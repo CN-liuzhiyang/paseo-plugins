@@ -309,6 +309,14 @@ agent 有完整 shell，能绕过任何 CLI 直接调插件 RPC；daemon 在协�
     结构倒是可以。
 13. **`im +messages-mget --download-resources` 只往工作目录里写**，所以下载时把 lark-cli 的工作目录设成
     附件目录。它按 `(message_id, key)` 去重，单个附件失败只在那一项上标 `error`。
+14. **表单外的按钮点了，回来的不是发出去时的 name**，只有它带的 `value`（`action_value`，实测 2026-09-24）；
+    表单内的按钮反过来，只有 name。放行按钮起初只看 name，每次点击都被静默丢掉。现在两处都读，认不出
+    的点击记一行日志。CardKit 校验结构过了不代表回调能走通，带按钮的新卡片要真点一次。
+15. **开了「获取群组中所有消息」，飞书把群里每一句都推过来**，插件要自己判断是不是 @ 了机器人（比对
+    `bot/v3/info` 取到的 open_id），否则每句都回。事件里的 `content` 已经把 @ 渲染成了名字
+    （`@TestBot 你好`），不是 `@_user_1` 占位符，判断要看 `mentions[].id`。
+16. **插件 server 只能读自己的设置，不能写**（`PluginSettings` 只有 `read` / `subscribe`）。卡片上的
+    操作要立即生效，就只能落在插件自己的数据文件里，成员名单因此是 `people.json` 而不是设置。
 
 ## 测试机器人
 
