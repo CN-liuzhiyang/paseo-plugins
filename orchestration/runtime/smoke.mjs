@@ -17,6 +17,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { define, text, choice, list } from "./step.mjs";
+import { carrierPrompt, fitBrief } from "./gate.mjs";
 import { COMMITTEES } from "../scripts/committee.mjs";
 
 const wantAgent = process.argv.includes("--agent");
@@ -76,6 +77,21 @@ const whole = define({ name: "whole", returns: { a: text() }, prompt: (input) =>
 check(
   "explicit undefined and whole-input prompts still work",
   !throws(() => reads.for({ a: "x", b: undefined })) && whole.for({ a: 1 }).prompt === '{"a":1}',
+);
+
+// --- Gate brief ---------------------------------------------------------
+
+const briefed = carrierPrompt("C:/hold/a.lua", "local x = 1", "Ticket #1: checks passed");
+check(
+  "gate: the brief comes first, the content is intact",
+  briefed.startsWith("Ticket #1") && briefed.includes("<<<CONTENT\nlocal x = 1\nCONTENT>>>"),
+);
+check("gate: no brief, no notes section", !carrierPrompt("C:/hold/a.lua", "x").includes("notes above"));
+const cut = fitBrief("C:/hold/a.lua", "y".repeat(2_000), "z".repeat(5_000), 4_000);
+check(
+  "gate: a long brief is cut to fit, never the content",
+  cut.length < 5_000 && carrierPrompt("C:/hold/a.lua", "y".repeat(2_000), cut).length <= 4_000,
+  `${cut.length} characters kept`,
 );
 
 function sampleDef() {
