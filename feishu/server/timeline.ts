@@ -26,11 +26,32 @@ export function finalAnswer(timeline: readonly AgentTimelineItem[]): string {
 
 const MAX_WHAT_CHARS = 200;
 
-/** One line saying what an agent is asking permission for. */
+/** One line saying what an agent is asking permission for, e.g. `Write: src/a.ts`. */
 export function describePermission(request: AgentPermissionRequest): string {
-  const input = request.input as Record<string, unknown> | undefined;
-  const command = typeof input?.command === "string" ? input.command : undefined;
-  const what = command ? `${request.name}: ${command}` : (request.title ?? request.name);
+  const subject = subjectOf(request);
+  const what = subject ? `${request.name}: ${subject}` : (request.title ?? request.name);
   const oneLine = what.replace(/\s+/g, " ").trim();
   return oneLine.length > MAX_WHAT_CHARS ? `${oneLine.slice(0, MAX_WHAT_CHARS)}…` : oneLine;
+}
+
+/** The command, file, URL or query a request is about: Paseo's normalized detail first. */
+function subjectOf(request: AgentPermissionRequest): string | undefined {
+  const detail = request.detail;
+  switch (detail?.type) {
+    case "shell":
+      return detail.command;
+    case "edit":
+    case "write":
+    case "read":
+      return detail.filePath;
+    case "fetch":
+      return detail.url;
+    case "search":
+      return detail.query;
+  }
+  const input = request.input as Record<string, unknown> | undefined;
+  for (const key of ["command", "file_path"]) {
+    if (typeof input?.[key] === "string") return input[key];
+  }
+  return undefined;
 }

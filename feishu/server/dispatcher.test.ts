@@ -746,6 +746,22 @@ test("permission descriptions stay on one short line", () => {
   assert.ok(what.length <= 201);
 });
 
+test("a permission description names the file, not just the tool", () => {
+  // As Claude's Write request arrived in the first live test: no title, no detail.
+  const write: AgentPermissionRequest = {
+    id: "w",
+    provider: "claude",
+    name: "Write",
+    kind: "tool",
+    input: { file_path: "C:\\work\\hello.txt", content: "嗨" },
+  };
+  assert.equal(describePermission(write), "Write: C:\\work\\hello.txt");
+  assert.equal(
+    describePermission({ ...write, name: "Edit", detail: { type: "edit", filePath: "src/a.ts" } }),
+    "Edit: src/a.ts",
+  );
+});
+
 test("truncation keeps a card under the byte budget without splitting a character", () => {
   const long = "汉".repeat(10_000);
   const cut = truncateBytes(long, 1_000);
