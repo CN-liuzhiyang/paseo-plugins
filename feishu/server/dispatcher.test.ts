@@ -32,9 +32,28 @@ afterEach(() => {
   for (const dispatcher of dispatchers.splice(0)) dispatcher.stop();
 });
 
-function harness(options: { settings?: Settings | null; createFails?: boolean } = {}) {
-  const sent: Array<{ op: "reply" | "patch"; id: string; title: string; body: string }> = [];
+interface FakeAgent {
+  id: string;
+  provider: string;
+  labels: Record<string, string>;
+  status: "idle" | "running";
+  archivedAt: string | null;
+  order: number;
+}
+
+/** Stands in for Paseo's agent registry; share one between harnesses to model a restart. */
+function registry() {
+  const agents = new Map<string, FakeAgent>();
   const created: Array<Record<string, unknown>> = [];
+  const sends: Array<{ agentId: string; text: string }> = [];
+  return { agents, created, sends };
+}
+
+function harness(
+  options: { settings?: Settings | null; createFails?: boolean; paseo?: ReturnType<typeof registry> } = {},
+) {
+  const paseo = options.paseo ?? registry();
+  const sent: Array<{ op: "reply" | "patch"; id: string; title: string; body: string }> = [];
   const logs: string[] = [];
   let cards = 0;
   const record = (op: "reply" | "patch", id: string, card: object) => {
@@ -54,16 +73,45 @@ function harness(options: { settings?: Settings | null; createFails?: boolean } 
       record("patch", cardId, card);
     },
   };
-  const dispatcher = createDispatcher({
-    paseo: {
-      agents: {
-        create: async (input: Record<string, unknown>) => {
-          created.push(input);
-          if (options.createFails) throw new Error("provider is not installed");
-          return { id: input.agentId };
-        },
+  const agents = {
+    create: async (input: Record<string, unknown>) => {
+      paseo.created.push(input);
+      if (options.createFails) throw new Error("provider is not installed");
+      const id = String(input.agentId);
+      paseo.agents.set(id, {
+        id,
+        provider: "claude",
+        labels: input.labels as Record<string, string>,
+        status: input.prompt ? "running" : "idle",
+        archivedAt: null,
+        order: paseo.agents.size,
+      });
+      return { id };
+    },
+    list: async (input: { filter: { labels: Record<string, string> }; page: { limit: number } }) => {
+      const matches = [...paseo.agents.values()]
+        .filter((agent) => agent.archivedAt === null)
+        .filter((agent) =>
+          Object.entries(input.filter.labels).every(([key, value]) => agent.labels[key] === value),
+        )
+        .sort((left, right) => right.order - left.order)
+        .slice(0, input.page.limit);
+      return { entries: matches.map((agent) => ({ agent })) };
+    },
+    ref: (id: string) => ({
+      refresh: async () => {
+        const agent = paseo.agents.get(id);
+        return agent ? { agent } : null;
       },
-    } as never,
+      send: async (text: string) => {
+        paseo.sends.push({ agentId: id, text });
+        const agent = paseo.agents.get(id);
+        if (agent) agent.status = "running";
+      },
+    }),
+  };
+  const dispatcher = createDispatcher({
+    paseo: { agents } as never,
     lark,
     readSettings: async () => (options.settings === undefined ? settings : options.settings),
     log: (line) => logs.push(line),
@@ -72,7 +120,22 @@ function harness(options: { settings?: Settings | null; createFails?: boolean } 
   dispatchers.push(dispatcher);
   // Card patches are chained on promises; let them drain before asserting.
   const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
-  return { dispatcher, sent, created, logs, settle };
+  /** Ends the agent's current turn with `answer`, as Paseo's turn_ended hook would. */
+  const end = async (agentId: string, answer: string) => {
+    const fake = paseo.agents.get(agentId);
+    if (fake) fake.status = "idle";
+    dispatcher.onTurnEnded({
+      agent: agent(agentId),
+      turnId: null,
+      outcome: { kind: "completed" },
+      timeline: [
+        { type: "user_message", text: "q" },
+        { type: "assistant_message", text: answer },
+      ],
+    });
+    await settle();
+  };
+  return { dispatcher, paseo, created: paseo.created, sent, logs, settle, end };
 }
 
 function agent(id: string) {
@@ -208,6 +271,113 @@ test("a redelivered message starts no second agent", async () => {
   await h.dispatcher.onMessage(message());
   await h.dispatcher.onMessage(message());
   assert.equal(h.created.length, 1);
+});
+
+test("later messages in a chat go to the same agent", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1", content: "记住：暗号是蓝鲸" }));
+  const agentId = String(h.created[0].agentId);
+  assert.deepEqual(h.created[0].labels, { source: "feishu", "feishu-chat": CHAT });
+  await h.end(agentId, "记住了。");
+
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "暗号是什么？" }));
+  await h.settle();
+  assert.equal(h.created.length, 1);
+  assert.deepEqual(h.paseo.sends, [{ agentId, text: "暗号是什么？" }]);
+  await h.end(agentId, "蓝鲸。");
+  assert.equal(h.sent.at(-1)?.title.split(" ")[0], "完成");
+  assert.match(h.sent.at(-1)?.body ?? "", /^蓝鲸。/);
+});
+
+test("a message sent while the agent is busy waits for the turn to end", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(h.created[0].agentId);
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "顺便看看测试" }));
+  await h.settle();
+  assert.deepEqual(h.paseo.sends, []);
+  assert.equal(h.sent.at(-1)?.title, "排队中");
+
+  await h.end(agentId, "构建通过。");
+  await h.settle();
+  assert.deepEqual(h.paseo.sends, [{ agentId, text: "顺便看看测试" }]);
+});
+
+test("a turn started in Paseo also makes the next Feishu message wait", async () => {
+  const shared = registry();
+  const first = harness({ paseo: shared });
+  await first.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(shared.created[0].agentId);
+  await first.end(agentId, "好了。");
+  // Someone types into the same agent from the Paseo app.
+  shared.agents.get(agentId)!.status = "running";
+  await first.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  await first.settle();
+  assert.deepEqual(shared.sends, []);
+  await first.end(agentId, "（Paseo 里那一轮的回答）");
+  assert.deepEqual(shared.sends, [{ agentId, text: "还在吗" }]);
+});
+
+test("/new starts a fresh agent that later messages go to", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const oldId = String(h.created[0].agentId);
+  await h.end(oldId, "好了。");
+
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "/new" }));
+  assert.equal(h.created.length, 2);
+  assert.equal(h.created[1].prompt, undefined);
+  const newId = String(h.created[1].agentId);
+  assert.equal(h.sent.at(-1)?.title, "已开新会话");
+
+  await h.dispatcher.onMessage(message({ message_id: "om_3", content: "从头来" }));
+  assert.deepEqual(h.paseo.sends, [{ agentId: newId, text: "从头来" }]);
+});
+
+test("/new with text starts the fresh agent on that text", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1", content: "/new 换个话题" }));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.created[0].prompt, "换个话题");
+});
+
+test("after a restart the chat finds its agent again through the label", async () => {
+  const shared = registry();
+  const before = harness({ paseo: shared });
+  await before.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(shared.created[0].agentId);
+  await before.end(agentId, "好了。");
+  before.dispatcher.stop();
+
+  const after = harness({ paseo: shared });
+  await after.dispatcher.onMessage(message({ message_id: "om_2", content: "接着说" }));
+  assert.equal(shared.created.length, 1);
+  assert.deepEqual(shared.sends, [{ agentId, text: "接着说" }]);
+});
+
+test("an archived conversation is not resumed", async () => {
+  const shared = registry();
+  const h = harness({ paseo: shared });
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(shared.created[0].agentId);
+  await h.end(agentId, "好了。");
+  shared.agents.get(agentId)!.archivedAt = "2026-09-23T00:00:00Z";
+
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "新问题" }));
+  assert.equal(shared.created.length, 2);
+  assert.equal(shared.created[1].prompt, "新问题");
+  assert.deepEqual(shared.sends, []);
+});
+
+test("two quick first messages start one agent, not two", async () => {
+  const h = harness();
+  await Promise.all([
+    h.dispatcher.onMessage(message({ message_id: "om_1", content: "第一句" })),
+    h.dispatcher.onMessage(message({ message_id: "om_2", content: "第二句" })),
+  ]);
+  await h.settle();
+  assert.equal(h.created.length, 1);
+  assert.equal(h.sent.at(-1)?.title, "排队中");
 });
 
 test("events for agents this plugin did not start are ignored", async () => {

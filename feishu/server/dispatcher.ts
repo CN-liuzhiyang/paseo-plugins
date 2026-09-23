@@ -5,23 +5,37 @@ import {
   canceledCard,
   doneCard,
   failedCard,
+  newSessionCard,
   noRouteCard,
+  queuedCard,
   receivedCard,
   runningCard,
   waitingCard,
   type RunView,
 } from "./cards";
 import { patchCard, replyCard, type LarkCli } from "./lark";
-import type { Settings } from "./settings";
+import type { Route, Settings } from "./settings";
 import { describePermission, finalAnswer } from "./timeline";
 
 const TICK_MS = 30_000;
 const REMEMBERED_MESSAGES = 1_000;
+// Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
+// registry, so the conversation survives plugin reloads and daemon restarts.
+export const CHAT_LABEL = "feishu-chat";
+const NEW_SESSION = /^\/new(?:\s+([\s\S]*))?$/;
 
 interface Run extends RunView {
   cardId: string;
   pending: Set<string>;
   // Patches to one card go out in order, so a late "running" tick never lands on top of "done".
+  chain: Promise<void>;
+}
+
+interface Turn {
+  messageId: string;
+  request: string;
+  provider: string;
+  cardId: string;
   chain: Promise<void>;
 }
 
@@ -40,9 +54,10 @@ export function larkOf(cli: LarkCli): Lark {
 type Event<Name extends keyof PluginLifecycleEvents> = PluginLifecycleEvents[Name];
 
 /**
- * Receives Feishu messages, checks the sender and the route, starts one agent per message, and
- * keeps that message's card current from the agent's lifecycle events. It holds no state that
- * matters across restarts: a run whose plugin restarted mid-turn just keeps its last card.
+ * One Feishu chat is one conversation with one agent. The first message in a routed chat starts
+ * the agent; later messages go to the same agent in order, queued while it is busy. `/new`
+ * starts a fresh agent for the chat. Every message gets its own card, patched in place from the
+ * agent's lifecycle events until that message's turn ends.
  */
 export function createDispatcher(deps: {
   paseo: Pick<PaseoApi, "agents">;
@@ -55,9 +70,12 @@ export function createDispatcher(deps: {
   const now = deps.now ?? Date.now;
   const seen = new Set<string>();
   const runs = new Map<string, Run>();
+  const queues = new Map<string, Turn[]>();
+  const chats = new Map<string, { agentId: string; provider: string }>();
+  const chatWork = new Map<string, Promise<void>>();
   let ticker: NodeJS.Timeout | null = null;
 
-  const update = (run: Run, card: object) => {
+  const update = (run: { cardId: string; chain: Promise<void> }, card: object) => {
     run.chain = run.chain
       .then(() => lark.patch(run.cardId, card))
       .catch((error: unknown) => log(`card ${run.cardId}: ${describe(error)}`));
@@ -86,6 +104,128 @@ export function createDispatcher(deps: {
     return run;
   };
 
+  const reply = async (messageId: string, card: object): Promise<string | null> => {
+    try {
+      return await lark.reply(messageId, card);
+    } catch (error) {
+      log(`reply to ${messageId}: ${describe(error)}`);
+      return null;
+    }
+  };
+
+  // Messages in one chat are handled one at a time, so two quick messages cannot both find no
+  // agent and start two.
+  const inChat = (chatId: string, work: () => Promise<void>): Promise<void> => {
+    const next = (chatWork.get(chatId) ?? Promise.resolve()).then(work);
+    const settled = next.catch(() => undefined);
+    chatWork.set(chatId, settled);
+    void settled.then(() => {
+      if (chatWork.get(chatId) === settled) chatWork.delete(chatId);
+    });
+    return next;
+  };
+
+  /** The chat's current agent: the newest live agent labelled with it. */
+  async function currentAgent(chatId: string): Promise<{ agentId: string; provider: string } | null> {
+    const cached = chats.get(chatId);
+    if (cached) return cached;
+    const { entries } = await paseo.agents.list({
+      filter: { labels: { [CHAT_LABEL]: chatId } },
+      sort: [{ key: "created_at", direction: "desc" }],
+      page: { limit: 1 },
+    });
+    const agent = entries[0]?.agent;
+    if (!agent) return null;
+    const found = { agentId: agent.id, provider: agent.provider };
+    chats.set(chatId, found);
+    return found;
+  }
+
+  async function startAgent(chatId: string, route: Route, messageId: string, request: string) {
+    const cardId = await reply(messageId, receivedCard(request, true));
+    if (!cardId) return;
+    // The ID is chosen here so the run is tracked before the agent exists: a turn that ends
+    // before create() returns still finds its card.
+    const agentId = randomUUID();
+    const run = newRun(agentId, route.provider, request, cardId);
+    track(agentId, run);
+    try {
+      await paseo.agents.create({
+        ...creation(chatId, route, messageId, agentId),
+        title: `飞书：${oneLine(request).slice(0, 40)}`,
+        prompt: request,
+      });
+    } catch (error) {
+      finish(agentId);
+      log(`create agent for ${messageId}: ${describe(error)}`);
+      update(run, failedCard(request, `没能启动 agent：${describe(error)}`));
+      return;
+    }
+    chats.set(chatId, { agentId, provider: route.provider });
+    log(`${messageId} -> new agent ${agentId}`);
+    if (runs.get(agentId) === run && run.pending.size === 0) update(run, runningCard(run, now()));
+  }
+
+  async function newSession(chatId: string, route: Route, messageId: string) {
+    const agentId = randomUUID();
+    try {
+      // No prompt: the agent exists, and is the newest for the chat, before anything is asked.
+      await paseo.agents.create({ ...creation(chatId, route, messageId, agentId), title: "飞书会话" });
+    } catch (error) {
+      log(`create agent for ${messageId}: ${describe(error)}`);
+      await reply(messageId, failedCard("/new", `没能开新会话：${describe(error)}`));
+      return;
+    }
+    chats.set(chatId, { agentId, provider: route.provider });
+    log(`${messageId} -> new session ${agentId}`);
+    await reply(messageId, newSessionCard(route.provider, agentId));
+  }
+
+  async function continueAgent(
+    agentId: string,
+    provider: string,
+    messageId: string,
+    request: string,
+    running: boolean,
+  ) {
+    const cardId = await reply(messageId, receivedCard(request, false));
+    if (!cardId) return;
+    const turn: Turn = { messageId, request, provider, cardId, chain: Promise.resolve() };
+    const queue = queues.get(agentId) ?? [];
+    // A turn this plugin did not start (someone typing in Paseo) also makes the agent busy.
+    if (running || runs.has(agentId) || queue.length > 0) {
+      queue.push(turn);
+      queues.set(agentId, queue);
+      log(`${messageId} queued for agent ${agentId} (${queue.length})`);
+      update(turn, queuedCard(request, queue.length));
+      return;
+    }
+    await sendTurn(agentId, turn);
+  }
+
+  async function sendTurn(agentId: string, turn: Turn) {
+    const run = newRun(agentId, turn.provider, turn.request, turn.cardId, turn.chain);
+    track(agentId, run);
+    try {
+      await paseo.agents.ref(agentId).send(turn.request, { messageId: `feishu:${turn.messageId}` });
+    } catch (error) {
+      finish(agentId);
+      log(`send ${turn.messageId} to agent ${agentId}: ${describe(error)}`);
+      update(run, failedCard(turn.request, `发不进这个会话的 agent：${describe(error)}\n\n发 \`/new\` 开新会话。`, run));
+      void drain(agentId);
+      return;
+    }
+    log(`${turn.messageId} -> agent ${agentId}`);
+    if (runs.get(agentId) === run && run.pending.size === 0) update(run, runningCard(run, now()));
+  }
+
+  async function drain(agentId: string) {
+    const queue = queues.get(agentId);
+    const next = queue?.shift();
+    if (queue?.length === 0) queues.delete(agentId);
+    if (next) await sendTurn(agentId, next);
+  }
+
   async function onMessage(event: Record<string, unknown>): Promise<void> {
     const messageId = text(event.message_id);
     const chatId = text(event.chat_id);
@@ -109,67 +249,48 @@ export function createDispatcher(deps: {
     const route = settings.routes.find((candidate) => candidate.chatId === chatId);
     if (!route) {
       log(`no route for ${chatId}`);
-      await lark.reply(messageId, noRouteCard(chatId)).catch((error: unknown) => {
-        log(`reply to ${messageId}: ${describe(error)}`);
-      });
+      await reply(messageId, noRouteCard(chatId));
       return;
     }
 
-    let cardId: string;
-    try {
-      cardId = await lark.reply(messageId, receivedCard(request));
-    } catch (error) {
-      log(`reply to ${messageId}: ${describe(error)}`);
-      return;
-    }
-    // The ID is chosen here so the run is tracked before the agent exists: a turn that ends
-    // before create() returns still finds its card.
-    const agentId = randomUUID();
-    const run: Run = {
-      request,
-      agentId,
-      provider: route.provider,
-      startedAt: now(),
-      cardId,
-      pending: new Set(),
-      chain: Promise.resolve(),
-    };
-    track(agentId, run);
-    try {
-      await paseo.agents.create({
-        agentId,
-        idempotencyKey: `feishu:${messageId}`,
-        cwd: route.cwd,
-        config: {
-          provider: route.provider,
-          modeId: route.modeId,
-          thinkingOptionId: route.thinkingOptionId,
-        },
-        title: `飞书：${request.replace(/\s+/g, " ").slice(0, 40)}`,
-        prompt: request,
-        labels: { source: "feishu" },
-      });
-    } catch (error) {
-      finish(agentId);
-      log(`create agent for ${messageId}: ${describe(error)}`);
-      update(run, failedCard(request, `没能启动 agent：${describe(error)}`));
-      return;
-    }
-    log(`${messageId} -> agent ${agentId}`);
-    if (runs.has(agentId) && run.pending.size === 0) update(run, runningCard(run, now()));
+    await inChat(chatId, async () => {
+      const reset = NEW_SESSION.exec(request);
+      if (reset) {
+        chats.delete(chatId);
+        const prompt = reset[1]?.trim() ?? "";
+        if (prompt === "") await newSession(chatId, route, messageId);
+        else await startAgent(chatId, route, messageId, prompt);
+        return;
+      }
+      const current = await currentAgent(chatId);
+      if (current) {
+        const live = await paseo.agents.ref(current.agentId).refresh();
+        if (live && !live.agent.archivedAt) {
+          const running = live.agent.status === "running";
+          await continueAgent(current.agentId, current.provider, messageId, request, running);
+          return;
+        }
+        // Archived or gone: the conversation is over, so this message starts the next one.
+        chats.delete(chatId);
+      }
+      await startAgent(chatId, route, messageId, request);
+    });
   }
 
   function onTurnEnded(event: Event<"agent.turn_ended">): void {
     const run = finish(event.agent.id);
-    if (!run) return;
-    const { outcome } = event;
-    if (outcome.kind === "completed") {
-      update(run, doneCard(run, finalAnswer(event.timeline), now()));
-    } else if (outcome.kind === "failed") {
-      update(run, failedCard(run.request, outcome.error.message, run));
-    } else {
-      update(run, canceledCard(run, outcome.reason));
+    if (run) {
+      const { outcome } = event;
+      if (outcome.kind === "completed") {
+        update(run, doneCard(run, finalAnswer(event.timeline), now()));
+      } else if (outcome.kind === "failed") {
+        update(run, failedCard(run.request, outcome.error.message, run));
+      } else {
+        update(run, canceledCard(run, outcome.reason));
+      }
     }
+    // Whoever started the turn that just ended, the next queued message can go now.
+    void drain(event.agent.id).catch((error: unknown) => log(`drain ${event.agent.id}: ${describe(error)}`));
   }
 
   function onPermissionRequested(event: Event<"agent.permission_requested">): void {
@@ -189,6 +310,17 @@ export function createDispatcher(deps: {
     if (ticker) clearInterval(ticker);
     ticker = null;
     runs.clear();
+    queues.clear();
+  }
+
+  function newRun(
+    agentId: string,
+    provider: string,
+    request: string,
+    cardId: string,
+    chain = Promise.resolve(),
+  ): Run {
+    return { request, agentId, provider, startedAt: now(), cardId, pending: new Set(), chain };
   }
 
   return { onMessage, onTurnEnded, onPermissionRequested, onPermissionResolved, stop };
@@ -196,8 +328,26 @@ export function createDispatcher(deps: {
 
 export type Dispatcher = ReturnType<typeof createDispatcher>;
 
+function creation(chatId: string, route: Route, messageId: string, agentId: string) {
+  return {
+    agentId,
+    idempotencyKey: `feishu:${messageId}`,
+    cwd: route.cwd,
+    config: {
+      provider: route.provider,
+      modeId: route.modeId,
+      thinkingOptionId: route.thinkingOptionId,
+    },
+    labels: { source: "feishu", [CHAT_LABEL]: chatId },
+  };
+}
+
 function text(value: unknown): string | undefined {
   return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
 function remember(seen: Set<string>, id: string): void {

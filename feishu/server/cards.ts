@@ -55,8 +55,21 @@ export interface RunView {
   startedAt: number;
 }
 
-export function receivedCard(request: string): object {
-  return card("已接收", "wathet", `${quote(request)}\n\n正在启动 agent。`);
+export function receivedCard(request: string, fresh: boolean): object {
+  const next = fresh ? "正在为这个会话启动 agent。" : "正在发给这个会话的 agent。";
+  return card("已接收", "wathet", `${quote(request)}\n\n${next}`);
+}
+
+export function queuedCard(request: string, ahead: number): object {
+  return card("排队中", "grey", `${quote(request)}\n\nagent 还在处理前面的 ${ahead} 条，处理完就轮到这条。`);
+}
+
+export function newSessionCard(provider: string, agentId: string): object {
+  return card(
+    "已开新会话",
+    "wathet",
+    `之后的消息交给新的 agent，之前的会话留在 Paseo 里。\n\n<font color='grey'>${provider} · agent ${agentId.slice(0, 8)}</font>`,
+  );
 }
 
 function runFooter(run: RunView): string {
