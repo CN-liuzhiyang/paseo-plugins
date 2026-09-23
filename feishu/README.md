@@ -3,9 +3,11 @@
 飞书入口：挂在 Paseo 插件 server 侧的一层薄 dispatcher。它不是 agent——收事件、鉴权、按表路由，
 判断交给它起的 agent 或它调的脚本；结果、进度和审批请求以一张原地更新的卡片发回飞书。
 
-**状态：M2。** 收消息 → 白名单 → 按 chat_id 路由 → 交给这个会话的 agent → 每条消息一张卡片
-原地更新（已接收 / 排队中 / 进行中 / 等待审批 / 完成 / 失败 / 已取消）；agent 要权限时直接在
-卡片上批准或拒绝，每次审批都记审计。还没有的：设置界面（M3，现在配置写文件，见下文）。
+**状态：M3。** 收消息 → 白名单 → 按 chat_id 路由 → 交给这个会话的 agent → 每条消息一张卡片
+原地更新（已接收 / 排队中 / 进行中 / 等待审批 / 完成 / 失败 / 已取消）。卡片跟着 agent 实时走：
+正在跑什么命令、读哪个文件、计划做到第几步、回答写到哪儿。图片直接给 agent 看，文件下载到本机，
+回复的是哪条消息也一并带上。agent 要权限时在卡片上批准或拒绝，每次审批都记审计。配置在 Paseo 的
+设置 → 插件 → feishu 里改。
 
 ## 会话
 
@@ -19,14 +21,48 @@
   插件或 daemon 重启后照样接得上。改了路由的 `cwd` 或 `provider` 不影响已有会话，`/new` 之后才生效。
 - 排队只在内存里：插件重启时还在排队的消息不会补发，卡片停在「排队中」。
 
-## 已知问题：agent 读得到 daemon 用户的全局配置
+## agent 收到什么
 
-飞书触发的 agent 以 daemon 用户的身份运行。Paseo 启动 Claude 时固定加载 user、project、local
-三层配置，与工作目录无关，所以它会读到这个用户的 `~/.claude/CLAUDE.md` 和其中 import 的一切，
-并可能把内容写进回复——实测问一句"你知道刚说了啥吗"，它就把全局指令和机器画像概括进了卡片。
-白名单里的每个人、路由到的群里的每个人都看得到这些回复。
+agent 应该看到聊天里的人看到的东西。之前一张截图到了 agent 那里只是 `[Image: img_v3_...]`，一个
+它打不开的 key。现在：
 
-上下文怎么配置还没定。在那之前，只路由给自己的单聊。
+| 消息里有 | agent 收到 |
+|---|---|
+| 几个字（单聊） | 原文，不多问飞书一句 |
+| 图片（含富文本里的图） | 图片本身随消息附上，文字里是 `[图片 1]`；Claude 收 PNG / JPEG / GIF / WebP，单张 3.75 MB 以内，一条最多 10 张 |
+| 文件、语音、视频 | 下载到本机，文字里写着路径，agent 用工具去读 |
+| 回复某条消息 | 开头一段 `[回复 某人 的消息]` 加引用原文（最多 1500 字），那条消息里的图片也附上；回复的是本机器人的卡片时引用卡片上的字 |
+| 群消息 | 以说话人的名字开头 |
+| 表情包 | `[表情]` |
+
+附件下载到 `<PASEO_HOME>/plugin-data/feishu/media/<chat_id>/<message_id>/`，不会自动删。附件没能
+下载、图片太大或格式不支持时，卡片上用橙色一行说明，agent 收到的文字里也写着，不会悄悄丢掉。
+
+## 上下文：agent 知道什么、读不到什么
+
+飞书触发的 agent 以 daemon 用户的身份运行。Paseo 启动 Claude 时固定加载 user、project、local 三层
+配置，所以它会读到这个用户的 `~/.claude/CLAUDE.md` 和其中 import 的一切，并把内容写进回复——实测问
+一句"你知道刚说了啥吗"，它就把全局指令和机器画像概括进了卡片，而会话里的每个人都看得到卡片。
+
+现在每条路由有两项：
+
+- **读取 CLAUDE.md（`claudeMd`，默认关）**：关着时 agent 不读任何 CLAUDE.md，全局的和工作目录里的
+  都不读。只在自己的单聊里打开。
+- **常驻指令（`instructions`）**：这个会话的 agent 的身份和说话方式，加在系统提示后面。关掉
+  CLAUDE.md 之后，要 agent 长期记住的东西写在这里。
+
+另外，每个飞书 agent 的系统提示里都写明了它在哪个会话、回复显示在卡片上（支持哪些 Markdown）、图片
+和文件怎么到它手里、审批怎么走；群聊里再加一句"每个人都看得到你的回复，不要复述配置和私人信息"。
+
+**怎么做到的**：Claude Code 只有一个按进程生效的开关 `CLAUDE_CODE_DISABLE_CLAUDE_MDS`，它关掉所有
+CLAUDE.md，没法只挑全局那份（`claudeMdExcludes` 要写进配置文件，按环境变量指定配置路径只对 Anthropic
+内部构建开放）。插件建 agent 时带上这个环境变量并打上标签 `feishu-claude-md=off`；Paseo 不保存 agent 的
+环境变量，所以插件还注册了 `agent.session_open` 钩子，agent 每次重新打开会话（daemon 重启后恢复等）
+都按标签再带一次。实测：同一个问题"你的上下文里有没有 Machine Profile"，带开关答 NO、不带答 YES。
+
+**还挡不住的**：用户级的 `settings.json`、skills、MCP 服务器照常加载（skill 列表里的描述也会进上下文）；
+这需要 Paseo 让插件指定 Claude 的 `settingSources`，是 fork 扩展点的候选。开关只对 Claude 生效，其他
+provider 照读它们自己的全局指令。开关是建 agent 时定的：改了路由，已有会话发 `/new` 才换。
 
 ## 审批
 
@@ -80,6 +116,8 @@ paseo plugin logs feishu
 
 飞书侧的能力全部经飞书官方的 `lark-cli` 调用，daemon 所在机器上要先装好它，
 并给机器人配一个单独的 profile。凭据留在 lark-cli 自己的存储里，不经过本插件。
+机器人要有读消息的权限（`im:message:readonly`）才能下载图片和文件、取被回复的消息；
+取发送者名字要 `contact:user.base:readonly`，没有时群聊里显示「某人」。
 
 ## 数据不在这里
 
@@ -87,9 +125,24 @@ paseo plugin logs feishu
 daemon 本机的插件 settings 里（`defineSettings`，scope 为 host，不跨机同步），**默认为空、
 fail-closed**：没配发送者就谁都进不来，没配路由就收到消息也不起 agent。
 
-## 配置
+## 设置界面
 
-设置界面做出来之前，直接写 `$PASEO_HOME/plugin-settings/<安装 id>/feishu.json`：
+Paseo 的 设置 → 插件 → feishu。整页是一份草稿，改完点「保存」才生效；别的客户端同时改过会提示冲突，
+不会互相覆盖。
+
+- **状态**：lark-cli 是否在收消息，没在收时显示它最后说了什么。
+- **最近被挡下的消息**：白名单外的人发的、没有路由的会话里发的，各带一个「允许此人」「加路由」。
+  open_id 和 chat_id 不用再去翻日志。
+- **白名单**、**会话路由**（名称、chat_id、工作目录、提供方 / 模型 / 执行档 / 思考档从 daemon 上
+  实际可用的里选，读取 CLAUDE.md，常驻指令）、**审计目录**。选了不逐条询问的执行档会提示。
+
+设置界面和配置文件是同一份数据，存在 daemon 本机。它照样能被这台机器上任何能调 daemon RPC 的进程
+改，包括 agent：见下文「非对称授权」，界面没有改变这一点。
+
+## 配置文件
+
+也可以直接写 `$PASEO_HOME/plugin-settings/<安装 id>/feishu.json`（手改文件后
+`paseo plugin reload feishu`）：
 
 ```json
 {
@@ -99,7 +152,15 @@ fail-closed**：没配发送者就谁都进不来，没配路由就收到消息�
     "profile": "<机器人的 lark-cli profile>",
     "senders": ["ou_..."],
     "routes": [
-      { "chatId": "oc_...", "cwd": "<agent 的工作目录>", "provider": "claude/claude-sonnet-5", "modeId": "default" }
+      {
+        "chatId": "oc_...",
+        "name": "我的单聊",
+        "cwd": "<agent 的工作目录>",
+        "provider": "claude/claude-sonnet-5",
+        "modeId": "default",
+        "instructions": "",
+        "claudeMd": false
+      }
     ],
     "auditDir": ""
   }
@@ -111,8 +172,8 @@ fail-closed**：没配发送者就谁都进不来，没配路由就收到消息�
 - `modeId` 必填。provider 的默认执行档可能是不逐条询问就跑工具的，而这些 prompt 来自外部，
   执行档要有意选。Claude 的 `default` 是 Always Ask。
 - `senders` 同时决定谁能在卡片上审批。
-- `senders`、`routes` 和 `auditDir` 每次用到都重新读，改完立即生效；`larkCli` 和 `profile` 改完要
-  `paseo plugin reload feishu`。
+- `senders`、`routes` 和 `auditDir` 每次用到都重新读，改完立即生效；`larkCli` 和 `profile` 在设置界面里
+  保存后插件自己重连，手改文件要 `paseo plugin reload feishu`。
 - open_id 和 chat_id 都是按应用分配的，别的应用里查到的不能用。拿法：`senders` 留空，给机器人
   发一条消息，插件日志里会有 `dropped <message> from ou_... in oc_...`；把 open_id 加进
   `senders` 后再发一条，没配路由的会话会收到一张写着 chat_id 的卡片。
@@ -130,14 +191,35 @@ fail-closed**：没配发送者就谁都进不来，没配路由就收到消息�
 为什么是插件 server 侧：它本身就是 daemon 的常驻子进程；`contribute()` 返回的清理函数管子进程的
 生命周期；而且插件 hook 在没有 app 连着的时候也照样跑——手机没开 Paseo，飞书消息照样处理。
 
-agent 的上下文里一个飞书工具都不需要：回信由 dispatcher 自己做，agent 不必知道自己是被飞书触发的。
+agent 的上下文里一个飞书工具都不需要：回信、下载附件都由 dispatcher 做。它只需要知道自己在飞书里、
+回复显示在卡片上，这写在系统提示里（见「上下文」）。
 
 ## 卡片
 
-一张卡片、三个状态：已接收 → 进行中（定时刷新耗时）→ 完成（结果正文）。两类事件必须当场推：
+**进行中**的卡片跟着 agent 的实时时间线走（插件订阅 `agents.ref(id).timeline`）：
 
-- **权限请求与 agent 提问**（`agent.permission_requested`）：卡片变成「等待审批」，见上文「审批」。
-- **失败**（`turn_ended` 的 outcome 为 `failed`），带错误原文，否则人会空等。
+- 标题是已用时间；正文依次是请求原文、agent 的计划（它用 TodoWrite 时，做到第几项）、最近 3 步
+  （`▶ 运行 npm test · 12 秒`、`✓ 读取 src/a.ts`、`✗` 失败）、没在跑工具时是「正在思考… / 正在写回答…」，
+  再往下是正在写的回答。
+- 飞书限制改同一条消息的频率（230020），所以改卡片合并着发：一次只有一个请求在路上，两次之间至少
+  1.5 秒，积压的只发最新的；卡片在发出那一刻才渲染，时间不会是旧的。被限流的中间帧直接丢，下一帧会
+  补上；最终状态被限流会重试。
+- 没有事件时靠心跳刷新：开头一分钟每 3 秒，十分钟内每 10 秒，之后每 30 秒。以前是固定 30 秒，
+  所以卡片停在「0 秒」然后跳到 30。
+- 等待审批的卡片不跟心跳刷新：重画会清掉正在输入的拒绝理由。
+
+**完成**的卡片上面是回答，下面一个默认折叠的「执行过程 · N 步 · 用时」面板，里面是全部步骤（最多
+30 步），再下面是审批记录。
+
+**回答的渲染**：保留加粗、列表、引用、代码块、链接、表格；代码块和行内代码原样显示。代码之外：
+
+- 所有 `<` 转义，能解码成标签的实体也转义：`<at id=all>` 在群里会 @所有人，`<font>` 能改卡片样式。
+- `[文字](链接)` 显示成「文字（链接）」，伪装不了去处。
+- 图片变成链接：卡片只显示本应用上传过的图，别的来源飞书整张卡片拒收（200570），卡片会卡在上一个状态。
+- 第 4 个起的表格放进代码块（飞书拒收第 4 个表格，230099）；`#`、`##`、`###` 标题缩成 `####`。
+
+agent 提问和权限请求（`agent.permission_requested`）当场把卡片变成「等待审批」，见上文「审批」；
+失败（`turn_ended` 的 outcome 为 `failed`）带错误原文。
 
 飞书把表单里的按钮点击交回来时只带按钮的 `name`（表单内按钮不能带 `value`），所以按钮名里写着
 它回答的是哪个 agent 的哪个请求、哪个选项；它只是个地址，点击时照样向 Paseo 核对。
@@ -183,6 +265,14 @@ agent 有完整 shell，能绕过任何 CLI 直接调插件 RPC；daemon 在协�
    所以审批卡片只受 14 天的限制。lark-cli 会自己在 3 秒内应答回调，飞书端不会弹提示，
    点击后的反馈全靠随后的 patch。
 9. **settings 的 scope 只能是 host**：多台 daemon 要各配一份白名单和路由。
+10. **`agent.session_open` 钩子对 daemon 上每个 agent 都跑**，钩子失败那个 agent 就打不开，插件卡住时
+    要等 30 秒超时。所以钩子只查内存里的一张表，不调任何接口、不抛错。
+11. **Claude 对不认识的图片类型一声不吭地丢掉**（Paseo 的 claude provider 只留 PNG / JPEG / GIF /
+    WebP），所以类型按文件头判断，不认识的给路径并在卡片上说明。
+12. **CardKit 建卡接口只校验结构**（tag、字段），不校验表单规则，不能当表单校验器；拿它验新卡片的
+    结构倒是可以。
+13. **`im +messages-mget --download-resources` 只往工作目录里写**，所以下载时把 lark-cli 的工作目录设成
+    附件目录。它按 `(message_id, key)` 去重，单个附件失败只在那一项上标 `error`。
 
 ## 测试机器人
 

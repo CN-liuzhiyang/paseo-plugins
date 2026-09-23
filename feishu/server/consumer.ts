@@ -3,6 +3,10 @@ import { createInterface } from "node:readline";
 import type { LarkCli } from "./lark";
 
 export interface Consumer {
+  /** Listening: lark-cli printed its ready marker and has not exited since. */
+  listening(): boolean;
+  /** The last thing lark-cli said on stderr, for when it is not listening. */
+  lastWords(): string;
   stop(): Promise<void>;
 }
 
@@ -33,6 +37,8 @@ export function consume(options: {
   let backoff = MIN_BACKOFF_MS;
   let retry: NodeJS.Timeout | null = null;
   let exited: Promise<void> = Promise.resolve();
+  let ready = false;
+  let lastStderr = "";
 
   const start = () => {
     retry = null;
@@ -43,8 +49,8 @@ export function consume(options: {
       { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
     );
     child = current;
-    let ready = false;
-    let lastStderr = "";
+    ready = false;
+    lastStderr = "";
     exited = new Promise((resolve) => current.on("close", () => resolve()));
 
     // Nothing on stdout counts until the ready marker shows up on stderr.
@@ -73,6 +79,7 @@ export function consume(options: {
     current.on("error", (error) => log(`${eventKey}: could not start ${cli.path}: ${error.message}`));
     current.on("close", (code) => {
       if (child === current) child = null;
+      ready = false;
       if (stopping) return;
       if (Date.now() - startedAt >= HEALTHY_MS) backoff = MIN_BACKOFF_MS;
       log(`${eventKey}: exited ${code} (${lastStderr || "no output"}); restarting in ${backoff / 1000}s`);
@@ -84,6 +91,8 @@ export function consume(options: {
   start();
 
   return {
+    listening: () => ready,
+    lastWords: () => lastStderr,
     async stop() {
       stopping = true;
       if (retry) clearTimeout(retry);

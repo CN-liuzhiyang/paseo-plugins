@@ -1,19 +1,27 @@
+import { cardMarkdown } from "./markdown";
 import { buttonName, reasonField } from "./permissions";
+import type { Progress, Step } from "./progress";
 
 // One card per request, patched in place: received, running, waiting, and one of done / failed /
 // canceled. Card JSON 2.0, which only allows update_multi: true, so every state can be patched.
-// Text that comes from the agent goes into plain_text, or through `escape` when it has to sit in
-// markdown: there it could mention people or carry links.
+// Text that comes from the agent goes into plain_text, through `escape` when it has to sit in
+// markdown as a fragment, or through `cardMarkdown` when it is an answer meant to be formatted.
 
 // Feishu caps a patched card at 30 KB serialized. Leave room for the frame and escaping.
-const MAX_BODY_BYTES = 20_000;
+const MAX_BODY_BYTES = 18_000;
+const MIN_BODY_BYTES = 1_000;
+const MAX_CARD_BYTES = 28_000;
 const MAX_QUOTE_CHARS = 200;
 const MAX_DETAIL_BYTES = 2_000;
 // Open requests past this many are answered in Paseo; the card has a size cap too.
 const MAX_FORMS = 5;
 const MAX_DECISIONS = 10;
+// Steps a running card shows; the finished card folds all of them away.
+const RECENT_STEPS = 3;
+const MAX_LOGGED_STEPS = 30;
+const MAX_TODOS = 8;
 
-type Template = "blue" | "wathet" | "orange" | "green" | "red" | "grey";
+export type Template = "blue" | "wathet" | "orange" | "green" | "red" | "grey";
 
 function cardOf(title: string, template: Template, elements: object[]): object {
   return {
@@ -30,6 +38,10 @@ function card(title: string, template: Template, content: string): object {
 
 function markdown(content: string): object {
   return { tag: "markdown", content };
+}
+
+function notation(content: string): object {
+  return { tag: "markdown", content, text_size: "notation" };
 }
 
 function plain(content: string): object {
@@ -59,10 +71,44 @@ export function truncateBytes(text: string, maxBytes: number): string {
   return text.slice(0, low) + TRUNCATED;
 }
 
+/** The request as one quoted line. It is what someone typed, but in a group that is not us. */
 function quote(request: string): string {
   const oneLine = request.replace(/\s+/g, " ").trim();
   const clipped = oneLine.length > MAX_QUOTE_CHARS ? `${oneLine.slice(0, MAX_QUOTE_CHARS)}…` : oneLine;
-  return `> ${clipped}`;
+  return `> ${escape(clipped)}`;
+}
+
+/** An answer, formatted but inert, cut to `budget` bytes before escaping grows it. */
+function answer(text: string, budget = MAX_BODY_BYTES): string {
+  return cardMarkdown(truncateBytes(text, budget));
+}
+
+/**
+ * Builds a card that fits Feishu's limit. Escaping, link rewriting, the steps panel and the
+ * approval records all add to the answer, so the whole card is measured: the steps go first,
+ * then the answer is cut shorter until it fits.
+ */
+function fitted(build: (budget: number, withSteps: boolean) => object): object {
+  let budget = MAX_BODY_BYTES;
+  let withSteps = true;
+  for (;;) {
+    const built = build(budget, withSteps);
+    const size = Buffer.byteLength(JSON.stringify(built), "utf8");
+    if (size <= MAX_CARD_BYTES || budget <= MIN_BODY_BYTES) return built;
+    if (withSteps) withSteps = false;
+    else budget = Math.max(MIN_BODY_BYTES, Math.floor(budget * Math.min(0.8, MAX_CARD_BYTES / size)));
+  }
+}
+
+/**
+ * What a card falls back to when Feishu refuses its last state for any reason but the rate
+ * limit, so it does not stay on "running" for good.
+ */
+export function lastResortCard(title: string, template: Template, run: RunView): object {
+  return cardOf(title, template, [
+    markdown("卡片没能显示完整内容（飞书不接受这张卡片），完整结果在 Paseo 里看。"),
+    footer(run),
+  ]);
 }
 
 export function formatElapsed(ms: number): string {
@@ -80,6 +126,9 @@ export interface RunView {
   startedAt: number;
   /** Lines from `decisionLine`, oldest first. */
   decisions: readonly string[];
+  progress: Progress;
+  /** What did not reach the agent with the message, e.g. an image too large to attach. */
+  notes: readonly string[];
 }
 
 export interface DecisionView {
@@ -111,12 +160,97 @@ export function decisionLine(decision: DecisionView): string {
   return `${verdict} · ${escape(decision.what)} · ${by}${waited}`;
 }
 
-function runElements(run: RunView, main: string): object[] {
-  const decisions = run.decisions.slice(-MAX_DECISIONS);
+function stepLine(step: Step, now: number): string {
+  const what = escape(step.subject === "" ? step.verb : `${step.verb} ${step.subject}`);
+  switch (step.status) {
+    case "running":
+      return `<font color='blue'>▶ ${what} · ${formatElapsed(now - step.startedAt)}</font>`;
+    case "failed":
+      return `<font color='red'>✗ ${what}</font>`;
+    case "canceled":
+      return `<font color='grey'>– ${what}（已取消）</font>`;
+    default:
+      return `<font color='grey'>✓ ${what}</font>`;
+  }
+}
+
+function todoLines(progress: Progress): string[] {
+  const todos = progress.todos.slice(0, MAX_TODOS);
+  const hidden = progress.todos.length - todos.length;
+  const done = progress.todos.filter((todo) => todo.status === "completed").length;
   return [
-    markdown(main),
-    ...(decisions.length > 0 ? [markdown(`**审批**\n${decisions.join("\n")}`)] : []),
-    markdown(`<font color='grey'>${run.provider} · agent ${run.agentId.slice(0, 8)}</font>`),
+    `**计划 ${done}/${progress.todos.length}**`,
+    ...todos.map((todo) =>
+      todo.status === "completed"
+        ? `<font color='grey'>✓ ~~${escape(todo.text)}~~</font>`
+        : todo.status === "in_progress"
+          ? `▶ **${escape(todo.text)}**`
+          : `<font color='grey'>○ ${escape(todo.text)}</font>`,
+    ),
+    ...(hidden > 0 ? [`<font color='grey'>……还有 ${hidden} 项</font>`] : []),
+  ];
+}
+
+/** What the agent is doing right now, as the running card says it. */
+function activity(progress: Progress, now: number): string[] {
+  const { steps } = progress;
+  const recent = steps.slice(-RECENT_STEPS);
+  const earlier = steps.length - recent.length;
+  const lines = [
+    ...(earlier > 0 ? [`<font color='grey'>……前面还有 ${earlier} 步</font>`] : []),
+    ...recent.map((step) => stepLine(step, now)),
+  ];
+  if (!steps.some((step) => step.status === "running")) {
+    const phase =
+      progress.phase === "writing" ? "正在写回答…" : progress.phase === "thinking" ? "正在思考…" : "正在启动…";
+    lines.push(`<font color='blue'>${phase}</font>`);
+  }
+  return lines;
+}
+
+function notesBlock(run: RunView): object[] {
+  if (run.notes.length === 0) return [];
+  return [notation(run.notes.map((note) => `<font color='orange'>⚠ ${escape(note)}</font>`).join("\n"))];
+}
+
+function footer(run: RunView): object {
+  return notation(`<font color='grey'>${escape(run.provider)} · agent ${run.agentId.slice(0, 8)}</font>`);
+}
+
+function decisionsBlock(run: RunView): object[] {
+  const decisions = run.decisions.slice(-MAX_DECISIONS);
+  return decisions.length > 0 ? [markdown(`**审批**\n${decisions.join("\n")}`)] : [];
+}
+
+/** The finished run's steps, folded away under the answer. */
+function stepsPanel(run: RunView, now: number): object[] {
+  const { steps } = run.progress;
+  if (steps.length === 0) return [];
+  const shown = steps.slice(-MAX_LOGGED_STEPS);
+  const hidden = steps.length - shown.length;
+  const failed = steps.filter((step) => step.status === "failed").length;
+  const title = [`执行过程 · ${steps.length} 步`, ...(failed > 0 ? [`${failed} 步失败`] : []), `用时 ${formatElapsed(now - run.startedAt)}`];
+  return [
+    {
+      tag: "collapsible_panel",
+      expanded: false,
+      header: {
+        title: { tag: "markdown", content: `<font color='grey'>${title.join(" · ")}</font>` },
+        icon: { tag: "standard_icon", token: "down-small-ccm_outlined", color: "grey", size: "16px 16px" },
+        icon_position: "right",
+        icon_expanded_angle: -180,
+      },
+      border: { color: "grey", corner_radius: "5px" },
+      padding: "4px 8px 4px 8px",
+      elements: [
+        notation(
+          [
+            ...(hidden > 0 ? [`<font color='grey'>……前面还有 ${hidden} 步，在 Paseo 里看</font>`] : []),
+            ...shown.map((step) => stepLine(step, now)),
+          ].join("\n"),
+        ),
+      ],
+    },
   ];
 }
 
@@ -133,15 +267,23 @@ export function newSessionCard(provider: string, agentId: string): object {
   return card(
     "已开新会话",
     "wathet",
-    `之后的消息交给新的 agent，之前的会话留在 Paseo 里。\n\n<font color='grey'>${provider} · agent ${agentId.slice(0, 8)}</font>`,
+    `之后的消息交给新的 agent，之前的会话留在 Paseo 里。\n\n<font color='grey'>${escape(provider)} · agent ${agentId.slice(0, 8)}</font>`,
   );
 }
 
 export function runningCard(run: RunView, now: number): object {
-  return cardOf(
-    `进行中 · ${formatElapsed(now - run.startedAt)}`,
-    "blue",
-    runElements(run, quote(run.request)),
+  const { progress } = run;
+  const draft = progress.text.trim();
+  return fitted((budget) =>
+    cardOf(`进行中 · ${formatElapsed(now - run.startedAt)}`, "blue", [
+      markdown(quote(run.request)),
+      ...notesBlock(run),
+      ...(progress.todos.length > 0 ? [markdown(todoLines(progress).join("\n"))] : []),
+      notation(activity(progress, now).join("\n")),
+      ...(draft === "" ? [] : [{ tag: "hr" }, markdown(answer(draft, budget))]),
+      ...decisionsBlock(run),
+      footer(run),
+    ]),
   );
 }
 
@@ -219,17 +361,18 @@ function approvalElements(approval: ApprovalView, form: number, numbered: boolea
   ];
 }
 
+// No clock on this card: it is not redrawn while it waits, because a redraw would wipe a
+// reason someone is halfway through typing.
 export function waitingCard(run: RunView, approvals: readonly ApprovalView[]): object {
   const shown = approvals.slice(0, MAX_FORMS);
   const hidden = approvals.length - shown.length;
-  const elements = runElements(run, quote(run.request));
-  const footer = elements.pop()!;
   return cardOf("等待审批", "orange", [
-    ...elements,
+    markdown(quote(run.request)),
+    ...decisionsBlock(run),
     ...shown.flatMap((approval, form) => approvalElements(approval, form, approvals.length > 1)),
     ...(hidden > 0 ? [markdown(`还有 ${hidden} 个请求，在 Paseo 里处理。`)] : []),
     markdown("<font color='grey'>也可以在 Paseo 里处理。</font>"),
-    footer,
+    footer(run),
   ]);
 }
 
@@ -252,28 +395,58 @@ export function staleApprovalCard(): object {
   );
 }
 
+export function doneTitle(run: RunView, now: number): string {
+  return `完成 · ${formatElapsed(now - run.startedAt)}`;
+}
+
 export function doneCard(run: RunView, result: string, now: number): object {
-  const body = result.trim() === "" ? "（agent 没有输出文字）" : result;
-  return cardOf(
-    `完成 · ${formatElapsed(now - run.startedAt)}`,
-    "green",
-    runElements(run, truncateBytes(body, MAX_BODY_BYTES)),
+  return fitted((budget, withSteps) =>
+    cardOf(doneTitle(run, now), "green", [
+      markdown(result.trim() === "" ? "（agent 没有输出文字）" : answer(result, budget)),
+      ...notesBlock(run),
+      ...(withSteps ? stepsPanel(run, now) : []),
+      ...decisionsBlock(run),
+      footer(run),
+    ]),
   );
 }
 
-export function failedCard(request: string, error: string, run?: RunView): object {
-  const main = `${quote(request)}\n\n${truncateBytes(error, MAX_BODY_BYTES)}`;
-  return run ? cardOf("失败", "red", runElements(run, main)) : card("失败", "red", main);
+/** `error` is shown as text; `hint` is this plugin's own markdown, e.g. what to do next. */
+export function failedCard(
+  request: string,
+  error: string,
+  options: { run?: RunView; now?: number; hint?: string } = {},
+): object {
+  const { run, now, hint } = options;
+  const main = markdown(
+    [quote(request), escape(truncateBytes(error, MAX_DETAIL_BYTES)), ...(hint ? [hint] : [])].join("\n\n"),
+  );
+  if (!run) return cardOf("失败", "red", [main]);
+  return fitted((_budget, withSteps) =>
+    cardOf("失败", "red", [
+      main,
+      ...(withSteps ? stepsPanel(run, now ?? run.startedAt) : []),
+      ...decisionsBlock(run),
+      footer(run),
+    ]),
+  );
 }
 
-export function canceledCard(run: RunView, reason: string): object {
-  return cardOf("已取消", "grey", runElements(run, `${quote(run.request)}\n\n${reason}`));
+export function canceledCard(run: RunView, reason: string, now: number): object {
+  return fitted((_budget, withSteps) =>
+    cardOf("已取消", "grey", [
+      markdown(`${quote(run.request)}\n\n${escape(reason)}`),
+      ...(withSteps ? stepsPanel(run, now) : []),
+      ...decisionsBlock(run),
+      footer(run),
+    ]),
+  );
 }
 
 export function noRouteCard(chatId: string): object {
   return card(
     "这个会话还没有路由",
     "grey",
-    `chat_id：\`${chatId}\`\n\n把它加进 feishu 插件设置的 routes，这个会话的消息才会交给 agent。`,
+    `chat_id：\`${chatId}\`\n\n在 Paseo 的 设置 → 插件 → feishu 里给它加一条路由，这个会话的消息才会交给 agent。`,
   );
 }

@@ -6,9 +6,10 @@ import type {
   AgentTimelineItem,
 } from "@getpaseo/protocol/agent-types";
 import { decisionLine, truncateBytes } from "./cards";
-import { createDispatcher, stripMentions, type Lark } from "./dispatcher";
+import { createDispatcher, heartbeatMs, type Lark, type Stranger } from "./dispatcher";
+import { stripMentions, type Incoming } from "./inbound";
 import { parseButtonName, requestDetail } from "./permissions";
-import type { Settings } from "./settings";
+import type { Settings } from "../shared/settings";
 import { describePermission, finalAnswer } from "./timeline";
 
 const SENDER = "ou_allowed";
@@ -18,7 +19,17 @@ const settings: Settings = {
   larkCli: "lark-cli",
   profile: "test",
   senders: [SENDER],
-  routes: [{ chatId: CHAT, cwd: "/work", provider: "claude/claude-sonnet-5", modeId: "default" }],
+  routes: [
+    {
+      chatId: CHAT,
+      name: "",
+      cwd: "/work",
+      provider: "claude/claude-sonnet-5",
+      modeId: "default",
+      instructions: "",
+      claudeMd: false,
+    },
+  ],
   auditDir: "",
 };
 
@@ -52,9 +63,11 @@ interface FakeAgent {
 function registry() {
   const agents = new Map<string, FakeAgent>();
   const created: Array<Record<string, unknown>> = [];
-  const sends: Array<{ agentId: string; text: string }> = [];
+  const sends: Array<{ agentId: string; text: string; images?: unknown }> = [];
   const responses: Array<{ agentId: string; requestId: string; response: AgentPermissionResponse }> = [];
-  return { agents, created, sends, responses, respondFails: false };
+  // Live timeline listeners, one per followed agent.
+  const streams = new Map<string, (event: unknown) => void>();
+  return { agents, created, sends, responses, streams, respondFails: false };
 }
 
 interface Sent {
@@ -67,12 +80,18 @@ interface Sent {
 }
 
 function harness(
-  options: { settings?: Settings | null; createFails?: boolean; paseo?: ReturnType<typeof registry> } = {},
+  options: {
+    settings?: Settings | null;
+    createFails?: boolean;
+    paseo?: ReturnType<typeof registry>;
+    readIncoming?: (event: Record<string, unknown>, options?: { command?: RegExp }) => Promise<Incoming>;
+  } = {},
 ) {
   const paseo = options.paseo ?? registry();
   const sent: Sent[] = [];
   const logs: string[] = [];
   const audits: Array<{ kind: string } & Record<string, unknown>> = [];
+  const strangers: Stranger[] = [];
   let cards = 0;
   const record = (op: "reply" | "patch", id: string, card: object) => {
     const view = card as {
@@ -100,7 +119,7 @@ function harness(
         id,
         provider: "claude",
         labels: input.labels as Record<string, string>,
-        status: input.prompt ? "running" : "idle",
+        status: "idle",
         archivedAt: null,
         order: paseo.agents.size,
         pendingPermissions: [],
@@ -122,14 +141,20 @@ function harness(
         const agent = paseo.agents.get(id);
         return agent ? { agent } : null;
       },
-      send: async (text: string) => {
-        paseo.sends.push({ agentId: id, text });
+      send: async (text: string, sendOptions?: { images?: unknown }) => {
+        paseo.sends.push({ agentId: id, text, ...(sendOptions?.images ? { images: sendOptions.images } : {}) });
         const agent = paseo.agents.get(id);
         if (agent) agent.status = "running";
       },
       respondToPermission: async (input: { requestId: string; response: AgentPermissionResponse }) => {
         if (paseo.respondFails) throw new Error("daemon went away");
         paseo.responses.push({ agentId: id, ...input });
+      },
+      timeline: {
+        subscribe: (handler: (event: unknown) => void) => {
+          paseo.streams.set(id, handler);
+          return Object.assign(() => paseo.streams.delete(id), { ready: Promise.resolve() });
+        },
       },
     }),
   };
@@ -141,6 +166,9 @@ function harness(
     log: (line) => logs.push(line),
     audit: (kind, fields) => audits.push({ kind, ...fields }),
     now: () => clock,
+    paintIntervalMs: 0,
+    ...(options.readIncoming ? { readIncoming: options.readIncoming } : {}),
+    onStranger: (stranger) => strangers.push(stranger),
   });
   dispatchers.push(dispatcher);
   // Card patches are chained on promises; let them drain before asserting.
@@ -195,6 +223,11 @@ function harness(
   const advance = (ms: number) => {
     clock += ms;
   };
+  /** The agent's live timeline shows `item`, as Paseo streams it. */
+  const stream = async (agentId: string, item: AgentTimelineItem) => {
+    paseo.streams.get(agentId)?.({ agentId, event: { type: "timeline", item, provider: "claude" } });
+    await settle();
+  };
   return {
     dispatcher,
     paseo,
@@ -208,6 +241,8 @@ function harness(
     resolve,
     click,
     advance,
+    stream,
+    strangers,
   };
 }
 
@@ -290,13 +325,14 @@ test("a routed message walks one card from received to done", async () => {
   assert.equal(h.created.length, 1);
   const input = h.created[0];
   assert.equal(input.cwd, "/work");
-  assert.equal(input.prompt, "查一下今天的构建");
   assert.equal(input.idempotencyKey, "feishu:om_1");
-  assert.deepEqual(input.config, {
-    provider: "claude/claude-sonnet-5",
-    modeId: "default",
-    thinkingOptionId: undefined,
-  });
+  const config = input.config as Record<string, unknown>;
+  assert.equal(config.provider, "claude/claude-sonnet-5");
+  assert.equal(config.modeId, "default");
+  assert.match(String(config.systemPrompt), /飞书单聊/);
+  // Created first and then sent the message, so the card can follow the turn from its start.
+  assert.equal(input.prompt, undefined);
+  assert.deepEqual(h.paseo.sends, [{ agentId: String(input.agentId), text: "查一下今天的构建" }]);
 
   const timeline: AgentTimelineItem[] = [
     { type: "user_message", text: "查一下今天的构建" },
@@ -603,13 +639,16 @@ test("later messages in a chat go to the same agent", async () => {
   const h = harness();
   await h.dispatcher.onMessage(message({ message_id: "om_1", content: "记住：暗号是蓝鲸" }));
   const agentId = String(h.created[0].agentId);
-  assert.deepEqual(h.created[0].labels, { source: "feishu", "feishu-chat": CHAT });
+  assert.deepEqual(h.created[0].labels, { source: "feishu", "feishu-chat": CHAT, "feishu-claude-md": "off" });
   await h.end(agentId, "记住了。");
 
   await h.dispatcher.onMessage(message({ message_id: "om_2", content: "暗号是什么？" }));
   await h.settle();
   assert.equal(h.created.length, 1);
-  assert.deepEqual(h.paseo.sends, [{ agentId, text: "暗号是什么？" }]);
+  assert.deepEqual(h.paseo.sends, [
+    { agentId, text: "记住：暗号是蓝鲸" },
+    { agentId, text: "暗号是什么？" },
+  ]);
   await h.end(agentId, "蓝鲸。");
   assert.equal(h.sent.at(-1)?.title.split(" ")[0], "完成");
   assert.match(h.sent.at(-1)?.body ?? "", /^蓝鲸。/);
@@ -621,12 +660,12 @@ test("a message sent while the agent is busy waits for the turn to end", async (
   const agentId = String(h.created[0].agentId);
   await h.dispatcher.onMessage(message({ message_id: "om_2", content: "顺便看看测试" }));
   await h.settle();
-  assert.deepEqual(h.paseo.sends, []);
+  assert.equal(h.paseo.sends.length, 1);
   assert.equal(h.sent.at(-1)?.title, "排队中");
 
   await h.end(agentId, "构建通过。");
   await h.settle();
-  assert.deepEqual(h.paseo.sends, [{ agentId, text: "顺便看看测试" }]);
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId, text: "顺便看看测试" });
 });
 
 test("a turn started in Paseo also makes the next Feishu message wait", async () => {
@@ -639,9 +678,9 @@ test("a turn started in Paseo also makes the next Feishu message wait", async ()
   shared.agents.get(agentId)!.status = "running";
   await first.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
   await first.settle();
-  assert.deepEqual(shared.sends, []);
+  assert.equal(shared.sends.length, 1);
   await first.end(agentId, "（Paseo 里那一轮的回答）");
-  assert.deepEqual(shared.sends, [{ agentId, text: "还在吗" }]);
+  assert.deepEqual(shared.sends.at(-1), { agentId, text: "还在吗" });
 });
 
 test("/new starts a fresh agent that later messages go to", async () => {
@@ -657,14 +696,14 @@ test("/new starts a fresh agent that later messages go to", async () => {
   assert.equal(h.sent.at(-1)?.title, "已开新会话");
 
   await h.dispatcher.onMessage(message({ message_id: "om_3", content: "从头来" }));
-  assert.deepEqual(h.paseo.sends, [{ agentId: newId, text: "从头来" }]);
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId: newId, text: "从头来" });
 });
 
 test("/new with text starts the fresh agent on that text", async () => {
   const h = harness();
   await h.dispatcher.onMessage(message({ message_id: "om_1", content: "/new 换个话题" }));
   assert.equal(h.created.length, 1);
-  assert.equal(h.created[0].prompt, "换个话题");
+  assert.deepEqual(h.paseo.sends, [{ agentId: String(h.created[0].agentId), text: "换个话题" }]);
 });
 
 test("after a restart the chat finds its agent again through the label", async () => {
@@ -678,7 +717,7 @@ test("after a restart the chat finds its agent again through the label", async (
   const after = harness({ paseo: shared });
   await after.dispatcher.onMessage(message({ message_id: "om_2", content: "接着说" }));
   assert.equal(shared.created.length, 1);
-  assert.deepEqual(shared.sends, [{ agentId, text: "接着说" }]);
+  assert.deepEqual(shared.sends.at(-1), { agentId, text: "接着说" });
 });
 
 test("an archived conversation is not resumed", async () => {
@@ -691,8 +730,8 @@ test("an archived conversation is not resumed", async () => {
 
   await h.dispatcher.onMessage(message({ message_id: "om_2", content: "新问题" }));
   assert.equal(shared.created.length, 2);
-  assert.equal(shared.created[1].prompt, "新问题");
-  assert.deepEqual(shared.sends, []);
+  assert.deepEqual(shared.sends.at(-1), { agentId: String(shared.created[1].agentId), text: "新问题" });
+  assert.equal(shared.sends.filter((sent) => sent.agentId === agentId).length, 1);
 });
 
 test("two quick first messages start one agent, not two", async () => {
@@ -768,4 +807,194 @@ test("truncation keeps a card under the byte budget without splitting a characte
   assert.ok(Buffer.byteLength(cut, "utf8") <= 1_000);
   assert.ok(!cut.includes(String.fromCharCode(0xfffd)));
   assert.equal(truncateBytes("short", 1_000), "short");
+});
+
+test("the running card says what the agent is doing, as it does it", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message());
+  const agentId = String(h.created[0].agentId);
+  await h.stream(agentId, { type: "reasoning", text: "想一想" });
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /正在思考/);
+
+  const running: AgentTimelineItem = {
+    type: "tool_call",
+    callId: "c1",
+    name: "Bash",
+    status: "running",
+    detail: { type: "shell", command: "npm test" },
+    error: null,
+  };
+  h.advance(2_000);
+  await h.stream(agentId, running);
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /▶ 运行 npm test/);
+  await h.stream(agentId, { ...running, status: "completed" } as AgentTimelineItem);
+  await h.stream(agentId, { type: "assistant_message", text: "测试" });
+  await h.stream(agentId, { type: "assistant_message", text: "全部通过。" });
+  const card = JSON.stringify(h.sent.at(-1)!.card);
+  assert.match(card, /✓ 运行 npm test/);
+  assert.match(card, /测试全部通过。/);
+
+  await h.end(agentId, "测试全部通过。");
+  const done = JSON.stringify(h.sent.at(-1)!.card);
+  assert.equal(h.sent.at(-1)!.title.split(" ")[0], "完成");
+  // The steps fold away under the answer.
+  assert.match(done, /"tag":"collapsible_panel","expanded":false/);
+  assert.match(done, /执行过程 · 1 步/);
+});
+
+test("a quiet run still shows its clock moving", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message());
+  const before = h.sent.length;
+  h.advance(1_000);
+  h.dispatcher.heartbeat();
+  await h.settle();
+  assert.equal(h.sent.length, before, "no redraw sooner than the heartbeat");
+  h.advance(2_000);
+  h.dispatcher.heartbeat();
+  await h.settle();
+  assert.equal(h.sent.at(-1)!.title, "进行中 · 3 秒");
+  assert.equal(heartbeatMs(30_000), 3_000);
+  assert.equal(heartbeatMs(5 * 60_000), 10_000);
+});
+
+test("a waiting card is not redrawn by the clock, so a reason being typed survives", async () => {
+  const h = harness();
+  await waiting(h);
+  const before = h.sent.length;
+  h.advance(60_000);
+  h.dispatcher.heartbeat();
+  await h.settle();
+  assert.equal(h.sent.length, before);
+});
+
+test("images in a message go to the agent with it", async () => {
+  const image = { data: "aGk=", mimeType: "image/png" };
+  const h = harness({
+    readIncoming: async () => ({ prompt: "[图片 1]", images: [image], summary: "[图片]", problems: ["有一张图片没附上：图片太大"] }),
+  });
+  await h.dispatcher.onMessage(message({ message_type: "image", content: "[Image: img_v3_x]" }));
+  assert.deepEqual(h.paseo.sends, [{ agentId: String(h.created[0].agentId), text: "[图片 1]", images: [image] }]);
+  assert.equal(h.sent[0].body, "> &#91;图片&#93;\n\n正在为这个会话启动 agent。");
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /图片太大/);
+});
+
+test("people turned away are remembered for the settings screen", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ sender_id: "ou_stranger" }));
+  await h.dispatcher.onMessage(message({ message_id: "om_2", chat_id: "oc_elsewhere" }));
+  assert.deepEqual(
+    h.strangers.map(({ senderId, chatId, why }) => [senderId, chatId, why]),
+    [
+      ["ou_stranger", CHAT, "sender"],
+      [SENDER, "oc_elsewhere", "route"],
+    ],
+  );
+});
+
+test("an agent is created without CLAUDE.md unless its route asks for it", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message());
+  assert.deepEqual(h.created[0].env, { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" });
+
+  const withClaudeMd = harness({
+    settings: { ...settings, routes: [{ ...settings.routes[0], claudeMd: true }] },
+  });
+  await withClaudeMd.dispatcher.onMessage(message());
+  assert.equal(withClaudeMd.created[0].env, undefined);
+  assert.equal((withClaudeMd.created[0].labels as Record<string, string>)["feishu-claude-md"], undefined);
+});
+
+test("a request quoted on a card cannot mention anyone either", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ content: "<at id=all></at> 看这里" }));
+  assert.ok(!h.sent[0].body.includes("<at"));
+});
+
+test("a finished card always fits Feishu's size limit, however long the answer", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message());
+  const agentId = String(h.created[0].agentId);
+  for (let index = 0; index < 40; index++) {
+    await h.stream(agentId, {
+      type: "tool_call",
+      callId: `c${index}`,
+      name: "Bash",
+      status: "completed",
+      detail: { type: "shell", command: `echo ${"很长的命令".repeat(20)} ${index}` },
+      error: null,
+    });
+  }
+  const answer = "见 [文档](https://example.com/some/long/path) 和 <tag> ".repeat(400);
+  await h.end(agentId, answer);
+  const card = h.sent.at(-1)!;
+  assert.equal(card.title.split(" ")[0], "完成");
+  assert.ok(Buffer.byteLength(JSON.stringify(card.card), "utf8") <= 28_000);
+});
+
+test("a message that finds the agent busy is still sent if the turn ends while its card goes out", async () => {
+  const shared = registry();
+  const h = harness({ paseo: shared });
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(shared.created[0].agentId);
+  await h.end(agentId, "好了。");
+  // A turn started in Paseo is running when the message arrives, and ends before the plugin
+  // gets to queue it: there will be no turn_ended left to drain the queue.
+  shared.agents.get(agentId)!.status = "running";
+  const pending = h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  shared.agents.get(agentId)!.status = "idle";
+  h.dispatcher.onTurnEnded({ agent: agent(agentId), turnId: null, outcome: { kind: "completed" }, timeline: [] });
+  await pending;
+  await h.settle();
+  assert.deepEqual(shared.sends.at(-1), { agentId, text: "还在吗" });
+});
+
+test("a queue stuck behind a turn that ended unseen is drained by the heartbeat", async () => {
+  const shared = registry();
+  const h = harness({ paseo: shared });
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const agentId = String(shared.created[0].agentId);
+  await h.end(agentId, "好了。");
+  shared.agents.get(agentId)!.status = "running";
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  assert.equal(h.sent.at(-1)?.title, "排队中");
+  // The Paseo turn ends; its turn_ended came before anything was queued.
+  shared.agents.get(agentId)!.status = "idle";
+  h.advance(10_000);
+  h.dispatcher.heartbeat();
+  await h.settle();
+  await h.settle();
+  assert.deepEqual(shared.sends.at(-1), { agentId, text: "还在吗" });
+});
+
+test("a late click does not replace a card that already shows how its run ended", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  const allow = buttons(h.sent.at(-1)!.card)[1].name;
+  await h.resolve(agentId, push.id, { behavior: "allow", selectedActionId: "accept" });
+  await h.end(agentId, "推送完成。");
+  const done = h.sent.length;
+  await h.click(allow);
+  assert.equal(h.sent.length, done);
+  assert.equal(h.audits.at(-1)?.why, "the request is no longer open");
+});
+
+test("after stop nothing new is started or followed", async () => {
+  const h = harness();
+  h.dispatcher.stop();
+  await h.dispatcher.onMessage(message());
+  assert.deepEqual(h.sent, []);
+  assert.deepEqual(h.created, []);
+});
+
+test("/new with text does not send the command to the agent", async () => {
+  const h = harness({
+    readIncoming: async (event, options) => {
+      const typed = String(event.content);
+      const text = options?.command ? typed.replace(options.command, "").trim() : typed;
+      return { prompt: text, images: [], summary: text, problems: [] };
+    },
+  });
+  await h.dispatcher.onMessage(message({ content: "/new 看看这张图" }));
+  assert.deepEqual(h.paseo.sends, [{ agentId: String(h.created[0].agentId), text: "看看这张图" }]);
 });

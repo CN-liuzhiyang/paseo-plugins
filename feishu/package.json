@@ -5,7 +5,10 @@
   "files": [
     "paseo-plugin.json",
     "index.server.ts",
-    "server/"
+    "index.client.tsx",
+    "server/",
+    "client/",
+    "shared/"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -16,6 +19,8 @@
     "@getpaseo/plugin": "0.9.1",
     "@getpaseo/protocol": "0.9.1",
     "@types/node": "^22.0.0",
+    "@types/react": "~19.1.0",
+    "react": "^19.1.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3",
     "zod": "^4.4.3"

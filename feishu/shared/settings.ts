@@ -3,8 +3,10 @@ import { z } from "zod";
 
 // Every table that grants access ships empty: no senders means nobody gets in,
 // no routes means a message from an allowed sender still starts nothing.
-const route = z.object({
+export const routeSchema = z.object({
   chatId: z.string().startsWith("oc_"),
+  // What people call this chat; shown in the settings screen and told to the agent.
+  name: z.string().default(""),
   cwd: z.string().min(1),
   // provider/model, e.g. "claude/claude-sonnet-5".
   provider: z.string().min(1),
@@ -12,6 +14,12 @@ const route = z.object({
   // come from outside. Pick the mode on purpose, e.g. "default" (Always Ask) for Claude.
   modeId: z.string().min(1),
   thinkingOptionId: z.string().min(1).optional(),
+  // Standing instructions for this chat's agents, added to their system prompt.
+  instructions: z.string().default(""),
+  // Whether the agent reads CLAUDE.md files: the daemon user's global one, which can carry
+  // private notes anyone in the chat may then read in a reply, and the workspace's own.
+  // Claude only; other providers load their own instruction files regardless.
+  claudeMd: z.boolean().default(false),
 });
 
 export const settingsDefinition = defineSettings({
@@ -27,7 +35,7 @@ export const settingsDefinition = defineSettings({
     profile: z.string().default(""),
     // Also who may answer an agent's permission request from its card.
     senders: z.array(z.string().startsWith("ou_")).default([]),
-    routes: z.array(route).default([]),
+    routes: z.array(routeSchema).default([]),
     // Where approval records go, one JSONL file per day. Empty means
     // <PASEO_HOME>/plugin-data/feishu/audit.
     auditDir: z.string().default(""),

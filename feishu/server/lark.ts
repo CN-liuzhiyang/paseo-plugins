@@ -6,22 +6,29 @@ export interface LarkCli {
 }
 
 const CALL_TIMEOUT_MS = 30_000;
+// Fetching a message downloads its attachments too; a long video takes a while.
+const FETCH_TIMEOUT_MS = 120_000;
 
 // lark-cli prints `{ ok: true, data }` on stdout, or `{ ok: false, error }` on
-// stderr with a non-zero exit. The body goes over stdin, so a card never meets
+// stderr with a non-zero exit. A body goes over stdin, so a card never meets
 // the command line's length limit or its quoting rules.
-function call(cli: LarkCli, method: "POST" | "PATCH", path: string, body: unknown) {
+function run(
+  cli: LarkCli,
+  args: string[],
+  options: { body?: unknown; cwd?: string; timeoutMs?: number } = {},
+): Promise<unknown> {
+  const what = args.slice(0, 3).join(" ");
   return new Promise<unknown>((resolve, reject) => {
-    const child = spawn(
-      cli.path,
-      ["--profile", cli.profile, "api", method, path, "--as", "bot", "--data", "-"],
-      { stdio: ["pipe", "pipe", "pipe"], windowsHide: true },
-    );
+    const child = spawn(cli.path, ["--profile", cli.profile, ...args, "--as", "bot"], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+      cwd: options.cwd,
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    const timer = setTimeout(() => child.kill(), CALL_TIMEOUT_MS);
+    const timer = setTimeout(() => child.kill(), options.timeoutMs ?? CALL_TIMEOUT_MS);
     child.on("error", (error) => {
       clearTimeout(timer);
       reject(error);
@@ -32,14 +39,18 @@ function call(cli: LarkCli, method: "POST" | "PATCH", path: string, body: unknow
         try {
           resolve((JSON.parse(stdout) as { data?: unknown }).data);
         } catch {
-          reject(new Error(`lark-cli ${method} ${path}: unreadable output: ${stdout.slice(0, 300)}`));
+          reject(new Error(`lark-cli ${what}: unreadable output: ${stdout.slice(0, 300)}`));
         }
         return;
       }
-      reject(new Error(`lark-cli ${method} ${path} exited ${code}: ${describeFailure(stderr)}`));
+      reject(new Error(`lark-cli ${what} exited ${code}: ${describeFailure(stderr)}`));
     });
-    child.stdin.end(JSON.stringify(body));
+    child.stdin.end(options.body === undefined ? "" : JSON.stringify(options.body));
   });
+}
+
+function call(cli: LarkCli, method: "POST" | "PATCH", path: string, body: unknown) {
+  return run(cli, ["api", method, path, "--data", "-"], { body });
 }
 
 function describeFailure(stderr: string): string {
@@ -70,4 +81,35 @@ export async function replyCard(cli: LarkCli, messageId: string, card: object): 
 /** Replaces a card sent by this bot in place. Feishu refuses cards older than 14 days. */
 export async function patchCard(cli: LarkCli, cardId: string, card: object): Promise<void> {
   await call(cli, "PATCH", `/open-apis/im/v1/messages/${cardId}`, { content: JSON.stringify(card) });
+}
+
+/** One message as `im +messages-mget` renders it: content is readable text, not raw JSON. */
+export interface LarkMessage {
+  message_id: string;
+  msg_type: string;
+  content: string;
+  deleted?: boolean;
+  sender?: { id?: string; name?: string; sender_type?: string };
+  /** Present with --download-resources; `error` marks one that did not download. */
+  resources?: Array<{
+    key: string;
+    type: "image" | "file";
+    local_path?: string;
+    size_bytes?: number;
+    error?: boolean;
+  }>;
+}
+
+/**
+ * Fetches messages with their sender names, and downloads their images and files into
+ * `<dir>/lark-im-resources/`. lark-cli only writes under its working directory, so `dir` is it.
+ */
+export async function fetchMessages(cli: LarkCli, messageIds: string[], dir: string): Promise<LarkMessage[]> {
+  const data = await run(
+    cli,
+    ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--download-resources", "--no-reactions", "--format", "json"],
+    { cwd: dir, timeoutMs: FETCH_TIMEOUT_MS },
+  );
+  const messages = (data as { messages?: unknown } | undefined)?.messages;
+  return Array.isArray(messages) ? (messages as LarkMessage[]) : [];
 }
