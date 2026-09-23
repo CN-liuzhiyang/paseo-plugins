@@ -482,12 +482,14 @@ export function strangerCard(input: {
   ]);
 }
 
-export function letInCard(name: string | null, byName: string | null): object {
+/** `handled`: the message that raised the card is being handled now, not lost to a restart. */
+export function letInCard(name: string | null, byName: string | null, handled: boolean): object {
   const who = name ? `**${escape(name)}**` : "这位";
   const by = byName ? `由 ${escape(byName)} ` : "";
+  const next = handled ? "刚才那条消息正在处理。" : `刚才那条消息没留住，请${name ? escape(name) : "他"}再 @ 我一次。`;
   return card(
     "已放行",
     "green",
-    `${who} 已${by}放行，可以 @ 我派活了。\n需要批准的操作仍由管理员在卡片上批。`,
+    `${who} 已${by}放行，可以 @ 我派活了。${next}\n需要批准的操作仍由管理员在卡片上批。`,
   );
 }

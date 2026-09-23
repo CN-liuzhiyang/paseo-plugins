@@ -1118,3 +1118,39 @@ test("a member can talk to the agent but cannot answer what it asks", async () =
   await h.click(allow);
   assert.equal(h.paseo.responses[0].agentId, agentId);
 });
+
+test("a 放行 click that carries its target only in the button's value still lets the person in", async () => {
+  const people = memoryPeople();
+  const h = harness({ botId: async () => BOT, people });
+  await h.dispatcher.onMessage(
+    group({ message_id: "om_s", sender_id: "ou_guest", content: "@_user_1 喂", mentions: [atBot] }),
+  );
+  // As Feishu sends a click on a button outside a form: the name is not the one on the card.
+  await h.dispatcher.onCardAction({
+    event_id: "ev_value",
+    operator_id: SENDER,
+    message_id: "om_card1",
+    chat_id: CHAT,
+    action_tag: "button",
+    action_name: "Button_m1abc",
+    action_value: JSON.stringify({ letIn: "letin|ou_guest|om_s" }),
+  });
+  await h.settle();
+  assert.equal(await people.isMember("ou_guest"), true);
+  assert.equal(h.paseo.sends[0].text, "喂");
+});
+
+test("letting someone in after the plugin restarted asks them to send the message again", async () => {
+  const people = memoryPeople();
+  const h = harness({ botId: async () => BOT, people });
+  await h.click("letin|ou_guest|om_gone", { cardId: "om_card9" });
+  assert.equal(await people.isMember("ou_guest"), true);
+  assert.equal(h.created.length, 0);
+  assert.match(h.sent.at(-1)?.body ?? "", /再 @ 我一次/);
+});
+
+test("a click the plugin cannot place is logged, not dropped without a word", async () => {
+  const h = harness();
+  await h.dispatcher.onCardAction({ event_id: "ev_x", operator_id: SENDER, message_id: "om_c", chat_id: CHAT, action_tag: "button", action_name: "whatever" });
+  assert.match(h.logs.join("\n"), /card action not understood: tag=button name=whatever/);
+});

@@ -559,6 +559,23 @@ export function createDispatcher(deps: {
     await reply(who.messageId, strangerCard({ name: who.name, letIn }));
   }
 
+  /**
+   * The person a 放行 click is for. A button in a form sends its name; one outside a form, like
+   * this one, sends only the value it carries (measured: action_name did not match, 2026-09-24).
+   */
+  function letInOf(event: Record<string, unknown>): { openId: string; messageId: string } | null {
+    const named = parseLetInName(text(event.action_name) ?? "");
+    if (named) return named;
+    const raw = text(event.action_value);
+    if (!raw) return null;
+    try {
+      const value = (JSON.parse(raw) as { letIn?: unknown }).letIn;
+      return typeof value === "string" ? parseLetInName(value) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** An admin pressed 放行 on a stranger card. */
   async function onLetIn(event: Record<string, unknown>, target: { openId: string; messageId: string }) {
     const operator = text(event.operator_id);
@@ -594,14 +611,16 @@ export function createDispatcher(deps: {
       }
       audit("feishu.people.added", { openId: target.openId, name, chatId, cardId, operator, operatorName: byName });
     }
-    await lark.patch(cardId, letInCard(name, byName)).catch((error: unknown) => {
-      log(`patch ${cardId}: ${describe(error)}`);
-    });
     toldStrangers.delete(`${chatId}|${target.openId}`);
-    // The message that raised the card is handled now, as if it had just arrived.
+    // The message that raised the card is handled now, as if it had just arrived. It is only
+    // kept in memory, so after a restart the card says to send it again instead.
     const waiting = held.get(target.messageId);
     held.delete(target.messageId);
-    if (waiting && now() - waiting.at < HELD_MAX_AGE_MS) {
+    const replay = waiting !== undefined && now() - waiting.at < HELD_MAX_AGE_MS;
+    await lark.patch(cardId, letInCard(name, byName, replay)).catch((error: unknown) => {
+      log(`patch ${cardId}: ${describe(error)}`);
+    });
+    if (replay) {
       seen.delete(target.messageId);
       await onMessage(waiting.event);
     }
@@ -778,9 +797,17 @@ export function createDispatcher(deps: {
 
   /** A button on a waiting card: someone allowed or denied a request from Feishu. */
   async function onCardAction(event: Record<string, unknown>): Promise<void> {
-    const letIn = parseLetInName(text(event.action_name) ?? "");
+    const letIn = letInOf(event);
     if (letIn) return onLetIn(event, letIn);
     const target = parseButtonName(text(event.action_name) ?? "");
+    if (!target) {
+      // A click this plugin cannot place was once dropped without a word, and a button that
+      // did nothing looked broken with nothing in the log to say why.
+      log(
+        `card action not understood: tag=${text(event.action_tag) ?? "-"} name=${text(event.action_name) ?? "-"} value=${(text(event.action_value) ?? "-").slice(0, 200)}`,
+      );
+      return;
+    }
     const operator = text(event.operator_id);
     const cardId = text(event.message_id);
     const chatId = text(event.chat_id);
