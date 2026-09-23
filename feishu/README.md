@@ -3,7 +3,15 @@
 飞书入口：挂在 Paseo 插件 server 侧的一层薄 dispatcher。它不是 agent——收事件、鉴权、按表路由，
 判断交给它起的 agent 或它调的脚本；结果、进度和审批请求以一张原地更新的卡片发回飞书。
 
-**状态：骨架。** `index.server.ts` 只证明插件能编译、加载、干净停止，不消费任何事件。
+**状态：M1。** 收消息 → 白名单 → 按 chat_id 路由 → 起 agent → 一张卡片原地更新（已接收 /
+进行中 / 等待审批 / 完成 / 失败 / 已取消）。还没有的：卡片内审批（M2，现在要回 Paseo 里批）、
+设置界面（M3，现在配置写文件，见下文）、卡片回调的消费进程。
+
+## 宿主要求
+
+飞书消息从 Paseo 外面进来，没有哪个 hook 或 RPC handler 会把 Paseo API 递给插件，所以插件入口
+要用 `server.paseo`。这是 fork（`CN-liuzhiyang/paseo` 的 `next`）加的扩展点，上游还没有；
+宿主不提供时插件只打一行日志，什么也不做。
 
 ## 安装
 
@@ -20,6 +28,34 @@ paseo plugin logs feishu
 仓库里只有代码和配置的 schema。谁能给机器人发消息、哪个会话路由到哪个 workspace，都存在
 daemon 本机的插件 settings 里（`defineSettings`，scope 为 host，不跨机同步），**默认为空、
 fail-closed**：没配发送者就谁都进不来，没配路由就收到消息也不起 agent。
+
+## 配置
+
+设置界面做出来之前，直接写 `$PASEO_HOME/plugin-settings/<安装 id>/feishu.json`：
+
+```json
+{
+  "version": 1,
+  "values": {
+    "larkCli": "<lark-cli 可执行文件的绝对路径>",
+    "profile": "<机器人的 lark-cli profile>",
+    "senders": ["ou_..."],
+    "routes": [
+      { "chatId": "oc_...", "cwd": "<agent 的工作目录>", "provider": "claude/claude-sonnet-5", "modeId": "default" }
+    ]
+  }
+}
+```
+
+- `larkCli` 在 Windows 上要指向 npm 包里的原生 `bin/lark-cli.exe`，不是 `.cmd` 包装：spawn 包装
+  需要 shell，而 shell 会打乱参数转义，也让关停信号到不了真正的进程。
+- `modeId` 必填。provider 的默认执行档可能是不逐条询问就跑工具的，而这些 prompt 来自外部，
+  执行档要有意选。Claude 的 `default` 是 Always Ask。
+- `senders` 和 `routes` 每条消息都重新读，改完立即生效；`larkCli` 和 `profile` 改完要
+  `paseo plugin reload feishu`。
+- open_id 和 chat_id 都是按应用分配的，别的应用里查到的不能用。拿法：`senders` 留空，给机器人
+  发一条消息，插件日志里会有 `dropped <message> from ou_... in oc_...`；把 open_id 加进
+  `senders` 后再发一条，没配路由的会话会收到一张写着 chat_id 的卡片。
 
 ## 分层
 
