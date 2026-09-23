@@ -10,10 +10,11 @@ import { consume, type Consumer } from "./server/consumer";
 import { createIsolation, isClaude } from "./server/context";
 import { createDispatcher, larkOf, type Dispatcher, type Stranger } from "./server/dispatcher";
 import { readIncoming } from "./server/inbound";
-import { fetchMessages } from "./server/lark";
+import { botOpenId, fetchMessages } from "./server/lark";
 
 const log = (line: string) => console.log(`feishu: ${line}`);
 const REMEMBERED_STRANGERS = 20;
+const BOT_ID_RETRY_MS = 60_000;
 
 type Status = RpcOutput<typeof statusRpc>;
 
@@ -83,6 +84,20 @@ export default function contribute(server: PluginServerContext) {
       return;
     }
     const cli = { path: values.larkCli, profile: values.profile };
+    // Asked once per consumer; a failed ask is retried at most once a minute, not per message.
+    let botId: Promise<string | null> | null = null;
+    let botIdAskedAt = 0;
+    const whoAmI = async (): Promise<string | null> => {
+      if (botId === null || ((await botId) === null && Date.now() - botIdAskedAt > BOT_ID_RETRY_MS)) {
+        botIdAskedAt = Date.now();
+        botId = botOpenId(cli).catch((error: unknown) => {
+          log(`cannot tell which @ is this bot: ${error instanceof Error ? error.message : String(error)}`);
+          return null;
+        });
+      }
+      return botId;
+    };
+    void whoAmI();
     const dispatcher = createDispatcher({
       paseo,
       lark: larkOf(cli),
@@ -94,10 +109,12 @@ export default function contribute(server: PluginServerContext) {
           event,
           {
             fetch: (ids, dir) => fetchMessages(cli, ids, dir),
+            lookup: (ids) => fetchMessages(cli, ids, null),
             mediaDir: (chatId, messageId) => path.join(mediaRoot(), chatId, messageId),
           },
           options,
         ),
+      botId: whoAmI,
       isolate: isolation.add,
       onStranger: (stranger) => {
         const known = strangers.findIndex(

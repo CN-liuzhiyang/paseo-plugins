@@ -85,6 +85,7 @@ function harness(
     createFails?: boolean;
     paseo?: ReturnType<typeof registry>;
     readIncoming?: (event: Record<string, unknown>, options?: { command?: RegExp }) => Promise<Incoming>;
+    botId?: () => Promise<string | null>;
   } = {},
 ) {
   const paseo = options.paseo ?? registry();
@@ -168,6 +169,7 @@ function harness(
     now: () => clock,
     paintIntervalMs: 0,
     ...(options.readIncoming ? { readIncoming: options.readIncoming } : {}),
+    ...(options.botId ? { botId: options.botId } : {}),
     onStranger: (stranger) => strangers.push(stranger),
   });
   dispatchers.push(dispatcher);
@@ -997,4 +999,65 @@ test("/new with text does not send the command to the agent", async () => {
   });
   await h.dispatcher.onMessage(message({ content: "/new 看看这张图" }));
   assert.deepEqual(h.paseo.sends, [{ agentId: String(h.created[0].agentId), text: "看看这张图" }]);
+});
+
+const BOT = "ou_bot";
+const atBot = { id: BOT, key: "@_user_1", name: "Bot" };
+
+function group(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return message({ chat_type: "group", ...overrides });
+}
+
+test("in a group the bot answers an @ to it, and hears the rest as context for it", async () => {
+  const h = harness({ botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ message_id: "om_a", sender_id: "ou_guest", content: "就是杭州" }));
+  await h.dispatcher.onMessage(
+    group({
+      message_id: "om_b",
+      content: "@_user_1 你也去吗",
+      mentions: [{ id: "ou_guest", key: "@_user_1", name: "访客" }],
+    }),
+  );
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.created.length, 0);
+  assert.equal(h.strangers.length, 0);
+
+  await h.dispatcher.onMessage(group({ message_id: "om_c", content: "@_user_1 刚才说去哪", mentions: [atBot] }));
+  assert.equal(h.created.length, 1);
+  assert.equal(
+    h.paseo.sends[0].text,
+    "[群里在这之前的消息，没有 @ 你]\n某人：就是杭州\n某人：@访客 你也去吗\n\n刚才说去哪",
+  );
+
+  // Heard once: the next @ carries only what was said after this one.
+  await h.end(String(h.created[0].agentId), "杭州。");
+  await h.dispatcher.onMessage(group({ message_id: "om_d", content: "@_user_1 好的", mentions: [atBot] }));
+  assert.equal(h.paseo.sends[1].text, "好的");
+});
+
+test("a group with no route stays quiet until the bot is @-ed", async () => {
+  const h = harness({ botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ chat_id: "oc_other", content: "大家好" }));
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.strangers.length, 0);
+  await h.dispatcher.onMessage(group({ message_id: "om_2", chat_id: "oc_other", content: "@_user_1 在吗", mentions: [atBot] }));
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.strangers[0].why, "route");
+});
+
+test("what a group said hours ago is not handed to the bot", async () => {
+  const h = harness({ botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ message_id: "om_a", content: "昨天的事" }));
+  h.advance(7 * 60 * 60_000);
+  await h.dispatcher.onMessage(group({ message_id: "om_b", content: "@_user_1 在吗", mentions: [atBot] }));
+  assert.equal(h.paseo.sends[0].text, "在吗");
+});
+
+test("not knowing its own ID, the bot takes any @ in a group as meant for it", async () => {
+  const h = harness({ botId: async () => null });
+  await h.dispatcher.onMessage(group({ message_id: "om_a", content: "随便聊聊" }));
+  assert.equal(h.created.length, 0);
+  await h.dispatcher.onMessage(group({ message_id: "om_b", content: "@_user_1 在吗", mentions: [atBot] }));
+  assert.equal(h.created.length, 1);
+  assert.match(h.logs.join("\n"), /open_id is unknown/);
 });

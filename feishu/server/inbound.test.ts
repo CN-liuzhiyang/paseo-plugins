@@ -3,7 +3,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { cardText, readIncoming, sniffImage } from "./inbound";
+import { cardText, overheardBlock, readIncoming, sniffImage } from "./inbound";
 import type { LarkMessage } from "./lark";
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
@@ -230,4 +230,37 @@ test("a command at the start of a message with attachments is not sent to the ag
   );
   const incoming = await readIncoming(event({ message_type: "post", content }), d, { command: /^\/new\b\s*/ });
   assert.equal(incoming.prompt, "看看 [图片 1]");
+});
+
+test("what the group said before the @ comes first, with names, tags and mentions as people see them", async () => {
+  const { dir } = await fixture();
+  const lookedUp: string[][] = [];
+  const incoming = await readIncoming(
+    event({ chat_type: "group", content: "@_user_1 你觉得呢", mentions: [{ id: "ou_bot", key: "@_user_1", name: "Bot" }] }),
+    {
+      fetch: async () => [{ message_id: "om_1", msg_type: "text", content: "@_user_1 你觉得呢", sender: { name: "甲" } }],
+      lookup: async (ids) => {
+        lookedUp.push(ids);
+        return [{ message_id: "om_a", msg_type: "text", content: "", sender: { name: "乙" } }];
+      },
+      mediaDir: () => dir,
+    },
+    {
+      overheard: [
+        { messageId: "om_a", content: "看这个 [Image: img_v3_x]", mentions: [], at: 0 },
+        { messageId: "om_b", content: "@_user_2 多行\n消息", mentions: [{ key: "@_user_2", name: "丙" }], at: 0 },
+      ],
+    },
+  );
+  assert.deepEqual(lookedUp, [["om_a", "om_b"]]);
+  assert.equal(incoming.prompt, "[群里在这之前的消息，没有 @ 你]\n乙：看这个 [图片]\n某人：@丙 多行 消息\n\n甲：你觉得呢");
+});
+
+test("when the group has been talking a lot, the oldest of it is left out", async () => {
+  const long = "字".repeat(400);
+  const overheard = Array.from({ length: 20 }, (_, i) => ({ messageId: `om_${i}`, content: `${i}${long}`, mentions: [], at: 0 }));
+  const block = await overheardBlock(overheard);
+  assert.ok(block.length <= 3_100);
+  assert.match(block, /某人：19/);
+  assert.doesNotMatch(block, /某人：0字/);
 });

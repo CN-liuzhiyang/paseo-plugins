@@ -26,9 +26,20 @@ export interface Incoming {
 export interface IncomingDeps {
   /** `im +messages-mget --download-resources`, with `dir` as where the files go. */
   fetch(messageIds: string[], dir: string): Promise<LarkMessage[]>;
+  /** `im +messages-mget` downloading nothing: who wrote what the group said before. */
+  lookup?(messageIds: string[]): Promise<LarkMessage[]>;
   /** Where this message's attachments are kept. */
   mediaDir(chatId: string, messageId: string): string;
   readFile?: (path: string) => Promise<Buffer>;
+}
+
+/** A group message the bot was not @-ed in, kept as context for the next one it is. */
+export interface Overheard {
+  messageId: string;
+  /** As the event has it: readable text, with attachment markers and `@_user_N` keys. */
+  content: string;
+  mentions: unknown;
+  at: number;
 }
 
 // Claude drops any other image type without a word (Paseo's claude provider keeps these four).
@@ -38,6 +49,9 @@ const MAX_IMAGE_BYTES = 3_750_000;
 const MAX_TOTAL_IMAGE_BYTES = 15_000_000;
 const MAX_IMAGES = 10;
 const MAX_QUOTED_CHARS = 1_500;
+// What the group said before an @: enough to follow the conversation, not a transcript.
+const MAX_OVERHEARD_LINE = 300;
+const MAX_OVERHEARD_CHARS = 3_000;
 
 // Markers lark-cli leaves in rendered content where an attachment was.
 const MARKERS: Array<{ pattern: RegExp; kind: "image" | "file" | "audio" | "video" | "sticker" }> = [
@@ -61,7 +75,7 @@ const PLAIN_TYPES = new Set(["text", "post"]);
 export async function readIncoming(
   event: Record<string, unknown>,
   deps: IncomingDeps,
-  options: { command?: RegExp } = {},
+  options: { command?: RegExp; overheard?: Overheard[] } = {},
 ): Promise<Incoming> {
   const messageId = String(event.message_id);
   const chatId = String(event.chat_id);
@@ -136,7 +150,8 @@ export async function readIncoming(
   const rendered = await render(main);
   const body = { text: uncommand(rendered.text), summary: uncommand(rendered.summary) };
   const speaker = group ? `${main.sender?.name || "某人"}：` : "";
-  const parts: string[] = [];
+  const heard = await overheardBlock(options.overheard ?? [], deps.lookup);
+  const parts: string[] = heard === "" ? [] : [heard];
   if (parent && quoted) {
     const who = parent.sender?.sender_type === "app" ? "你之前的回复" : `${parent.sender?.name || "某人"} 的消息`;
     const lines = clip(quoted.text, MAX_QUOTED_CHARS).split("\n").map((line) => `> ${line}`);
@@ -151,6 +166,58 @@ export async function readIncoming(
     summary: body.summary === "" ? "[消息]" : body.summary,
     problems,
   };
+}
+
+/**
+ * What the group said since the bot was last @-ed, one line per message, oldest first, the
+ * oldest dropped first when it runs long. The event carries open_ids, not names, so names are
+ * looked up; attachments stay tags, since the agent is told what was said, not handed every
+ * picture posted in the chat.
+ */
+export async function overheardBlock(overheard: Overheard[], lookup?: IncomingDeps["lookup"]): Promise<string> {
+  if (overheard.length === 0) return "";
+  const names = new Map<string, string>();
+  if (lookup) {
+    try {
+      for (const message of await lookup(overheard.map((entry) => entry.messageId))) {
+        if (message.sender?.name) names.set(message.message_id, message.sender.name);
+      }
+    } catch {
+      // The lines still read without names.
+    }
+  }
+  const lines: string[] = [];
+  let used = 0;
+  for (const entry of [...overheard].reverse()) {
+    const said = clip(tagged(entry.content, entry.mentions), MAX_OVERHEARD_LINE);
+    const line = `${names.get(entry.messageId) ?? "某人"}：${said}`;
+    if (used + line.length > MAX_OVERHEARD_CHARS) break;
+    lines.unshift(line);
+    used += line.length + 1;
+  }
+  return lines.length === 0 ? "" : `[群里在这之前的消息，没有 @ 你]\n${lines.join("\n")}`;
+}
+
+/** Content on one line, attachments as tags and mentions as the names a person sees. */
+function tagged(content: string, mentions: unknown): string {
+  let text = content;
+  for (const { pattern, kind } of MARKERS) {
+    text = text.replace(pattern, (marker) => {
+      if (kind === "image") return "[图片]";
+      if (kind === "sticker") return "[表情]";
+      const label = { file: "文件", audio: "语音", video: "视频" }[kind];
+      const name = /name="([^"]*)"/.exec(marker)?.[1] ?? "";
+      return name === "" ? `[${label}]` : `[${label} ${name}]`;
+    });
+  }
+  if (Array.isArray(mentions)) {
+    for (const mention of mentions) {
+      const { key, name } = (mention ?? {}) as { key?: unknown; name?: unknown };
+      if (typeof key !== "string" || key === "") continue;
+      text = text.split(key).join(typeof name === "string" && name !== "" ? `@${name}` : "");
+    }
+  }
+  return text.replace(/\s*\n\s*/g, " ").trim();
 }
 
 /** Attaches the image, or says why not. */

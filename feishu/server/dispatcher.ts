@@ -24,7 +24,7 @@ import {
   type RunView,
 } from "./cards";
 import { contextOf, systemPrompt } from "./context";
-import { stripMentions, type Incoming } from "./inbound";
+import { overheardBlock, stripMentions, type Incoming, type Overheard } from "./inbound";
 import { patchCard, replyCard, type LarkCli } from "./lark";
 import { createPainter, type Painter } from "./painter";
 import {
@@ -56,6 +56,10 @@ const UNATTRIBUTED = "paseo (unattributed: Paseo does not record who answered)";
 // Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
 // registry, so the conversation survives plugin reloads and daemon restarts.
 export const CHAT_LABEL = "feishu-chat";
+// What a group said while the bot was not @-ed, kept for its next @: the last this many
+// messages, none older than this.
+const OVERHEARD_LIMIT = 20;
+const OVERHEARD_MAX_AGE_MS = 6 * 60 * 60_000;
 const NEW_SESSION = /^\/new(?:\s+([\s\S]*))?$/;
 const NEW_COMMAND = /^\/new\b\s*/;
 
@@ -140,11 +144,12 @@ type Event<Name extends keyof PluginLifecycleEvents> = PluginLifecycleEvents[Nam
 /** A message as typed, for tests and for hosts that cannot fetch attachments. */
 export async function textOnly(
   event: Record<string, unknown>,
-  options: { command?: RegExp } = {},
+  options: { command?: RegExp; overheard?: Overheard[] } = {},
 ): Promise<Incoming> {
   const typed = stripMentions(typeof event.content === "string" ? event.content : "", event.mentions);
   const text = options.command ? typed.replace(options.command, "").trim() : typed;
-  return { prompt: text, images: [], summary: text, problems: [] };
+  const heard = await overheardBlock(options.overheard ?? []);
+  return { prompt: heard === "" ? text : `${heard}\n\n${text}`, images: [], summary: text, problems: [] };
 }
 
 /**
@@ -160,7 +165,12 @@ export function createDispatcher(deps: {
   log: (line: string) => void;
   audit: Audit;
   /** What the agent is sent for a message: text, images, the message replied to. */
-  readIncoming?: (event: Record<string, unknown>, options?: { command?: RegExp }) => Promise<Incoming>;
+  readIncoming?: (
+    event: Record<string, unknown>,
+    options?: { command?: RegExp; overheard?: Overheard[] },
+  ) => Promise<Incoming>;
+  /** This bot's open_id, which a group message @-mentions when it is meant for the bot. */
+  botId?: () => Promise<string | null>;
   /** Told about an agent before it is created without CLAUDE.md; see context.ts. */
   isolate?: (agentId: string) => void;
   /** Told about everyone turned away, so the settings screen can offer to let them in. */
@@ -185,6 +195,8 @@ export function createDispatcher(deps: {
   const queueChecks = new Map<string, number>();
   const chats = new Map<string, ChatAgent>();
   const chatWork = new Map<string, Promise<void>>();
+  const overheard = new Map<string, Overheard[]>();
+  let botIdMissingLogged = false;
   let ticker: NodeJS.Timeout | null = null;
   let stopped = false;
 
@@ -492,6 +504,34 @@ export function createDispatcher(deps: {
     if (next) await sendTurn(agentId, next);
   }
 
+  /** Whether a group message @-mentions this bot. */
+  async function meantForBot(event: Record<string, unknown>): Promise<boolean> {
+    const mentioned = Array.isArray(event.mentions)
+      ? event.mentions.map((mention) => (mention as { id?: unknown } | null)?.id)
+      : [];
+    const botId = deps.botId ? await deps.botId().catch(() => null) : null;
+    if (botId) return mentioned.includes(botId);
+    // Not knowing its own ID, the bot takes any @ as possibly meant for it: answering an @ that
+    // was for someone else beats staying silent when it was for the bot.
+    if (!botIdMissingLogged) {
+      botIdMissingLogged = true;
+      log("this bot's open_id is unknown: any @ in a group is taken as meant for it");
+    }
+    return mentioned.length > 0;
+  }
+
+  function overhear(chatId: string, messageId: string, event: Record<string, unknown>) {
+    const kept = (overheard.get(chatId) ?? []).filter((entry) => now() - entry.at < OVERHEARD_MAX_AGE_MS);
+    kept.push({ messageId, content: text(event.content) ?? "", mentions: event.mentions, at: now() });
+    overheard.set(chatId, kept.slice(-OVERHEARD_LIMIT));
+  }
+
+  function takeOverheard(chatId: string): Overheard[] {
+    const kept = overheard.get(chatId) ?? [];
+    overheard.delete(chatId);
+    return kept.filter((entry) => now() - entry.at < OVERHEARD_MAX_AGE_MS);
+  }
+
   async function onMessage(event: Record<string, unknown>): Promise<void> {
     const messageId = text(event.message_id);
     const chatId = text(event.chat_id);
@@ -506,6 +546,12 @@ export function createDispatcher(deps: {
       return;
     }
     const chatType = event.chat_type === "group" ? "group" : "p2p";
+    if (chatType === "group" && !(await meantForBot(event))) {
+      // With 「获取群组中所有消息」 Feishu sends everything said in the group. The bot speaks when
+      // @-ed, as a person would; the rest is what it hears in the meantime.
+      if (settings.routes.some((candidate) => candidate.chatId === chatId)) overhear(chatId, messageId, event);
+      return;
+    }
     if (!settings.senders.includes(senderId)) {
       // Both IDs are per app, so this line is how an operator finds the values to allow.
       log(`dropped ${messageId} from ${senderId} in ${chatId}: not in senders`);
@@ -520,6 +566,8 @@ export function createDispatcher(deps: {
       await reply(messageId, noRouteCard(chatId));
       return;
     }
+    // Taken now, not when the chat's turn comes: what is said after this @ belongs to the next.
+    const heard = takeOverheard(chatId);
 
     await inChat(chatId, async () => {
       const kind = text(event.message_type) ?? "text";
@@ -528,10 +576,13 @@ export function createDispatcher(deps: {
         chats.delete(chatId);
         const rest = reset[1]?.trim() ?? "";
         if (rest === "") await newSession(chatId, chatType, route, messageId);
-        else await startAgent(chatId, chatType, route, messageId, await readIncoming(event, { command: NEW_COMMAND }));
+        else {
+          const incoming = await readIncoming(event, { command: NEW_COMMAND, overheard: heard });
+          await startAgent(chatId, chatType, route, messageId, incoming);
+        }
         return;
       }
-      const incoming = await readIncoming(event);
+      const incoming = await readIncoming(event, { overheard: heard });
       if (incoming.prompt.trim() === "" && incoming.images.length === 0) return;
       const current = await currentAgent(chatId);
       if (current) {

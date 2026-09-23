@@ -15,7 +15,7 @@ const FETCH_TIMEOUT_MS = 120_000;
 function run(
   cli: LarkCli,
   args: string[],
-  options: { body?: unknown; cwd?: string; timeoutMs?: number } = {},
+  options: { body?: unknown; cwd?: string; timeoutMs?: number; raw?: boolean } = {},
 ): Promise<unknown> {
   const what = args.slice(0, 3).join(" ");
   return new Promise<unknown>((resolve, reject) => {
@@ -37,7 +37,8 @@ function run(
       clearTimeout(timer);
       if (code === 0) {
         try {
-          resolve((JSON.parse(stdout) as { data?: unknown }).data);
+          const parsed = JSON.parse(stdout) as { data?: unknown };
+          resolve(options.raw ? parsed : parsed.data);
         } catch {
           reject(new Error(`lark-cli ${what}: unreadable output: ${stdout.slice(0, 300)}`));
         }
@@ -101,15 +102,31 @@ export interface LarkMessage {
 }
 
 /**
- * Fetches messages with their sender names, and downloads their images and files into
- * `<dir>/lark-im-resources/`. lark-cli only writes under its working directory, so `dir` is it.
+ * Fetches messages with their sender names. With `downloadTo`, their images and files are
+ * downloaded into `<downloadTo>/lark-im-resources/`: lark-cli only writes under its working
+ * directory, so that is where it runs.
  */
-export async function fetchMessages(cli: LarkCli, messageIds: string[], dir: string): Promise<LarkMessage[]> {
+export async function fetchMessages(
+  cli: LarkCli,
+  messageIds: string[],
+  downloadTo: string | null,
+): Promise<LarkMessage[]> {
+  const args = ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--no-reactions", "--format", "json"];
   const data = await run(
     cli,
-    ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--download-resources", "--no-reactions", "--format", "json"],
-    { cwd: dir, timeoutMs: FETCH_TIMEOUT_MS },
+    downloadTo === null ? args : [...args, "--download-resources"],
+    downloadTo === null ? {} : { cwd: downloadTo, timeoutMs: FETCH_TIMEOUT_MS },
   );
   const messages = (data as { messages?: unknown } | undefined)?.messages;
   return Array.isArray(messages) ? (messages as LarkMessage[]) : [];
+}
+
+/** This bot's own open_id: a group message is meant for the bot when it @-mentions this ID. */
+export async function botOpenId(cli: LarkCli): Promise<string> {
+  // The endpoint answers `{ bot: { open_id } }` with no `data`, which lark-cli's JSON envelope
+  // drops; ndjson is the response as Feishu sent it.
+  const response = await run(cli, ["api", "GET", "/open-apis/bot/v3/info", "--format", "ndjson"], { raw: true });
+  const id = (response as { bot?: { open_id?: unknown } } | undefined)?.bot?.open_id;
+  if (typeof id !== "string" || id === "") throw new Error("Feishu returned no open_id for this bot");
+  return id;
 }
