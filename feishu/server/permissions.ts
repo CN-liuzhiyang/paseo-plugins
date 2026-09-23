@@ -116,3 +116,20 @@ export function requestDetail(request: AgentPermissionRequest): string {
   }
   return request.description ?? "";
 }
+
+// The button an admin presses to let someone in, addressed the same way: by its name, checked
+// against the settings when it is pressed.
+export interface LetInTarget {
+  openId: string;
+  messageId: string;
+}
+
+export function letInName(target: LetInTarget): string {
+  return `letin|${target.openId}|${target.messageId}`;
+}
+
+export function parseLetInName(name: string): LetInTarget | null {
+  const [kind, openId, messageId, ...rest] = name.split("|");
+  if (kind !== "letin" || !openId || !messageId || rest.length > 0) return null;
+  return { openId, messageId };
+}

@@ -3,14 +3,16 @@ import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { choicesRpc, statusRpc } from "./shared/rpc";
+import { addMemberRpc, choicesRpc, removeMemberRpc, statusRpc } from "./shared/rpc";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createAudit, defaultAuditDir } from "./server/audit";
 import { consume, type Consumer } from "./server/consumer";
 import { createIsolation, isClaude } from "./server/context";
 import { createDispatcher, larkOf, type Dispatcher, type Stranger } from "./server/dispatcher";
 import { readIncoming } from "./server/inbound";
-import { botOpenId, fetchMessages } from "./server/lark";
+import { createDirectory, type Directory } from "./server/directory";
+import { botOpenId, chatMembers, fetchMessages } from "./server/lark";
+import { createPeople } from "./server/people";
 
 const log = (line: string) => console.log(`feishu: ${line}`);
 const REMEMBERED_STRANGERS = 20;
@@ -18,14 +20,20 @@ const BOT_ID_RETRY_MS = 60_000;
 
 type Status = RpcOutput<typeof statusRpc>;
 
-/** Where a message's attachments are downloaded: <PASEO_HOME>/plugin-data/feishu/media/... */
-function mediaRoot(env: NodeJS.ProcessEnv = process.env): string {
-  return path.join(env.PASEO_HOME ?? path.join(os.homedir(), ".paseo"), "plugin-data", "feishu", "media");
+/** What the plugin keeps: <PASEO_HOME>/plugin-data/feishu. */
+function dataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(env.PASEO_HOME ?? path.join(os.homedir(), ".paseo"), "plugin-data", "feishu");
+}
+
+/** Where a message's attachments are downloaded. */
+function mediaRoot(): string {
+  return path.join(dataRoot(), "media");
 }
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(settingsDefinition);
   const strangers: Stranger[] = [];
+  const people = createPeople(path.join(dataRoot(), "people.json"));
 
   // COMPAT(server.paseo): a fork-only extension point until upstream lands its own shape.
   // Feishu messages arrive from outside Paseo, so no hook or handler hands this plugin the API.
@@ -36,6 +44,9 @@ export default function contribute(server: PluginServerContext) {
       state: "unsupported",
       detail: "这个 Paseo 版本没有 server.paseo 扩展点，插件不工作。",
       strangers: [],
+      members: [],
+      names: {},
+      candidates: [],
     }));
     server.handle(choicesRpc, () => ({ providers: [] }));
     return () => {};
@@ -61,7 +72,7 @@ export default function contribute(server: PluginServerContext) {
     return env ? { ...request, env } : undefined;
   });
 
-  let active: { key: string; consumers: Consumer[]; dispatcher: Dispatcher } | null = null;
+  let active: { key: string; consumers: Consumer[]; dispatcher: Dispatcher; directory: Directory } | null = null;
   let stopped = false;
 
   const stopActive = async () => {
@@ -98,6 +109,11 @@ export default function contribute(server: PluginServerContext) {
       return botId;
     };
     void whoAmI();
+    const directory = createDirectory({
+      chatMembers: (chatId) => chatMembers(cli, chatId),
+      senderName: async (messageId) => (await fetchMessages(cli, [messageId], null))[0]?.sender?.name ?? null,
+      log,
+    });
     const dispatcher = createDispatcher({
       paseo,
       lark: larkOf(cli),
@@ -115,6 +131,8 @@ export default function contribute(server: PluginServerContext) {
           options,
         ),
       botId: whoAmI,
+      people,
+      directory,
       isolate: isolation.add,
       onStranger: (stranger) => {
         const known = strangers.findIndex(
@@ -145,7 +163,7 @@ export default function contribute(server: PluginServerContext) {
       },
       log,
     });
-    active = { key, consumers: [messages, clicks], dispatcher };
+    active = { key, consumers: [messages, clicks], dispatcher, directory };
   };
 
   let applying = Promise.resolve();
@@ -155,20 +173,62 @@ export default function contribute(server: PluginServerContext) {
   reapply();
   const unsubscribe = settings.subscribe(reapply);
 
+  /** Everyone the settings screen shows, by name where Feishu gave one. */
+  const peopleView = async (values: Settings | null) => {
+    const members = await people.members().catch((error: unknown) => {
+      log(`members cannot be read: ${String(error)}`);
+      return [];
+    });
+    const names: Record<string, string> = {};
+    const candidates: Array<{ openId: string; name: string; chatId: string }> = [];
+    const directory = active?.directory;
+    if (directory && values) {
+      const known = new Set([...values.senders, ...members.map((member) => member.openId)]);
+      const rosters = await Promise.all(
+        values.routes.map(async (route) => ({ chatId: route.chatId, roster: await directory.members(route.chatId) })),
+      );
+      for (const { chatId, roster } of rosters) {
+        for (const person of roster) {
+          if (known.has(person.openId)) continue;
+          known.add(person.openId);
+          candidates.push({ ...person, chatId });
+        }
+      }
+      for (const openId of [...values.senders, ...strangers.map((stranger) => stranger.senderId)]) {
+        const name = directory.name(openId);
+        if (name) names[openId] = name;
+      }
+    }
+    for (const member of members) if (member.name) names[member.openId] = member.name;
+    return { strangers: strangers.map((stranger) => ({ ...stranger })), members, names, candidates };
+  };
+
   server.handle(statusRpc, async (): Promise<Status> => {
     const state = await settings.read();
-    const known = strangers.map((stranger) => ({ ...stranger }));
-    if (state.status !== "ready") return { state: "invalid", detail: state.error, strangers: known };
+    if (state.status !== "ready") return { state: "invalid", detail: state.error, ...(await peopleView(null)) };
+    const view = await peopleView(state.values);
     const { larkCli, profile } = state.values;
     if (larkCli === "" || profile === "") {
-      return { state: "unconfigured", detail: "填好 lark-cli 路径和 profile 才会开始收消息。", strangers: known };
+      return { state: "unconfigured", detail: "填好 lark-cli 路径和 profile 才会开始收消息。", ...view };
     }
     const consumers = active?.consumers ?? [];
     if (consumers.length > 0 && consumers.every((consumer) => consumer.listening())) {
-      return { state: "listening", detail: `正在用 profile「${profile}」收消息和卡片回调。`, strangers: known };
+      return { state: "listening", detail: `正在用 profile「${profile}」收消息和卡片回调。`, ...view };
     }
     const why = consumers.map((consumer) => consumer.lastWords()).find((words) => words !== "") ?? "";
-    return { state: "connecting", detail: why === "" ? "正在连接飞书……" : why, strangers: known };
+    return { state: "connecting", detail: why === "" ? "正在连接飞书……" : why, ...view };
+  });
+
+  // From the settings screen: whoever is at the daemon runs it, so nobody else is asked.
+  server.handle(addMemberRpc, async ({ openId, name, chatId }) => {
+    await people.add({ openId, name, by: "paseo", byName: "Paseo 设置", chatId, at: Date.now() });
+    audit("feishu.people.added", { openId, name, chatId, operator: "paseo" });
+    return {};
+  });
+  server.handle(removeMemberRpc, async ({ openId }) => {
+    const removed = await people.remove(openId);
+    if (removed) audit("feishu.people.removed", { openId, operator: "paseo" });
+    return { removed };
   });
 
   server.handle(choicesRpc, async () => {

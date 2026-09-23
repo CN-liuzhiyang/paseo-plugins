@@ -450,3 +450,44 @@ export function noRouteCard(chatId: string): object {
     `chat_id：\`${chatId}\`\n\n在 Paseo 的 设置 → 插件 → feishu 里给它加一条路由，这个会话的消息才会交给 agent。`,
   );
 }
+
+/**
+ * For someone the bot does not know yet. In a group an admin is likely reading, so the card
+ * asks them, and the button lets the person in; in a single chat nobody else is, so it says
+ * where an admin can.
+ */
+export function strangerCard(input: {
+  name: string | null;
+  letIn: string | null;
+  notice?: string | null;
+}): object {
+  const who = input.name ? `**${escape(input.name)}**` : "这位";
+  if (input.letIn === null) {
+    return card(
+      "还不能用",
+      "grey",
+      "你还不在这个机器人的名单里，这条消息没有交给 agent。\n\n请让管理员在 Paseo 的 设置 → 飞书 里放行你：你会出现在「最近被挡下的消息」里。",
+    );
+  }
+  return cardOf("还不能用", "grey", [
+    markdown(`${who} 还不在这个机器人的名单里，这条消息没有交给 agent。\n管理员可以放行，放行后这条消息会接着处理。`),
+    ...(input.notice ? [markdown(`<font color='red'>${escape(input.notice)}</font>`)] : []),
+    {
+      tag: "button",
+      name: input.letIn,
+      text: { tag: "plain_text", content: `放行 ${input.name ?? "这位"}`.slice(0, 100) },
+      type: "primary_filled",
+      behaviors: [{ type: "callback", value: { letIn: input.letIn } }],
+    },
+  ]);
+}
+
+export function letInCard(name: string | null, byName: string | null): object {
+  const who = name ? `**${escape(name)}**` : "这位";
+  const by = byName ? `由 ${escape(byName)} ` : "";
+  return card(
+    "已放行",
+    "green",
+    `${who} 已${by}放行，可以 @ 我派活了。\n需要批准的操作仍由管理员在卡片上批。`,
+  );
+}

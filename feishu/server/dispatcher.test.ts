@@ -8,6 +8,7 @@ import type {
 import { decisionLine, truncateBytes } from "./cards";
 import { createDispatcher, heartbeatMs, type Lark, type Stranger } from "./dispatcher";
 import { stripMentions, type Incoming } from "./inbound";
+import { memoryPeople, type People } from "./people";
 import { parseButtonName, requestDetail } from "./permissions";
 import type { Settings } from "../shared/settings";
 import { describePermission, finalAnswer } from "./timeline";
@@ -86,6 +87,7 @@ function harness(
     paseo?: ReturnType<typeof registry>;
     readIncoming?: (event: Record<string, unknown>, options?: { command?: RegExp }) => Promise<Incoming>;
     botId?: () => Promise<string | null>;
+    people?: People;
   } = {},
 ) {
   const paseo = options.paseo ?? registry();
@@ -170,6 +172,7 @@ function harness(
     paintIntervalMs: 0,
     ...(options.readIncoming ? { readIncoming: options.readIncoming } : {}),
     ...(options.botId ? { botId: options.botId } : {}),
+    ...(options.people ? { people: options.people } : {}),
     onStranger: (stranger) => strangers.push(stranger),
   });
   dispatchers.push(dispatcher);
@@ -289,11 +292,17 @@ function agent(id: string) {
   return { id, workspaceId: null, parentAgentId: null, provider: "claude", cwd: "/work", title: null };
 }
 
-test("a sender outside the allowlist gets nothing back and starts nothing", async () => {
+test("a sender outside the allowlist is told so once, and starts nothing", async () => {
   const h = harness();
   await h.dispatcher.onMessage(message({ sender_id: "ou_stranger" }));
-  assert.deepEqual(h.sent, []);
-  assert.deepEqual(h.created, []);
+  assert.equal(h.created.length, 0);
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.sent[0].title, "还不能用");
+  // A single chat has no admin in it to press a button.
+  assert.equal(buttons(h.sent[0].card).length, 0);
+  // Not again on every message.
+  await h.dispatcher.onMessage(message({ message_id: "om_2", sender_id: "ou_stranger" }));
+  assert.equal(h.sent.length, 1);
   // The operator reads both IDs off this line to allow the sender and route the chat.
   assert.match(h.logs.join("\n"), /from ou_stranger in oc_routed: not in senders/);
 });
@@ -1060,4 +1069,52 @@ test("not knowing its own ID, the bot takes any @ in a group as meant for it", a
   await h.dispatcher.onMessage(group({ message_id: "om_b", content: "@_user_1 在吗", mentions: [atBot] }));
   assert.equal(h.created.length, 1);
   assert.match(h.logs.join("\n"), /open_id is unknown/);
+});
+
+test("an admin lets a stranger in from the card, and the stranger's message is handled then", async () => {
+  const people = memoryPeople();
+  const h = harness({ botId: async () => BOT, people });
+  await h.dispatcher.onMessage(
+    group({ message_id: "om_s", sender_id: "ou_guest", content: "@_user_1 喂", mentions: [atBot] }),
+  );
+  assert.equal(h.created.length, 0);
+  assert.equal(h.sent[0].title, "还不能用");
+  const [letIn] = buttons(h.sent[0].card);
+  assert.equal(letIn.name, "letin|ou_guest|om_s");
+
+  // Someone who is not an admin cannot.
+  await h.click(letIn.name, { operator: "ou_nobody", cardId: "om_card1" });
+  assert.equal(await people.isMember("ou_guest"), false);
+  assert.equal(h.sent.at(-1)?.title, "还不能用");
+  assert.match(JSON.stringify(h.sent.at(-1)?.card), /只有管理员能放行/);
+
+  await h.click(letIn.name, { cardId: "om_card1" });
+  assert.equal(await people.isMember("ou_guest"), true);
+  assert.ok(h.sent.some((sent) => sent.op === "patch" && sent.title === "已放行"));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.paseo.sends[0].text, "喂");
+  assert.equal(h.audits.find((entry) => entry.kind === "feishu.people.added")?.operator, SENDER);
+
+  // From now on a member talks like anyone allowed.
+  await h.end(String(h.created[0].agentId), "在。");
+  await h.dispatcher.onMessage(
+    group({ message_id: "om_t", sender_id: "ou_guest", content: "@_user_1 帮我看看", mentions: [atBot] }),
+  );
+  assert.equal(h.paseo.sends[1].text, "帮我看看");
+});
+
+test("a member can talk to the agent but cannot answer what it asks", async () => {
+  const people = memoryPeople([
+    { openId: "ou_member", name: "乙", by: SENDER, byName: "甲", chatId: CHAT, at: 0 },
+  ]);
+  const h = harness({ people });
+  await h.dispatcher.onMessage(message({ sender_id: "ou_member" }));
+  const agentId = String(h.created[0].agentId);
+  await h.ask(agentId, push);
+  const allow = buttons(h.sent.at(-1)!.card)[1].name;
+  await h.click(allow, { operator: "ou_member" });
+  assert.equal(h.paseo.responses.length, 0);
+  assert.equal(h.audits.at(-1)?.why, "not in senders");
+  await h.click(allow);
+  assert.equal(h.paseo.responses[0].agentId, agentId);
 });

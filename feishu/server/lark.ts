@@ -130,3 +130,25 @@ export async function botOpenId(cli: LarkCli): Promise<string> {
   if (typeof id !== "string" || id === "") throw new Error("Feishu returned no open_id for this bot");
   return id;
 }
+
+const MAX_MEMBER_PAGES = 10;
+
+/** Everyone in a chat the bot is in, with the names the chat shows. */
+export async function chatMembers(cli: LarkCli, chatId: string): Promise<Array<{ openId: string; name: string }>> {
+  const found: Array<{ openId: string; name: string }> = [];
+  let pageToken = "";
+  for (let page = 0; page < MAX_MEMBER_PAGES; page += 1) {
+    const params = { member_id_type: "open_id", page_size: 100, ...(pageToken ? { page_token: pageToken } : {}) };
+    const data = (await run(cli, ["api", "GET", `/open-apis/im/v1/chats/${chatId}/members`, "--params", JSON.stringify(params)])) as
+      | { items?: Array<{ member_id?: unknown; name?: unknown }>; has_more?: unknown; page_token?: unknown }
+      | undefined;
+    for (const item of data?.items ?? []) {
+      if (typeof item.member_id === "string" && typeof item.name === "string") {
+        found.push({ openId: item.member_id, name: item.name });
+      }
+    }
+    if (data?.has_more !== true || typeof data.page_token !== "string" || data.page_token === "") break;
+    pageToken = data.page_token;
+  }
+  return found;
+}

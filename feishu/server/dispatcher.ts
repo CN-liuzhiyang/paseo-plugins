@@ -19,6 +19,8 @@ import {
   receivedCard,
   runningCard,
   staleApprovalCard,
+  strangerCard,
+  letInCard,
   waitingCard,
   type ApprovalView,
   type RunView,
@@ -27,8 +29,12 @@ import { contextOf, systemPrompt } from "./context";
 import { overheardBlock, stripMentions, type Incoming, type Overheard } from "./inbound";
 import { patchCard, replyCard, type LarkCli } from "./lark";
 import { createPainter, type Painter } from "./painter";
+import type { Directory } from "./directory";
+import type { People } from "./people";
 import {
+  letInName,
   parseButtonName,
+  parseLetInName,
   permissionActions,
   permissionResponse,
   reasonFrom,
@@ -60,6 +66,11 @@ export const CHAT_LABEL = "feishu-chat";
 // messages, none older than this.
 const OVERHEARD_LIMIT = 20;
 const OVERHEARD_MAX_AGE_MS = 6 * 60 * 60_000;
+// Someone the bot does not know is told so once in this long per chat, not on every message.
+const STRANGER_NOTICE_MS = 10 * 60_000;
+// A message from someone not yet let in waits this long for an admin to let them in.
+const HELD_MAX_AGE_MS = 60 * 60_000;
+const HELD_LIMIT = 50;
 const NEW_SESSION = /^\/new(?:\s+([\s\S]*))?$/;
 const NEW_COMMAND = /^\/new\b\s*/;
 
@@ -115,6 +126,8 @@ interface Turn {
 /** Someone the plugin turned away: not in senders, or writing from a chat with no route. */
 export interface Stranger {
   senderId: string;
+  /** As Feishu shows them, when it could be found. */
+  name: string | null;
   chatId: string;
   chatType: "p2p" | "group";
   why: "sender" | "route";
@@ -175,6 +188,10 @@ export function createDispatcher(deps: {
   isolate?: (agentId: string) => void;
   /** Told about everyone turned away, so the settings screen can offer to let them in. */
   onStranger?: (stranger: Stranger) => void;
+  /** Members let in from Feishu; see people.ts. Without it only senders get in. */
+  people?: People;
+  /** Names for open_ids; see directory.ts. */
+  directory?: Directory;
   now?: () => number;
   paintIntervalMs?: number;
 }) {
@@ -197,6 +214,10 @@ export function createDispatcher(deps: {
   const chatWork = new Map<string, Promise<void>>();
   const overheard = new Map<string, Overheard[]>();
   let botIdMissingLogged = false;
+  // When each stranger was last told, by chat and sender.
+  const toldStrangers = new Map<string, number>();
+  // Messages from strangers, by message ID, until an admin lets the sender in.
+  const held = new Map<string, { event: Record<string, unknown>; at: number }>();
   let ticker: NodeJS.Timeout | null = null;
   let stopped = false;
 
@@ -504,6 +525,88 @@ export function createDispatcher(deps: {
     if (next) await sendTurn(agentId, next);
   }
 
+  /** Admins (senders) and members let in from Feishu may give the agent work. */
+  async function mayTalk(settings: Settings, openId: string): Promise<boolean> {
+    if (settings.senders.includes(openId)) return true;
+    return (await deps.people?.isMember(openId).catch((error: unknown) => {
+      log(`members cannot be read: ${describe(error)}`);
+      return false;
+    })) ?? false;
+  }
+
+  async function nameOf(openId: string, chatId: string, messageId: string): Promise<string | null> {
+    return (await deps.directory?.resolve(openId, { chatId, messageId }).catch(() => null)) ?? null;
+  }
+
+  /**
+   * Tells a stranger why nothing happens, at most once in a while per chat. In a group the
+   * card carries a button for an admin, and the message waits to be handled once they press it.
+   */
+  async function turnAway(
+    event: Record<string, unknown>,
+    who: { senderId: string; name: string | null; chatId: string; chatType: "p2p" | "group"; messageId: string },
+  ) {
+    if (who.chatType === "group") {
+      for (const [id, entry] of held) if (now() - entry.at >= HELD_MAX_AGE_MS) held.delete(id);
+      held.set(who.messageId, { event, at: now() });
+      while (held.size > HELD_LIMIT) held.delete(held.keys().next().value!);
+    }
+    const key = `${who.chatId}|${who.senderId}`;
+    const told = toldStrangers.get(key);
+    if (told !== undefined && now() - told < STRANGER_NOTICE_MS) return;
+    toldStrangers.set(key, now());
+    const letIn = who.chatType === "group" ? letInName({ openId: who.senderId, messageId: who.messageId }) : null;
+    await reply(who.messageId, strangerCard({ name: who.name, letIn }));
+  }
+
+  /** An admin pressed 放行 on a stranger card. */
+  async function onLetIn(event: Record<string, unknown>, target: { openId: string; messageId: string }) {
+    const operator = text(event.operator_id);
+    const cardId = text(event.message_id);
+    const chatId = text(event.chat_id);
+    if (stopped || !operator || !cardId || !chatId) return;
+    const eventId = text(event.event_id);
+    if (eventId) {
+      if (seenActions.has(eventId)) return;
+      remember(seenActions, eventId);
+    }
+    const name = await nameOf(target.openId, chatId, target.messageId);
+    const byName = await nameOf(operator, chatId, target.messageId);
+    const letIn = letInName(target);
+    const refuse = async (why: string, notice: string) => {
+      log(`refused ${operator}'s letting ${target.openId} in: ${why}`);
+      audit("feishu.people.refused", { openId: target.openId, chatId, cardId, operator, why });
+      await lark.patch(cardId, strangerCard({ name, letIn, notice })).catch((error: unknown) => {
+        log(`patch ${cardId}: ${describe(error)}`);
+      });
+    };
+
+    const settings = await readSettings();
+    if (!settings || !deps.people) return refuse("members cannot be kept", "现在放行不了，到 Paseo 设置 → 飞书 里看看");
+    if (!settings.senders.includes(operator)) {
+      return refuse("only admins let people in", `${byName ?? "刚才点的人"}不是管理员，只有管理员能放行。`);
+    }
+    if (!(await mayTalk(settings, target.openId))) {
+      try {
+        await deps.people.add({ openId: target.openId, name: name ?? "", by: operator, byName: byName ?? "", chatId, at: now() });
+      } catch (error) {
+        return refuse(`members cannot be saved: ${describe(error)}`, "放行没存上，到 Paseo 设置 → 飞书 里看看");
+      }
+      audit("feishu.people.added", { openId: target.openId, name, chatId, cardId, operator, operatorName: byName });
+    }
+    await lark.patch(cardId, letInCard(name, byName)).catch((error: unknown) => {
+      log(`patch ${cardId}: ${describe(error)}`);
+    });
+    toldStrangers.delete(`${chatId}|${target.openId}`);
+    // The message that raised the card is handled now, as if it had just arrived.
+    const waiting = held.get(target.messageId);
+    held.delete(target.messageId);
+    if (waiting && now() - waiting.at < HELD_MAX_AGE_MS) {
+      seen.delete(target.messageId);
+      await onMessage(waiting.event);
+    }
+  }
+
   /** Whether a group message @-mentions this bot. */
   async function meantForBot(event: Record<string, unknown>): Promise<boolean> {
     const mentioned = Array.isArray(event.mentions)
@@ -552,17 +655,20 @@ export function createDispatcher(deps: {
       if (settings.routes.some((candidate) => candidate.chatId === chatId)) overhear(chatId, messageId, event);
       return;
     }
-    if (!settings.senders.includes(senderId)) {
+    if (!(await mayTalk(settings, senderId))) {
       // Both IDs are per app, so this line is how an operator finds the values to allow.
       log(`dropped ${messageId} from ${senderId} in ${chatId}: not in senders`);
-      deps.onStranger?.({ senderId, chatId, chatType, why: "sender", at: now() });
+      const name = await nameOf(senderId, chatId, messageId);
+      deps.onStranger?.({ senderId, name, chatId, chatType, why: "sender", at: now() });
+      await turnAway(event, { senderId, name, chatId, chatType, messageId });
       return;
     }
+    if (deps.directory && !deps.directory.name(senderId)) void nameOf(senderId, chatId, messageId);
     const typed = stripMentions(text(event.content) ?? "", event.mentions);
     const route = settings.routes.find((candidate) => candidate.chatId === chatId);
     if (!route) {
       log(`no route for ${chatId}`);
-      deps.onStranger?.({ senderId, chatId, chatType, why: "route", at: now() });
+      deps.onStranger?.({ senderId, name: deps.directory?.name(senderId) ?? null, chatId, chatType, why: "route", at: now() });
       await reply(messageId, noRouteCard(chatId));
       return;
     }
@@ -672,6 +778,8 @@ export function createDispatcher(deps: {
 
   /** A button on a waiting card: someone allowed or denied a request from Feishu. */
   async function onCardAction(event: Record<string, unknown>): Promise<void> {
+    const letIn = parseLetInName(text(event.action_name) ?? "");
+    if (letIn) return onLetIn(event, letIn);
     const target = parseButtonName(text(event.action_name) ?? "");
     const operator = text(event.operator_id);
     const cardId = text(event.message_id);
