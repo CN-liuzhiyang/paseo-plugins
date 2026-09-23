@@ -1154,3 +1154,11 @@ test("a click the plugin cannot place is logged, not dropped without a word", as
   await h.dispatcher.onCardAction({ event_id: "ev_x", operator_id: SENDER, message_id: "om_c", chat_id: CHAT, action_tag: "button", action_name: "whatever" });
   assert.match(h.logs.join("\n"), /card action not understood: tag=button name=whatever/);
 });
+
+test("before there is an admin, a stranger is told how the first one is made, with no button nobody could press", async () => {
+  const h = harness({ settings: { ...settings, senders: [] }, botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ message_id: "om_s", content: "@_user_1 你好", mentions: [atBot] }));
+  assert.equal(h.sent[0].title, "还没有管理员");
+  assert.equal(buttons(h.sent[0].card).length, 0);
+  assert.match(h.sent[0].body, /设为管理员/);
+});

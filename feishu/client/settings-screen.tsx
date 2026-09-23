@@ -139,6 +139,7 @@ function Editor({ settings }: { settings: Ready }) {
         status={status}
         values={draft.values}
         onLetIn={letIn}
+        onAdmin={(openId) => change((values) => ({ ...values, senders: unique([...values.senders, openId]) }))}
         onRoute={(chatId) => {
           change((values) => ({ ...values, routes: [...values.routes, { ...blankRoute(choices), chatId }] }));
           setEditing(draft.values.routes.length);
@@ -243,13 +244,18 @@ function StatusSection({
   status,
   values,
   onLetIn,
+  onAdmin,
   onRoute,
 }: {
   status: Status | null;
   values: Settings;
   onLetIn(person: { openId: string; name: string; chatId: string }): void;
+  onAdmin(openId: string): void;
   onRoute(chatId: string): void;
 }) {
+  // Before there is an admin, the first person to write is almost always the one setting the
+  // bot up: one press makes them admin, instead of member first and admin after a search.
+  const firstRun = values.senders.length === 0;
   const label = status === null ? "正在查询…" : STATE_LABELS[status.state];
   const members = new Set((status?.members ?? []).map((member) => member.openId));
   const strangers = (status?.strangers ?? []).filter((stranger) =>
@@ -269,9 +275,24 @@ function StatusSection({
       </SettingsCard>
       {strangers.length > 0 ? (
         <SettingsCard>
-          <SettingsRow label="最近被挡下的消息" hint="名单外的人发的，或者还没接入的会话里发的" />
+          <SettingsRow
+            label="最近被挡下的消息"
+            hint={
+              firstRun
+                ? "还没有管理员：给机器人发过消息的你就在下面，设为管理员再保存"
+                : "名单外的人发的，或者还没接入的会话里发的"
+            }
+          />
           {strangers.map((stranger) =>
-            stranger.why === "sender" ? (
+            stranger.why === "sender" && firstRun ? (
+              <SettingsAction
+                key={`${stranger.senderId}-${stranger.chatId}`}
+                label={stranger.name ?? stranger.senderId}
+                hint={`${chatKind(stranger.chatType)} · ${ago(stranger.at)} · 设为管理员后要保存`}
+                actionLabel="设为管理员"
+                onPress={() => onAdmin(stranger.senderId)}
+              />
+            ) : stranger.why === "sender" ? (
               <SettingsAction
                 key={`${stranger.senderId}-${stranger.chatId}`}
                 label={stranger.name ?? stranger.senderId}

@@ -545,8 +545,9 @@ export function createDispatcher(deps: {
   async function turnAway(
     event: Record<string, unknown>,
     who: { senderId: string; name: string | null; chatId: string; chatType: "p2p" | "group"; messageId: string },
+    hasAdmin: boolean,
   ) {
-    if (who.chatType === "group") {
+    if (who.chatType === "group" && hasAdmin) {
       for (const [id, entry] of held) if (now() - entry.at >= HELD_MAX_AGE_MS) held.delete(id);
       held.set(who.messageId, { event, at: now() });
       while (held.size > HELD_LIMIT) held.delete(held.keys().next().value!);
@@ -555,6 +556,10 @@ export function createDispatcher(deps: {
     const told = toldStrangers.get(key);
     if (told !== undefined && now() - told < STRANGER_NOTICE_MS) return;
     toldStrangers.set(key, now());
+    if (!hasAdmin) {
+      await reply(who.messageId, strangerCard({ name: who.name, letIn: null, noAdmin: true }));
+      return;
+    }
     const letIn = who.chatType === "group" ? letInName({ openId: who.senderId, messageId: who.messageId }) : null;
     await reply(who.messageId, strangerCard({ name: who.name, letIn }));
   }
@@ -679,7 +684,7 @@ export function createDispatcher(deps: {
       log(`dropped ${messageId} from ${senderId} in ${chatId}: not in senders`);
       const name = await nameOf(senderId, chatId, messageId);
       deps.onStranger?.({ senderId, name, chatId, chatType, why: "sender", at: now() });
-      await turnAway(event, { senderId, name, chatId, chatType, messageId });
+      await turnAway(event, { senderId, name, chatId, chatType, messageId }, settings.senders.length > 0);
       return;
     }
     if (deps.directory && !deps.directory.name(senderId)) void nameOf(senderId, chatId, messageId);

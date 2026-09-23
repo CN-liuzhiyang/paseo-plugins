@@ -460,8 +460,17 @@ export function strangerCard(input: {
   name: string | null;
   letIn: string | null;
   notice?: string | null;
+  /** Nobody is admin yet: nobody could press the button, so say how the first one is made. */
+  noAdmin?: boolean;
 }): object {
   const who = input.name ? `**${escape(input.name)}**` : "这位";
+  if (input.noAdmin) {
+    return card(
+      "还没有管理员",
+      "grey",
+      "这个机器人还没有管理员，所以谁的消息都不会交给 agent。\n\n装它的人：打开 Paseo 的 设置 → 飞书，在「最近被挡下的消息」里找到自己，点「设为管理员」再保存。",
+    );
+  }
   if (input.letIn === null) {
     return card(
       "还不能用",
