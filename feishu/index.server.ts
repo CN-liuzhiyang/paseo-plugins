@@ -1,5 +1,6 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createAudit, defaultAuditDir } from "./server/audit";
 import { consume, type Consumer } from "./server/consumer";
 import { createDispatcher, larkOf, type Dispatcher } from "./server/dispatcher";
 import { settingsDefinition, type Settings } from "./server/settings";
@@ -23,7 +24,12 @@ export default function contribute(server: PluginServerContext) {
     return null;
   };
 
-  let active: { key: string; consumer: Consumer; dispatcher: Dispatcher } | null = null;
+  const audit = createAudit({
+    dir: async () => (await readSettings())?.auditDir || defaultAuditDir(),
+    log,
+  });
+
+  let active: { key: string; consumers: Consumer[]; dispatcher: Dispatcher } | null = null;
   let stopped = false;
 
   const stopActive = async () => {
@@ -31,7 +37,7 @@ export default function contribute(server: PluginServerContext) {
     active = null;
     if (!current) return;
     current.dispatcher.stop();
-    await current.consumer.stop();
+    await Promise.all(current.consumers.map((consumer) => consumer.stop()));
   };
 
   // Senders and routes are read on every message, so editing them needs nothing here. Only the
@@ -46,8 +52,8 @@ export default function contribute(server: PluginServerContext) {
       return;
     }
     const cli = { path: values.larkCli, profile: values.profile };
-    const dispatcher = createDispatcher({ paseo, lark: larkOf(cli), readSettings, log });
-    const consumer = consume({
+    const dispatcher = createDispatcher({ paseo, lark: larkOf(cli), readSettings, log, audit });
+    const messages = consume({
       cli,
       eventKey: "im.message.receive_v1",
       onEvent: (event) => {
@@ -55,7 +61,19 @@ export default function contribute(server: PluginServerContext) {
       },
       log,
     });
-    active = { key, consumer, dispatcher };
+    // Button clicks on cards. Feishu hands each callback to one consumer per app, and lark-cli
+    // acknowledges it; the card changes when this plugin patches it.
+    const clicks = consume({
+      cli,
+      eventKey: "card.action.trigger",
+      onEvent: (event) => {
+        void dispatcher
+          .onCardAction(event)
+          .catch((error: unknown) => log(`card action: ${String(error)}`));
+      },
+      log,
+    });
+    active = { key, consumers: [messages, clicks], dispatcher };
   };
 
   let applying = Promise.resolve();

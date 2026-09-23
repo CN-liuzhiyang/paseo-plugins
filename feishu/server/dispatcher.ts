@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
+import type { AgentPermissionAction, AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type { Audit } from "./audit";
 import {
+  answerFailedCard,
+  answeredCard,
   canceledCard,
+  decisionLine,
   doneCard,
   failedCard,
   newSessionCard,
@@ -10,28 +15,66 @@ import {
   queuedCard,
   receivedCard,
   runningCard,
+  staleApprovalCard,
   waitingCard,
+  type ApprovalView,
   type RunView,
 } from "./cards";
 import { patchCard, replyCard, type LarkCli } from "./lark";
+import {
+  parseButtonName,
+  permissionActions,
+  permissionResponse,
+  reasonFrom,
+  requestDetail,
+} from "./permissions";
 import type { Route, Settings } from "./settings";
 import { describePermission, finalAnswer } from "./timeline";
 
 const TICK_MS = 30_000;
 const REMEMBERED_MESSAGES = 1_000;
+// How long an answer sent from a card may go without Paseo confirming it.
+const CONFIRM_MS = 15_000;
+const REMEMBERED_ORPHANS = 100;
+// Worded like the orchestration runtime's gate, which has the same blind spot.
+const UNATTRIBUTED = "paseo (unattributed: Paseo does not record who answered)";
 // Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
 // registry, so the conversation survives plugin reloads and daemon restarts.
 export const CHAT_LABEL = "feishu-chat";
 const NEW_SESSION = /^\/new(?:\s+([\s\S]*))?$/;
 
+interface Pending {
+  request: AgentPermissionRequest;
+  askedAt: number;
+  /** Why the last answer from the card did not go through, shown until the next one. */
+  notice: string | null;
+}
+
 interface Run extends RunView {
+  chatId: string;
   cardId: string;
-  pending: Set<string>;
+  pending: Map<string, Pending>;
+  decisions: string[];
   // Patches to one card go out in order, so a late "running" tick never lands on top of "done".
   chain: Promise<void>;
 }
 
+/** A choice made on a card and sent to Paseo, until Paseo confirms it. */
+interface Answer {
+  agentId: string;
+  requestId: string;
+  cardId: string;
+  chatId: string;
+  operator: string;
+  action: AgentPermissionAction;
+  reason: string | null;
+  what: string;
+  askedAt: number | null;
+  timer: NodeJS.Timeout;
+}
+
 interface Turn {
+  chatId: string;
   messageId: string;
   request: string;
   provider: string;
@@ -64,12 +107,17 @@ export function createDispatcher(deps: {
   lark: Lark;
   readSettings: () => Promise<Settings | null>;
   log: (line: string) => void;
+  audit: Audit;
   now?: () => number;
 }) {
-  const { paseo, lark, readSettings, log } = deps;
+  const { paseo, lark, readSettings, log, audit } = deps;
   const now = deps.now ?? Date.now;
   const seen = new Set<string>();
+  const seenActions = new Set<string>();
   const runs = new Map<string, Run>();
+  const answers = new Map<string, Answer>();
+  // Cards whose run is no longer followed, as after a restart; their patches stay in order too.
+  const orphans = new Map<string, { cardId: string; chain: Promise<void> }>();
   const queues = new Map<string, Turn[]>();
   const chats = new Map<string, { agentId: string; provider: string }>();
   const chatWork = new Map<string, Promise<void>>();
@@ -79,6 +127,37 @@ export function createDispatcher(deps: {
     run.chain = run.chain
       .then(() => lark.patch(run.cardId, card))
       .catch((error: unknown) => log(`card ${run.cardId}: ${describe(error)}`));
+  };
+
+  const approvalsOf = (run: Run): ApprovalView[] =>
+    [...run.pending.values()].map(({ request, notice }) => {
+      const detail = requestDetail(request);
+      const title = request.title ?? request.name;
+      const described = request.description && request.description !== detail;
+      return {
+        agentId: run.agentId,
+        requestId: request.id,
+        title: described ? `${title}\n${request.description}` : title,
+        detail,
+        actions: permissionActions(request),
+        submitting: answers.get(answerKey(run.agentId, request.id))?.action.label ?? null,
+        notice,
+      };
+    });
+
+  /** The card for a run that has not ended: waiting while anything is open, else running. */
+  const render = (run: Run): object =>
+    run.pending.size > 0 ? waitingCard(run, approvalsOf(run)) : runningCard(run, now());
+
+  const orphan = (cardId: string) => {
+    let entry = orphans.get(cardId);
+    if (!entry) {
+      entry = { cardId, chain: Promise.resolve() };
+      orphans.set(cardId, entry);
+      const oldest = orphans.keys().next().value;
+      if (orphans.size > REMEMBERED_ORPHANS && oldest !== undefined) orphans.delete(oldest);
+    }
+    return entry;
   };
 
   const tick = () => {
@@ -147,7 +226,7 @@ export function createDispatcher(deps: {
     // The ID is chosen here so the run is tracked before the agent exists: a turn that ends
     // before create() returns still finds its card.
     const agentId = randomUUID();
-    const run = newRun(agentId, route.provider, request, cardId);
+    const run = newRun(agentId, chatId, route.provider, request, cardId);
     track(agentId, run);
     try {
       await paseo.agents.create({
@@ -183,6 +262,7 @@ export function createDispatcher(deps: {
 
   async function continueAgent(
     agentId: string,
+    chatId: string,
     provider: string,
     messageId: string,
     request: string,
@@ -190,7 +270,7 @@ export function createDispatcher(deps: {
   ) {
     const cardId = await reply(messageId, receivedCard(request, false));
     if (!cardId) return;
-    const turn: Turn = { messageId, request, provider, cardId, chain: Promise.resolve() };
+    const turn: Turn = { chatId, messageId, request, provider, cardId, chain: Promise.resolve() };
     const queue = queues.get(agentId) ?? [];
     // A turn this plugin did not start (someone typing in Paseo) also makes the agent busy.
     if (running || runs.has(agentId) || queue.length > 0) {
@@ -204,7 +284,7 @@ export function createDispatcher(deps: {
   }
 
   async function sendTurn(agentId: string, turn: Turn) {
-    const run = newRun(agentId, turn.provider, turn.request, turn.cardId, turn.chain);
+    const run = newRun(agentId, turn.chatId, turn.provider, turn.request, turn.cardId, turn.chain);
     track(agentId, run);
     try {
       await paseo.agents.ref(agentId).send(turn.request, { messageId: `feishu:${turn.messageId}` });
@@ -267,7 +347,7 @@ export function createDispatcher(deps: {
         const live = await paseo.agents.ref(current.agentId).refresh();
         if (live && !live.agent.archivedAt) {
           const running = live.agent.status === "running";
-          await continueAgent(current.agentId, current.provider, messageId, request, running);
+          await continueAgent(current.agentId, chatId, current.provider, messageId, request, running);
           return;
         }
         // Archived or gone: the conversation is over, so this message starts the next one.
@@ -280,6 +360,34 @@ export function createDispatcher(deps: {
   function onTurnEnded(event: Event<"agent.turn_ended">): void {
     const run = finish(event.agent.id);
     if (run) {
+      // A request still open when its turn ends was never answered.
+      for (const [requestId, pending] of run.pending) {
+        const answer = answers.get(answerKey(run.agentId, requestId));
+        if (answer) {
+          clearTimeout(answer.timer);
+          answers.delete(answerKey(run.agentId, requestId));
+        }
+        const decidedAt = now();
+        const waitedMs = decidedAt - pending.askedAt;
+        const what = describePermission(pending.request);
+        run.decisions.push(
+          decisionLine({ outcome: "abandoned", label: "", what, operator: null, waitedMs }),
+        );
+        audit("feishu.approval.decision", {
+          agentId: run.agentId,
+          requestId,
+          chatId: run.chatId,
+          outcome: "abandoned",
+          approved: false,
+          actionId: null,
+          askedAt: iso(pending.askedAt),
+          decidedAt: iso(decidedAt),
+          waitedMs,
+          reason: null,
+          by: "turn ended",
+        });
+      }
+      run.pending.clear();
       const { outcome } = event;
       if (outcome.kind === "completed") {
         update(run, doneCard(run, finalAnswer(event.timeline), now()));
@@ -296,34 +404,231 @@ export function createDispatcher(deps: {
   function onPermissionRequested(event: Event<"agent.permission_requested">): void {
     const run = runs.get(event.agent.id);
     if (!run) return;
-    run.pending.add(event.request.id);
-    update(run, waitingCard(run, describePermission(event.request)));
+    const { request } = event;
+    const askedAt = now();
+    run.pending.set(request.id, { request, askedAt, notice: null });
+    audit("feishu.approval.ask", {
+      agentId: run.agentId,
+      requestId: request.id,
+      chatId: run.chatId,
+      cardId: run.cardId,
+      tool: request.name,
+      requestKind: request.kind,
+      title: request.title ?? null,
+      what: describePermission(request),
+      input: request.input ?? null,
+      askedAt: iso(askedAt),
+    });
+    update(run, render(run));
+  }
+
+  /** A button on a waiting card: someone allowed or denied a request from Feishu. */
+  async function onCardAction(event: Record<string, unknown>): Promise<void> {
+    const target = parseButtonName(text(event.action_name) ?? "");
+    const operator = text(event.operator_id);
+    const cardId = text(event.message_id);
+    const chatId = text(event.chat_id);
+    if (!target || !operator || !cardId || !chatId) return;
+    const eventId = text(event.event_id);
+    if (eventId) {
+      if (seenActions.has(eventId)) return;
+      remember(seenActions, eventId);
+    }
+    const { agentId, requestId } = target;
+    const key = answerKey(agentId, requestId);
+    const refuse = (why: string) => {
+      log(`refused ${operator}'s answer to ${requestId} on agent ${agentId}: ${why}`);
+      audit("feishu.approval.refused", { agentId, requestId, chatId, cardId, operator, why });
+    };
+
+    const settings = await readSettings();
+    if (!settings) return refuse("settings are invalid");
+    // Whoever may give the agent work may answer it; nobody else.
+    if (!settings.senders.includes(operator)) return refuse("not in senders");
+    if (answers.has(key)) return refuse("an answer is already on its way");
+
+    // Paseo, not this plugin's memory, says whether the request is still open: the card may be
+    // older than a plugin restart, or the request may have been answered in Paseo meanwhile.
+    const live = await paseo.agents
+      .ref(agentId)
+      .refresh()
+      .catch(() => null);
+    const agent = live?.agent;
+    if (!agent || agent.archivedAt) return refuse("the agent is gone");
+    if (agent.labels[CHAT_LABEL] !== chatId) return refuse("the card is not in the agent's chat");
+    const request = agent.pendingPermissions.find((open) => open.id === requestId);
+    const run = runs.get(agentId);
+    if (!request) {
+      refuse("the request is no longer open");
+      // Whatever the card still shows is out of date.
+      if (run) update(run, render(run));
+      else update(orphan(cardId), staleApprovalCard());
+      return;
+    }
+    const action = permissionActions(request)[target.action];
+    if (!action) return refuse(`there is no choice ${target.action}`);
+    const reason = action.behavior === "deny" ? reasonFrom(event.form_value, target.form) : null;
+    const pending = run?.pending.get(requestId);
+    const answer: Answer = {
+      agentId,
+      requestId,
+      cardId,
+      chatId,
+      operator,
+      action,
+      reason,
+      what: describePermission(request),
+      askedAt: pending?.askedAt ?? null,
+      timer: setTimeout(
+        () => fail(key, "Paseo 没有确认这个回答"),
+        CONFIRM_MS,
+      ).unref(),
+    };
+    answers.set(key, answer);
+    audit("feishu.approval.answer", {
+      agentId,
+      requestId,
+      chatId,
+      cardId,
+      operator,
+      actionId: action.id,
+      behavior: action.behavior,
+      reason,
+    });
+    if (run && pending) {
+      pending.notice = null;
+      update(run, render(run));
+    }
+    try {
+      await paseo.agents.ref(agentId).respondToPermission({
+        requestId,
+        response: permissionResponse(action, reason),
+      });
+    } catch (error) {
+      fail(key, `没能提交给 Paseo：${describe(error)}`);
+    }
+  }
+
+  /** An answer from a card that Paseo did not take: say so on the card and let it be tried again. */
+  function fail(key: string, why: string): void {
+    const answer = answers.get(key);
+    if (!answer) return;
+    clearTimeout(answer.timer);
+    answers.delete(key);
+    log(`answer to ${answer.requestId} on agent ${answer.agentId}: ${why}`);
+    audit("feishu.approval.error", {
+      agentId: answer.agentId,
+      requestId: answer.requestId,
+      chatId: answer.chatId,
+      cardId: answer.cardId,
+      operator: answer.operator,
+      actionId: answer.action.id,
+      why,
+    });
+    const run = runs.get(answer.agentId);
+    const pending = run?.pending.get(answer.requestId);
+    if (run && pending) {
+      pending.notice = why;
+      update(run, render(run));
+    } else {
+      update(orphan(answer.cardId), answerFailedCard(why));
+    }
   }
 
   function onPermissionResolved(event: Event<"agent.permission_resolved">): void {
-    const run = runs.get(event.agent.id);
-    if (!run || !run.pending.delete(event.requestId)) return;
-    if (run.pending.size === 0) update(run, runningCard(run, now()));
+    const agentId = event.agent.id;
+    const { requestId, resolution } = event;
+    const key = answerKey(agentId, requestId);
+    const answer = answers.get(key);
+    if (answer) {
+      clearTimeout(answer.timer);
+      answers.delete(key);
+    }
+    const run = runs.get(agentId);
+    const pending = run?.pending.get(requestId);
+    if (!pending && !answer) return;
+
+    // Paseo does not say who answered. It was the card's answer if it made the same choice.
+    const byCard = answer && resolution.selectedActionId === answer.action.id ? answer : null;
+    const askedAt = pending?.askedAt ?? answer?.askedAt ?? null;
+    const decidedAt = now();
+    const waitedMs = askedAt === null ? null : decidedAt - askedAt;
+    const outcome = resolution.behavior === "allow" ? "allowed" : "denied";
+    const chosen = pending
+      ? permissionActions(pending.request).find((action) => action.id === resolution.selectedActionId)
+      : undefined;
+    const label = byCard?.action.label ?? chosen?.label ?? (outcome === "allowed" ? "允许" : "拒绝");
+    const what = pending ? describePermission(pending.request) : answer!.what;
+    const line = decisionLine({ outcome, label, what, operator: byCard?.operator ?? null, waitedMs });
+    audit("feishu.approval.decision", {
+      agentId,
+      requestId,
+      chatId: run?.chatId ?? answer?.chatId ?? null,
+      outcome,
+      approved: outcome === "allowed",
+      actionId: resolution.selectedActionId ?? null,
+      askedAt: iso(askedAt),
+      decidedAt: iso(decidedAt),
+      waitedMs,
+      reason: resolution.behavior === "deny" ? (resolution.message ?? null) : null,
+      by: byCard ? `feishu:${byCard.operator}` : UNATTRIBUTED,
+    });
+
+    if (run && pending) {
+      run.pending.delete(requestId);
+      run.decisions.push(line);
+      update(run, render(run));
+    } else if (answer) {
+      update(orphan(answer.cardId), answeredCard(line));
+    }
   }
 
   function stop(): void {
     if (ticker) clearInterval(ticker);
     ticker = null;
+    for (const answer of answers.values()) clearTimeout(answer.timer);
+    answers.clear();
     runs.clear();
     queues.clear();
   }
 
   function newRun(
     agentId: string,
+    chatId: string,
     provider: string,
     request: string,
     cardId: string,
     chain = Promise.resolve(),
   ): Run {
-    return { request, agentId, provider, startedAt: now(), cardId, pending: new Set(), chain };
+    return {
+      request,
+      agentId,
+      chatId,
+      provider,
+      startedAt: now(),
+      cardId,
+      pending: new Map(),
+      decisions: [],
+      chain,
+    };
   }
 
-  return { onMessage, onTurnEnded, onPermissionRequested, onPermissionResolved, stop };
+  return {
+    onMessage,
+    onCardAction,
+    onTurnEnded,
+    onPermissionRequested,
+    onPermissionResolved,
+    stop,
+  };
+}
+
+function answerKey(agentId: string, requestId: string): string {
+  return `${agentId}\n${requestId}`;
+}
+
+function iso(ms: number | null): string | null {
+  return ms === null ? null : new Date(ms).toISOString();
 }
 
 export type Dispatcher = ReturnType<typeof createDispatcher>;

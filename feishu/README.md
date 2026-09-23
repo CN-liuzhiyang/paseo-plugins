@@ -3,9 +3,9 @@
 飞书入口：挂在 Paseo 插件 server 侧的一层薄 dispatcher。它不是 agent——收事件、鉴权、按表路由，
 判断交给它起的 agent 或它调的脚本；结果、进度和审批请求以一张原地更新的卡片发回飞书。
 
-**状态：M1。** 收消息 → 白名单 → 按 chat_id 路由 → 交给这个会话的 agent → 每条消息一张卡片
-原地更新（已接收 / 排队中 / 进行中 / 等待审批 / 完成 / 失败 / 已取消）。还没有的：卡片内审批
-（M2，现在要回 Paseo 里批）、设置界面（M3，现在配置写文件，见下文）、卡片回调的消费进程。
+**状态：M2。** 收消息 → 白名单 → 按 chat_id 路由 → 交给这个会话的 agent → 每条消息一张卡片
+原地更新（已接收 / 排队中 / 进行中 / 等待审批 / 完成 / 失败 / 已取消）；agent 要权限时直接在
+卡片上批准或拒绝，每次审批都记审计。还没有的：设置界面（M3，现在配置写文件，见下文）。
 
 ## 会话
 
@@ -27,6 +27,43 @@
 白名单里的每个人、路由到的群里的每个人都看得到这些回复。
 
 上下文怎么配置还没定。在那之前，只路由给自己的单聊。
+
+## 审批
+
+agent 要权限时，这条消息的卡片变成「等待审批」，每个未决请求一个表单：要做什么（命令、文件和
+改动、计划），一排按钮，有拒绝选项时再加一个拒绝理由输入框。
+
+- **按钮和 Paseo 自己的权限卡片一致**：请求带了选项就用它的选项，否则是「拒绝 / 允许」；发出去的
+  回应也和 Paseo 卡片发的一样。拒绝理由会原样转告 agent（`Denied by user: <理由>`）。
+- **谁能批**：`senders` 里的人。白名单外的人点了没有任何反应，只记一条审计。
+- **每次点击都向 Paseo 核对**，不信插件自己的记忆：agent 还在、卡片在这个 agent 的会话里、请求
+  此刻确实还开着，才提交。所以已在 Paseo 里处理过的请求点了不会再批一次；插件重启过，旧卡片照样
+  能批（批完卡片换成一行审批记录，这条消息之后的进度去 Paseo 里看）。
+- **以 Paseo 的确认为准**：点完卡片先显示「正在提交」，收到 `agent.permission_resolved` 才算数；
+  15 秒没确认就在卡片上说明，可以再点一次。
+- **卡片上记着谁批的**：审批记录一行一条，写明允许还是拒绝、批的是什么、谁（飞书里点的显示人名，
+  在 Paseo 里批的写「在 Paseo 里」，Paseo 不记录是谁）、等了多久。
+- **提问（`question`）不在卡片上答**，卡片提示去 Paseo 里回答。
+- **没有「总是允许」**：放宽权限规则是 Paseo 里的事，卡片只对这一次请求表态。
+
+卡片上凡是 agent 写的文字，都用纯文本组件或转义后显示：否则 agent 输出里的 `<at id=all>`
+能在群里 @所有人，`[文字](链接)` 能伪装成链接。
+
+### 审计
+
+审计按天写成 JSONL，默认目录是 `<PASEO_HOME>/plugin-data/feishu/audit/`，用设置里的 `auditDir`
+可以改。格式和编排运行时的审计一致（每行都有 `id` / `ts` / `kind`），可以放进同一个目录一起统计：
+
+| kind | 何时 | 要点字段 |
+|---|---|---|
+| `feishu.approval.ask` | 请求出现在卡片上 | 工具、完整 input、`askedAt` |
+| `feishu.approval.answer` | 有人在卡片上作了选择并已提交 | `operator`、`actionId`、`reason` |
+| `feishu.approval.refused` | 点击被拒绝 | `operator`、`why`（不在白名单、不在这个会话、请求已关闭……） |
+| `feishu.approval.error` | 提交了但 Paseo 没接 | `why` |
+| `feishu.approval.decision` | 请求了结 | `outcome`（allowed / denied / abandoned）、`by`、`waitedMs`、拒绝理由 |
+
+`by` 是 `feishu:<open_id>`，或者在 Paseo 里批的 `paseo (unattributed ...)`。拒绝率和审查耗时从
+`decision` 行直接算。这些记录里有人名 ID 和完整的工具输入，不能进任何仓库。
 
 ## 宿主要求
 
@@ -63,7 +100,8 @@ fail-closed**：没配发送者就谁都进不来，没配路由就收到消息�
     "senders": ["ou_..."],
     "routes": [
       { "chatId": "oc_...", "cwd": "<agent 的工作目录>", "provider": "claude/claude-sonnet-5", "modeId": "default" }
-    ]
+    ],
+    "auditDir": ""
   }
 }
 ```
@@ -72,7 +110,8 @@ fail-closed**：没配发送者就谁都进不来，没配路由就收到消息�
   需要 shell，而 shell 会打乱参数转义，也让关停信号到不了真正的进程。
 - `modeId` 必填。provider 的默认执行档可能是不逐条询问就跑工具的，而这些 prompt 来自外部，
   执行档要有意选。Claude 的 `default` 是 Always Ask。
-- `senders` 和 `routes` 每条消息都重新读，改完立即生效；`larkCli` 和 `profile` 改完要
+- `senders` 同时决定谁能在卡片上审批。
+- `senders`、`routes` 和 `auditDir` 每次用到都重新读，改完立即生效；`larkCli` 和 `profile` 改完要
   `paseo plugin reload feishu`。
 - open_id 和 chat_id 都是按应用分配的，别的应用里查到的不能用。拿法：`senders` 留空，给机器人
   发一条消息，插件日志里会有 `dropped <message> from ou_... in oc_...`；把 open_id 加进
@@ -97,12 +136,11 @@ agent 的上下文里一个飞书工具都不需要：回信由 dispatcher 自�
 
 一张卡片、三个状态：已接收 → 进行中（定时刷新耗时）→ 完成（结果正文）。两类事件必须当场推：
 
-- **权限请求与 agent 提问**（`agent.permission_requested`）。推一张带按钮的卡片，点击经
-  `card.action.trigger` 回到 dispatcher，调 `respondToPermission`。卡片可以带输入框，拒绝理由能
-  回到调用方；回调里带着点按钮的人，"谁批的"也有记录（待实测）。
+- **权限请求与 agent 提问**（`agent.permission_requested`）：卡片变成「等待审批」，见上文「审批」。
 - **失败**（`turn_ended` 的 outcome 为 `failed`），带错误原文，否则人会空等。
 
-`agent.permission_resolved` 顺带就是人闸拒绝率的原始数据。
+飞书把表单里的按钮点击交回来时只带按钮的 `name`（表单内按钮不能带 `value`），所以按钮名里写着
+它回答的是哪个 agent 的哪个请求、哪个选项；它只是个地址，点击时照样向 Paseo 核对。
 
 ## 权限分级
 
@@ -141,7 +179,9 @@ agent 有完整 shell，能绕过任何 CLI 直接调插件 RPC；daemon 在协�
 5. **关停用 SIGTERM 或关 stdin，不要 kill -9**：某些 EventKey 会因此泄漏服务端订阅。
 6. **不要用 `--quiet`**：它会连事件丢失的警告一起吞掉。
 7. **`messages.patch` 只能改 14 天内的卡片**，content 序列化后不超过 30 KB。
-8. **卡片回调 token 有效期 30 分钟、最多用 2 次**：审批卡片过期后只能重发。
+8. **卡片回调 token 有效期 30 分钟、最多用 2 次**：本插件不用它，点击后改卡片走 `messages.patch`，
+   所以审批卡片只受 14 天的限制。lark-cli 会自己在 3 秒内应答回调，飞书端不会弹提示，
+   点击后的反馈全靠随后的 patch。
 9. **settings 的 scope 只能是 host**：多台 daemon 要各配一份白名单和路由。
 
 ## 测试机器人

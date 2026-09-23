@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
-import { truncateBytes } from "./cards";
+import type {
+  AgentPermissionRequest,
+  AgentPermissionResponse,
+  AgentTimelineItem,
+} from "@getpaseo/protocol/agent-types";
+import { decisionLine, truncateBytes } from "./cards";
 import { createDispatcher, stripMentions, type Lark } from "./dispatcher";
+import { parseButtonName, requestDetail } from "./permissions";
 import type { Settings } from "./settings";
 import { describePermission, finalAnswer } from "./timeline";
 
@@ -14,6 +19,7 @@ const settings: Settings = {
   profile: "test",
   senders: [SENDER],
   routes: [{ chatId: CHAT, cwd: "/work", provider: "claude/claude-sonnet-5", modeId: "default" }],
+  auditDir: "",
 };
 
 function message(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -39,6 +45,7 @@ interface FakeAgent {
   status: "idle" | "running";
   archivedAt: string | null;
   order: number;
+  pendingPermissions: AgentPermissionRequest[];
 }
 
 /** Stands in for Paseo's agent registry; share one between harnesses to model a restart. */
@@ -46,22 +53,33 @@ function registry() {
   const agents = new Map<string, FakeAgent>();
   const created: Array<Record<string, unknown>> = [];
   const sends: Array<{ agentId: string; text: string }> = [];
-  return { agents, created, sends };
+  const responses: Array<{ agentId: string; requestId: string; response: AgentPermissionResponse }> = [];
+  return { agents, created, sends, responses, respondFails: false };
+}
+
+interface Sent {
+  op: "reply" | "patch";
+  id: string;
+  title: string;
+  /** The card's first element, which is always markdown. */
+  body: string;
+  card: object;
 }
 
 function harness(
   options: { settings?: Settings | null; createFails?: boolean; paseo?: ReturnType<typeof registry> } = {},
 ) {
   const paseo = options.paseo ?? registry();
-  const sent: Array<{ op: "reply" | "patch"; id: string; title: string; body: string }> = [];
+  const sent: Sent[] = [];
   const logs: string[] = [];
+  const audits: Array<{ kind: string } & Record<string, unknown>> = [];
   let cards = 0;
   const record = (op: "reply" | "patch", id: string, card: object) => {
     const view = card as {
       header: { title: { content: string } };
       body: { elements: Array<{ content: string }> };
     };
-    sent.push({ op, id, title: view.header.title.content, body: view.body.elements[0].content });
+    sent.push({ op, id, title: view.header.title.content, body: view.body.elements[0].content, card });
   };
   const lark: Lark = {
     async reply(messageId, card) {
@@ -85,6 +103,7 @@ function harness(
         status: input.prompt ? "running" : "idle",
         archivedAt: null,
         order: paseo.agents.size,
+        pendingPermissions: [],
       });
       return { id };
     },
@@ -108,14 +127,20 @@ function harness(
         const agent = paseo.agents.get(id);
         if (agent) agent.status = "running";
       },
+      respondToPermission: async (input: { requestId: string; response: AgentPermissionResponse }) => {
+        if (paseo.respondFails) throw new Error("daemon went away");
+        paseo.responses.push({ agentId: id, ...input });
+      },
     }),
   };
+  let clock = 0;
   const dispatcher = createDispatcher({
     paseo: { agents } as never,
     lark,
     readSettings: async () => (options.settings === undefined ? settings : options.settings),
     log: (line) => logs.push(line),
-    now: () => 0,
+    audit: (kind, fields) => audits.push({ kind, ...fields }),
+    now: () => clock,
   });
   dispatchers.push(dispatcher);
   // Card patches are chained on promises; let them drain before asserting.
@@ -135,7 +160,92 @@ function harness(
     });
     await settle();
   };
-  return { dispatcher, paseo, created: paseo.created, sent, logs, settle, end };
+  /** The agent asks for permission: Paseo holds the request open and the hook fires. */
+  const ask = async (agentId: string, request: AgentPermissionRequest) => {
+    paseo.agents.get(agentId)?.pendingPermissions.push(request);
+    dispatcher.onPermissionRequested({ agent: agent(agentId), request });
+    await settle();
+  };
+  /** Paseo settles a request, whoever answered it. */
+  const resolve = async (agentId: string, requestId: string, resolution: AgentPermissionResponse) => {
+    const fake = paseo.agents.get(agentId);
+    if (fake) fake.pendingPermissions = fake.pendingPermissions.filter((open) => open.id !== requestId);
+    dispatcher.onPermissionResolved({ agent: agent(agentId), requestId, resolution });
+    await settle();
+  };
+  /** Someone presses a button, as lark-cli's card.action.trigger line describes it. */
+  let events = 0;
+  const click = async (
+    name: string,
+    input: { operator?: string; chatId?: string; cardId?: string; reason?: string } = {},
+  ) => {
+    events += 1;
+    const form = parseButtonName(name)?.form ?? 0;
+    await dispatcher.onCardAction({
+      event_id: `ev_${events}`,
+      operator_id: input.operator ?? SENDER,
+      message_id: input.cardId ?? "om_card1",
+      chat_id: input.chatId ?? CHAT,
+      action_tag: "button",
+      action_name: name,
+      form_value: JSON.stringify({ [`reason${form}`]: input.reason ?? "" }),
+    });
+    await settle();
+  };
+  const advance = (ms: number) => {
+    clock += ms;
+  };
+  return {
+    dispatcher,
+    paseo,
+    created: paseo.created,
+    sent,
+    logs,
+    audits,
+    settle,
+    end,
+    ask,
+    resolve,
+    click,
+    advance,
+  };
+}
+
+/** Every button on a card, in order, with the name it sends back. */
+function buttons(card: object): Array<{ name: string; label: string; type: string }> {
+  const found: Array<{ name: string; label: string; type: string }> = [];
+  const walk = (node: unknown) => {
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (node === null || typeof node !== "object") return;
+    const element = node as Record<string, unknown>;
+    if (element.tag === "button") {
+      found.push({
+        name: String(element.name),
+        label: String((element.text as { content: string }).content),
+        type: String(element.type),
+      });
+    }
+    Object.values(element).forEach(walk);
+  };
+  walk(card);
+  return found;
+}
+
+const push: AgentPermissionRequest = {
+  id: "toolu_push",
+  provider: "claude",
+  name: "Bash",
+  kind: "tool",
+  input: { command: "git push origin next" },
+  detail: { type: "shell", command: "git push origin next" },
+};
+
+/** Starts a run and has its agent ask for `request`; returns the agent's ID. */
+async function waiting(h: ReturnType<typeof harness>, request = push): Promise<string> {
+  await h.dispatcher.onMessage(message());
+  const agentId = String(h.created[0].agentId);
+  await h.ask(agentId, request);
+  return agentId;
 }
 
 function agent(id: string) {
@@ -223,27 +333,243 @@ test("a routed message walks one card from received to done", async () => {
 
 test("a permission request turns the card orange until it is resolved", async () => {
   const h = harness();
-  await h.dispatcher.onMessage(message());
-  const agentId = String(h.created[0].agentId);
-  h.dispatcher.onPermissionRequested({
-    agent: agent(agentId),
-    request: {
-      id: "perm-1",
-      provider: "claude",
-      name: "Bash",
-      kind: "tool",
-      input: { command: "git push" },
-    },
-  });
-  h.dispatcher.onPermissionResolved({
-    agent: agent(agentId),
-    requestId: "perm-1",
-    resolution: { behavior: "allow" },
-  });
-  await h.settle();
+  const agentId = await waiting(h);
+  await h.resolve(agentId, push.id, { behavior: "allow" });
   const titles = h.sent.map((entry) => entry.title.split(" ")[0]);
   assert.deepEqual(titles, ["已接收", "进行中", "等待审批", "进行中"]);
-  assert.match(h.sent[2].body, /Bash: git push/);
+  assert.match(JSON.stringify(h.sent[2].card), /git push origin next/);
+});
+
+test("the waiting card offers Paseo's choices, with a reason for denying", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  const card = h.sent.at(-1)!.card;
+  assert.deepEqual(
+    buttons(card).map(({ label, type }) => [label, type]),
+    [
+      ["拒绝", "danger"],
+      ["允许", "primary_filled"],
+    ],
+  );
+  assert.deepEqual(parseButtonName(buttons(card)[1].name), {
+    form: 0,
+    action: 1,
+    agentId,
+    requestId: push.id,
+  });
+  assert.match(JSON.stringify(card), /"tag":"input","name":"reason0"/);
+});
+
+test("an allowed sender approves from the card and the card says who did", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  h.advance(12_000);
+  await h.click(buttons(h.sent.at(-1)!.card)[1].name);
+  assert.deepEqual(h.paseo.responses, [
+    { agentId, requestId: push.id, response: { behavior: "allow", selectedActionId: "accept" } },
+  ]);
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /正在提交/);
+  assert.deepEqual(buttons(h.sent.at(-1)!.card), []);
+
+  await h.resolve(agentId, push.id, { behavior: "allow", selectedActionId: "accept" });
+  const done = h.sent.at(-1)!;
+  assert.equal(done.title.split(" ")[0], "进行中");
+  assert.match(JSON.stringify(done.card), /<person id='ou_allowed'/);
+  assert.match(JSON.stringify(done.card), /12 秒/);
+  const decision = h.audits.find((entry) => entry.kind === "feishu.approval.decision")!;
+  assert.equal(decision.by, "feishu:ou_allowed");
+  assert.equal(decision.outcome, "allowed");
+  assert.equal(decision.waitedMs, 12_000);
+  assert.deepEqual(
+    h.audits.map((entry) => entry.kind),
+    ["feishu.approval.ask", "feishu.approval.answer", "feishu.approval.decision"],
+  );
+});
+
+test("a denial carries the reason typed on the card to the agent", async () => {
+  const h = harness();
+  await waiting(h);
+  await h.click(buttons(h.sent.at(-1)!.card)[0].name, { reason: "  先别推，等评审  " });
+  assert.deepEqual(h.paseo.responses[0].response, {
+    behavior: "deny",
+    selectedActionId: "reject",
+    message: "Denied by user: 先别推，等评审",
+  });
+});
+
+test("nobody outside senders can answer, and the card does not change", async () => {
+  const h = harness();
+  await waiting(h);
+  const before = h.sent.length;
+  await h.click(buttons(h.sent.at(-1)!.card)[1].name, { operator: "ou_stranger" });
+  assert.deepEqual(h.paseo.responses, []);
+  assert.equal(h.sent.length, before);
+  assert.deepEqual(h.audits.at(-1), {
+    kind: "feishu.approval.refused",
+    agentId: String(h.created[0].agentId),
+    requestId: push.id,
+    chatId: CHAT,
+    cardId: "om_card1",
+    operator: "ou_stranger",
+    why: "not in senders",
+  });
+});
+
+test("a card in another chat cannot answer the agent", async () => {
+  const h = harness();
+  await waiting(h);
+  await h.click(buttons(h.sent.at(-1)!.card)[1].name, { chatId: "oc_elsewhere" });
+  assert.deepEqual(h.paseo.responses, []);
+  assert.equal(h.audits.at(-1)?.why, "the card is not in the agent's chat");
+});
+
+test("a second click while the first answer is on its way sends nothing", async () => {
+  const h = harness();
+  await waiting(h);
+  const allow = buttons(h.sent.at(-1)!.card)[1].name;
+  await h.click(allow);
+  await h.click(allow);
+  assert.equal(h.paseo.responses.length, 1);
+  assert.equal(h.audits.at(-1)?.why, "an answer is already on its way");
+});
+
+test("a request answered in Paseo is recorded as such and cannot be answered again", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  const allow = buttons(h.sent.at(-1)!.card)[1].name;
+  await h.resolve(agentId, push.id, { behavior: "deny", selectedActionId: "reject", message: "Denied by user" });
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /在 Paseo 里/);
+  const decision = h.audits.find((entry) => entry.kind === "feishu.approval.decision")!;
+  assert.equal(decision.outcome, "denied");
+  assert.match(String(decision.by), /^paseo/);
+
+  await h.click(allow);
+  assert.deepEqual(h.paseo.responses, []);
+  assert.equal(h.audits.at(-1)?.why, "the request is no longer open");
+});
+
+test("after a restart a card still answers its request, checked against Paseo", async () => {
+  const shared = registry();
+  const before = harness({ paseo: shared });
+  const agentId = await waiting(before);
+  const allow = buttons(before.sent.at(-1)!.card)[1].name;
+  before.dispatcher.stop();
+
+  const after = harness({ paseo: shared });
+  await after.click(allow);
+  assert.deepEqual(shared.responses.map((entry) => entry.requestId), [push.id]);
+  await after.resolve(agentId, push.id, { behavior: "allow", selectedActionId: "accept" });
+  const card = after.sent.at(-1)!;
+  assert.equal(card.op, "patch");
+  assert.equal(card.id, "om_card1");
+  assert.equal(card.title, "已处理审批");
+  assert.match(card.body, /<person id='ou_allowed'/);
+});
+
+test("an answer Paseo does not take is reported and can be tried again", async () => {
+  const h = harness();
+  await waiting(h);
+  h.paseo.respondFails = true;
+  await h.click(buttons(h.sent.at(-1)!.card)[1].name);
+  const card = JSON.stringify(h.sent.at(-1)!.card);
+  assert.match(card, /没能提交给 Paseo：daemon went away/);
+  assert.equal(buttons(h.sent.at(-1)!.card).length, 2);
+  assert.equal(h.audits.at(-1)?.kind, "feishu.approval.error");
+
+  h.paseo.respondFails = false;
+  await h.click(buttons(h.sent.at(-1)!.card)[1].name);
+  assert.equal(h.paseo.responses.length, 1);
+});
+
+test("a request still open when the turn ends is recorded as never answered", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  h.dispatcher.onTurnEnded({
+    agent: agent(agentId),
+    turnId: null,
+    outcome: { kind: "canceled", reason: "stopped in Paseo" },
+    timeline: [],
+  });
+  await h.settle();
+  assert.equal(h.sent.at(-1)?.title, "已取消");
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /没有处理/);
+  assert.equal(h.audits.at(-1)?.outcome, "abandoned");
+});
+
+test("questions are answered in Paseo, not on the card", async () => {
+  const h = harness();
+  await waiting(h, {
+    id: "q1",
+    provider: "claude",
+    name: "AskUserQuestion",
+    kind: "question",
+    input: { questions: [{ question: "用哪个分支？" }] },
+  });
+  const card = h.sent.at(-1)!.card;
+  assert.deepEqual(buttons(card), []);
+  assert.match(JSON.stringify(card), /请到 Paseo 里回答/);
+});
+
+test("several open requests each get their own form", async () => {
+  const h = harness();
+  const agentId = await waiting(h);
+  await h.ask(agentId, { ...push, id: "toolu_second", input: { command: "rm -rf dist" }, detail: undefined });
+  const names = buttons(h.sent.at(-1)!.card).map(({ name }) => parseButtonName(name));
+  assert.deepEqual(
+    names.map((target) => [target?.form, target?.requestId]),
+    [
+      [0, push.id],
+      [0, push.id],
+      [1, "toolu_second"],
+      [1, "toolu_second"],
+    ],
+  );
+  await h.click(buttons(h.sent.at(-1)!.card)[2].name, { reason: "别删" });
+  assert.deepEqual(h.paseo.responses[0], {
+    agentId,
+    requestId: "toolu_second",
+    response: { behavior: "deny", selectedActionId: "reject", message: "Denied by user: 别删" },
+  });
+});
+
+test("agent text on a card can neither mention anyone nor link anywhere", async () => {
+  const line = decisionLine({
+    outcome: "allowed",
+    label: "允许",
+    what: "Bash: echo <at id=all></at> [点我](https://evil.example)",
+    operator: null,
+    waitedMs: null,
+  });
+  assert.ok(!line.includes("<at"));
+  assert.ok(!line.includes("](https://"));
+
+  const h = harness();
+  await waiting(h, { ...push, detail: { type: "shell", command: "echo <at id=all></at>" } });
+  // Command text sits in plain_text, which Feishu never parses.
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /"tag":"plain_text","content":"echo <at id=all><\/at>"/);
+});
+
+test("the detail shows what a tool would change", () => {
+  assert.equal(
+    requestDetail({
+      id: "e",
+      provider: "claude",
+      name: "Edit",
+      kind: "tool",
+      detail: { type: "edit", filePath: "src/a.ts", unifiedDiff: "-old\n+new" },
+    }),
+    "src/a.ts\n\n-old\n+new",
+  );
+  assert.equal(
+    requestDetail({
+      id: "p",
+      provider: "claude",
+      name: "ExitPlanMode",
+      kind: "plan",
+      input: { plan: "1. 改配置\n2. 跑测试" },
+    }),
+    "1. 改配置\n2. 跑测试",
+  );
 });
 
 test("a failed turn and a failed start both end on a red card", async () => {

@@ -25,8 +25,12 @@ export const settingsDefinition = defineSettings({
     larkCli: z.string().default(""),
     // lark-cli profile holding the bot's credentials; they never pass through here.
     profile: z.string().default(""),
+    // Also who may answer an agent's permission request from its card.
     senders: z.array(z.string().startsWith("ou_")).default([]),
     routes: z.array(route).default([]),
+    // Where approval records go, one JSONL file per day. Empty means
+    // <PASEO_HOME>/plugin-data/feishu/audit.
+    auditDir: z.string().default(""),
   }),
 });
 
