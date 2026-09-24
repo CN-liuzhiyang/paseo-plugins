@@ -3,5 +3,6 @@
   "description": "飞书入口：在 daemon 上常驻的 dispatcher，把飞书消息和卡片回调接到 Paseo agent",
   "requirements": {
     "paseo": ">=0.9.1"
-  }
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
 }

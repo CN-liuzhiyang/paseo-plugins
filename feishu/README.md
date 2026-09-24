@@ -126,6 +126,12 @@ paseo plugin add CN-liuzhiyang/paseo-plugins:feishu
 paseo plugin logs feishu
 ```
 
+- 新装的 daemon 默认关着插件总开关（`pluginsEnabled` 缺省为 `false`），插件会显示 `disabled`：
+  先 `paseo daemon config set pluginsEnabled true` 再重启 daemon。
+- 代码里引了 `@getpaseo/client`、`@getpaseo/protocol` 的类型，宿主只提供 `@getpaseo/plugin`，所以清单里
+  声明了 `build: npm ci`：从 git 装时 daemon 先装依赖再编译，daemon 所在机器要能跑 `npm`、连得上 npm 源。
+  从本地目录装（`paseo plugin add <目录>`）则要先在目录里自己 `npm ci`。
+
 飞书侧的能力全部经飞书官方的 `lark-cli` 调用，daemon 所在机器上要先装好它，
 并给机器人配一个单独的 profile。凭据留在 lark-cli 自己的存储里，不经过本插件。
 机器人要有读消息的权限（`im:message:readonly`）才能下载图片和文件、取被回复的消息；
