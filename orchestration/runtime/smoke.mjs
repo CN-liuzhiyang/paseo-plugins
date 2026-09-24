@@ -2,24 +2,30 @@
 //
 // `paseo-cli.mjs` reaches past `paseo.cmd` into the install layout, so an
 // upgrade that moves Paseo.exe breaks the launch path. The schema checks guard
-// the invariant that R2 in CONVENTIONS.md depends on.
+// the invariant that R2 in CONVENTIONS.md depends on; the roster checks catch
+// model and thinking ids that moved; the fence checks catch a role nobody can
+// run. The unit tests (npm test) cover the runner on a fake executor; this is
+// what only a real Paseo can answer.
 //
 //   node runtime/smoke.mjs          fast checks, no agent spend
-//   node runtime/smoke.mjs --agent  also runs two haiku agents end to end
+//   node runtime/smoke.mjs --agent  also runs two haiku agents end to end, as flows
 
 import { runPaseo, runPaseoJson } from "./paseo-cli.mjs";
-import { evaluate } from "./orch.mjs";
-import { Orchestrator } from "./agents.mjs";
-import { Audit } from "./audit.mjs";
-import { loadRoster, parseRole, ROLES_DIR } from "./roster.mjs";
+import { loadRoster, parseRole, bindRole, ROLES_DIR } from "./roster.mjs";
 import { parseConfig } from "./config.mjs";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { define, text, choice, list } from "./step.mjs";
+import { flow, checkFlow } from "./flow.mjs";
+import { fenceFor, FENCES } from "./fences.mjs";
+import { runFlow } from "./run.mjs";
+import { readEvents, checkEvents } from "./events.mjs";
 import { carrierPrompt, fitBrief } from "./gate.mjs";
-import { COMMITTEES } from "../scripts/committee.mjs";
+import { COMMITTEES } from "../flows/committee.mjs";
 
+const FLOWS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "flows");
 const wantAgent = process.argv.includes("--agent");
 const results = [];
 
@@ -50,11 +56,10 @@ check("argument encoding intact", `${stdout}${stderr}`.includes(probe));
 
 // --- Step contract ----------------------------------------------------
 
-const sample = define({
-  name: "sample",
-  returns: { a: text("first"), b: choice(["x", "y"]), c: list(text()) },
-  prompt: ({ v }) => `do ${v}`,
-});
+function sampleDef() {
+  return { name: "sample", effects: "none", returns: { a: text("first"), b: choice(["x", "y"]), c: list(text()) }, prompt: ({ v }) => `do ${v}` };
+}
+const sample = define(sampleDef());
 
 check(
   "schema requires every field",
@@ -62,21 +67,22 @@ check(
   sample.schema.required.join(","),
 );
 check("schema forbids extra properties", sample.schema.additionalProperties === false);
-check("fingerprint is stable", sample.fingerprint === define({ ...sampleDef(), name: "sample" }).fingerprint);
-check("readOnly appends the suffix", define({ ...sampleDef(), readOnly: true }).for({ v: "z" }).prompt.includes("Do NOT edit"));
-check("plain step does not", !sample.for({ v: "z" }).prompt.includes("Do NOT edit"));
+check("fingerprint is stable", sample.fingerprint === define(sampleDef()).fingerprint);
+check("effects none appends the no-edits line", sample.for({ v: "z" }).includes("Do NOT edit"));
+check("effects workspace does not", !define({ ...sampleDef(), effects: "workspace" }).for({ v: "z" }).includes("Do NOT edit"));
 
-check("define rejects a missing prompt", throws(() => define({ name: "x", returns: { a: text() } })));
-check("define rejects empty returns", throws(() => define({ name: "x", returns: {}, prompt: () => "p" })));
-check("define rejects a non-object root", throws(() => define({ name: "x", returns: text(), prompt: () => "p" })));
+check("define rejects a missing prompt", throws(() => define({ name: "x", effects: "none", returns: { a: text() } })));
+check("define rejects empty returns", throws(() => define({ name: "x", effects: "none", returns: {}, prompt: () => "p" })));
+check("define rejects a non-object root", throws(() => define({ name: "x", effects: "none", returns: text(), prompt: () => "p" })));
+check("define rejects a step without effects", throws(() => define({ name: "x", returns: { a: text() }, prompt: () => "p" })));
 check("choice rejects an empty list", throws(() => choice([])));
 
-const reads = define({ name: "reads", returns: { a: text() }, prompt: ({ a, b }) => `${a} ${b}` });
+const reads = define({ name: "reads", effects: "none", returns: { a: text() }, prompt: ({ a, b }) => `${a} ${b}` });
 check("step refuses input missing a field its prompt reads", throws(() => reads.for({ a: "x" })));
-const whole = define({ name: "whole", returns: { a: text() }, prompt: (input) => JSON.stringify(input) });
+const whole = define({ name: "whole", effects: "none", returns: { a: text() }, prompt: (input) => JSON.stringify(input) });
 check(
   "explicit undefined and whole-input prompts still work",
-  !throws(() => reads.for({ a: "x", b: undefined })) && whole.for({ a: 1 }).prompt === '{"a":1}',
+  !throws(() => reads.for({ a: "x", b: undefined })) && whole.for({ a: 1 }).startsWith('{"a":1}'),
 );
 
 // --- Gate brief ---------------------------------------------------------
@@ -93,10 +99,6 @@ check(
   cut.length < 5_000 && carrierPrompt("C:/hold/a.lua", "y".repeat(2_000), cut).length <= 4_000,
   `${cut.length} characters kept`,
 );
-
-function sampleDef() {
-  return { name: "sample", returns: { a: text("first"), b: choice(["x", "y"]), c: list(text()) }, prompt: ({ v }) => `do ${v}` };
-}
 
 // --- Role files -------------------------------------------------------
 //
@@ -147,39 +149,19 @@ const configAccepted = Object.entries(configRefusals)
 check(`config: parser refuses ${Object.keys(configRefusals).length} malformed files`, configAccepted.length === 0, configAccepted.join(", "));
 check("config: parser reads a BOM-prefixed file", parseConfig(`${bom}{"logDir": "C:/logs"}`, "probe").logDir === "C:/logs");
 
-// Binding rules, checked without spawning anything: `role: ""` must not
-// quietly mean "no role", and moving a role that pins thinking to another
-// model must not quietly drop the pin.
-const binder = new Orchestrator({
-  grants: [], // a binding that wrongly passes stops at GrantError, never at a spawn
-  roster: {
-    defaultRole: "a",
-    roles: {
-      a: { provider: "claude/m1", description: "d", thinking: "high", instructions: "" },
-    },
-  },
-});
-const bindRefusals = {
-  // `mode` is passed so these reach binding and nothing else: without it the
-  // writable-step check would refuse them first and hide a binding regression.
-  "empty role name": () => binder.ask(define({ ...sampleDef() }), { v: "z" }, { role: "", mode: "auto" }),
-  "thinking pin across models": () =>
-    binder.ask(define({ ...sampleDef() }), { v: "z" }, { role: "a", provider: "codex/m2", mode: "auto" }),
+// Binding rules: `role: ""` must not quietly mean "no role", and moving a
+// role that pins thinking to another model must not quietly drop the pin.
+const pinned = {
+  defaultRole: "a",
+  roles: { a: { provider: "claude/m1", description: "d", thinking: "high", instructions: "" } },
 };
-const bindAccepted = [];
-for (const [name, call] of Object.entries(bindRefusals)) {
-  const outcome = await call().then(() => "ran", (error) => (error.name === "GrantError" ? "reached spawn" : "refused"));
-  if (outcome !== "refused") bindAccepted.push(`${name}: ${outcome}`);
-}
+const bindRefusals = {
+  "empty role name": () => bindRole(pinned, { role: "" }),
+  "thinking pin across models": () => bindRole(pinned, { role: "a", provider: "codex/m2" }),
+  "inherited name": () => bindRole(pinned, { role: "constructor" }),
+};
+const bindAccepted = Object.entries(bindRefusals).filter(([, fn]) => !throws(fn)).map(([name]) => name);
 check(`roles: binding refuses ${Object.keys(bindRefusals).length} ambiguous calls`, bindAccepted.length === 0, bindAccepted.join(", "));
-
-// A step that may write must name its mode: left to Paseo, Claude asks a
-// person, and an unattended structured call dies waiting (hotfix, 2026-09-23).
-const writable = await binder.ask(define({ ...sampleDef() }), { v: "z" }, { role: "a" }).then(
-  () => "ran",
-  (error) => (error.name === "GrantError" ? "reached spawn" : "refused"),
-);
-check("a writable step without a mode is refused", writable === "refused", writable);
 
 // --- Roster against the daemon ----------------------------------------
 //
@@ -221,49 +203,67 @@ const unknownMembers = Object.entries(COMMITTEES).flatMap(([name, members]) =>
 );
 check("roles: committees name real roles", unknownMembers.length === 0, unknownMembers.join(", "));
 
-// --- Eval entry point -------------------------------------------------
+// Every role needs a fence to run behind, and the gate's carrier needs the
+// ask-human one. A role without one is refused at its first call, which is
+// free, but finding out here is freer.
+const unfenced = Object.entries(roster.roles).flatMap(([name, entry]) =>
+  ["none", "workspace"].filter((level) => throws(() => fenceFor(entry.provider, level))).map((level) => `${name}:${level}`),
+);
+check("fences: every role can run a none and a workspace step", unfenced.length === 0, unfenced.join(", ") || Object.keys(FENCES).join(", "));
+check("fences: the gate's carrier (fast) can ask a person", !throws(() => fenceFor(roster.roles.fast.provider, "ask-human")));
 
-const evaluated = await evaluate("return 1 + 1;", { name: "smoke" });
-check("eval returns value", evaluated.ok && evaluated.value === 2, `auditId ${evaluated.auditId}`);
-check("eval skips cost collection when no agent ran", evaluated.cost === null);
+// --- Flows -------------------------------------------------------------
 
-const refused = await evaluate("return await agents.archive('smoke-nonexistent');", { name: "smoke-grant" });
-check("ungranted action refused", !refused.ok && refused.error.name === "GrantError");
+for (const name of ["committee", "advisor"]) {
+  const checked = await checkFlow(path.join(FLOWS, `${name}.mjs`), { roster });
+  check(`flows: ${name} passes check`, checked.ok && checked.warnings.length === 0, [...checked.problems, ...checked.warnings].join("; "));
+}
 
-const stepInScope = await evaluate("return typeof step.define === 'function' && typeof step.text === 'function';", {
-  name: "smoke-inject",
-});
-check("step is in scope inside eval", stepInScope.ok && stepInScope.value === true);
-
-// --- One real agent ---------------------------------------------------
+// --- Real agents ------------------------------------------------------
 
 if (wantAgent) {
-  const answered = await evaluate(
-    `const add = step.define({
-       name: 'add',
-       readOnly: true,
-       returns: { answer: step.text('The sum, as digits.') },
-       prompt: ({ a, b }) => \`Compute \${a} + \${b}.\`,
-     });
-     return await agents.ask(add, { a: 1, b: 1 }, { role: 'fast' });`,
-    { name: "smoke-agent" },
-  );
-  check("agent round trip via step", answered.ok && String(answered.value?.answer).includes("2"), JSON.stringify(answered.value));
-  check("cost collected", answered.cost?.agentCount >= 1, `${answered.cost?.agentCount} agent(s), $${answered.cost?.totalUsd}`);
+  // Both go through the runner and the real executor, and are checked the way
+  // a reader of the events would check them.
+  const add = define({
+    name: "add",
+    effects: "none",
+    timeout: "5m",
+    returns: { answer: text("The sum, as digits.") },
+    prompt: ({ a, b }) => `Compute ${a} + ${b}.`,
+  });
+  const adder = flow({
+    name: "smoke-add",
+    description: "smoke: one real agent through a step",
+    phases: [],
+    inputs: {},
+    grants: [],
+    run: (_, $) => $.ask(add, { a: 1, b: 1 }, { role: "fast" }),
+  });
+  const answered = await runFlow(adder, { roster });
+  check("agent round trip via a flow", answered.outcome === "done" && String(answered.value?.answer).includes("2"), JSON.stringify(answered.value ?? answered.error));
+  const events = readEvents(answered.events);
+  const problems = checkEvents(events, { strict: true, complete: true });
+  check("events conform to EVENTS.md", problems.length === 0, problems.join("; ") || answered.events);
+  const end = events.find((e) => e.kind === "call.end");
+  check("call.end names its agent", typeof end?.agentId === "string", end?.agentId);
+  check("call.end has its cost", typeof end?.cost?.usd === "number", JSON.stringify(end?.cost));
 
   // The prompt alone gives no reason to write this marker; only the role's
   // instructions do. Seeing it proves the body reached the model.
   const marker = "ROLE-INSTRUCTIONS-SEEN";
-  const probe = new Orchestrator({
-    audit: new Audit({ script: "smoke-role" }),
-    roster: {
-      defaultRole: "probe",
-      roles: { probe: { ...roster.roles.fast, instructions: `Whatever the task, set the field "marker" to exactly ${marker}.` } },
+  const mark = define({ name: "mark", effects: "none", timeout: "5m", returns: { marker: text() }, prompt: () => "Fill in the fields." });
+  const marked = await runFlow(
+    flow({ name: "smoke-role", description: "smoke: role instructions", phases: [], inputs: {}, grants: [], run: (_, $) => $.ask(mark, {}) }),
+    {
+      roster: {
+        defaultRole: "probe",
+        roles: { ...roster.roles, probe: { ...roster.roles.fast, instructions: `Whatever the task, set the field "marker" to exactly ${marker}.` } },
+      },
     },
-  });
-  const mark = define({ name: "mark", readOnly: true, returns: { marker: text() }, prompt: () => "Fill in the fields." });
-  const marked = await probe.ask(mark, {}).catch((error) => ({ error: error.message }));
-  check("role instructions reach the agent", marked.marker === marker, JSON.stringify(marked));
+  );
+  check("role instructions reach the agent", marked.value?.marker === marker, JSON.stringify(marked.value ?? marked.error));
+  const spent = (answered.cost?.totalUsd ?? 0) + (marked.cost?.totalUsd ?? 0);
+  console.log(`\nruns ${answered.runId}, ${marked.runId}; spent $${spent.toFixed(4)}`);
 }
 
 const failed = results.filter((r) => !r.ok);

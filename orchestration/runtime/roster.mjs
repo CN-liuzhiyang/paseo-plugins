@@ -130,3 +130,48 @@ export async function loadRoster(dirs = rolesDirs()) {
   }
   return { defaultRole: DEFAULT_ROLE, roles };
 }
+
+/**
+ * Who runs one call.
+ *
+ * - `role` supplies provider, thinking and instructions.
+ * - `provider` alone is a literal call: no role, no instructions.
+ * - Neither: the default role.
+ * - `role` plus a different `provider` runs the role's instructions on that
+ *   model. If the role pins a thinking level this throws unless `thinking`
+ *   is passed too: the level may not exist on the new model (opus-5-5 has
+ *   no "off"), and dropping it would lower the depth silently -- the thing
+ *   pinning it exists to prevent.
+ * - An explicit `thinking` always wins.
+ *
+ * An unknown role is an error, not a default; `role: ""` is an unknown role.
+ *
+ * @returns {{ role: string | null, provider: string, thinking: string | null, instructions: string }}
+ */
+export function bindRole(roster, { role, provider, thinking } = {}) {
+  const named = role ?? (provider ? null : (roster.defaultRole ?? DEFAULT_ROLE));
+  let entry = null;
+  if (named !== null) {
+    const found = roster.roles[named];
+    if (!Object.hasOwn(roster.roles, named) || !found) {
+      throw new Error(`Unknown role "${named}". Roles: ${Object.keys(roster.roles).join(", ")}`);
+    }
+    entry = { role: named, ...found };
+  }
+  const swapped = Boolean(provider) && provider !== entry?.provider;
+  if (swapped && entry?.thinking && !thinking) {
+    throw new Error(
+      `Role "${entry.role}" pins thinking "${entry.thinking}" for ${entry.provider}. ` +
+        `Running it on ${provider} needs an explicit { thinking } for that model.`,
+    );
+  }
+  return {
+    role: entry?.role ?? null,
+    provider: provider ?? entry.provider,
+    thinking: thinking ?? (swapped ? null : (entry?.thinking ?? null)),
+    instructions: entry?.instructions ?? "",
+  };
+}
+
+/** The prompt as sent: role instructions first, then the call's own prompt. */
+export const composePrompt = (bound, prompt) => (bound.instructions ? `${bound.instructions}\n\n${prompt}` : prompt);

@@ -1,8 +1,9 @@
-// Human gate: a script stops and a person decides, in Paseo.
+// Human gate: a flow stops and a person decides, in Paseo. Flows reach it as
+// `$.gate(...)` (run.mjs), which records the call and checks the grant.
 //
 // Paseo has one decision surface -- the permission request an agent raises,
 // answered in the app (or `paseo permit`). A script cannot raise one itself,
-// so the gate starts a small agent in the provider's ask-first mode whose only
+// so the gate starts a small agent in the provider's ask-human mode (fences.mjs) whose only
 // job is to write the artifact under review to a holding path. The write is
 // what the person approves: the app's permission card renders the tool call,
 // so they see the exact content, not a summary of it.
@@ -67,6 +68,9 @@ export const carrierPrompt = (holdPath, content, brief = "") =>
 
 export const sameContent = (a, b) => sha256(canonical(a)) === sha256(canonical(b));
 
+/** The fingerprint a gate records for its content: the same one its decision carries. */
+export const contentDigest = (content) => sha256(canonical(content));
+
 const BRIEF_CUT = "\n\n...(notes cut to fit the prompt)";
 
 /** The brief, cut so the prompt fits; the content itself is never cut. */
@@ -85,21 +89,36 @@ const MAX_POLL_FAILURES = 6;
 const CARRIER_PROMPT_LIMIT = 30_000;
 
 /**
+ * The prompt the carrier gets for this request: the brief cut to fit, the
+ * content whole. `fits` is false when even the content alone is over the
+ * limit, and then no card can be raised. Exported so the runner can record
+ * the exact prompt before the carrier starts.
+ */
+export function gatePrompt(holdPath, content, brief = "") {
+  const prompt = carrierPrompt(holdPath, content, fitBrief(holdPath, content, brief));
+  return { prompt, fits: prompt.length <= CARRIER_PROMPT_LIMIT };
+}
+
+/**
  * Hold `content` until a person approves writing it to `holdPath`.
  *
- * Needs the `gate:deny` grant, and only to close a request the script has
- * stopped waiting for (expiry, lost contact): denying on the person's behalf is
- * the conservative direction. It never needs `gate:allow`.
+ * `io` is what the gate needs from the executor, already bound to this call:
+ * `spawn(prompt)` starts the carrier (in the provider's ask-human mode, see
+ * fences.mjs) and resolves to its agent id; `inspect`, `deny`, `stop` and
+ * `transcript` take that id. Denying is only ever used to close a request the
+ * script has stopped waiting for (expiry, lost contact): the conservative
+ * direction, under the `gate:deny` grant the caller checks. Nothing here can
+ * allow.
  *
- * @param {import("./agents.mjs").Orchestrator} orch
- * @param {{ title: string, holdPath: string, content: string, brief?: string, timeout?: string,
- *           role?: string, pollMs?: number }} request
+ * @param {{ spawn: (prompt: string) => Promise<string>, inspect: Function, deny: Function, stop: Function,
+ *           transcript: Function }} io
+ * @param {{ holdPath: string, content: string, brief?: string, timeout?: string, pollMs?: number }} request
  * @returns {Promise<{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved: boolean,
- *   agentId: string, sha256: string, askedAt: string, decidedAt: string, waitedMs: number,
+ *   agentId: string|null, sha256: string, askedAt: string, decidedAt: string, waitedMs: number,
  *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null }>}
  */
-export async function requestApproval(orch, request) {
-  const { title, holdPath, content, brief = "", timeout = "2h", role = "fast", pollMs = 10_000 } = request;
+export async function requestApproval(io, request) {
+  const { holdPath, content, brief = "", timeout = "2h", pollMs = 10_000 } = request;
   const deadline = Date.now() + parseDuration(timeout);
   const digest = sha256(canonical(content));
 
@@ -108,16 +127,15 @@ export async function requestApproval(orch, request) {
   await rm(holdPath, { force: true });
 
   const askedAt = new Date();
-  await orch.audit.record("gate.ask", { title, holdPath, sha256: digest, timeout });
 
   // The carrier gets the content in its prompt, and the prompt is a command-
   // line argument (see COMMAND_LINE_BUDGET). Measured 2026-09-23: 257 lines
   // copied exactly; an 818-line hotfix could not be sent at all. Reading the
   // content from a file instead would put a Read card in front of the person
   // before the Write card, so for now a gate this size is refused, not faked.
-  const prompt = carrierPrompt(holdPath, content, fitBrief(holdPath, content, brief));
-  if (prompt.length > CARRIER_PROMPT_LIMIT) {
-    const decision = {
+  const { prompt, fits } = gatePrompt(holdPath, content, brief);
+  if (!fits) {
+    return {
       outcome: "error",
       approved: false,
       agentId: null,
@@ -130,19 +148,9 @@ export async function requestApproval(orch, request) {
       by: "nobody (no card was raised)",
       agentStatusAtDecision: null,
     };
-    await orch.audit.record("gate.decision", { title, holdPath, ...decision });
-    return decision;
   }
 
-  const agent = await orch.spawn({
-    role,
-    mode: "default",
-    title: `[gate] ${title}`,
-    cwd: path.dirname(holdPath),
-    labels: { "orch-step": "gate" },
-    prompt,
-  });
-  const agentId = agent.agentId;
+  const agentId = await io.spawn(prompt);
 
   // A two-hour wait is hundreds of CLI calls; one that fails (a daemon
   // restart) must not end the gate. Several in a row do.
@@ -152,7 +160,7 @@ export async function requestApproval(orch, request) {
   for (let failures = 0; ; ) {
     let detail;
     try {
-      detail = await orch.inspect(agentId);
+      detail = await io.inspect(agentId);
       failures = 0;
     } catch (error) {
       if (++failures >= MAX_POLL_FAILURES) {
@@ -162,7 +170,7 @@ export async function requestApproval(orch, request) {
       await sleep(pollMs);
       continue;
     }
-    status = detail?.Status ?? null;
+    status = detail?.status ?? null;
     if (status === "idle" || status === "error" || status === "closed") break;
     if (Date.now() >= deadline) {
       expired = true;
@@ -179,8 +187,8 @@ export async function requestApproval(orch, request) {
   // person after the script has stopped listening.
   if (status !== "idle") {
     const message = expired ? `gate expired after ${timeout} without an answer` : "gate closed: the script stopped waiting";
-    await orch.deny(agentId, undefined, { all: true, message }).catch(() => null);
-    await orch.stop(agentId).catch(() => null);
+    await io.deny(agentId, { message }).catch(() => null);
+    await io.stop(agentId).catch(() => null);
   }
 
   const decidedAt = new Date();
@@ -202,9 +210,9 @@ export async function requestApproval(orch, request) {
   const agentReport =
     outcome === "allowed"
       ? ""
-      : ((await orch.transcript(agentId, { tail: 3, filter: "text" }).catch(() => "")) ?? "").trim().slice(-1000);
+      : ((await io.transcript(agentId, { tail: 3, filter: "text" }).catch(() => "")) ?? "").trim().slice(-1000);
 
-  const decision = {
+  return {
     outcome,
     approved: outcome === "allowed",
     agentId,
@@ -217,6 +225,4 @@ export async function requestApproval(orch, request) {
     by: outcome === "expired" ? "gate timeout" : outcome === "error" ? "nobody (gate lost sight of the request)" : "unattributed (Paseo does not record who answered)",
     agentStatusAtDecision: status,
   };
-  await orch.audit.record("gate.decision", { title, holdPath, ...decision });
-  return decision;
 }
