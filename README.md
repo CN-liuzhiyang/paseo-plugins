@@ -13,6 +13,14 @@ Install a plugin straight from this repository:
 paseo plugin add CN-liuzhiyang/paseo-plugins:feishu
 ```
 
+## Reuse Paseo, then add
+
+A plugin adds only what Paseo does not already do. Timing, automation and orchestration use what
+Paseo ships -- schedules, heartbeats, `notifyOnFinish`, the orchestration runtime -- and a channel
+plugin such as `feishu/` is the way in and the way out: it turns messages into agent turns and
+delivers what agents say back to the chat, whoever started the turn. When Paseo lacks something
+generic, the fix is an extension point in Paseo, not a copy of it inside each plugin.
+
 ## Code here, data elsewhere
 
 This repository holds code and the schemas of its configuration, never the configuration itself.
