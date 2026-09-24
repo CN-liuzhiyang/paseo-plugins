@@ -178,6 +178,9 @@ export function headline(call: CallState, status: RunStatus): string | null {
   const schema = call.ask?.schema;
   const named = call.ask?.headline;
   if (named && isObj(output) && named in output) {
+    // A named yes/no answers the node's own title ("收敛了吗"); a label in front would repeat
+    // the schema's description, which is written for the model, not for this line.
+    if (typeof output[named] === "boolean") return output[named] ? "是" : "否";
     const line = fieldLine(named, output[named], schema);
     if (line) return line;
   }

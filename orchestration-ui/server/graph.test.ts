@@ -234,6 +234,16 @@ test("titles in brackets from older runtimes read as phase and step", () => {
   ]);
   assert.equal(wrong.calls.get("a")!.ask?.headline, null);
   assert.equal(headline(wrong.calls.get("a")!, "done"), "done：是");
+  // A named yes/no answers the title's question on its own, without the schema's description.
+  const named = foldEvents([
+    { ...head, seq: 0, kind: "run.start", flow: { name: "x", phases: [] } },
+    {
+      ...head, seq: 1, kind: "call.start", callId: "a", type: "ask", name: "assess", title: "裁决：收敛了吗", phase: null, provider: "p/m",
+      headline: "converged", schema: { type: "object", properties: { converged: { type: "boolean", description: "True only if both positions agree." } } },
+    },
+    { ...head, seq: 2, kind: "call.end", callId: "a", ok: true, output: { converged: false } },
+  ]);
+  assert.equal(headline(named.calls.get("a")!, "done"), "否");
 });
 
 test("a shape the loop rule does not recognize stays flat and keeps every call", () => {
