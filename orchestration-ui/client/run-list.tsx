@@ -1,13 +1,34 @@
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
-import { formatAgo, formatDuration, formatTime, formatUsd, RUN_STATUS_LABEL, shortId } from "../shared/format";
+import { formatTime, formatUsd, RUN_STATUS_LABEL, shortId } from "../shared/format";
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
-import { ms } from "../shared/run";
 import { useNow, useRunList } from "./data";
-import { LOG_DIR_SOURCE, RUN_LOOK } from "./looks";
-import { Badge, Banner, Block, useUi } from "./ui";
+import { LOG_DIR_SOURCE, RUN_LOOK, VISIT_LOOK } from "./looks";
+import { Banner, Block, useUi } from "./ui";
 
-const LAUNCH = "node <paseo-plugins>/orchestration/runtime/orch.mjs eval <script.mjs>";
+// Every run, sorted by whether it needs you: a gate waiting or a run gone quiet first, then what
+// is running, then what ended. A row is the flow, the input that tells it apart, how far each
+// phase got, and the same sentence the detail view opens with.
+
+const LAUNCH = "node <paseo-plugins>/orchestration/runtime/orch.mjs run <flow.mjs> --<输入> ...";
+
+type Group = { key: string; title: string; runs: RunSummary[] };
+
+function grouped(runs: RunSummary[]): Group[] {
+  const needs: RunSummary[] = [];
+  const live: RunSummary[] = [];
+  const ended: RunSummary[] = [];
+  for (const run of runs) {
+    if (run.needsYou) needs.push(run);
+    else if (run.status === "running" || run.status === "starting") live.push(run);
+    else ended.push(run);
+  }
+  return [
+    { key: "needs", title: "需要你处理", runs: needs },
+    { key: "live", title: "运行中", runs: live },
+    { key: "ended", title: "最近结束", runs: ended },
+  ].filter((group) => group.runs.length > 0);
+}
 
 export function RunList({ onOpen, onSettings }: { onOpen(runId: string): void; onSettings(): void }) {
   const ui = useUi();
@@ -46,9 +67,34 @@ export function RunList({ onOpen, onSettings }: { onOpen(runId: string): void; o
       ) : data.runs.length === 0 ? (
         <Empty info={data.logDir} missing={data.state === "missing"} />
       ) : (
-        <View style={{ gap: 8 }}>
-          {data.runs.map((run) => (
-            <Row key={run.runId} run={run} now={now} onOpen={onOpen} />
+        <View
+          style={{
+            borderWidth: 1,
+            borderColor: ui.theme.colors.border,
+            borderRadius: 12,
+            overflow: "hidden",
+            backgroundColor: ui.theme.colors.surface1,
+          }}
+        >
+          {grouped(data.runs).map((group) => (
+            <View key={group.key}>
+              <View
+                style={{
+                  paddingHorizontal: 14,
+                  paddingVertical: 7,
+                  backgroundColor: group.key === "needs" ? ui.tint("warning", 0.12) : ui.theme.colors.surface2,
+                  borderBottomWidth: 1,
+                  borderBottomColor: ui.theme.colors.border,
+                }}
+              >
+                <Text style={[ui.styles.small, { fontWeight: "700", color: group.key === "needs" ? ui.tone("warning") : undefined }]}>
+                  {group.title} · {group.runs.length}
+                </Text>
+              </View>
+              {group.runs.map((run) => (
+                <Row key={run.runId} run={run} now={now} onOpen={onOpen} />
+              ))}
+            </View>
           ))}
         </View>
       )}
@@ -60,7 +106,7 @@ function Where({ info, total, shown, onSettings }: { info: LogDirInfo; total: nu
   const ui = useUi();
   return (
     <View style={ui.styles.row}>
-      <Text style={ui.styles.muted} selectable>
+      <Text style={ui.styles.small} selectable>
         {info.runsDir}
       </Text>
       <Text style={ui.styles.small}>
@@ -94,64 +140,103 @@ function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean })
   );
 }
 
+function Strip({ run }: { run: RunSummary }) {
+  const ui = useUi();
+  const c = ui.theme.colors;
+  if (!run.strip || run.strip.length === 0) {
+    const look = RUN_LOOK[run.status];
+    return (
+      <View style={{ flexDirection: "row", gap: 3 }}>
+        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: run.strip ? ui.tone(look.tone) : c.border }} />
+      </View>
+    );
+  }
+  return (
+    <View style={{ flexDirection: "row", gap: 3 }} accessibilityLabel={run.strip.map((s) => `${s.title}：${VISIT_LOOK[s.state].label}`).join("，")}>
+      {run.strip.map((segment, index) => {
+        const look = VISIT_LOOK[segment.state];
+        const empty = segment.state === "pending" || segment.state === "skipped";
+        // Hosts may give "running" and "done" near-identical colors; a running segment is half-filled.
+        const running = segment.state === "running";
+        return (
+          <View
+            key={index}
+            style={{
+              flex: 1,
+              height: 6,
+              borderRadius: 3,
+              backgroundColor: empty ? "transparent" : running ? ui.tint(look.tone, 0.35) : ui.tone(look.tone),
+              borderWidth: empty || running ? 1 : 0,
+              borderStyle: segment.state === "skipped" ? "dashed" : "solid",
+              borderColor: running ? ui.tone(look.tone) : c.border,
+            }}
+          />
+        );
+      })}
+    </View>
+  );
+}
+
+function sentence(run: RunSummary): string | null {
+  if (run.status === "unreadable") return run.problem;
+  return run.hero?.title ?? run.activity;
+}
+
 function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId: string): void }) {
   const ui = useUi();
+  const c = ui.theme.colors;
   const look = RUN_LOOK[run.status];
-  const started = ms(run.startedAt);
-  const elapsed =
-    run.durationMs ??
-    (started === null
-      ? null
-      : run.status === "running"
-        ? now - started
-        : run.status === "lost"
-          ? (ms(run.lastEventAt) ?? started) - started
-          : null);
-  const facts = [
-    run.startedAt ? `开始 ${formatTime(run.startedAt, now)}` : null,
-    elapsed === null ? null : `${run.status === "running" ? "已运行" : run.status === "lost" ? "失联前跑了" : "耗时"} ${formatDuration(elapsed)}`,
-    run.costUsd === null ? null : `成本 ${formatUsd(run.costUsd)}${run.costNote ? "（不全）" : ""}`,
-    run.flowName === null ? null : run.caller ? `发起方 agent ${shortId(run.caller)}` : "从终端发起",
-    run.host ? `主机 ${run.host}` : null,
-  ].filter((fact): fact is string => fact !== null);
-
-  let why: string | null = null;
-  if (run.status === "stopped" && run.stop) {
-    why = `停在「${run.stop.phaseTitle ?? "阶段之外"}」：${run.stop.reason || "（没有说明原因）"}`;
-  } else if ((run.status === "failed" || run.status === "timeout") && run.error) {
-    why = `${run.error.name}：${run.error.message}`;
-  } else if (run.status === "running" || run.status === "lost" || run.status === "starting") {
-    why = run.activity;
-  } else if (run.status === "unreadable") {
-    why = run.problem;
-  }
-
+  const tone = run.hero?.tone ?? look.tone;
+  // A note means the figure leaves something out (Codex, calls still open): it is a lower bound.
+  const cost = run.costUsd === null ? "—" : `${run.costNote ? "至少 " : ""}${formatUsd(run.costUsd)}`;
+  const when = run.startedAt ? formatTime(run.startedAt, now) : "—";
+  const label = (
+    <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1 }}>
+      <Text style={[ui.styles.strong, { flexShrink: 0 }]} numberOfLines={1}>
+        {run.flowName ?? "（不是运行记录）"}
+      </Text>
+      <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
+        {run.inputLabel ?? shortId(run.runId)}
+      </Text>
+    </View>
+  );
+  const said = (
+    <Text style={{ color: tone === "neutral" || tone === "success" ? c.foregroundMuted : ui.tone(tone), fontSize: 13 }} numberOfLines={2}>
+      {sentence(run) ?? RUN_STATUS_LABEL[run.status]}
+    </Text>
+  );
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={`打开运行 ${run.flowName ?? run.runId}，${RUN_STATUS_LABEL[run.status]}`}
       onPress={() => onOpen(run.runId)}
-      style={({ pressed }) => [ui.styles.card, { opacity: pressed ? 0.7 : 1 }]}
+      style={({ pressed }) => ({
+        flexDirection: ui.compact ? "column" : "row",
+        alignItems: ui.compact ? "stretch" : "center",
+        gap: ui.compact ? 6 : 14,
+        paddingHorizontal: 14,
+        paddingVertical: 11,
+        borderBottomWidth: 1,
+        borderBottomColor: c.border,
+        backgroundColor: pressed ? c.surface2 : "transparent",
+      })}
     >
-      <View style={ui.styles.row}>
-        <Badge tone={look.tone} icon={look.icon} label={RUN_STATUS_LABEL[run.status]} />
-        <Text style={ui.styles.strong}>{run.flowName ?? "（不是运行记录）"}</Text>
-        <Text style={ui.styles.small}>{shortId(run.runId)}</Text>
-        {run.status === "running" && run.lastEventAt ? (
-          <Text style={ui.styles.small}>最新事件 {formatAgo(run.lastEventAt, now)}</Text>
-        ) : null}
+      <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start", flex: 1, minWidth: 0 }}>
+        <View style={{ width: 10, height: 10, borderRadius: 5, marginTop: 5, backgroundColor: ui.tone(tone) }} />
+        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+          {label}
+          {said}
+        </View>
       </View>
-      {run.description ? (
-        <Text style={ui.styles.muted} numberOfLines={ui.compact ? 2 : 1}>
-          {run.description}
+      <View style={{ width: ui.compact ? undefined : 180, paddingLeft: ui.compact ? 20 : 0 }}>
+        <Strip run={run} />
+      </View>
+      <View style={{ flexDirection: "row", gap: 14, paddingLeft: ui.compact ? 20 : 0, justifyContent: ui.compact ? "flex-start" : "flex-end" }}>
+        <Text style={[ui.styles.small, { width: ui.compact ? undefined : 64, textAlign: ui.compact ? "left" : "right" }]}>{cost}</Text>
+        <Text style={[ui.styles.small, { width: ui.compact ? undefined : 92, textAlign: ui.compact ? "left" : "right" }]}>
+          {when}
         </Text>
-      ) : null}
-      {facts.length > 0 ? <Text style={ui.styles.small}>{facts.join(" · ")}</Text> : null}
-      {why ? (
-        <Text style={{ color: ui.tone(run.status === "running" ? "neutral" : look.tone), fontSize: 13 }} numberOfLines={3}>
-          {why}
-        </Text>
-      ) : null}
+      </View>
     </Pressable>
   );
 }

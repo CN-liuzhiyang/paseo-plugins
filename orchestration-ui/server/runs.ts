@@ -3,6 +3,7 @@ import path from "node:path";
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { listRunsRpc, readRunRpc, RunSummary } from "../shared/rpc";
 import { activity } from "../shared/format";
+import { hero, inputLabel, phaseStrip } from "../shared/graph";
 import {
   applyEvent,
   costSoFar,
@@ -16,10 +17,11 @@ import {
 import { checkProcess, localProbe, type Probe } from "./alive";
 import { readFrom, readHeadLine, readTailLines, type Line } from "./lines";
 
-// Reading <logDir>/runs. A finished run is summarized from its first and last lines only, and
-// cached until the file changes. A run without run.end is folded in full -- the list has to know
-// what it is doing and which calls are open to tell running from lost -- but incrementally: each
-// listing reads only what was appended since the last one.
+// Reading <logDir>/runs. A run is folded in full -- the list has to know what it is doing, which
+// calls are open to tell running from lost, and how far each phase got -- but incrementally: each
+// listing reads only what was appended since the last one. A finished run is folded once and its
+// summary cached until the file changes; a finished run too big for that is summarized from its
+// first and last lines only.
 
 type ListOutput = RpcOutput<typeof listRunsRpc>;
 type ReadOutput = RpcOutput<typeof readRunRpc>;
@@ -27,6 +29,8 @@ type ReadOutput = RpcOutput<typeof readRunRpc>;
 const SUFFIX = ".jsonl";
 /** Past this size an unfinished run is summarized from head and tail, like a finished one. */
 const FOLD_LIMIT = 64 << 20;
+/** Past this size a finished run is summarized from head and tail: no phase strip. */
+const FINISHED_FOLD_LIMIT = 8 << 20;
 
 interface Finished {
   size: number;
@@ -64,8 +68,10 @@ export function summarize(
   now: number,
   staleMs: number,
   proc: ProcessCheck | null = null,
+  { whole = true }: { whole?: boolean } = {},
 ): RunSummary {
   const status = runStatus(run, now, staleMs, proc);
+  const top = run.start ? hero(run, status, now, { proc, staleMs }) : null;
   const end = run.end;
   let costUsd: number | null = null;
   let costNote: string | null = null;
@@ -95,6 +101,10 @@ export function summarize(
     problem: null,
     process: run.end ? null : proc,
     sizeBytes: size,
+    inputLabel: inputLabel(run.start),
+    hero: top ? { tone: top.tone, title: top.title } : null,
+    needsYou: top?.needsYou ?? false,
+    strip: whole && run.start ? phaseStrip(run, status) : null,
   };
 }
 
@@ -117,6 +127,10 @@ function unreadable(runId: string, size: number, problem: string): RunSummary {
     problem,
     process: null,
     sizeBytes: size,
+    inputLabel: null,
+    hero: null,
+    needsYou: false,
+    strip: null,
   };
 }
 
@@ -152,7 +166,8 @@ export function createRunIndex({ now = Date.now, probe = localProbe }: RunIndexO
       if (parsed.ok && (parsed.value as { kind?: unknown } | null)?.kind === "run.end") end = parsed.value;
     }
     if (end === null) return null;
-    return summarize(runId, foldEvents([start.value, end]), size, now(), 0);
+    if (size > FINISHED_FOLD_LIMIT) return summarize(runId, foldEvents([start.value, end]), size, now(), 0, null, { whole: false });
+    return summarize(runId, await fold(file, size), size, now(), 0);
   }
 
   async function fold(file: string, size: number): Promise<RunState> {
@@ -201,7 +216,7 @@ export function createRunIndex({ now = Date.now, probe = localProbe }: RunIndexO
         return parsed.ok ? [parsed.value] : [];
       });
       const run = foldEvents(events);
-      return summarize(runId, run, size, now(), staleMs, proc);
+      return summarize(runId, run, size, now(), staleMs, proc, { whole: false });
     }
     const run = await fold(file, size);
     if (!run.start && run.eventCount > 0) return unreadable(runId, size, "第一条事件不是 run.start");

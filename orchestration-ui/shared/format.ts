@@ -26,6 +26,18 @@ export function formatDuration(value: number | null): string {
   return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
 }
 
+/** The same, tight enough for a node: "42秒", "3分12秒", "1时05分". */
+export function formatShort(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "—";
+  if (value < 1_000) return "<1秒";
+  const seconds = Math.round(value / 1_000);
+  if (seconds < 60) return `${seconds}秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return seconds % 60 ? `${minutes}分${String(seconds % 60).padStart(2, "0")}秒` : `${minutes}分`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}时${String(minutes % 60).padStart(2, "0")}分`;
+}
+
 export function formatUsd(value: number | null): string {
   if (value === null) return "—";
   if (value === 0) return "$0";

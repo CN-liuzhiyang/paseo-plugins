@@ -63,6 +63,8 @@ export interface RunEnd {
   durationMs: number | null;
   cost: { totalUsd: number | null; agentCount: number | null; partial: string | null } | null;
   caveats: string[];
+  /** Newer runtimes: the flow's own one-line result. */
+  summary: string | null;
 }
 
 export interface AskInfo {
@@ -75,6 +77,8 @@ export interface AskInfo {
   schema: unknown;
   schemaFingerprint: string | null;
   timeout: string | null;
+  /** Newer runtimes: which output field is the call's one line. */
+  headline: string | null;
 }
 
 export interface GateInfo {
@@ -82,6 +86,10 @@ export interface GateInfo {
   content: string | null;
   sha256: string | null;
   timeout: string | null;
+  /** Where the carrier agent writes, the path the person sees on the card. */
+  holdPath: string | null;
+  provider: string | null;
+  fence: Fence | null;
 }
 
 export interface CallEnd {
@@ -105,6 +113,10 @@ export interface CallState {
   phase: string | null;
   /** Which entry into its phase this call belongs to, from 1; 0 outside a phase. */
   round: number;
+  /** Index into run.visits of the phase visit that was open when the call began; null outside one. */
+  visit: number | null;
+  /** Position in the stream when this call was first seen, to order it against phase visits. */
+  order: number;
   startedAt: string | null;
   ask: AskInfo | null;
   gate: GateInfo | null;
@@ -128,6 +140,18 @@ export interface PhaseState {
   callIds: string[];
 }
 
+/** One phase.start…phase.end: a phase entered n times has n visits. */
+export interface PhaseVisit {
+  phase: string;
+  /** Which entry into the phase this is, from 1. */
+  round: number;
+  startedAt: string;
+  endedAt: string | null;
+  ok: boolean | null;
+  callIds: string[];
+  order: number;
+}
+
 export interface LogEntry {
   at: string;
   level: "info" | "warn" | "error";
@@ -148,6 +172,9 @@ export interface RunState {
   eventCount: number;
   phaseOrder: string[];
   phases: Map<string, PhaseState>;
+  visits: PhaseVisit[];
+  /** Per phase, the visits entered and not yet left, innermost last. */
+  openVisits: Map<string, number[]>;
   callOrder: string[];
   calls: Map<string, CallState>;
   caveats: Caveat[];
@@ -171,6 +198,8 @@ export function createRun(): RunState {
     eventCount: 0,
     phaseOrder: [],
     phases: new Map(),
+    visits: [],
+    openVisits: new Map(),
     callOrder: [],
     calls: new Map(),
     caveats: [],
@@ -262,6 +291,8 @@ function callFor(run: RunState, callId: string): CallState {
       title: callId,
       phase: null,
       round: 0,
+      visit: null,
+      order: run.eventCount,
       startedAt: null,
       ask: null,
       gate: null,
@@ -354,14 +385,21 @@ export function applyEvent(run: RunState, raw: unknown): void {
         return;
       }
       const phase = phaseFor(run, id, ts);
+      const open = run.openVisits.get(id) ?? [];
+      run.openVisits.set(id, open);
       if (kind === "phase.start") {
         phase.starts += 1;
         phase.firstStartAt ??= ts;
         phase.lastStartAt = ts;
+        open.push(run.visits.length);
+        run.visits.push({ phase: id, round: phase.starts, startedAt: ts, endedAt: null, ok: null, callIds: [], order: run.eventCount });
       } else {
         phase.ends += 1;
         phase.lastEndAt = ts;
         if (raw.ok === false) phase.failedEnds += 1;
+        const visit = open.pop();
+        if (visit === undefined) problem(run, `${ts}：阶段「${id}」没有开着就结束了`);
+        else Object.assign(run.visits[visit]!, { endedAt: ts, ok: raw.ok === true });
       }
       return;
     }
@@ -385,6 +423,13 @@ export function applyEvent(run: RunState, raw: unknown): void {
         const phase = phaseFor(run, phaseId, ts);
         phase.callIds.push(callId);
         call.round = Math.max(phase.starts, 1);
+        // The innermost visit of that phase still open; none when the phase was not entered.
+        const visit = run.openVisits.get(phaseId)?.at(-1);
+        if (visit !== undefined) {
+          call.visit = visit;
+          call.round = run.visits[visit]!.round;
+          run.visits[visit]!.callIds.push(callId);
+        }
       }
       if (call.type === "ask") {
         call.ask = {
@@ -397,6 +442,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
           schema: raw.schema ?? null,
           schemaFingerprint: str(raw.schemaFingerprint),
           timeout: str(raw.timeout),
+          headline: str(raw.headline),
         };
       } else if (call.type === "gate") {
         call.gate = {
@@ -404,6 +450,9 @@ export function applyEvent(run: RunState, raw: unknown): void {
           content: str(raw.content),
           sha256: str(raw.sha256),
           timeout: str(raw.timeout),
+          holdPath: str(raw.holdPath),
+          provider: str(raw.provider),
+          fence: fenceOf(raw.fence),
         };
       }
       return;
@@ -480,6 +529,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         durationMs: num(raw.durationMs),
         cost,
         caveats: Array.isArray(raw.caveats) ? raw.caveats.filter((c): c is string => typeof c === "string") : [],
+        summary: str(raw.summary),
       };
       return;
     }

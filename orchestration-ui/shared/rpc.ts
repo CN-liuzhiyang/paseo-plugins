@@ -42,6 +42,21 @@ export const runSummary = z.object({
   problem: z.string().nullable(),
   process: processCheck,
   sizeBytes: z.number(),
+  /** The input value that tells this run from the others (shared/graph.ts inputLabel). */
+  inputLabel: z.string().nullable(),
+  /** The detail view's one sentence (shared/graph.ts hero), for the row. */
+  hero: z.object({ tone: z.enum(["neutral", "accent", "success", "warning", "danger"]), title: z.string() }).nullable(),
+  /** A person has to act: a gate is waiting, or the run is lost. */
+  needsYou: z.boolean(),
+  /** One segment per declared phase; null when the file was too big to fold for a row. */
+  strip: z
+    .array(
+      z.object({
+        title: z.string(),
+        state: z.enum(["done", "running", "waiting", "failed", "stopped", "interrupted", "pending", "skipped"]),
+      }),
+    )
+    .nullable(),
 });
 export type RunSummary = z.output<typeof runSummary>;
 

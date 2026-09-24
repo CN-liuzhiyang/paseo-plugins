@@ -17,6 +17,8 @@ export interface Ui {
   navigation: Navigation;
   styles: ReturnType<typeof makeStyles>;
   tone(tone: Tone): string;
+  /** A tone as a faint wash over the current surface; works on light and dark themes alike. */
+  tint(tone: Tone, alpha?: number): string;
 }
 
 const UiContext = createContext<Ui | null>(null);
@@ -25,6 +27,18 @@ export function useUi(): Ui {
   const ui = useContext(UiContext);
   if (!ui) throw new Error("useUi outside UiProvider");
   return ui;
+}
+
+/** "#rgb", "#rrggbb" or "rgb(…)" with an alpha; anything else is returned as is. */
+function withAlpha(color: string, alpha: number): string | null {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color.trim());
+  if (hex) {
+    const digits = hex[1]!.length === 3 ? [...hex[1]!].map((d) => d + d).join("") : hex[1]!;
+    const [r, g, b] = [0, 2, 4].map((i) => parseInt(digits.slice(i, i + 2), 16));
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  const rgb = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i.exec(color.trim());
+  return rgb ? `rgba(${rgb[1]}, ${rgb[2]}, ${rgb[3]}, ${alpha})` : null;
 }
 
 export const MONO = Platform.select({
@@ -82,8 +96,17 @@ export function UiProvider({ props, children }: { props: PluginSurfaceProps; chi
       navigation,
       styles: makeStyles(theme, layout.compact),
       tone: (tone) => tones[tone],
+      tint: (tone, alpha = 0.12) => withAlpha(tones[tone], alpha) ?? c.surface2,
     };
   }, [theme, layout.compact, navigation]);
+  return <UiContext.Provider value={ui}>{children}</UiContext.Provider>;
+}
+
+/**
+ * Carries the context into content the host renders elsewhere: its Modal is not inside the
+ * surface's tree, so anything using useUi() there needs the value handed across.
+ */
+export function ProvideUi({ ui, children }: { ui: Ui; children: ReactNode }) {
   return <UiContext.Provider value={ui}>{children}</UiContext.Provider>;
 }
 
@@ -202,6 +225,70 @@ export function LinkButton({ icon, label, onPress }: { icon: string; label: stri
       <Text style={{ color: ui.theme.colors.foreground, fontSize: 12 }}>{label}</Text>
     </Pressable>
   );
+}
+
+/** A real button: filled for the one thing to do, outlined otherwise. */
+export function Button({
+  icon,
+  label,
+  onPress,
+  primary = false,
+  wide = false,
+}: {
+  icon?: string;
+  label: string;
+  onPress(): void;
+  primary?: boolean;
+  wide?: boolean;
+}) {
+  const ui = useUi();
+  const c = ui.theme.colors;
+  const fg = primary ? c.surface0 : c.foreground;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        paddingHorizontal: 14,
+        paddingVertical: 8,
+        borderRadius: 8,
+        borderWidth: 1,
+        borderColor: primary ? c.foreground : c.border,
+        backgroundColor: primary ? c.foreground : c.surface1,
+        alignSelf: wide ? "stretch" : "flex-start",
+        opacity: pressed ? 0.75 : 1,
+      })}
+    >
+      {icon ? <Icon name={icon} size={14} color={fg} /> : null}
+      <Text style={{ color: fg, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/** Opens an agent in Paseo; says why not when the run lives on another daemon or the host cannot. */
+export function OpenAgent({
+  agentId,
+  remote,
+  label = "在 Paseo 中打开这个 agent",
+  primary = false,
+  wide = false,
+}: {
+  agentId: string;
+  remote: boolean;
+  label?: string;
+  primary?: boolean;
+  wide?: boolean;
+}) {
+  const ui = useUi();
+  const open = ui.navigation?.openAgent;
+  if (remote) return <Text style={ui.styles.small}>这个 agent 在另一台主机上，这里打不开。</Text>;
+  if (!open) return <Text style={ui.styles.small}>这个版本的 Paseo 不支持从插件打开 agent。</Text>;
+  return <Button icon="ExternalLink" label={label} primary={primary} wide={wide} onPress={() => open({ agentId })} />;
 }
 
 export function CopyButton({ text, label = "复制" }: { text: string; label?: string }) {

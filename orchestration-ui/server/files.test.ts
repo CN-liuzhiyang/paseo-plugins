@@ -124,6 +124,15 @@ test("list summarizes every fixture and orders by start", async () => {
   // Another machine's pid cannot be checked: the threshold decided.
   assert.equal(byId["survey-unfinished"]!.process, null);
   assert.equal(byId["broken"]!.status, "unreadable");
+  // Finished runs are folded whole once, so the row has the detail view's sentence and phase strip.
+  assert.deepEqual(
+    byId["hotfix-stopped"]!.strip?.map((segment) => segment.state),
+    ["done", "done", "done", "done", "stopped", "skipped"],
+  );
+  assert.equal(byId["advisor-failed"]!.hero?.title, "「第二意见」没拿到结果：paseo run 等了 10m 仍未返回");
+  assert.equal(byId["committee-done"]!.inputLabel, "编排运行时的裁决者（assess）该不该默认用比成员便宜的模型？");
+  assert.equal(byId["survey-unfinished"]!.needsYou, true);
+  assert.equal(byId["committee-done"]!.needsYou, false);
   assert.deepEqual(
     listed.runs.filter((run) => run.startedAt).map((run) => run.runId),
     [ids["survey-unfinished"], ids["committee-done"], ids["hotfix-stopped"], ids["advisor-failed"]],

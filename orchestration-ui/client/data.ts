@@ -41,6 +41,8 @@ export function useRunList(): { data: RunList | null; error: string | null } {
 
 export interface RunSnapshot {
   run: RunState;
+  /** The parsed lines as read, for the events view. Appended in place like `run`. */
+  events: unknown[];
   /** Bumped on every fold; the run object itself is mutated in place. */
   version: number;
   loaded: boolean;
@@ -58,6 +60,7 @@ export function useRun(runId: string): RunSnapshot {
   const read = useRpc(readRunRpc);
   const [snapshot, setSnapshot] = useState<RunSnapshot>(() => ({
     run: createRun(),
+    events: [],
     version: 0,
     loaded: false,
     state: null,
@@ -71,6 +74,7 @@ export function useRun(runId: string): RunSnapshot {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let run = createRun();
+    let events: unknown[] = [];
     let offset = 0;
     let version = 0;
     const tick = async () => {
@@ -78,14 +82,19 @@ export function useRun(runId: string): RunSnapshot {
       try {
         const chunk = await read({ runId, offset, probe: run.end === null });
         if (cancelled) return;
-        if (chunk.reset) run = createRun();
+        if (chunk.reset) {
+          run = createRun();
+          events = [];
+        }
         foldEvents(chunk.events, run);
+        for (const event of chunk.events) events.push(event);
         for (const bad of chunk.badLines) run.problems.push(`字节 ${bad.offset} 处的一行不是 JSON（${bad.error}）`);
         offset = chunk.nextOffset;
         const ended = run.end !== null && !chunk.more;
         version += 1;
         setSnapshot({
           run,
+          events,
           version,
           loaded: true,
           state: chunk.state,
