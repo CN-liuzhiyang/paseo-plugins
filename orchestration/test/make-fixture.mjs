@@ -8,7 +8,7 @@
 // member's answer fails (a failed call.end, and the member keeps its
 // position), the assessor asks again, both answer, and the third assessment
 // converges in round three -- so the fixture holds concurrent calls, a failure, phases
-// re-entered, caveats and costs. Local paths are replaced so the file is the
+// re-entered, agents announced mid-call, caveats and costs. Local paths are replaced so the file is the
 // same on every machine.
 
 import { mkdtemp, writeFile } from "node:fs/promises";
@@ -38,11 +38,17 @@ const result = await runFlow(path.join(ROOT, "flows", "committee.mjs"), {
   logDir,
   cwd: "D:/work/project",
   caller: "fake-caller-agent",
+  // Found while the calls run (40-120ms), so the fixture shows call.agent.
+  agentProbeDelays: [10, 20, 40],
 });
 
-// Only run.start names a local path, and only in `source`.
+// Only run.start names this machine: `source`, `pid`, `hostname`.
 const lines = readEvents(result.events).map((event) =>
-  JSON.stringify(event.kind === "run.start" ? { ...event, source: "/path/to/paseo-plugins/orchestration/flows/committee.mjs" } : event),
+  JSON.stringify(
+    event.kind === "run.start"
+      ? { ...event, source: "/path/to/paseo-plugins/orchestration/flows/committee.mjs", pid: 4242, hostname: "fixture-host" }
+      : event,
+  ),
 );
 await writeFile(target, `${lines.join("\n")}\n`, "utf8");
 const problems = checkEvents(readEvents(target), { strict: true, complete: true });

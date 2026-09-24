@@ -14,6 +14,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import path from "node:path";
 import { format } from "node:util";
 import { loadFlow, describeFlow, scanSource, DEFAULT_GRANTS } from "./flow.mjs";
@@ -31,6 +32,12 @@ export const DEFAULT_CALL_TIMEOUT = "30m";
 const GATE_ROLE = "fast";
 /** `do` outputs are the script's own values, often file contents; the event keeps a prefix. */
 const DO_STRING_LIMIT = 2_000;
+/**
+ * When to look for an ask's agent while the call runs: `run --output-schema`
+ * does not return its id, so it is found by label, in the background, a few
+ * times at most. Milliseconds after the call starts, between attempts.
+ */
+const AGENT_PROBE_DELAYS = [3_000, 5_000, 10_000, 20_000, 40_000];
 /** setTimeout's ceiling; past it Node fires after 1ms, which would time a run out at its first call. */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
@@ -121,13 +128,14 @@ function checkKeys(where, object, allowed) {
  *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
- *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number }} [options]
+ *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
+ *           agentProbeDelays?: number[] }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
  *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays"]);
 
   // --- Before anything is spent -----------------------------------------
   let loaded;
@@ -168,6 +176,7 @@ export async function runFlow(target, options = {}) {
   const host = options.host ?? null;
   const caller = options.caller !== undefined ? options.caller : (process.env.PASEO_AGENT_ID ?? null);
   const gatePollMs = options.gatePollMs ?? 10_000;
+  const agentProbeDelays = options.agentProbeDelays ?? AGENT_PROBE_DELAYS;
 
   const runId = randomUUID();
   const dir = options.logDir ?? configuredLogDir();
@@ -183,10 +192,14 @@ export async function runFlow(target, options = {}) {
   const spent = new Map(); // agentId -> cost
   const caveats = [];
   let calls = 0;
-  // Set the moment the flow's outcome is decided. A flow still running past
-  // a timeout (or a branch nobody awaited) keeps executing; from here on it
+  // Set the moment the flow's outcome is decided: when it returns, throws or
+  // times out, or when it first calls $.stop. Code still running after that
+  // (past a timeout, an unawaited branch, a flow that caught its own stop)
   // may not start a call or a phase -- nothing new is spent or recorded.
   let ending = false;
+  // The first $.stop, recorded when it is called rather than when it reaches
+  // the runner: a flow that catches it still ends as stopped.
+  let stopped = null;
 
   const caveat = (text, callId) => {
     if (caveats.includes(text)) return;
@@ -210,6 +223,29 @@ export async function runFlow(target, options = {}) {
     if (!agentId) return { agentId: null, cost: null };
     const detail = await executor.inspect(agentId).catch(() => null);
     return { agentId, cost: detail?.usage ? { usd: detail.usage.usd, inputTokens: detail.usage.inputTokens, outputTokens: detail.usage.outputTokens } : null };
+  };
+
+  // A call's agent, announced once, while the call is still open, so a
+  // reader can open it before the call ends.
+  const announceAgent = (record, agentId) => {
+    if (record.announced || !agentId || !open.has(record.callId)) return;
+    record.announced = true;
+    record.agentId = agentId;
+    log.emit("call.agent", { callId: record.callId, agentId });
+  };
+
+  // Look for an ask's agent by label in the background. A lookup that fails
+  // or finds nothing is tried again later, a bounded number of times; none
+  // of it touches the call itself.
+  const probeAgent = (record, attempt = 0) => {
+    if (attempt >= agentProbeDelays.length) return;
+    const timer = setTimeout(async () => {
+      if (record.announced || !open.has(record.callId)) return;
+      const agentId = await executor.findAgent(record.labels).catch(() => null);
+      if (agentId) announceAgent(record, agentId);
+      else probeAgent(record, attempt + 1);
+    }, agentProbeDelays[attempt]);
+    timer.unref?.();
   };
 
   const endCall = (record, { ok, output, error, agentId, cost }) => {
@@ -270,6 +306,7 @@ export async function runFlow(target, options = {}) {
         timeout,
       });
       if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
+      probeAgent(record);
 
       let output = null;
       let failure = null;
@@ -358,7 +395,7 @@ export async function runFlow(target, options = {}) {
             prompt: composePrompt(bound, prompt),
             cwd: path.dirname(holdPath),
           });
-          record.agentId = agentId;
+          announceAgent(record, agentId);
           return agentId;
         },
         inspect: (agentId) => executor.inspect(agentId),
@@ -395,8 +432,9 @@ export async function runFlow(target, options = {}) {
         end(true);
         return value;
       } catch (error) {
-        // $.stop is how a flow ends on purpose, not a failure of the phase.
-        end(error instanceof StopSignal);
+        // $.stop is how a flow ends on purpose, not a failure of the phase;
+        // neither is a RunEnded that the stop caused.
+        end(error instanceof StopSignal || (stopped !== null && error instanceof RunEnded));
         throw error;
       }
     },
@@ -416,10 +454,20 @@ export async function runFlow(target, options = {}) {
       return settled.map((s) => (s.status === "fulfilled" ? { ok: true, value: s.value } : { ok: false, error: s.reason }));
     },
 
-    /** End the flow here, on purpose. Do not catch what this throws. */
+    /**
+     * End the flow here, on purpose. The stop is recorded now, the first one
+     * wins, and from here no call or phase can start: catching what this
+     * throws does not undo it, and the run ends as stopped whatever the flow
+     * does next. Called after the outcome is already decided, it records nothing.
+     */
     stop(reason, value = null) {
       if (typeof reason !== "string" || reason.trim() === "") throw new TypeError("$.stop needs a reason");
-      throw new StopSignal(reason, value, currentPhase());
+      const signal = new StopSignal(reason, value, currentPhase());
+      if (!ending) {
+        stopped = signal;
+        ending = true;
+      }
+      throw signal;
     },
 
     log: Object.freeze({
@@ -439,7 +487,9 @@ export async function runFlow(target, options = {}) {
 
   // --- Run and settle -----------------------------------------------------
   const startedAt = Date.now();
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host });
+  // pid and hostname let a reader on the same machine ask whether the run is
+  // still alive instead of guessing from the time of the last event.
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname() });
 
   let outcome;
   let value = null;
@@ -470,6 +520,14 @@ export async function runFlow(target, options = {}) {
     if (timer) clearTimeout(timer);
   }
   ending = true;
+  // A recorded stop decides the outcome, whether or not the flow caught it
+  // and whatever it returned or threw afterwards.
+  if (stopped) {
+    outcome = "stopped";
+    value = stopped.value;
+    stop = { reason: stopped.reason, phase: stopped.phase };
+    error = null;
+  }
 
   // Calls still in flight (a timeout, or a flow that threw without awaiting
   // everything it started) are closed here, so every call.start has its

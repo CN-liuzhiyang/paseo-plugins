@@ -61,18 +61,19 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里） | `call.start`/`call.end`，`type: "ask"` |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里） | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.do(name, fn)` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值 | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, brief?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`holdPath` 不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
 | `$.all(tasks)` | 并发，等全部结束。**永不因为某个任务失败而 reject**，返回 `[{ ok: true, value } \| { ok: false, error }]`，和 `tasks` 一一对应。任务可以是 promise 或返回 promise 的函数 | 无（并发看调用的时间重叠） |
-| `$.stop(reason, value)` | flow 主动停下，`value` 是部分结果。它靠抛出实现，**不要 catch 它**；`$.all` 里的任务调了它，等全部任务结束后照样停 | `run.end.outcome = "stopped"` |
+| `$.stop(reason, value)` | flow 主动停下，`value` 是部分结果。调用的那一刻运行器就记下这次停止（第一次为准），之后任何新的调用、阶段都抛 `RunEnded`。它也会抛出以便中断当前代码，但**接住它没有用**：结局照样是 `stopped`，接住之后想接着花钱会被拦下。`$.all` 里某个任务调了它，其他任务里已经在跑的调用照常结束，新的起不来 | `run.end.outcome = "stopped"` |
 | `$.log.info/warn/error(...)` | 给人看的一行，参数按 `util.format` 拼 | `log` |
 | `$.ctx` | 只读：`runId`、`caller`、`cwd`、`host`、`runDir`、`events`（事件文件路径）、`role(name)`（解析角色，没有就抛错） | — |
 
 `return value` 就是 `outcome: "done"`。抛错是 `failed`，超过 `--timeout` 是 `timeout`；这两种运行器都照样
-写 `run.end`、收成本、带 caveats。结局一定下来，flow 里还在跑的代码（超时后的后台部分、没 await 的分支）
-再调任何原语都会抛 `RunEnded`：不会再花钱，也不会再往事件里写。
+写 `run.end`、收成本、带 caveats。结局一定下来（flow 返回、抛错、超时，或第一次 `$.stop`），flow 里还在跑的
+代码（超时后的后台部分、没 await 的分支、接住了 stop 的 catch）再调任何原语都会抛 `RunEnded`：不会再花钱，
+也不会再往事件里写。
 
 **`$.all` 的返回形状是刻意的**：R6 以前是约定（"用 `Promise.allSettled`"），committee 手写了 `failures`；
 现在失败的任务只是数组里 `ok: false` 的一项，已经付费的结果不会被另一个失败吃掉——除非脚本自己去扔。

@@ -11,11 +11,15 @@
 ## 存放
 
 - 一次运行一个文件：`<logDir>/runs/<runId>.jsonl`，只追加，一行一个 JSON 对象，UTF-8，`\n` 结尾。
+  文件名去掉 `.jsonl` 就是 `runId`，与文件里每一行的 `runId` 相同。
+- `run.end` 是最后一行，之后不会再有任何行（包括运行结束后才返回的调用）。
 - `logDir` 的解析顺序与运行时一致：环境变量 `ORCH_LOG_DIR` → `~/.paseo-orchestration/config.json`
   的 `logDir` → `~/.paseo-orchestration/logs`。
 - 读者可以按字节偏移增量读取；最后一行可能是写了一半的（没有 `\n` 结尾），读者要忽略它，下次再读。
-- 没有 `run.end` 的文件表示运行还没结束，**或者进程死了**。读者用最后一条事件的 `ts` 判断：
-  很久没有新事件、又没有 `run.end`，显示为"失联"，不要显示为"运行中"。
+- 没有 `run.end` 的文件表示运行还没结束，**或者进程死了**。和运行在同一台机器上的读者（`run.start.hostname`
+  等于本机 hostname）直接查 `run.start.pid` 这个进程还在不在；进程不在又没有 `run.end`，就是死了。别的
+  机器上的读者只能用最后一条事件的 `ts` 判断：很久没有新事件、又没有 `run.end`，显示为"失联"，不要显示为
+  "运行中"。pid 会被系统复用，所以"进程在"只说明可能还活着，配合 `ts` 看。
 - 运行在第一笔花费之前被拒（输入不合 `inputs`、flow 加载失败、源码扫描发现未声明的阶段）时**不产生
   文件**：运行没有开始。调用方从异常里拿到原因。
 
@@ -41,6 +45,8 @@
 | `caller` | string \| null | 发起方 Paseo agent id（`PASEO_AGENT_ID`），终端里跑为 null |
 | `cwd` | string | 运行时的工作目录 |
 | `host` | string \| null | `--host`，本机为 null |
+| `pid` | number | 跑这次运行的进程 id |
+| `hostname` | string | 跑这次运行的机器，Node 的 `os.hostname()` |
 
 ### `phase.start` / `phase.end`
 
@@ -63,6 +69,10 @@
 | `name` | string | `ask`：step 名；`do`：动作名；`gate`：`"gate"` |
 | `title` | string | 给人看的标题（`do` 与 `name` 相同） |
 | `phase` | string \| null | 所在阶段，不在任何阶段内为 null |
+
+所有 `timeout` 字段是运行时 `parseDuration` 接受的格式：正则 `^\d+(s|m|h)$`，即一个非负整数紧跟一个单位
+`s`（秒）、`m`（分）、`h`（时），例如 `90s`、`12m`、`2h`。没有小数、空格、组合（`1h30m` 不合法）。
+`ask` 的是单次调用的上限（step 的 `timeout`，没写时为 `30m`）；`gate` 的是等人的上限（默认 `2h`）。
 
 `type: "ask"` 另有：
 
@@ -91,6 +101,22 @@
 | `fence` | object | 同 `ask`，`mode` 是"每次写都要人批"那一档 |
 | `prompt` | string | 实际发给载体的完整 prompt（含 `brief`，`brief` 过长时被截断的那份） |
 
+### `call.agent`
+
+一知道某个调用对应哪个 Paseo agent 就发一条，让人在调用进行中就能点进那个 agent 看。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId` | string | |
+| `agentId` | string | |
+
+- 只有 `ask` 和 `gate` 会有；`do` 没有。
+- 每个调用**最多一条**，而且一定在该调用的 `call.end` 之前；调用结束后不再为它发。
+- `gate` 在载体 agent 起来之后立刻发。`ask` 的 agent id 不会随 `run --output-schema` 返回，运行时在后台按
+  标签找：调用开始后约 3 秒找第一次，找不到就隔一段再试，总共最多 5 次（约 78 秒内）。所以短调用、
+  或者一直没找到的调用，**可能没有** `call.agent`——那时以 `call.end.agentId` 为准。
+- 两条都有时，`call.end.agentId` 与 `call.agent.agentId` 相同。
+
 ### `call.end`
 
 | 字段 | 类型 | 含义 |
@@ -110,6 +136,19 @@
 `gate` 的 `output` 就是现有 `requestApproval()` 的判定对象，字段不变：
 `{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision }`。
 
+`gate` 的 `call.end.ok` 说的是**人闸这个机制**有没有正常走完，不是人批没批：拒绝、过期、内容不一致、
+甚至判定为 `error`（内容太长起不了卡片、轮询一直失败）都是 `ok: true`，结论看 `output.outcome`
+（或 `output.approved`）。`ok: false` 只在人闸自身抛错时出现（例如起载体 agent 失败），这时 `output` 为 null。
+
+`by` 的取值是封闭集合，v1 只有这四个，和 `outcome` 的对应关系固定：
+
+| `by` | 何时 |
+|---|---|
+| `"unattributed (Paseo does not record who answered)"` | `allowed`、`denied`、`mismatch`：有人（或别的进程）应答了卡片，Paseo 不记录是谁 |
+| `"gate timeout"` | `expired`：到期没人应答，运行时替人拒绝 |
+| `"nobody (gate lost sight of the request)"` | `error`：轮询 agent 状态连续失败，不知道发生了什么 |
+| `"nobody (no card was raised)"` | `error`：内容太长，载体 prompt 超限，卡片没起 |
+
 ### `caveat`
 
 | 字段 | 类型 | 含义 |
@@ -127,16 +166,16 @@
 | `level` | `"info"` \| `"warn"` \| `"error"` | |
 | `message` | string | |
 
-### `run.end`（正常情况下是最后一行）
+### `run.end`（最后一行）
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 主动停下（`$.stop`）；`failed`：抛错；`timeout`：超出运行总时限 |
+| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`）；`failed`：抛错；`timeout`：超出运行总时限 |
 | `value` | any | `done` / `stopped` 时 flow 给出的结果 |
 | `stop` | `{ reason: string, phase: string \| null }` \| null | 仅 `stopped` |
 | `error` | `{ name, message }` \| null | 仅 `failed` / `timeout` |
 | `durationMs` | number | |
-| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 说明它少算了什么 |
+| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 只算最后一轮 `LastUsage`；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
 | `caveats` | string[] | 本次运行所有 caveat 的去重列表 |
 
 ## 演进规则

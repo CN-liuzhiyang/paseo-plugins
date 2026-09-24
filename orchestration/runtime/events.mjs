@@ -95,6 +95,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const phaseDepth = new Map();
   const calls = new Map(); // callId -> call.start
   const ended = new Set();
+  const agents = new Map(); // callId -> agentId from call.agent
   const caveatTexts = new Set();
   let runEnd = null;
 
@@ -124,6 +125,8 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, isNullableString(event.caller), "caller is not string | null");
         need(event, isString(event.cwd), "cwd is not a string");
         need(event, isNullableString(event.host), "host is not string | null");
+        need(event, Number.isInteger(event.pid) && event.pid > 0, "pid is not a positive integer");
+        need(event, isString(event.hostname) && event.hostname.length > 0, "hostname is not a string");
         break;
       }
       case "phase.start":
@@ -171,6 +174,19 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         break;
       }
+      case "call.agent": {
+        const start = calls.get(event.callId);
+        if (!start) {
+          bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
+          break;
+        }
+        need(event, start.type !== "do", "a do call has no agent");
+        need(event, !ended.has(event.callId), "call.agent after the call's call.end");
+        need(event, !agents.has(event.callId), "second call.agent for this call");
+        need(event, isString(event.agentId) && event.agentId.length > 0, "agentId is not a string");
+        agents.set(event.callId, event.agentId);
+        break;
+      }
       case "call.end": {
         const start = calls.get(event.callId);
         if (!start) {
@@ -186,6 +202,9 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, event.ok ? event.error === null : event.error !== null, "ok and error disagree");
         need(event, isNullableString(event.agentId), "agentId is not string | null");
         if (start.type === "do") need(event, event.agentId === null, "a do call has no agent");
+        if (agents.has(event.callId) && event.agentId !== null) {
+          need(event, event.agentId === agents.get(event.callId), "agentId differs from the call's call.agent");
+        }
         need(
           event,
           event.cost === null ||

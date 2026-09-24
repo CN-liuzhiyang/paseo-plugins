@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
+import process from "node:process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFlow, RunRefused } from "../runtime/run.mjs";
@@ -30,7 +31,8 @@ before(async () => {
   logDir = await mkdtemp(path.join(os.tmpdir(), "orch-test-"));
 });
 
-const run = (target, options) => runFlow(target, { roster, logDir, cwd: "C:/work", caller: null, gatePollMs: 5, ...options });
+const run = (target, options) =>
+  runFlow(target, { roster, logDir, cwd: "C:/work", caller: null, gatePollMs: 5, agentProbeDelays: [5, 10, 20], ...options });
 
 /** Events of a finished run, checked against the contract. */
 function eventsOf(result) {
@@ -39,12 +41,15 @@ function eventsOf(result) {
   return events;
 }
 
-const kinds = (events) => events.map((e) => (e.kind.startsWith("call.") ? `${e.kind}:${e.callId}` : e.kind.startsWith("phase.") ? `${e.kind}:${e.phase}` : e.kind));
+const kinds = (events) =>
+  events
+    .filter((e) => e.kind !== "call.agent")
+    .map((e) => (e.kind.startsWith("call.") ? `${e.kind}:${e.callId}` : e.kind.startsWith("phase.") ? `${e.kind}:${e.phase}` : e.kind));
 
 const COMMITTEE_INPUT = { question: "Why does the cache miss?", committee: "cheap", rounds: 3, assessor: "worker" };
 
 test("committee: two rounds, converges, every event in the contract", async () => {
-  const executor = fakeExecutor({ answer: committeeAnswers({ convergeAt: 2 }) });
+  const executor = fakeExecutor({ answer: committeeAnswers({ convergeAt: 2 }), delayMs: 60 });
   const result = await run(committee, { input: COMMITTEE_INPUT, executor });
 
   assert.equal(result.outcome, "done");
@@ -79,6 +84,15 @@ test("committee: two rounds, converges, every event in the contract", async () =
     assert.match(end.agentId, /^fake-agent-/);
     assert.deepEqual(end.cost, { usd: 0.01, inputTokens: 1200, outputTokens: 300 });
   }
+  // Each call's agent was announced while the call ran, once, and matches call.end.
+  for (const end of ends) {
+    const announced = events.filter((e) => e.kind === "call.agent" && e.callId === end.callId);
+    assert.equal(announced.length, 1, end.callId);
+    assert.ok(announced[0].seq < end.seq, `${end.callId}: call.agent comes before call.end`);
+    assert.equal(announced[0].agentId, end.agentId);
+  }
+  assert.equal(events[0].pid, process.pid);
+  assert.equal(events[0].hostname, os.hostname());
   assert.equal(result.cost.agentCount, 6);
   assert.ok(Math.abs(result.cost.totalUsd - 0.06) < 1e-9);
   // Unenforced effects are said once per provider family.
@@ -195,6 +209,100 @@ test("$.phase / $.do / $.log / $.stop: stop inside a phase ends it cleanly and n
   assert.equal(events[5].ok, true, "a stop is not a failed phase");
 });
 
+test("$.stop cannot be swallowed: caught and returned, the run is still stopped", async () => {
+  const f = flow({
+    name: "swallow",
+    description: "d",
+    phases: [{ id: "one", title: "One" }],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      await $.phase("one", async () => {
+        try {
+          $.stop("first reason", { partial: 1 });
+        } catch {
+          // swallowed
+        }
+        try {
+          $.stop("second reason", { partial: 2 });
+        } catch {
+          // the first stop wins
+        }
+      });
+      return "carried on";
+    },
+  });
+  const result = await run(f, { executor: fakeExecutor() });
+  assert.equal(result.outcome, "stopped");
+  assert.deepEqual(result.stop, { reason: "first reason", phase: "one" });
+  assert.deepEqual(result.value, { partial: 1 });
+  const events = eventsOf(result);
+  assert.deepEqual(events.find((e) => e.kind === "phase.end").ok, true);
+});
+
+test("$.stop cannot be swallowed: spending after a caught stop is refused", async () => {
+  const executor = fakeExecutor({ answer: () => ({ said: "a" }) });
+  const f = flow({
+    name: "spend-after",
+    description: "d",
+    phases: [{ id: "later", title: "Later" }],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      try {
+        $.stop("done here");
+      } catch {
+        // swallowed
+      }
+      const refused = [];
+      for (const attempt of [() => $.ask(echo, { word: "a" }, { role: "fast" }), () => $.phase("later", async () => 1), () => $.do("write", () => 1)]) {
+        await attempt().catch((error) => refused.push(error.name));
+      }
+      throw new Error(`carried on and failed after: ${refused.join(",")}`);
+    },
+  });
+  const result = await run(f, { executor });
+  assert.equal(result.outcome, "stopped");
+  assert.equal(result.error, null);
+  assert.equal(result.stop.reason, "done here");
+  assert.equal(executor.requests.length, 0, "nothing was sent after the stop");
+  const events = eventsOf(result);
+  assert.ok(!events.some((e) => e.kind === "call.start" || e.kind === "phase.start"));
+  assert.match(events.find((e) => e.kind === "log").message, /RunEnded,RunEnded,RunEnded/);
+});
+
+test("$.stop inside one $.all task: siblings cannot start new calls, calls in flight finish", async () => {
+  const executor = fakeExecutor({ answer: () => ({ said: "a" }), delayMs: 30 });
+  const f = flow({
+    name: "stop-in-all",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      const results = await $.all([
+        () => $.ask(echo, { word: "a" }, { role: "fast" }),
+        async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          $.stop("enough");
+        },
+        async () => {
+          await new Promise((r) => setTimeout(r, 15));
+          return $.ask(echo, { word: "b" }, { role: "fast" });
+        },
+      ]).catch((error) => error);
+      return results;
+    },
+  });
+  const result = await run(f, { executor });
+  assert.equal(result.outcome, "stopped");
+  assert.equal(result.stop.reason, "enough");
+  assert.equal(executor.requests.length, 1, "the late sibling was refused");
+  const events = eventsOf(result);
+  const end = events.find((e) => e.kind === "call.end");
+  assert.equal(end.ok, true, "the call already in flight finished normally");
+});
+
 test("$.all settles every task; one failure keeps the others' results", async () => {
   const f = flow({
     name: "fan",
@@ -271,6 +379,9 @@ test("$.gate: approved, denied, expired; the decision is the output; gate:deny i
   assert.ok(start.prompt.startsWith("checks passed"), "the carrier's prompt as sent is recorded");
   const end = events.find((e) => e.kind === "call.end");
   assert.equal(end.agentId, approved.value.agentId);
+  const announced = events.find((e) => e.kind === "call.agent");
+  assert.equal(announced.agentId, approved.value.agentId, "the carrier is announced as soon as it is spawned");
+  assert.ok(announced.seq < end.seq);
   assert.ok(approved.caveats.some((c) => c.includes("unattributed")));
 
   const denied = await run(gated("1m"), { executor: fakeExecutor({ carrier: "deny" }) });
@@ -472,7 +583,7 @@ test("CLI arguments are parsed by the flow's input types", async () => {
 
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
-    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null },
+    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h" },
     { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [] },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);
@@ -482,6 +593,15 @@ test("checkEvents catches what a reader would trip on", () => {
   assert.match(checkEvents([good[0], { ...good[1], outcome: "stopped" }]).join(), /stop must be/);
   assert.match(checkEvents([good[0], { ...good[1], kind: "future.thing" }], { strict: true }).join(), /not in the contract/);
   assert.deepEqual(checkEvents([good[0], { ...good[1], kind: "future.thing" }]), [], "readers ignore unknown kinds");
+  const t = "2026-09-24T00:00:00.500Z";
+  const call = [
+    good[0],
+    { v: 1, seq: 1, ts: t, runId: "r", kind: "call.start", callId: "c1", type: "do", name: "x", title: "x", phase: null },
+    { v: 1, seq: 2, ts: t, runId: "r", kind: "call.agent", callId: "c1", agentId: "a" },
+  ];
+  assert.match(checkEvents(call).join(), /a do call has no agent/);
+  const { pid, ...noPid } = good[0];
+  assert.match(checkEvents([noPid]).join(), /pid is not a positive integer/);
 });
 
 test("the committed committee fixture conforms to the contract", async () => {
