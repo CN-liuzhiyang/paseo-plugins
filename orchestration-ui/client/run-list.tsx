@@ -30,7 +30,7 @@ function grouped(runs: RunSummary[]): Group[] {
   ].filter((group) => group.runs.length > 0);
 }
 
-export function RunList({ onOpen, onSettings }: { onOpen(runId: string): void; onSettings(): void }) {
+export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(runId: string): void; onSettings(): void }) {
   const ui = useUi();
   const { data, error } = useRunList();
   const live = data?.runs.some((run) => run.status === "running" || run.status === "starting") ?? false;
@@ -40,7 +40,7 @@ export function RunList({ onOpen, onSettings }: { onOpen(runId: string): void; o
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <View style={{ gap: 4 }}>
         <Text style={ui.styles.title}>编排运行</Text>
-        {data?.logDir ? <Where info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
+        {data?.logDir ? <Where host={host} info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
       </View>
       {error ? (
         <Banner tone="danger" icon="TriangleAlert" title="刷新失败，下面是上一次读到的列表">
@@ -102,12 +102,15 @@ export function RunList({ onOpen, onSettings }: { onOpen(runId: string): void; o
   );
 }
 
-function Where({ info, total, shown, onSettings }: { info: LogDirInfo; total: number; shown: number; onSettings(): void }) {
+// The runs are files on one daemon's disk; with several hosts connected, the host is what tells
+// you whose runs these are.
+function Where({ host, info, total, shown, onSettings }: { host: string; info: LogDirInfo; total: number; shown: number; onSettings(): void }) {
   const ui = useUi();
   return (
     <View style={ui.styles.row}>
+      <Text style={[ui.styles.small, { fontWeight: "700" }]}>{host}</Text>
       <Text style={ui.styles.small} selectable>
-        {info.runsDir}
+        · {info.runsDir}
       </Text>
       <Text style={ui.styles.small}>
         （{LOG_DIR_SOURCE[info.source]}）· {total > shown ? `最近 ${shown} 次，共 ${total} 次` : `共 ${total} 次`}

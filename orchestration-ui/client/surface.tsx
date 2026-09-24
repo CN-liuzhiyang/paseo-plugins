@@ -10,7 +10,7 @@ export function RunsSurface(props: PluginSurfaceProps & { openSettings(): void }
   return (
     <UiProvider props={props}>
       {selected === null ? (
-        <RunList onOpen={setSelected} onSettings={props.openSettings} />
+        <RunList host={props.host.label} onOpen={setSelected} onSettings={props.openSettings} />
       ) : (
         <RunDetail key={selected} runId={selected} onBack={() => setSelected(null)} />
       )}
