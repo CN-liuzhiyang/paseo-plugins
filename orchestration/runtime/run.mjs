@@ -40,6 +40,8 @@ const DO_STRING_LIMIT = 2_000;
 const AGENT_PROBE_DELAYS = [3_000, 5_000, 10_000, 20_000, 40_000];
 /** setTimeout's ceiling; past it Node fires after 1ms, which would time a run out at its first call. */
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+/** run.end.summary is one line for a result bar; longer is cut here, in characters (code points). */
+export const SUMMARY_LIMIT = 200;
 
 const COST_NOTE =
   "per agent, LastUsage: the last turn only (a structured call is one turn). Codex reports CostUsd 0, so totalUsd counts Claude only";
@@ -130,7 +132,7 @@ function checkKeys(where, object, allowed) {
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
  *           agentProbeDelays?: number[] }} [options]
- * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, runId: string,
+ * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
  *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null }>}
  */
@@ -286,7 +288,9 @@ export async function runFlow(target, options = {}) {
       const prompt = composePrompt(bound, step.for(stepInput));
       const timeout = callOptions.timeout ?? step.timeout ?? DEFAULT_CALL_TIMEOUT;
       parseDuration(timeout);
-      const title = sentTitle(callOptions.title ?? `[${step.name}]`);
+      // The call's own title, then the step's, then its name: one value for
+      // the events and for the agent on Paseo.
+      const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
 
       const record = startCall();
       log.emit("call.start", {
@@ -294,6 +298,7 @@ export async function runFlow(target, options = {}) {
         type: "ask",
         name: step.name,
         title,
+        headline: step.headline,
         phase: currentPhase(),
         role: bound.role,
         provider: bound.provider,
@@ -335,11 +340,14 @@ export async function runFlow(target, options = {}) {
     },
 
     /** The flow's own deterministic action: read, run a CLI, write. Returns fn's value. */
-    async do(name, fn) {
+    async do(name, fn, doOptions = {}) {
       if (typeof name !== "string" || name.trim() === "") throw new TypeError("$.do needs a name");
       if (typeof fn !== "function") throw new TypeError(`$.do("${name}") needs a function`);
+      checkKeys(`$.do("${name}")`, doOptions, ["title"]);
+      const { title = name } = doOptions ?? {};
+      if (typeof title !== "string" || title.trim() === "") throw new TypeError(`$.do("${name}"): title must be a non-empty string`);
       const record = startCall();
-      log.emit("call.start", { callId: record.callId, type: "do", name, title: name, phase: currentPhase() });
+      log.emit("call.start", { callId: record.callId, type: "do", name, title, phase: currentPhase() });
       try {
         const value = await fn();
         endCall(record, { ok: true, output: jsonSafe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
@@ -555,13 +563,16 @@ export async function runFlow(target, options = {}) {
     spent.size > 0
       ? { totalUsd: [...spent.values()].reduce((sum, c) => sum + (c?.usd ?? 0), 0), agentCount: spent.size, partial: COST_NOTE }
       : null;
+  const recorded = jsonSafe(value);
+  const summary = outcome === "done" || outcome === "stopped" ? summarizeRun(f, recorded, outcome, log) : null;
   const durationMs = Date.now() - startedAt;
-  log.emit("run.end", { outcome, value: jsonSafe(value), stop, error, durationMs, cost, caveats: [...caveats] });
+  log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats] });
 
   return {
     ok: outcome === "done" || outcome === "stopped",
     outcome,
     value,
+    summary,
     runId,
     events: log.file,
     cost,
@@ -570,4 +581,44 @@ export async function runFlow(target, options = {}) {
     error,
     stop,
   };
+}
+
+/**
+ * The flow's one line about how its run came out, or null. It sees the value
+ * as run.end records it, so the line never says more than the record. Nothing
+ * it does can change the outcome or keep run.end from being written: a throw,
+ * or anything but a string, is a warning and a null. It is called without
+ * waiting, so a promise counts as not a string rather than holding the run open.
+ */
+function summarizeRun(f, value, outcome, log) {
+  if (!f.summarize) return null;
+  let line;
+  try {
+    line = f.summarize(value, { outcome });
+    // Inside the try: looking at what came back runs its code too (a getter, a proxy).
+    if (typeof line !== "string") {
+      const promise = line instanceof Promise;
+      // An async summarize that rejects later must not crash the process.
+      if (promise) line.catch(() => {});
+      const got = promise ? "a promise (it is not awaited)" : line === null ? "null" : typeof line;
+      log.emit("log", { level: "warn", message: `summarize returned ${got}, not a string, so run.end has no summary` });
+      return null;
+    }
+  } catch (error) {
+    log.emit("log", { level: "warn", message: `summarize threw, so run.end has no summary: ${describeThrown(error)}` });
+    return null;
+  }
+  if (line.trim() === "") return null;
+  const chars = [...line];
+  return chars.length > SUMMARY_LIMIT ? `${chars.slice(0, SUMMARY_LIMIT).join("")}…` : line;
+}
+
+/** A thrown value as one line, whatever was thrown. */
+function describeThrown(error) {
+  try {
+    const { name, message } = errorOf(error);
+    return `${name}: ${message}`;
+  } catch {
+    return "an error that cannot be printed";
+  }
 }

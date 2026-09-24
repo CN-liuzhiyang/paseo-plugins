@@ -32,6 +32,8 @@ export const COMMITTEES = {
 // A step that blows its budget fails; the flow keeps the rounds already paid for.
 const analyze = define({
   name: "analyze",
+  title: "独立分析",
+  headline: "plan",
   effects: "none",
   timeout: "12m",
   returns: {
@@ -52,6 +54,8 @@ const analyze = define({
 
 const assess = define({
   name: "assess",
+  title: "裁决：收敛了吗",
+  headline: "converged",
   effects: "none",
   timeout: "5m",
   returns: {
@@ -78,8 +82,12 @@ const assess = define({
     ].join("\n"),
 });
 
+// A respond node exists to answer the assessor's question, so its line is the
+// answer; `plan` is restated in full there and says less at a glance.
 const respond = define({
   name: "respond",
+  title: "回应",
+  headline: "answer",
   effects: "none",
   timeout: "8m",
   returns: {
@@ -134,6 +142,7 @@ export default flow({
 
   async run({ question, committee, rounds: maxRounds, assessor }, $) {
     const roles = COMMITTEES[committee];
+    const member = (i) => `成员 ${"AB"[i]}（${roles[i]}）`;
     // Roles resolve here, before anything is spent, not at the first ask.
     const members = roles.map((role) => ({ role, provider: $.ctx.role(role).provider }));
     $.ctx.role(assessor);
@@ -153,7 +162,7 @@ export default flow({
       ...fields,
     });
 
-    const first = await $.phase("analyze", () => $.all(roles.map((role) => $.ask(analyze, { question }, { role }))));
+    const first = await $.phase("analyze", () => $.all(roles.map((role, i) => $.ask(analyze, { question }, { role, title: `${member(i)}独立分析` }))));
     first.forEach((outcome, i) => {
       if (!outcome.ok) failures.push({ round: 1, step: "analyze", role: roles[i], message: outcome.error.message });
     });
@@ -175,7 +184,7 @@ export default flow({
       const debated = await $.phase("debate", async () => {
         let assessed;
         try {
-          assessed = await $.ask(assess, { question, positions, roles }, { role: assessor });
+          assessed = await $.ask(assess, { question, positions, roles }, { role: assessor, title: `第 ${round} 轮裁决：收敛了吗` });
         } catch (error) {
           failures.push({ round, step: "assess", message: error.message });
           return { assessed: null, next: null };
@@ -185,7 +194,11 @@ export default flow({
         const focus = assessed.nextQuestion;
         const settled = await $.all(
           roles.map((role, i) =>
-            $.ask(respond, { question, own: positions[i], other: positions[1 - i], otherRole: roles[1 - i], focus }, { role }),
+            $.ask(
+              respond,
+              { question, own: positions[i], other: positions[1 - i], otherRole: roles[1 - i], focus },
+              { role, title: `${member(i)}第 ${round + 1} 轮回应` },
+            ),
           ),
         );
         settled.forEach((outcome, i) => {
@@ -211,5 +224,20 @@ export default flow({
       disagreement: verdict?.converged ? null : (verdict?.realDisagreement ?? null),
       positions,
     });
+  },
+
+  // The line on the result bar. It gets the value as run.end records it; the
+  // only stop above is a failed analyze, so a stopped run is said from that.
+  summarize(value, { outcome }) {
+    const failures = value.failures ?? [];
+    if (outcome === "stopped") {
+      const who = failures.filter((f) => f.step === "analyze").map((f) => f.role);
+      return `独立分析失败（${who.join("、")}），没有进入辩论`;
+    }
+    const note = failures.length > 0 ? `（${failures.length} 次调用失败）` : "";
+    if (value.converged === true) return `第 ${value.rounds} 轮收敛${note}：${value.positions[0].plan}`;
+    if (value.converged === false) return `${value.rounds} 轮未收敛${note}，分歧：${value.disagreement || "裁决者没有说清"}`;
+    // No assessment ever came back: one round only, or the first one failed.
+    return failures.some((f) => f.step === "assess") ? `裁决失败，${value.rounds} 轮没有结论${note}` : `只做了独立分析，没有裁决${note}`;
   },
 });

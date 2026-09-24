@@ -17,6 +17,9 @@ const analyze = define({
 // @ts-expect-error effects is required
 define({ name: "x", returns: { a: text() }, prompt: () => "p" });
 
+// @ts-expect-error headline names a field of returns
+define({ name: "x", effects: "none", returns: { a: text() }, headline: "b", prompt: () => "p" });
+
 export default flow({
   name: "probe",
   description: "d",
@@ -41,7 +44,9 @@ export default flow({
     await $.phase("debate", async () => null);
     // @ts-expect-error inputs are the declared ones
     rounds.toFixed();
-    const [a, b] = await $.all([$.ask(analyze, { question }), () => $.do("read", () => 42)]);
+    // @ts-expect-error $.do takes only a title
+    await $.do("read", () => 1, { name: "x" });
+    const [a, b] = await $.all([$.ask(analyze, { question }), () => $.do("read", () => 42, { title: "读取" })]);
     if (b.ok) {
       /** @type {number} */
       const n = b.value;
@@ -51,4 +56,5 @@ export default flow({
     b.value.toFixed();
     return { d, c, ok };
   },
+  summarize: (value, { outcome }) => `${outcome}: ${value.d}`,
 });

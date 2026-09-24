@@ -12,6 +12,8 @@ import { flow, define, text, choice } from "../runtime/flow.mjs";
 
 export const advise = define({
   name: "advise",
+  title: "第二意见",
+  headline: "verdict",
   effects: "none",
   timeout: "12m",
   returns: {
@@ -49,4 +51,6 @@ export default flow({
     const answer = await $.ask(advise, { question }, { role });
     return { question, advisor: { role, provider }, answer };
   },
+
+  summarize: (value) => value.answer.verdict,
 });

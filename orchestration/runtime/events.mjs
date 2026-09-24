@@ -85,6 +85,15 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const problems = [];
   const bad = (event, message) => problems.push(`seq ${event?.seq ?? "?"} (${event?.kind ?? "?"}): ${message}`);
   const need = (event, ok, message) => ok || bad(event, message);
+  // A field added to v1 after files were already written: strict wants it,
+  // a reader of older files takes it as absent, and when present it must fit.
+  const added = (event, key, ok, message) => {
+    if (!(key in event)) {
+      if (strict) bad(event, `${key} is missing`);
+      return;
+    }
+    need(event, ok, message);
+  };
 
   if (events.length === 0) return ["no events"];
   const first = events[0];
@@ -168,6 +177,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           need(event, isObject(event.schema), "schema is not an object");
           need(event, isString(event.schemaFingerprint), "schemaFingerprint is not a string");
           need(event, isString(event.timeout), "timeout is not a string");
+          added(
+            event,
+            "headline",
+            event.headline === null || (isString(event.headline) && Object.hasOwn(event.schema?.properties ?? {}, event.headline)),
+            "headline is not null or a field of schema",
+          );
         }
         if (event.type === "gate") {
           for (const key of ["brief", "content", "sha256", "timeout"]) need(event, isString(event[key]), `${key} is not a string`);
@@ -232,6 +247,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         const outcome = event.outcome;
         need(event, ["done", "stopped", "failed", "timeout"].includes(outcome), `outcome "${outcome}" is unknown`);
         need(event, "value" in event, "value is missing");
+        added(
+          event,
+          "summary",
+          event.summary === null || (outcome !== "failed" && outcome !== "timeout" && isString(event.summary) && event.summary.trim() !== ""),
+          "summary must be null, or a non-empty string when done or stopped",
+        );
         need(
           event,
           outcome === "stopped" ? isObject(event.stop) && isString(event.stop.reason) && isNullableString(event.stop.phase) : event.stop === null,

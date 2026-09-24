@@ -177,10 +177,12 @@ export const isStep = (value) => Boolean(value?.[STEP]);
  *   returns: Record<string, object> | object,
  *   prompt: (input: unknown) => string,
  *   timeout?: string,
+ *   title?: string,
+ *   headline?: string,
  * }} definition
  */
 export function define(definition) {
-  const { name, returns, prompt, effects, timeout } = definition ?? {};
+  const { name, returns, prompt, effects, timeout, title, headline } = definition ?? {};
 
   // Fail at definition time, which for a flow is import time: `orch check`
   // and the runner both import before anything is spent.
@@ -193,12 +195,18 @@ export function define(definition) {
   if (!EFFECTS.includes(effects)) {
     throw new TypeError(`step "${name}": effects is required and must be ${EFFECTS.map((e) => `"${e}"`).join(" or ")}`);
   }
-  const unknown = Object.keys(definition).filter((key) => !["name", "returns", "prompt", "effects", "timeout"].includes(key));
+  const unknown = Object.keys(definition).filter((key) => !["name", "returns", "prompt", "effects", "timeout", "title", "headline"].includes(key));
   if (unknown.length > 0) throw new TypeError(`step "${name}": unknown key ${unknown.join(", ")}`);
   if (typeof prompt !== "function") throw new TypeError(`step "${name}": prompt must be a function`);
   if (!returns || typeof returns !== "object") throw new TypeError(`step "${name}": returns is required`);
   if (timeout !== undefined && !/^\d+(s|m|h)$/.test(timeout)) {
     throw new TypeError(`step "${name}": timeout must look like 90s, 12m or 2h, got "${timeout}"`);
+  }
+  // `title` and `headline` are for people, not for the model: the title names
+  // the call in the events and on Paseo, the headline says which field of the
+  // answer a reader shows as its one line.
+  if (title !== undefined && (typeof title !== "string" || title.trim() === "")) {
+    throw new TypeError(`step "${name}": title must be a non-empty string`);
   }
 
   // A full JSON Schema passes through; a field map gets built. `type` is the
@@ -208,6 +216,10 @@ export function define(definition) {
 
   if (schema.type !== "object") {
     throw new TypeError(`step "${name}": returns must be an object schema; Codex rejects any other root`);
+  }
+  if (headline !== undefined && (typeof headline !== "string" || !Object.hasOwn(schema.properties ?? {}, headline))) {
+    const fields = Object.keys(schema.properties ?? {}).join(", ");
+    throw new TypeError(`step "${name}": headline must name a field of returns (${fields}), got ${JSON.stringify(headline)}`);
   }
 
   const fingerprint = createHash("sha256").update(JSON.stringify(schema)).digest("hex").slice(0, 8);
@@ -219,6 +231,8 @@ export function define(definition) {
     schema,
     fingerprint,
     timeout,
+    title,
+    headline: headline ?? null,
 
     /**
      * The step's prompt for one input, with the effects line appended. Not

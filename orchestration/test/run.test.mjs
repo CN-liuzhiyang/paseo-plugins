@@ -475,6 +475,206 @@ test("a thrown error is a failed run with a run.end", async () => {
   assert.match(events.at(-2).message, /RangeError: bad/);
 });
 
+// --- For people: titles, headlines, summaries ---------------------------
+
+test("titles: $.ask's own, then the step's, then [name]; the same text goes to Paseo", async () => {
+  const titled = define({ name: "titled", title: "有标题的一步", headline: "said", effects: "none", timeout: "1m", returns: { said: text() }, prompt: () => "p" });
+  const f = flow({
+    name: "titles",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      await $.ask(titled, {}, { role: "fast", title: "这一次的标题" });
+      await $.ask(titled, {}, { role: "fast" });
+      await $.ask(echo, { word: "hi" }, { role: "fast" });
+      await $.do("read", () => 1, { title: "读文件" });
+      await $.do("write", () => 2);
+    },
+  });
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  const result = await run(f, { executor });
+  assert.equal(result.outcome, "done");
+  const starts = eventsOf(result).filter((e) => e.kind === "call.start");
+  assert.deepEqual(starts.map((e) => e.title), ["这一次的标题", "有标题的一步", "[echo]", "读文件", "write"]);
+  assert.deepEqual(executor.requests.map((r) => r.title), ["这一次的标题", "有标题的一步", "[echo]"]);
+  assert.deepEqual(starts.map((e) => e.name), ["titled", "titled", "echo", "read", "write"]);
+});
+
+test("$.do takes only a title, and a real one", async () => {
+  for (const [options, message] of [
+    [{ name: "x" }, /unknown option name; options: title/],
+    [{ title: "" }, /title must be a non-empty string/],
+    [{ title: 3 }, /title must be a non-empty string/],
+  ]) {
+    const f = flow({ name: "bad-do", description: "d", phases: [], inputs: {}, grants: [], run: (_, $) => $.do("read", () => 1, options) });
+    const result = await run(f, { executor: fakeExecutor() });
+    assert.equal(result.outcome, "failed");
+    assert.match(result.error.message, message);
+    assert.ok(!eventsOf(result).some((e) => e.kind === "call.start"), "refused before the call starts");
+  }
+});
+
+test("headline: the step's field on every ask's call.start, null when it has none", async () => {
+  const pick = define({ name: "pick", headline: "choice", effects: "none", timeout: "1m", returns: { choice: text(), why: text() }, prompt: () => "p" });
+  const f = flow({
+    name: "headlines",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    run: async (_, $) => [await $.ask(pick, {}, { role: "fast" }), await $.ask(echo, { word: "x" }, { role: "fast" })],
+  });
+  const result = await run(f, { executor: fakeExecutor({ answer: (r) => (r.labels["orch-step"] === "pick" ? { choice: "a", why: "b" } : { said: "x" }) }) });
+  const asks = eventsOf(result).filter((e) => e.kind === "call.start");
+  assert.deepEqual(asks.map((e) => e.headline), ["choice", null]);
+  assert.ok(asks.every((e) => Object.hasOwn(e, "headline")));
+});
+
+test("define: title is a non-empty string, headline names a field of returns", () => {
+  const base = { name: "x", effects: "none", returns: { verdict: text(), why: text() }, prompt: () => "p" };
+  assert.throws(() => define({ ...base, headline: "verdit" }), /headline must name a field of returns \(verdict, why\), got "verdit"/);
+  assert.throws(() => define({ ...base, headline: 1 }), /headline must name a field of returns/);
+  assert.throws(() => define({ ...base, headline: "toString" }), /headline must name a field/, "inherited names are not fields");
+  assert.throws(() => define({ ...base, title: "  " }), /title must be a non-empty string/);
+  assert.throws(() => define({ ...base, title: ["t"] }), /title must be a non-empty string/);
+  const ok = define({ ...base, title: "裁决", headline: "verdict" });
+  assert.equal(ok.title, "裁决");
+  assert.equal(ok.headline, "verdict");
+  assert.equal(define(base).headline, null);
+  // A hand-written schema passes through; its properties are the fields.
+  const raw = { type: "object", properties: { a: { type: "string" } }, required: ["a"], additionalProperties: false };
+  assert.equal(define({ ...base, returns: raw, headline: "a" }).headline, "a");
+  assert.throws(() => define({ ...base, returns: raw, headline: "b" }), /headline must name a field of returns \(a\)/);
+});
+
+/** A flow that ends as told, with a summarize under test. */
+const ending = (how, summarize) =>
+  flow({
+    name: "ending",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      if (how === "stop") $.stop("had enough", { got: "partial" });
+      if (how === "throw") throw new Error("broke");
+      return { got: "all", when: new Date(0) };
+    },
+    summarize,
+  });
+
+test("summarize: called once, on done and stopped, with the value as recorded", async () => {
+  const seen = [];
+  const summarize = (value, info) => {
+    seen.push({ value, info });
+    return `${info.outcome}: ${value.got}`;
+  };
+  const done = await run(ending("return", summarize), { executor: fakeExecutor() });
+  assert.equal(done.summary, "done: all");
+  assert.equal(eventsOf(done).at(-1).summary, "done: all");
+  // The value run.end writes: JSON, so the Date is its string.
+  assert.deepEqual(seen[0], { value: { got: "all", when: "1970-01-01T00:00:00.000Z" }, info: { outcome: "done" } });
+
+  const stopped = await run(ending("stop", summarize), { executor: fakeExecutor() });
+  assert.equal(stopped.outcome, "stopped");
+  assert.equal(stopped.summary, "stopped: partial");
+  assert.equal(seen.length, 2);
+
+  const failed = await run(ending("throw", summarize), { executor: fakeExecutor() });
+  assert.equal(failed.outcome, "failed");
+  assert.equal(failed.summary, null);
+  assert.equal(eventsOf(failed).at(-1).summary, null);
+  assert.equal(seen.length, 2, "not called for a failed run");
+
+  // No summarize: null, and run.start does not carry one either way.
+  const plain = await run(ending("return"), { executor: fakeExecutor() });
+  assert.equal(plain.summary, null);
+  const events = eventsOf(done);
+  assert.equal(Object.hasOwn(events[0].flow, "summarize"), false);
+  assert.equal(Object.hasOwn(eventsOf(plain).at(-1), "summary"), true);
+});
+
+test("summarize: a throw or a non-string is a warning and a null; the outcome stands", async () => {
+  const cases = [
+    ["throws", () => { throw new TypeError("cannot read verdict"); }, /summarize threw, so run\.end has no summary: TypeError: cannot read verdict/],
+    ["throws a non-error", () => { throw Object.create(null); }, /summarize threw/],
+    ["returns a number", () => 42, /summarize returned number, not a string/],
+    ["returns null", () => null, /summarize returned null, not a string/],
+    ["is async", async () => { throw new Error("later"); }, /summarize returned a promise \(it is not awaited\)/],
+  ];
+  for (const [label, summarize, warning] of cases) {
+    for (const how of ["return", "stop"]) {
+      const result = await run(ending(how, summarize), { executor: fakeExecutor() });
+      assert.equal(result.outcome, how === "stop" ? "stopped" : "done", `${label}/${how}`);
+      assert.equal(result.summary, null, `${label}/${how}`);
+      const events = eventsOf(result);
+      assert.equal(events.at(-1).kind, "run.end");
+      assert.equal(events.at(-1).outcome, result.outcome);
+      assert.equal(events.at(-1).summary, null);
+      const warn = events.filter((e) => e.kind === "log" && e.level === "warn");
+      assert.equal(warn.length, 1, `${label}/${how}`);
+      assert.match(warn[0].message, warning);
+    }
+  }
+  // Nothing to say is not a mistake: null, no warning.
+  const empty = await run(ending("return", () => "   "), { executor: fakeExecutor() });
+  assert.equal(empty.summary, null);
+  assert.ok(!eventsOf(empty).some((e) => e.kind === "log"));
+});
+
+test("summarize: past 200 characters the line is cut, by code points, and marked", async () => {
+  const long = "裁".repeat(150) + "😀".repeat(100);
+  const result = await run(ending("return", () => long), { executor: fakeExecutor() });
+  assert.equal([...result.summary].length, 201);
+  assert.equal(result.summary, `${"裁".repeat(150)}${"😀".repeat(50)}…`);
+  const exact = await run(ending("return", () => "x".repeat(200)), { executor: fakeExecutor() });
+  assert.equal(exact.summary, "x".repeat(200));
+});
+
+test("flow: summarize is optional, and a function when given", () => {
+  const base = { name: "f", description: "d", phases: [], inputs: {}, grants: [], run: async () => null };
+  assert.equal(flow(base).summarize, null);
+  assert.throws(() => flow({ ...base, summarize: "done" }), /summarize must be a function/);
+});
+
+test("shipped flows say how they came out", async () => {
+  const converged = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ convergeAt: 2 }) }) });
+  assert.equal(converged.summary, "第 2 轮收敛：Key the cache on the resolved path.");
+  const events = eventsOf(converged);
+  const starts = events.filter((e) => e.kind === "call.start");
+  assert.deepEqual(starts.map((e) => e.title), [
+    "成员 A（worker）独立分析",
+    "成员 B（reviewer-alt）独立分析",
+    "第 1 轮裁决：收敛了吗",
+    "成员 A（worker）第 2 轮回应",
+    "成员 B（reviewer-alt）第 2 轮回应",
+    "第 2 轮裁决：收敛了吗",
+  ]);
+  assert.deepEqual(starts.map((e) => e.headline), ["plan", "plan", "converged", "answer", "answer", "converged"]);
+
+  const capped = await run(committee, { input: { ...COMMITTEE_INPUT, rounds: 2 }, executor: fakeExecutor({ answer: committeeAnswers({ convergeAt: 9 }) }) });
+  assert.equal(capped.summary, "2 轮未收敛，分歧：Whether symlinked checkouts must share a cache entry.");
+
+  const single = await run(committee, { input: { ...COMMITTEE_INPUT, rounds: 1 }, executor: fakeExecutor({ answer: committeeAnswers() }) });
+  assert.equal(single.summary, "只做了独立分析，没有裁决");
+
+  const noAssess = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["assess:claude/claude-sonnet-5[1m]:1"] }) }) });
+  assert.equal(noAssess.summary, "裁决失败，1 轮没有结论（1 次调用失败）");
+
+  const stopped = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["analyze:claude/claude-sonnet-5[1m]:1"] }) }) });
+  assert.equal(stopped.outcome, "stopped");
+  assert.equal(stopped.summary, "独立分析失败（worker），没有进入辩论");
+
+  const answer = { verdict: "It holds.", reasoning: "r", recommendation: "x", whatWouldChangeMyMind: "y", confidence: "high" };
+  const advised = await run(advisor, { input: { question: "q", role: "fast" }, executor: fakeExecutor({ answer: () => answer }) });
+  assert.equal(advised.summary, "It holds.");
+  const ask = eventsOf(advised).find((e) => e.kind === "call.start");
+  assert.equal(ask.title, "第二意见");
+  assert.equal(ask.headline, "verdict");
+});
+
 // --- Definitions and checks -------------------------------------------
 
 test("define: effects is required, readOnly is gone, names are verbs in lowercase", () => {
@@ -584,7 +784,7 @@ test("CLI arguments are parsed by the flow's input types", async () => {
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
     { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h" },
-    { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [] },
+    { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [] },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);
   assert.match(checkEvents([good[0]], { complete: true }).join(), /no run\.end/);
@@ -602,12 +802,31 @@ test("checkEvents catches what a reader would trip on", () => {
   assert.match(checkEvents(call).join(), /a do call has no agent/);
   const { pid, ...noPid } = good[0];
   assert.match(checkEvents([noPid]).join(), /pid is not a positive integer/);
+  assert.match(checkEvents([good[0], { ...good[1], outcome: "failed", error: { name: "E", message: "m" }, summary: "x" }]).join(), /summary must be null/);
+  assert.match(checkEvents([good[0], { ...good[1], summary: " " }]).join(), /summary must be null/);
+});
+
+test("checkEvents: headline and summary are required of new files, absent from old ones", () => {
+  const events = readEvents(path.join(HERE, "..", "fixtures", "committee.jsonl"));
+  const asks = events.filter((e) => e.kind === "call.start" && e.type === "ask");
+  assert.ok(asks.every((e) => e.headline !== undefined) && events.at(-1).summary !== undefined);
+  // What a file written before the two fields looks like.
+  const old = events.map(({ headline, summary, ...rest }) => rest);
+  assert.deepEqual(checkEvents(old, { complete: true }), [], "a reader of old files is not bothered");
+  const strict = checkEvents(old, { strict: true, complete: true });
+  assert.equal(strict.filter((p) => /headline is missing/.test(p)).length, asks.length);
+  assert.equal(strict.filter((p) => /summary is missing/.test(p)).length, 1);
+  // Present, they must fit.
+  const bent = events.map((e) => (e.kind === "call.start" && e.type === "ask" ? { ...e, headline: "nosuchfield" } : e));
+  assert.match(checkEvents(bent).join(), /headline is not null or a field of schema/);
 });
 
 test("the committed committee fixture conforms to the contract", async () => {
   const events = readEvents(path.join(HERE, "..", "fixtures", "committee.jsonl"));
   assert.deepEqual(checkEvents(events, { strict: true, complete: true }), []);
   assert.equal(events[0].flow.name, "committee");
+  assert.equal(events[0].flow.summarize, undefined);
+  assert.match(events.at(-1).summary, /^第 3 轮收敛（1 次调用失败）：/);
 });
 
 test("nothing is left in the log directory but runs/", async () => {

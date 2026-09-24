@@ -57,13 +57,14 @@ function fail(name, message) {
  * @template T
  * @param {{ name: string, description: string, phases: { id: string, title: string }[],
  *           inputs: Record<string, object>, grants: string[],
- *           run: (input: object, $: object) => Promise<T> }} definition
+ *           run: (input: object, $: object) => Promise<T>,
+ *           summarize?: (value: unknown, info: { outcome: "done" | "stopped" }) => string }} definition
  */
 export function flow(definition) {
   if (!definition || typeof definition !== "object") throw new TypeError("flow() needs a definition object");
-  const { name, description, phases, inputs, grants, run } = definition;
+  const { name, description, phases, inputs, grants, run, summarize } = definition;
 
-  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run"].includes(key));
+  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize"].includes(key));
   if (unknown.length > 0) fail(name, `unknown key ${unknown.join(", ")}`);
   if (typeof name !== "string" || !ID.test(name)) fail(name, `name must match ${ID}`);
   if (typeof description !== "string" || description.trim() === "") fail(name, "description is required");
@@ -103,6 +104,11 @@ export function flow(definition) {
   }
 
   if (typeof run !== "function") fail(name, "run must be an async function (input, $) => value");
+  // The one optional key: it changes nothing about the run, only the line a
+  // person reads about it. It is code, so run.start does not carry it.
+  if (summarize !== undefined && typeof summarize !== "function") {
+    fail(name, "summarize must be a function (value, { outcome }) => string");
+  }
 
   return Object.freeze({
     [FLOW]: true,
@@ -112,10 +118,11 @@ export function flow(definition) {
     inputs: objectSchema(inputs, { allowEmpty: true }),
     grants: Object.freeze([...grants]),
     run,
+    summarize: summarize ?? null,
   });
 }
 
-/** The metadata as run.start carries it: everything but `run`. */
+/** The metadata as run.start carries it: everything but the functions, `run` and `summarize`. */
 export const describeFlow = (f) => ({
   name: f.name,
   description: f.description,
@@ -183,7 +190,7 @@ export async function checkFlow(target, { roster } = {}) {
   const { flow: f, text } = loaded;
   const steps = definedSteps()
     .slice(before)
-    .map((s) => ({ name: s.name, effects: s.effects, timeout: s.timeout ?? null, fingerprint: s.fingerprint }));
+    .map((s) => ({ name: s.name, title: s.title ?? null, headline: s.headline, effects: s.effects, timeout: s.timeout ?? null, fingerprint: s.fingerprint }));
   const problems = text === null ? [] : scanSource(f, text);
   const warnings = steps.filter((s) => s.timeout === null).map((s) => `step "${s.name}" declares no timeout (R7); it gets the 30m default`);
 

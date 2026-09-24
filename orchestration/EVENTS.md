@@ -67,7 +67,7 @@
 | `callId` | string | 本次运行内唯一（运行时写成 `c1`、`c2`……，按开始顺序）。Paseo 上的 agent 带 `orch-run=<runId>` 和 `orch-call=<callId>` 两个标签，两个一起才唯一 |
 | `type` | `"ask"` \| `"do"` \| `"gate"` | |
 | `name` | string | `ask`：step 名；`do`：动作名；`gate`：`"gate"` |
-| `title` | string | 给人看的标题（`do` 与 `name` 相同） |
+| `title` | string | 给人看的标题。`ask`：调用点的 `$.ask(step, input, { title })` → step 的 `define({ title })` → `` `[${name}]` ``，取第一个有的，截到 120 字符，和发给 Paseo 的 agent 标题（`--title`）是同一个值；`do`：`$.do(name, fn, { title })` 的 `title`，没给就等于 `name`；`gate`：`$.gate` 的 `title`，截到 120 字符 |
 | `phase` | string \| null | 所在阶段，不在任何阶段内为 null |
 
 所有 `timeout` 字段是运行时 `parseDuration` 接受的格式：正则 `^\d+(s|m|h)$`，即一个非负整数紧跟一个单位
@@ -87,6 +87,7 @@
 | `schema` | object | 输出 JSON Schema；字段的 `description` 可用作界面标签 |
 | `schemaFingerprint` | string | |
 | `timeout` | string | |
+| `headline` | string \| null | step 的 `define({ headline })`：`schema.properties` 里的一个键，说明回答里哪个字段可以当这次调用的一句话（界面在节点上显示 `call.end.output[headline]`）。step 没声明时为 null。运行时写的每条 `ask` 都有这个字段；之前写的文件没有，读者按 null 处理 |
 
 `type: "gate"` 另有：
 
@@ -172,6 +173,7 @@
 |---|---|---|
 | `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`）；`failed`：抛错；`timeout`：超出运行总时限 |
 | `value` | any | `done` / `stopped` 时 flow 给出的结果 |
+| `summary` | string \| null | 给人看的一句话结论，来自 flow 的 `summarize(value, { outcome })`（`value` 就是本行的 `value`）。只在 `done` / `stopped` 时调用；flow 没声明 `summarize`、结局是 `failed` / `timeout`、它抛错（这时前面有一条 `log` warn 说原因）或返回的不是非空字符串时为 null。超过 200 字符（按 Unicode 码点算）截断并加 `…`。它出错不影响结局。运行时写的每条 `run.end` 都有这个字段；之前写的文件没有，读者按 null 处理 |
 | `stop` | `{ reason: string, phase: string \| null }` \| null | 仅 `stopped` |
 | `error` | `{ name, message }` \| null | 仅 `failed` / `timeout` |
 | `durationMs` | number | |
@@ -181,4 +183,6 @@
 ## 演进规则
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
+- 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
+  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`，缺省都是 null。
 - 改字段含义、删字段才升 `v`。

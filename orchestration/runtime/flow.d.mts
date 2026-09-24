@@ -36,6 +36,8 @@ export interface Step<Out, In> {
   readonly schema: object;
   readonly fingerprint: string;
   readonly timeout: Duration | undefined;
+  readonly title: string | undefined;
+  readonly headline: string | null;
   for(input: In): string;
   /** Never present at runtime. */
   readonly __out?: Out;
@@ -47,6 +49,10 @@ export function define<F extends Fields, In = any>(definition: {
   returns: F;
   prompt: (input: In) => string;
   timeout?: Duration;
+  /** For people: the call's title in the events and on Paseo, unless $.ask passes its own. */
+  title?: string;
+  /** For people: the field of the answer that says it in one line. */
+  headline?: keyof F & string;
 }): Step<Shape<F>, In>;
 
 export interface Phase<Id extends string = string> {
@@ -111,7 +117,7 @@ export interface RunContext {
 
 export interface Dollar<PhaseId extends string> {
   ask<Out, In>(step: Step<Out, In>, input: In, options?: AskOptions): Promise<Out>;
-  do<T>(name: string, fn: () => T | Promise<T>): Promise<T>;
+  do<T>(name: string, fn: () => T | Promise<T>, options?: { title?: string }): Promise<T>;
   gate(request: GateRequest): Promise<GateDecision>;
   phase<T>(id: PhaseId, fn: () => T | Promise<T>): Promise<T>;
   all<const T extends readonly Task[]>(tasks: T): Promise<{ -readonly [K in keyof T]: Settled<Result<T[K]>> }>;
@@ -131,7 +137,14 @@ export interface Flow<I extends Fields, R> {
   readonly inputs: object;
   readonly grants: readonly Grant[];
   run(input: Shape<I>, $: Dollar<string>): Promise<R>;
+  readonly summarize: Summarize | null;
 }
+
+/**
+ * The run's one line for people, from the value run.end records: what `run`
+ * returned when done, the value given to $.stop when stopped -- so `any`.
+ */
+export type Summarize = (value: any, info: { outcome: "done" | "stopped" }) => string;
 
 export function flow<I extends Fields, const P extends readonly Phase[], R>(definition: {
   name: string;
@@ -140,6 +153,7 @@ export function flow<I extends Fields, const P extends readonly Phase[], R>(defi
   inputs: I;
   grants: readonly Grant[];
   run(input: Shape<I>, $: Dollar<P[number]["id"]>): Promise<R>;
+  summarize?: Summarize;
 }): Flow<I, R>;
 
 export function isFlow(value: unknown): value is Flow<Fields, unknown>;

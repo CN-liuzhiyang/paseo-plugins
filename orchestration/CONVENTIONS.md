@@ -12,6 +12,8 @@ import { flow, define, text, count, choice } from "../runtime/flow.mjs";
 
 const analyze = define({
   name: "analyze",
+  title: "根因分析",        // 可选，给人看的
+  headline: "diagnosis",   // 可选，给人看的
   effects: "none",
   timeout: "12m",
   returns: {
@@ -31,6 +33,7 @@ export default flow({
     const result = await $.phase("analyze", () => $.ask(analyze, { question }, { role: "planner" }));
     return result; // { diagnosis, confidence }，不用解包
   },
+  summarize: (value) => value.diagnosis, // 可选，给人看的
 });
 ```
 
@@ -43,6 +46,12 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 不执行 `run` 就能读出来。界面据此在运行前画骨架、生成启动表单；`orch check` 据此零花费查错。
 五个键加 `run` 全部必填，"没有阶段""没有额外权限"写 `[]`，"没有输入"写 `{}`——和 R2 同一个理由：
 缺省值会让两个读者对同一个 flow 有不同的理解。
+
+**`summarize(value, { outcome })` 是唯一可选的键**，因为它不改变运行，只给人一句话：运行以 `done` 或
+`stopped` 结束时调用一次，`value` 是 `run.end` 记下的那个值（`stopped` 时是 `$.stop` 给的部分结果），
+返回的字符串进 `run.end.summary`，节点图的结论条显示它。超过 200 字符会被截断。它抛错、返回非字符串，
+都只是一条 warn 加 `summary: null`，结局不变——所以不必为它写防御代码，但也别在里面做事情，它是同步调用、
+不 await 的。committee 的写法可以照抄：收敛了说第几轮、结论是什么，没收敛说分歧是什么。
 
 **`inputs` 用 step 的字段构造器写**（`text`/`count`/`flag`/`choice`/`list`/`group`），同样全字段必填、
 不能有别的 JSON Schema 关键字（`default` 之类直接报错）。运行器在**第一笔花费之前**按它校验输入，
@@ -67,8 +76,8 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里） | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
-| `$.do(name, fn)` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值 | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title` | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
+| `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, brief?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`holdPath` 不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
 | `$.all(tasks)` | 并发，等全部结束。**永不因为某个任务失败而 reject**，返回 `[{ ok: true, value } \| { ok: false, error }]`，和 `tasks` 一一对应。任务可以是 promise 或返回 promise 的函数 | 无（并发看调用的时间重叠） |
@@ -125,12 +134,18 @@ flow 都正常。限制是 Node 的：只能用可擦除的语法（不能有 `e
 ## step
 
 ```js
-const analyze = define({ name, effects, timeout, returns, prompt });
+const analyze = define({ name, effects, timeout, returns, prompt, title?, headline? });
 ```
 
 三件事绑在一个对象里，因为它们是**一个**决定。prompt 要了一样 schema 里没有的东西，agent 会老实照
 schema 返回，那样东西就静默丢了——没有任何测试能抓到这种错。绑在一起，至少 review 时看得见。
 `effects` 也在这里，因为"这一步能碰到多远"是这一步的属性，不是调用点的。
+
+`title` 和 `headline` 是给人看的，模型看不到，节点图用它们画节点：`title` 是节点名（写中文；调用点
+`$.ask(..., { title })` 可以按这一次覆盖它，比如"成员 A（planner）独立分析"；都没写就是 `[name]`），它也是
+Paseo 上那个 agent 的标题。`headline` 是 `returns` 里的一个键，说回答里哪个字段能一句话概括这次调用，
+节点上就显示那个字段——选最短、最像结论的那个（advisor 的 `verdict`、assess 的 `converged`），
+写成 `returns` 里没有的键，`define` 当场报错。
 
 ## R1. prompt 说"做什么"，schema 说"交什么"，两边不重复
 
@@ -302,7 +317,8 @@ step 声明 `effects`，**必填、没有默认**：
 那是调用点的决定（`$.ask(step, input, { role })`）。flow 里也只写角色名，不写模型 id——
 模型会换，角色名不换。
 
-**flow 名、phase id 用小写加连字符**，phase 的 `title` 是给人看的，写中文。
+**flow 名、phase id 用小写加连字符**，phase 的 `title` 是给人看的，写中文；step 和调用的 `title`、
+`summarize` 的返回值同理。
 
 ## 角色：`roles/<name>.md`
 

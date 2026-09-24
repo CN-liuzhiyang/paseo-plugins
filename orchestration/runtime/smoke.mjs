@@ -75,6 +75,7 @@ check("define rejects a missing prompt", throws(() => define({ name: "x", effect
 check("define rejects empty returns", throws(() => define({ name: "x", effects: "none", returns: {}, prompt: () => "p" })));
 check("define rejects a non-object root", throws(() => define({ name: "x", effects: "none", returns: text(), prompt: () => "p" })));
 check("define rejects a step without effects", throws(() => define({ name: "x", returns: { a: text() }, prompt: () => "p" })));
+check("define rejects a headline that names no field", throws(() => define({ ...sampleDef(), headline: "z" })));
 check("choice rejects an empty list", throws(() => choice([])));
 
 const reads = define({ name: "reads", effects: "none", returns: { a: text() }, prompt: ({ a, b }) => `${a} ${b}` });
