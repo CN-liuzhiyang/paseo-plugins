@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 export interface LarkCli {
   readonly path: string;
@@ -125,10 +128,11 @@ export interface LarkMessage {
 }
 
 /**
- * Fetches messages with their sender names. With `downloadTo`, their images and files are
- * downloaded into `<downloadTo>/lark-im-resources/`: lark-cli only writes under its working
- * directory, so that is where it runs. A download that fails still exits 0; what lark-cli said
- * about it on stderr goes to `onStderr`.
+ * Fetches messages with their sender names. With `downloadTo`, their images and files end up in
+ * `<downloadTo>/lark-im-resources/`. lark-cli only writes under its working directory, and since
+ * 1.0.93 refuses any directory inside a protected one such as /root, where Paseo's data lives on a
+ * root daemon; so it runs in a fresh temporary directory and the files are moved over afterwards.
+ * A download that fails still exits 0; what lark-cli said about it on stderr goes to `onStderr`.
  */
 export async function fetchMessages(
   cli: LarkCli,
@@ -137,11 +141,30 @@ export async function fetchMessages(
   onStderr?: (text: string) => void,
 ): Promise<LarkMessage[]> {
   const args = ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--no-reactions", "--format", "json"];
-  const data = await run(
-    cli,
-    downloadTo === null ? args : [...args, "--download-resources"],
-    downloadTo === null ? {} : { cwd: downloadTo, timeoutMs: FETCH_TIMEOUT_MS, stderr: onStderr },
-  );
+  if (downloadTo === null) return messagesOf(await run(cli, args));
+  const staging = await mkdtemp(path.join(os.tmpdir(), "paseo-feishu-"));
+  try {
+    const messages = messagesOf(
+      await run(cli, [...args, "--download-resources"], { cwd: staging, timeoutMs: FETCH_TIMEOUT_MS, stderr: onStderr }),
+    );
+    for (const message of messages) {
+      for (const resource of message.resources ?? []) {
+        if (resource.error || !resource.local_path) continue;
+        const relative = path.relative(staging, path.resolve(staging, resource.local_path));
+        if (relative.startsWith("..") || path.isAbsolute(relative)) continue;
+        const target = path.join(downloadTo, relative);
+        await mkdir(path.dirname(target), { recursive: true });
+        await copyFile(path.join(staging, relative), target);
+        resource.local_path = target;
+      }
+    }
+    return messages;
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+function messagesOf(data: unknown): LarkMessage[] {
   const messages = (data as { messages?: unknown } | undefined)?.messages;
   return Array.isArray(messages) ? (messages as LarkMessage[]) : [];
 }
