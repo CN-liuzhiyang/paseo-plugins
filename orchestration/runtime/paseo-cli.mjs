@@ -155,7 +155,7 @@ const ERROR_HINTS = {
   OUTPUT_SCHEMA_FAILED:
     "The agent raised a permission request and nothing answered it, so it never produced structured output. " +
     "Unattended structured calls must use a mode that finishes without a human -- notably not Claude's `plan` " +
-    "mode, which always asks at the end of a turn. See readOnlyMode() in runtime/agents.mjs.",
+    "mode, which always asks at the end of a turn. The mode comes from the step's effects: see runtime/fences.mjs.",
   INVALID_OUTPUT_SCHEMA:
     "Paseo could not parse the schema JSON. If this came from a shell, quoting ate it: pass arguments as an " +
     "array through runtime/paseo-cli.mjs rather than through cmd.exe or PowerShell.",

@@ -1,0 +1,16 @@
+// Type probe for runtime/flow.d.mts: npx -p typescript tsc -p test/typecheck
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "allowJs": true,
+    "checkJs": true,
+    "strict": false,
+    "strictNullChecks": true,
+    "noEmit": true,
+    "skipLibCheck": false,
+    "types": []
+  },
+  "files": ["probe.mjs", "../../flows/committee.mjs", "../../flows/advisor.mjs"]
+}

@@ -1,143 +1,156 @@
-// The entry point an agent calls.
+// The command line over run.mjs and flow.mjs.
 //
-//   node runtime/orch.mjs eval <file|-> [--grants spawn,send] [--name x] [--timeout ms]
+//   node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
+//   node runtime/orch.mjs check <flow.mjs>
 //
-// Reads a JavaScript source, runs it with the orchestration objects in scope,
-// and prints one JSON object. Everything handed back to the model is also in
-// the audit log.
+// `run` prints one JSON object, { ok, outcome, value, runId, events, cost,
+// caveats, durationMs } plus error / stop when there is one. The events file
+// holds everything else. Exit code: 0 done or stopped, 1 failed or timed out,
+// 2 refused before anything ran (bad arguments, bad input, a check failed).
 //
-// The script is NOT sandboxed, by design: it runs in this process with full
-// Node access, and safety comes from the audit trail, the grant list, and the
-// fact that only a local caller can reach this file. Do not add a sandbox here
-// and then rely on it -- an escape would be silent.
-//
-// Scripts are wrapped in an async function rather than run through node:vm.
-// A fresh vm context would hide Node's globals from the script, which fights
-// the full-access decision above; an async function body gives the same "no
-// shared script variables" property without pretending to isolate anything.
+// Inputs come from the flow's own `inputs`: each one is a flag named in
+// kebab-case (hotfixVersion -> --hotfix-version), parsed by its type --
+// text and choice as strings, count as a number, flag as --name / --no-name,
+// a list of text or numbers by repeating the flag. Groups and other lists go
+// through --input. Flags win over --input, key by key.
 
 import { readFile } from "node:fs/promises";
-import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { Orchestrator, DEFAULT_GRANTS, ALL_GRANTS, NO_EDITS_SUFFIX, readOnlyMode } from "./agents.mjs";
-import { Audit } from "./audit.mjs";
-import * as step from "./step.mjs";
+import { parseArgs } from "node:util";
+import { loadFlow, checkFlow } from "./flow.mjs";
+import { runFlow, jsonSafe } from "./run.mjs";
 
-const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const USAGE = [
+  "Usage:",
+  "  node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]",
+  "  node runtime/orch.mjs check <flow.mjs>",
+].join("\n");
 
-async function readSource(target) {
-  if (target === "-") {
-    const chunks = [];
-    for await (const chunk of process.stdin) chunks.push(chunk);
-    return Buffer.concat(chunks).toString("utf8");
+const kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
+
+export class UsageError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "UsageError";
   }
-  return readFile(target, "utf8");
+}
+
+/** parseArgs options for a flow's inputs, and how to turn each back into a value. */
+function inputOptions(schema) {
+  const options = {};
+  const convert = {};
+  for (const [name, field] of Object.entries(schema.properties)) {
+    const flag = kebab(name);
+    const itemType = field.type === "array" ? field.items.type : null;
+    if (field.type === "boolean") {
+      options[flag] = { type: "boolean" };
+    } else if (field.type === "string" || field.type === "number") {
+      options[flag] = { type: "string" };
+    } else if (itemType === "string" || itemType === "number") {
+      options[flag] = { type: "string", multiple: true };
+    } else {
+      continue; // groups and lists of groups: --input only
+    }
+    convert[flag] = (raw) => {
+      const number = (text) => {
+        const value = Number(text);
+        if (text.trim() === "" || !Number.isFinite(value)) throw new UsageError(`--${flag}: "${text}" is not a number`);
+        return value;
+      };
+      const value = field.type === "number" ? number(raw) : itemType === "number" ? raw.map(number) : raw;
+      return [name, value];
+    };
+  }
+  return { options, convert };
+}
+
+async function readInput(raw) {
+  if (raw === undefined) return {};
+  const text = raw.startsWith("@") ? await readFile(raw.slice(1), "utf8") : raw;
+  const unmarked = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+  let value;
+  try {
+    value = JSON.parse(unmarked);
+  } catch (error) {
+    throw new UsageError(`--input: not valid JSON (${error.message})`);
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new UsageError("--input must be a JSON object");
+  return value;
 }
 
 /**
- * @param {string} source
- * @param {{ name?: string, grants?: string[], timeoutMs?: number, cwd?: string, host?: string }} [options]
+ * A flow's input and the run's timeout from argv (what follows `run <flow>`).
+ * Exported for the tests; throws UsageError.
  */
-export async function evaluate(source, options = {}) {
-  const audit = new Audit({ script: options.name ?? "(inline)" });
-  const grants = options.grants ?? DEFAULT_GRANTS;
-  const orch = await Orchestrator.create({ audit, grants, cwd: options.cwd, host: options.host });
-
-  const logs = [];
-  const log = {
-    info: (...args) => logs.push({ level: "info", message: args.map(String).join(" ") }),
-    warn: (...args) => logs.push({ level: "warn", message: args.map(String).join(" ") }),
-    error: (...args) => logs.push({ level: "error", message: args.map(String).join(" ") }),
-  };
-
-  const ctx = {
-    caller: process.env.PASEO_AGENT_ID ?? null,
-    cwd: orch.cwd,
-    host: orch.host,
-    grants,
-    runId: audit.runId,
-  };
-
-  await audit.record("script.start", { grants, source, sourceLength: source.length });
-
-  const startedAt = Date.now();
-  let timer = null;
-
-  // Settling is the same work whether the script returned or threw: the spend
-  // already happened, and a failed run is exactly when its cost and its
-  // unenforced constraints matter most.
-  const settle = async (outcome) => {
-    const startedAgents = audit.entries.some((e) => e.kind === "agent.run" || e.kind === "agent.spawn");
-    const cost = startedAgents ? await orch.collectCosts().catch(() => null) : null;
-    const caveats = orch.caveats.length > 0 ? [...orch.caveats] : null;
-
-    const entry = await audit.record("script.end", {
-      ...outcome,
-      durationMs: Date.now() - startedAt,
-      logs,
-      cost,
-      caveats,
-    });
-
-    return { auditId: entry.id, runId: audit.runId, durationMs: entry.durationMs, cost, caveats, logs };
-  };
-
-  try {
-    const body = new AsyncFunction("agents", "log", "ctx", "roster", "step", source);
-    const run = body(orch, log, ctx, orch.roster, step);
-
-    const value = await (options.timeoutMs
-      ? Promise.race([
-          run,
-          new Promise((_, reject) => {
-            timer = setTimeout(() => reject(new Error(`Script exceeded ${options.timeoutMs}ms`)), options.timeoutMs);
-          }),
-        ])
-      : run);
-
-    return { ok: true, value, ...(await settle({ ok: true, value })) };
-  } catch (error) {
-    const settled = await settle({
-      ok: false,
-      error: { message: error.message, name: error.name, stack: error.stack },
-    });
-    return { ok: false, error: { message: error.message, name: error.name }, ...settled };
-  } finally {
-    if (timer) clearTimeout(timer);
-    // A script that timed out may have left agents running. They are not
-    // killed: the caller decides, and `cost.agents` names them.
+export async function parseRunArgs(f, argv) {
+  const { options, convert } = inputOptions(f.inputs);
+  const all = { ...options, input: { type: "string" }, timeout: { type: "string" } };
+  // parseArgs refuses a value that starts with "-" as ambiguous, and a question
+  // written as a Markdown list does. A value-taking flag always takes the next
+  // argument, so join them before parseArgs sees them.
+  const joined = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const name = argv[i].startsWith("--") && !argv[i].includes("=") ? argv[i].slice(2) : null;
+    if (name && all[name]?.type === "string" && i + 1 < argv.length) {
+      joined.push(`${argv[i]}=${argv[i + 1]}`);
+      i += 1;
+    } else {
+      joined.push(argv[i]);
+    }
   }
+  let parsed;
+  try {
+    parsed = parseArgs({
+      args: joined,
+      options: all,
+      allowNegative: true,
+      strict: true,
+    });
+  } catch (error) {
+    throw new UsageError(`${error.message}\nInputs of "${f.name}": ${Object.keys(f.inputs.properties).map((n) => `--${kebab(n)}`).join(" ") || "(none)"}`);
+  }
+  const input = await readInput(parsed.values.input);
+  for (const [flag, raw] of Object.entries(parsed.values)) {
+    if (flag === "input" || flag === "timeout") continue;
+    const [name, value] = convert[flag](raw);
+    input[name] = value;
+  }
+  return { input, timeout: parsed.values.timeout ?? null };
 }
 
-function parseFlags(argv) {
-  const flags = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i].startsWith("--")) flags[argv[i].slice(2)] = argv[i + 1];
-  }
-  return flags;
+async function run(target, argv) {
+  const { flow: f } = await loadFlow(target);
+  const { input, timeout } = await parseRunArgs(f, argv);
+  // The path, not the loaded value: the runner records it and scans its source.
+  return runFlow(target, { input, timeout });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, target, ...rest] = process.argv.slice(2);
-  const flags = parseFlags(rest);
+  const print = (value) => console.log(JSON.stringify(jsonSafe(value), null, 2));
 
-  if (command !== "eval" || !target) {
-    console.error("Usage: node runtime/orch.mjs eval <file|-> [--grants a,b] [--name x] [--timeout ms]");
-    console.error(`Grants: ${ALL_GRANTS.join(", ")} (default: ${DEFAULT_GRANTS.join(", ")})`);
+  if (!["run", "check"].includes(command) || !target) {
+    console.error(USAGE);
     process.exit(2);
   }
 
-  const result = await evaluate(await readSource(target), {
-    name: flags.name ?? (target === "-" ? "(stdin)" : path.basename(target)),
-    grants: flags.grants ? flags.grants.split(",") : undefined,
-    timeoutMs: flags.timeout ? Number(flags.timeout) : undefined,
-    cwd: flags.cwd,
-    host: flags.host,
-  });
-
-  console.log(JSON.stringify(result, null, 2));
-  process.exit(result.ok ? 0 : 1);
+  try {
+    if (command === "check") {
+      if (rest.length > 0) throw new UsageError(`check takes only the flow path, got ${rest.join(" ")}`);
+      const result = await checkFlow(target);
+      print(result);
+      process.exit(result.ok ? 0 : 2);
+    }
+    const result = await run(target, rest);
+    print(result);
+    // Calls left running past a timeout hold child processes open; the run
+    // is over, and its events say so.
+    process.exit(result.ok ? 0 : 1);
+  } catch (error) {
+    // Refused before run.start: nothing ran, nothing was spent, no events file.
+    console.error(`${error.name}: ${error.message}`);
+    if (error.name === "UsageError") console.error(`\n${USAGE}`);
+    process.exit(2);
+  }
 }
-
-export { NO_EDITS_SUFFIX, readOnlyMode };

@@ -65,3 +65,12 @@ export function loadConfig() {
   }
   return (cached = parseConfig(source, file));
 }
+
+/**
+ * Where run events go: ORCH_LOG_DIR, then `logDir` in config.json, then
+ * ~/.paseo-orchestration/logs. Outside every checkout by default: the events
+ * hold full prompts and agent output, and this code is public.
+ */
+export function logDir() {
+  return process.env.ORCH_LOG_DIR ?? loadConfig().logDir ?? path.join(CONFIG_HOME, "logs");
+}

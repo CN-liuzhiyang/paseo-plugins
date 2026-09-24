@@ -1,17 +1,18 @@
 {
   "name": "paseo-orchestration",
   "private": true,
-  "version": "0.1.0",
-  "description": "Deterministic scripts that dispatch Paseo agents: steps with output schemas, roles, audit, and a human gate.",
+  "version": "0.2.0",
+  "description": "Flows that dispatch Paseo agents: steps with output schemas and declared effects, roles, a run event stream, and a human gate.",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.4"
   },
   "exports": {
     "./runtime/*": "./runtime/*",
-    "./scripts/*": "./scripts/*"
+    "./flows/*": "./flows/*"
   },
   "scripts": {
+    "test": "node --test test/*.test.mjs",
     "smoke": "node runtime/smoke.mjs"
   }
 }
