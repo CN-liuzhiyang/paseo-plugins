@@ -1,0 +1,8 @@
+{
+  "id": "orchestration-ui",
+  "description": "编排运行：只读地查看编排运行时（orchestration/）写下的每次运行——阶段、调用、人闸、结局",
+  "requirements": {
+    "paseo": ">=0.9.1"
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
