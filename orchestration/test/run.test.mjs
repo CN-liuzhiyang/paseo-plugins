@@ -314,6 +314,46 @@ test("timeout: the run ends, the call in flight is closed with RunEnded", async 
   assert.deepEqual(events.filter((e) => e.kind === "phase.end").map((e) => e.ok), [false]);
 });
 
+test("past a timeout the flow cannot start new calls, even while the run is settling", async () => {
+  // The slow call is not awaited; the loop keeps asking while settling looks
+  // agents up, which takes a while on a real daemon.
+  const f = flow({
+    name: "busy",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    async run(_, $) {
+      $.ask(echo, { word: "slow" }, { role: "fast" }).catch(() => {});
+      for (;;) await $.ask(echo, { word: "a" }, { role: "fast" });
+    },
+  });
+  const base = fakeExecutor({ answer: (r) => (r.prompt.includes("slow") ? new Promise(() => {}) : { said: "a" }), delayMs: 200 });
+  const executor = { ...base, findAgent: async (labels) => (await new Promise((r) => setTimeout(r, 300)), base.findAgent(labels)) };
+  const result = await run(f, { executor, timeout: "1s" });
+  assert.equal(result.outcome, "timeout");
+  eventsOf(result);
+  const started = base.requests.length;
+  await new Promise((r) => setTimeout(r, 700));
+  assert.equal(base.requests.length, started, "nothing was sent after the run ended");
+});
+
+test("a timeout out of setTimeout's range is refused before anything runs", async () => {
+  await assert.rejects(run(advisor, { input: { question: "q", role: "fast" }, executor: fakeExecutor(), timeout: "0s" }), /out of range/);
+  await assert.rejects(run(advisor, { input: { question: "q", role: "fast" }, executor: fakeExecutor(), timeout: "600h" }), /out of range/);
+});
+
+test("an answer that does not fit the schema fails the call and is still recorded", async () => {
+  for (const [label, answer] of [["null", null], ["missing field", { verdict: "v" }]]) {
+    const result = await run(advisor, { input: { question: "q", role: "fast" }, executor: fakeExecutor({ answer: () => answer }) });
+    assert.equal(result.outcome, "failed", label);
+    assert.equal(result.error.name, "OutputMismatch", label);
+    const end = eventsOf(result).find((e) => e.kind === "call.end");
+    assert.equal(end.ok, false);
+    assert.deepEqual(end.output, answer, `${label}: the paid answer is kept`);
+  }
+});
+
 test("a thrown error is a failed run with a run.end", async () => {
   const f = flow({ name: "throws", description: "d", phases: [], inputs: {}, grants: [], run: async () => { throw new RangeError("bad"); } });
   const result = await run(f, { executor: fakeExecutor() });
@@ -421,6 +461,9 @@ test("CLI arguments are parsed by the flow's input types", async () => {
   assert.deepEqual(parsed, { input: { hotfixId: "42", rounds: 3, write: false, files: ["a.lua", "b.lua"], mode: "a" }, timeout: "2h" });
   const merged = await parseRunArgs(f, ["--input", '{"hotfixId":"1","rounds":2}', "--rounds", "5"]);
   assert.deepEqual(merged.input, { hotfixId: "1", rounds: 5 });
+  // Values that start with "-": a question written as a list, a negative number.
+  const dashed = await parseRunArgs(f, ["--hotfix-id", "- a\n- b", "--rounds", "-1", "--write"]);
+  assert.deepEqual(dashed.input, { hotfixId: "- a\n- b", rounds: -1, write: true });
   await assert.rejects(parseRunArgs(f, ["--rounds", "three"]), /not a number/);
   await assert.rejects(parseRunArgs(f, ["--hotfix_id", "1"]), /Unknown option/);
 });

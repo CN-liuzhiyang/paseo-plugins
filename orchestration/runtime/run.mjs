@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { format } from "node:util";
 import { loadFlow, describeFlow, scanSource, DEFAULT_GRANTS } from "./flow.mjs";
-import { isStep, validate } from "./step.mjs";
+import { isStep, validate, assertBuilderSchema } from "./step.mjs";
 import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog } from "./events.mjs";
@@ -31,6 +31,8 @@ export const DEFAULT_CALL_TIMEOUT = "30m";
 const GATE_ROLE = "fast";
 /** `do` outputs are the script's own values, often file contents; the event keeps a prefix. */
 const DO_STRING_LIMIT = 2_000;
+/** setTimeout's ceiling; past it Node fires after 1ms, which would time a run out at its first call. */
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 
 const COST_NOTE =
   "per agent, LastUsage: the last turn only (a structured call is one turn). Codex reports CostUsd 0, so totalUsd counts Claude only";
@@ -61,6 +63,13 @@ class StopSignal extends Error {
   }
 }
 
+class RunEnded extends Error {
+  constructor() {
+    super("the run has ended; no new calls or phases");
+    this.name = "RunEnded";
+  }
+}
+
 class RunTimeout extends Error {
   constructor(limit) {
     super(`the run exceeded its ${limit} limit`);
@@ -83,6 +92,18 @@ export function jsonSafe(value, limit = Infinity) {
     return text === undefined ? null : JSON.parse(text);
   } catch (error) {
     return `[not serializable: ${error.message}]`;
+  }
+}
+
+const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** Whether a step's schema is made of the builders, so `validate` understands all of it. */
+function builderSchema(step) {
+  try {
+    assertBuilderSchema(step.schema, step.name);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -131,6 +152,7 @@ export async function runFlow(target, options = {}) {
     } catch (error) {
       throw new RunRefused(`--timeout: ${error.message}`);
     }
+    if (timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) throw new RunRefused(`--timeout: ${options.timeout} is out of range (1s to 596h)`);
   }
   let roster = options.roster;
   if (!roster) {
@@ -161,6 +183,10 @@ export async function runFlow(target, options = {}) {
   const spent = new Map(); // agentId -> cost
   const caveats = [];
   let calls = 0;
+  // Set the moment the flow's outcome is decided. A flow still running past
+  // a timeout (or a branch nobody awaited) keeps executing; from here on it
+  // may not start a call or a phase -- nothing new is spent or recorded.
+  let ending = false;
 
   const caveat = (text, callId) => {
     if (caveats.includes(text)) return;
@@ -169,6 +195,7 @@ export async function runFlow(target, options = {}) {
   };
 
   const startCall = () => {
+    if (ending) throw new RunEnded();
     const callId = `c${++calls}`;
     const record = { callId, labels: { "orch-run": runId, "orch-call": callId }, agentId: null, startedAt: Date.now() };
     open.set(callId, record);
@@ -258,10 +285,14 @@ export async function runFlow(target, options = {}) {
           timeout,
           cwd: callOptions.cwd ?? cwd,
         });
+        // Paseo enforces the schema; this catches what reaches the flow anyway
+        // (an empty stdout parses to null). The answer stays in call.end.
+        const problems = builderSchema(step) ? validate(step.schema, output, step.name) : isPlainObject(output) ? [] : [`${step.name}: not an object`];
+        if (problems.length > 0) failure = Object.assign(new Error(`the answer does not fit the step's schema: ${problems.join("; ")}`), { name: "OutputMismatch" });
       } catch (error) {
         failure = error;
       }
-      endCall(record, { ok: !failure, output, error: failure, ...(await settleAgent(record)) });
+      endCall(record, { ok: !failure, output: jsonSafe(output), error: failure, ...(await settleAgent(record)) });
       if (failure) throw failure;
       return output;
     },
@@ -350,6 +381,7 @@ export async function runFlow(target, options = {}) {
     async phase(id, fn) {
       if (!declared.has(id)) throw new TypeError(`$.phase("${id}") is not declared in the flow's phases`);
       if (typeof fn !== "function") throw new TypeError(`$.phase("${id}") needs a function`);
+      if (ending) throw new RunEnded();
       log.emit("phase.start", { phase: id });
       openPhases.set(id, (openPhases.get(id) ?? 0) + 1);
       const end = (ok) => {
@@ -437,12 +469,15 @@ export async function runFlow(target, options = {}) {
   } finally {
     if (timer) clearTimeout(timer);
   }
+  ending = true;
 
   // Calls still in flight (a timeout, or a flow that threw without awaiting
   // everything it started) are closed here, so every call.start has its
   // call.end. Their agents are not stopped: whoever runs this decides.
-  const unfinished = [...open.values()];
-  for (const record of unfinished) {
+  let unfinished = 0;
+  while (open.size > 0) {
+    const record = open.values().next().value;
+    unfinished += 1;
     endCall(record, {
       ok: false,
       output: null,
@@ -450,8 +485,8 @@ export async function runFlow(target, options = {}) {
       ...(await settleAgent(record)),
     });
   }
-  if (unfinished.length > 0) {
-    log.emit("log", { level: "warn", message: `${unfinished.length} call(s) were still running when the run ended; their agents were left running` });
+  if (unfinished > 0) {
+    log.emit("log", { level: "warn", message: `${unfinished} call(s) were still running when the run ended; their agents were left running` });
   }
   for (const [id, depth] of openPhases) {
     for (let i = 0; i < depth; i += 1) log.emit("phase.end", { phase: id, ok: false });

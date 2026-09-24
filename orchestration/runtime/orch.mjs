@@ -85,11 +85,25 @@ async function readInput(raw) {
  */
 export async function parseRunArgs(f, argv) {
   const { options, convert } = inputOptions(f.inputs);
+  const all = { ...options, input: { type: "string" }, timeout: { type: "string" } };
+  // parseArgs refuses a value that starts with "-" as ambiguous, and a question
+  // written as a Markdown list does. A value-taking flag always takes the next
+  // argument, so join them before parseArgs sees them.
+  const joined = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const name = argv[i].startsWith("--") && !argv[i].includes("=") ? argv[i].slice(2) : null;
+    if (name && all[name]?.type === "string" && i + 1 < argv.length) {
+      joined.push(`${argv[i]}=${argv[i + 1]}`);
+      i += 1;
+    } else {
+      joined.push(argv[i]);
+    }
+  }
   let parsed;
   try {
     parsed = parseArgs({
-      args: argv,
-      options: { ...options, input: { type: "string" }, timeout: { type: "string" } },
+      args: joined,
+      options: all,
       allowNegative: true,
       strict: true,
     });

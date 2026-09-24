@@ -48,7 +48,8 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 不能有别的 JSON Schema 关键字（`default` 之类直接报错）。运行器在**第一笔花费之前**按它校验输入，
 不合就拒绝运行、不产生事件文件。命令行上每个输入是一个 kebab-case 的 flag（`hotfixVersion` →
 `--hotfix-version`），按类型解析：`text`/`choice` 是字符串，`count` 是数字，`flag` 是 `--x` / `--no-x`，
-`list(text())` 重复写 flag；`group` 只能经 `--input <json 或 @文件>` 给。`input`、`timeout`、`help`
+`list(text())` 重复写 flag；`group` 只能经 `--input <json 或 @文件>` 给。以 `-` 开头的值（写成列表的问题、
+负数）照常能传。`input`、`timeout`、`help`
 是运行器自己的 flag，不能当输入名。
 
 没有默认值是刻意的：advisor 的 `role`、committee 的 `assessor` 都要调用方写出来。代价是命令行长一点，
@@ -60,7 +61,7 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8） | `call.start`/`call.end`，`type: "ask"` |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里） | `call.start`/`call.end`，`type: "ask"` |
 | `$.do(name, fn)` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值 | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, brief?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`holdPath` 不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
@@ -70,7 +71,8 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 | `$.ctx` | 只读：`runId`、`caller`、`cwd`、`host`、`runDir`、`events`（事件文件路径）、`role(name)`（解析角色，没有就抛错） | — |
 
 `return value` 就是 `outcome: "done"`。抛错是 `failed`，超过 `--timeout` 是 `timeout`；这两种运行器都照样
-写 `run.end`、收成本、带 caveats。
+写 `run.end`、收成本、带 caveats。结局一定下来，flow 里还在跑的代码（超时后的后台部分、没 await 的分支）
+再调任何原语都会抛 `RunEnded`：不会再花钱，也不会再往事件里写。
 
 **`$.all` 的返回形状是刻意的**：R6 以前是约定（"用 `Promise.allSettled`"），committee 手写了 `failures`；
 现在失败的任务只是数组里 `ok: false` 的一项，已经付费的结果不会被另一个失败吃掉——除非脚本自己去扔。
@@ -213,7 +215,8 @@ agent 调用会花钱，可能有副作用。失败了要不要再来一次，�
 **按"最慢的那家的最慢一次"估，不要按平均，也不要假设哪家一定更快。**
 
 超时的 step 会失败，所以脚本必须能在中间步骤失败时保住前面已经付费的结果（见 R6）。
-整次运行的上限是 `orch run --timeout 2h`（不给就不限）；到点时运行以 `timeout` 结束，还在跑的
+整次运行的上限是 `orch run --timeout 2h`（不给就不限；超出 1s 到 596h 的值在运行前被拒——`setTimeout`
+过了上限会退化成 1ms，等于第一次调用就超时）；到点时运行以 `timeout` 结束，还在跑的
 调用补一条 `RunEnded` 的 `call.end`，它们的 agent **不会被停掉**——停不停由跑它的人决定。
 
 ## R8. 栅栏按爆炸半径声明，没被强制的要如实说出来
