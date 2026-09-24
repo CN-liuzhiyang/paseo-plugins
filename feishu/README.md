@@ -130,6 +130,7 @@ Paseo 的 schedule 可以带 `delivery: { channel, to }`（`paseo schedule creat
 发到 `to` 这个会话，标题是 schedule 的名字；没跑完也发，红色卡片写明原因。在飞书里回复这张卡片，
 消息照常交给这个会话的 agent，被引用的卡片内容一起带过去。
 
+- 渠道向 Paseo 报出可投递的目标：每条路由一个，名字就是路由的名称，所以在 App 里建 schedule 时按名字选，不用填 chat_id。
 - 只投递到**有路由的会话**。能建 schedule 的不只是人，agent 也能，路由就是机器人会主动发言的会话名单。
 - 用 run id 作飞书的 `uuid`，daemon 重复投递同一次运行时飞书只发一条（飞书的去重窗口是一小时）。
 - 投递结果（成功或失败原因）记在 Paseo 这次运行的记录里，`paseo schedule logs` 能看到；插件另写一条

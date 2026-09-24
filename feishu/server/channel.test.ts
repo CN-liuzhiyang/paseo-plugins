@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Settings } from "../shared/settings";
-import { createChannel, type ChannelDelivery } from "./channel";
+import { createChannel, destinationsOf, type ChannelDelivery } from "./channel";
 
 const CHAT = "oc_routed";
 
@@ -84,4 +84,13 @@ test("a chat without a route is refused, so a schedule cannot post anywhere the 
 test("an unconfigured plugin refuses rather than dropping the result", async () => {
   await assert.rejects(harness({ ...settings, profile: "" }).deliver(delivery()), /not configured/);
   await assert.rejects(harness(null).deliver(delivery()), /settings are invalid/);
+});
+
+test("every routed chat is offered as a destination, by its name", () => {
+  const named = { ...settings, routes: [{ ...settings.routes[0], name: "我的单聊" }, { ...settings.routes[0], chatId: "oc_other", name: " " }] };
+  assert.deepEqual(destinationsOf(named), [
+    { to: CHAT, label: "我的单聊" },
+    { to: "oc_other", label: "oc_other" },
+  ]);
+  assert.deepEqual(destinationsOf(null), []);
 });

@@ -15,6 +15,11 @@ export interface ChannelDelivery {
   agentId: string | null;
 }
 
+/** Where a delivery can go, as Paseo offers it to people choosing one: every routed chat, by name. */
+export function destinationsOf(settings: Settings | null): Array<{ to: string; label: string }> {
+  return (settings?.routes ?? []).map((route) => ({ to: route.chatId, label: route.name.trim() || route.chatId }));
+}
+
 /**
  * Delivers to routed chats only. Anyone who can create a schedule can name a delivery target,
  * agents included, so the routes are the list of chats this bot will post to on its own.

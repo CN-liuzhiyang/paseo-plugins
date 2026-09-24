@@ -11,7 +11,7 @@ import { createIsolation, isClaude } from "./server/context";
 import { createDispatcher, larkOf, type Dispatcher, type Stranger } from "./server/dispatcher";
 import { readIncoming } from "./server/inbound";
 import { createDirectory, type Directory } from "./server/directory";
-import { createChannel, type ChannelDelivery } from "./server/channel";
+import { createChannel, destinationsOf, type ChannelDelivery } from "./server/channel";
 import { botOpenId, chatMembers, fetchMessages, sendCard } from "./server/lark";
 import { createPeople } from "./server/people";
 
@@ -68,12 +68,18 @@ export default function contribute(server: PluginServerContext) {
   // COMPAT(registerChannel): a fork-only extension point until upstream lands its own shape.
   // A schedule whose delivery names this channel has its result posted to a routed chat.
   const host = server as PluginServerContext & {
-    registerChannel?: (channel: { id: string; label?: string; deliver(delivery: ChannelDelivery): Promise<void> }) => void;
+    registerChannel?: (channel: {
+      id: string;
+      label?: string;
+      deliver(delivery: ChannelDelivery): Promise<void>;
+      destinations?(): Promise<Array<{ to: string; label: string }>>;
+    }) => void;
   };
   if (host.registerChannel) {
     host.registerChannel({
       id: "feishu",
       label: "飞书",
+      destinations: async () => destinationsOf(await readSettings()),
       deliver: createChannel({
         readSettings,
         send: (values, chatId, card, key) =>
