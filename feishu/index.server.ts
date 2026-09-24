@@ -152,9 +152,11 @@ export default function contribute(server: PluginServerContext) {
         readIncoming(
           event,
           {
-            fetch: (ids, dir) => fetchMessages(cli, ids, dir),
+            fetch: (ids, dir) =>
+              fetchMessages(cli, ids, dir, (text) => log(`lark-cli on fetching ${ids.join(",")}: ${text}`)),
             lookup: (ids) => fetchMessages(cli, ids, null),
             mediaDir: (chatId, messageId) => path.join(mediaRoot(), chatId, messageId),
+            log,
           },
           options,
         ),

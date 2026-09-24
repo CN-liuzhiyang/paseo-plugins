@@ -31,6 +31,10 @@ export interface IncomingDeps {
   /** Where this message's attachments are kept. */
   mediaDir(chatId: string, messageId: string): string;
   readFile?: (path: string) => Promise<Buffer>;
+  /** Where a failed download is explained; the card only says that it failed. */
+  log?: (line: string) => void;
+  /** How long to wait before fetching again when an attachment did not download. */
+  retryDelayMs?: number;
 }
 
 /** A group message the bot was not @-ed in, kept as context for the next one it is. */
@@ -52,6 +56,9 @@ const MAX_QUOTED_CHARS = 1_500;
 // What the group said before an @: enough to follow the conversation, not a transcript.
 const MAX_OVERHEARD_LINE = 300;
 const MAX_OVERHEARD_CHARS = 3_000;
+// On the server, both images of a picture-and-text message came back missing when fetched the
+// moment the event arrived, yet downloaded fine minutes later: one retry, a moment later.
+const RETRY_DELAY_MS = 1_500;
 
 // Markers lark-cli leaves in rendered content where an attachment was.
 const MARKERS: Array<{ pattern: RegExp; kind: "image" | "file" | "audio" | "video" | "sticker" }> = [
@@ -92,14 +99,29 @@ export async function readIncoming(
   }
 
   const dir = deps.mediaDir(chatId, messageId);
-  let fetched: LarkMessage[] = [];
+  const ids = replyTo ? [messageId, replyTo] : [messageId];
   const problems: string[] = [];
-  try {
-    await mkdir(dir, { recursive: true });
-    fetched = await deps.fetch(replyTo ? [messageId, replyTo] : [messageId], dir);
-  } catch (error) {
-    problems.push(`没能从飞书取到消息的附件：${error instanceof Error ? error.message : String(error)}`);
+  const fetchOnce = async (): Promise<{ messages: LarkMessage[]; error: string | null }> => {
+    try {
+      await mkdir(dir, { recursive: true });
+      return { messages: await deps.fetch(ids, dir), error: null };
+    } catch (error) {
+      return { messages: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  };
+  let result = await fetchOnce();
+  let missing = undownloaded(result.messages, messageId, content);
+  if (result.error !== null || missing.length > 0) {
+    deps.log?.(`${messageId} attachments incomplete (${result.error ?? missing.join(", ")}), fetching again`);
+    await new Promise((done) => setTimeout(done, deps.retryDelayMs ?? RETRY_DELAY_MS));
+    result = await fetchOnce();
+    missing = undownloaded(result.messages, messageId, content);
+    if (result.error !== null || missing.length > 0) {
+      deps.log?.(`${messageId} attachments still incomplete (${result.error ?? missing.join(", ")})`);
+    }
   }
+  const fetched = result.messages;
+  if (result.error !== null) problems.push(`没能从飞书取到消息的附件：${result.error}`);
   const byId = new Map(fetched.map((message) => [message.message_id, message]));
   const main = byId.get(messageId) ?? { message_id: messageId, msg_type: type, content };
   const parent = replyTo ? byId.get(replyTo) : undefined;
@@ -166,6 +188,27 @@ export async function readIncoming(
     summary: body.summary === "" ? "[消息]" : body.summary,
     problems,
   };
+}
+
+/** The attachments that did not reach disk, as `message/key (why)`; stickers are never downloaded. */
+function undownloaded(messages: LarkMessage[], messageId: string, eventContent: string): string[] {
+  const missing: string[] = [];
+  if (!messages.some((message) => message.message_id === messageId) && ANY_MARKER.test(eventContent)) {
+    missing.push(`${messageId} (message not returned)`);
+  }
+  for (const message of messages) {
+    const resources = new Map((message.resources ?? []).map((resource) => [resource.key, resource]));
+    for (const { pattern, kind } of MARKERS) {
+      if (kind === "sticker") continue;
+      for (const [, key] of message.content.matchAll(pattern)) {
+        const resource = resources.get(key);
+        if (resource && !resource.error && resource.local_path) continue;
+        const why = !resource ? "not returned" : resource.error ? "error" : "no path";
+        missing.push(`${message.message_id}/${key} (${why})`);
+      }
+    }
+  }
+  return missing;
 }
 
 /**

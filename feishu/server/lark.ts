@@ -15,7 +15,7 @@ const FETCH_TIMEOUT_MS = 120_000;
 function run(
   cli: LarkCli,
   args: string[],
-  options: { body?: unknown; cwd?: string; timeoutMs?: number; raw?: boolean } = {},
+  options: { body?: unknown; cwd?: string; timeoutMs?: number; raw?: boolean; stderr?: (text: string) => void } = {},
 ): Promise<unknown> {
   const what = args.slice(0, 3).join(" ");
   return new Promise<unknown>((resolve, reject) => {
@@ -36,6 +36,7 @@ function run(
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) {
+        if (options.stderr && stderr.trim() !== "") options.stderr(stderr.trim().slice(-1_000));
         try {
           const parsed = JSON.parse(stdout) as { data?: unknown };
           resolve(options.raw ? parsed : parsed.data);
@@ -126,18 +127,20 @@ export interface LarkMessage {
 /**
  * Fetches messages with their sender names. With `downloadTo`, their images and files are
  * downloaded into `<downloadTo>/lark-im-resources/`: lark-cli only writes under its working
- * directory, so that is where it runs.
+ * directory, so that is where it runs. A download that fails still exits 0; what lark-cli said
+ * about it on stderr goes to `onStderr`.
  */
 export async function fetchMessages(
   cli: LarkCli,
   messageIds: string[],
   downloadTo: string | null,
+  onStderr?: (text: string) => void,
 ): Promise<LarkMessage[]> {
   const args = ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--no-reactions", "--format", "json"];
   const data = await run(
     cli,
     downloadTo === null ? args : [...args, "--download-resources"],
-    downloadTo === null ? {} : { cwd: downloadTo, timeoutMs: FETCH_TIMEOUT_MS },
+    downloadTo === null ? {} : { cwd: downloadTo, timeoutMs: FETCH_TIMEOUT_MS, stderr: onStderr },
   );
   const messages = (data as { messages?: unknown } | undefined)?.messages;
   return Array.isArray(messages) ? (messages as LarkMessage[]) : [];

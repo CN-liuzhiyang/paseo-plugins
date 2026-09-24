@@ -264,3 +264,62 @@ test("when the group has been talking a lot, the oldest of it is left out", asyn
   assert.match(block, /某人：19/);
   assert.doesNotMatch(block, /某人：0字/);
 });
+
+test("an image that did not download the first time is fetched again, and the retry is logged", async () => {
+  const { dir, file } = await fixture();
+  const post = "![Image](img_v3_key)\n就是这种呀";
+  const answers: LarkMessage[][] = [
+    [{ message_id: "om_1", msg_type: "post", content: post, resources: [{ key: "img_v3_key", type: "image", error: true }] }],
+    [{ message_id: "om_1", msg_type: "post", content: post, resources: [{ key: "img_v3_key", type: "image", local_path: file }] }],
+  ];
+  let calls = 0;
+  const logged: string[] = [];
+  const incoming = await readIncoming(event({ message_type: "post", content: post }), {
+    fetch: async () => answers[calls++],
+    mediaDir: () => dir,
+    log: (line) => logged.push(line),
+    retryDelayMs: 0,
+  });
+  assert.equal(calls, 2);
+  assert.equal(incoming.prompt, "[图片 1]\n就是这种呀");
+  assert.equal(incoming.images.length, 1);
+  assert.deepEqual(incoming.problems, []);
+  assert.deepEqual(logged, ["om_1 attachments incomplete (om_1/img_v3_key (error)), fetching again"]);
+});
+
+test("an image that fails twice is fetched only twice, and the card and the log both say so", async () => {
+  const { dir } = await fixture();
+  const post = "![Image](img_v3_key)\n看这个";
+  let calls = 0;
+  const logged: string[] = [];
+  const incoming = await readIncoming(event({ message_type: "post", content: post }), {
+    fetch: async () => {
+      calls += 1;
+      return [{ message_id: "om_1", msg_type: "post", content: post, resources: [] }];
+    },
+    mediaDir: () => dir,
+    log: (line) => logged.push(line),
+    retryDelayMs: 0,
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(incoming.problems, ["有一张图片没附上：没能下载"]);
+  assert.equal(logged.length, 2);
+  assert.match(logged[1], /still incomplete \(om_1\/img_v3_key \(not returned\)\)/);
+});
+
+test("a reply without attachments is fetched once", async () => {
+  const { dir } = await fixture();
+  let calls = 0;
+  await readIncoming(event({ reply_to: "om_0" }), {
+    fetch: async () => {
+      calls += 1;
+      return [
+        { message_id: "om_1", msg_type: "text", content: "你好" },
+        { message_id: "om_0", msg_type: "text", content: "之前" },
+      ];
+    },
+    mediaDir: () => dir,
+    retryDelayMs: 0,
+  });
+  assert.equal(calls, 1);
+});
