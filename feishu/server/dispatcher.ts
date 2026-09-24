@@ -138,6 +138,17 @@ interface ChatAgent {
   agentId: string;
   provider: string;
   cwd: string;
+  /** When the conversation started, in ms; a daily reset compares it with the reset time. */
+  createdAt: number;
+}
+
+/** The latest time of day `hhmm` ("HH:MM", host local time) at or before `now`. */
+export function lastResetAt(now: number, hhmm: string): number {
+  const [hours, minutes] = hhmm.split(":").map(Number);
+  const at = new Date(now);
+  at.setHours(hours ?? 0, minutes ?? 0, 0, 0);
+  if (at.getTime() > now) at.setDate(at.getDate() - 1);
+  return at.getTime();
 }
 
 export interface Lark {
@@ -372,7 +383,8 @@ export function createDispatcher(deps: {
     });
     const agent = entries[0]?.agent;
     if (!agent) return null;
-    const found = { agentId: agent.id, provider: agent.provider, cwd: agent.cwd };
+    const created = Date.parse(agent.createdAt);
+    const found = { agentId: agent.id, provider: agent.provider, cwd: agent.cwd, createdAt: Number.isNaN(created) ? now() : created };
     chats.set(chatId, found);
     return found;
   }
@@ -396,13 +408,47 @@ export function createDispatcher(deps: {
       ...(Object.keys(context.env).length > 0 ? { env: context.env } : {}),
       labels: { source: "feishu", [CHAT_LABEL]: chatId, ...context.labels },
     });
-    const chat = { agentId, provider: route.provider, cwd: route.cwd };
+    const chat = { agentId, provider: route.provider, cwd: route.cwd, createdAt: now() };
     chats.set(chatId, chat);
     return chat;
   }
 
-  async function startAgent(chatId: string, chatType: "p2p" | "group", route: Route, messageId: string, incoming: Incoming) {
-    const cardId = await reply(messageId, receivedCard(incoming.summary, true));
+  /** Whether anything is under way on an agent, from this plugin or from anyone else. */
+  function busy(agentId: string, live: { agent: { status: string } } | null): boolean {
+    return runs.has(agentId) || (queues.get(agentId)?.length ?? 0) > 0 || live?.agent.status === "running";
+  }
+
+  /**
+   * Archives a conversation the chat has moved on from. One that is still working is left
+   * alone: archiving it would cut its turn short. Returns whether it was archived.
+   */
+  async function retire(agentId: string, why: string): Promise<boolean> {
+    const handle = paseo.agents.ref(agentId);
+    const live = await handle.refresh().catch(() => null);
+    if (!live || live.agent.archivedAt) return false;
+    if (busy(agentId, live)) {
+      log(`kept agent ${agentId} after ${why}: it is still working`);
+      return false;
+    }
+    try {
+      await handle.archive();
+      log(`archived agent ${agentId} after ${why}`);
+      return true;
+    } catch (error) {
+      log(`archive agent ${agentId} after ${why}: ${describe(error)}`);
+      return false;
+    }
+  }
+
+  async function startAgent(
+    chatId: string,
+    chatType: "p2p" | "group",
+    route: Route,
+    messageId: string,
+    incoming: Incoming,
+    note?: string,
+  ) {
+    const cardId = await reply(messageId, receivedCard(incoming.summary, true, note));
     if (!cardId) return;
     const painter = painterFor(cardId);
     let chat: ChatAgent;
@@ -427,7 +473,13 @@ export function createDispatcher(deps: {
     });
   }
 
-  async function newSession(chatId: string, chatType: "p2p" | "group", route: Route, messageId: string) {
+  async function newSession(
+    chatId: string,
+    chatType: "p2p" | "group",
+    route: Route,
+    messageId: string,
+    previous: ChatAgent | null,
+  ) {
     let chat: ChatAgent;
     try {
       chat = await createAgent(chatId, chatType, route, messageId, "飞书会话");
@@ -437,7 +489,8 @@ export function createDispatcher(deps: {
       return;
     }
     log(`${messageId} -> new session ${chat.agentId}`);
-    await reply(messageId, newSessionCard(route.provider, chat.agentId));
+    const archived = previous ? await retire(previous.agentId, "/new") : false;
+    await reply(messageId, newSessionCard(route.provider, chat.agentId, previous === null ? "none" : archived ? "archived" : "kept"));
   }
 
   async function continueAgent(chat: ChatAgent, chatId: string, messageId: string, incoming: Incoming) {
@@ -703,11 +756,13 @@ export function createDispatcher(deps: {
       const kind = text(event.message_type) ?? "text";
       const reset = kind === "text" || kind === "post" ? NEW_SESSION.exec(typed) : null;
       if (reset) {
+        const previous = await currentAgent(chatId).catch(() => null);
         chats.delete(chatId);
         const rest = reset[1]?.trim() ?? "";
-        if (rest === "") await newSession(chatId, chatType, route, messageId);
+        if (rest === "") await newSession(chatId, chatType, route, messageId, previous);
         else {
           const incoming = await readIncoming(event, { command: NEW_COMMAND, overheard: heard });
+          if (previous) await retire(previous.agentId, "/new");
           await startAgent(chatId, chatType, route, messageId, incoming);
         }
         return;
@@ -718,7 +773,16 @@ export function createDispatcher(deps: {
       if (current) {
         const live = await paseo.agents.ref(current.agentId).refresh();
         if (live && !live.agent.archivedAt) {
-          await continueAgent(current, chatId, messageId, incoming);
+          // Past the reset time the conversation starts over, unless the old one is still working.
+          const stale = Boolean(route.dailyReset) && current.createdAt < lastResetAt(now(), route.dailyReset);
+          if (!stale || busy(current.agentId, live)) {
+            await continueAgent(current, chatId, messageId, incoming);
+            return;
+          }
+          chats.delete(chatId);
+          const archived = await retire(current.agentId, `daily reset at ${route.dailyReset}`);
+          const note = archived ? "新的一天，开了新会话；之前的会话已在 Paseo 里归档。" : "新的一天，开了新会话。";
+          await startAgent(chatId, chatType, route, messageId, incoming, note);
           return;
         }
         // Archived or gone: the conversation is over, so this message starts the next one.

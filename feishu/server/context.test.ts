@@ -11,6 +11,7 @@ const route: Route = {
   modeId: "default",
   instructions: "你是家里的管家。",
   claudeMd: false,
+  dailyReset: "",
 };
 
 test("by default a Claude agent reads no CLAUDE.md, and is labelled so it stays that way", () => {

@@ -20,6 +20,12 @@ export const routeSchema = z.object({
   // private notes anyone in the chat may then read in a reply, and the workspace's own.
   // Claude only; other providers load their own instruction files regardless.
   claudeMd: z.boolean().default(false),
+  // "HH:MM" in the daemon host's local time: the first message after it each day starts a new
+  // conversation, as `/new` would, and the old one is archived. Empty keeps one conversation.
+  dailyReset: z
+    .string()
+    .regex(/^(?:|(?:[01]\d|2[0-3]):[0-5]\d)$/, "HH:MM, e.g. 05:00")
+    .default(""),
 });
 
 export const settingsDefinition = defineSettings({

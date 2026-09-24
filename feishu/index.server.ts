@@ -11,7 +11,8 @@ import { createIsolation, isClaude } from "./server/context";
 import { createDispatcher, larkOf, type Dispatcher, type Stranger } from "./server/dispatcher";
 import { readIncoming } from "./server/inbound";
 import { createDirectory, type Directory } from "./server/directory";
-import { botOpenId, chatMembers, fetchMessages } from "./server/lark";
+import { createChannel, type ChannelDelivery } from "./server/channel";
+import { botOpenId, chatMembers, fetchMessages, sendCard } from "./server/lark";
 import { createPeople } from "./server/people";
 
 const log = (line: string) => console.log(`feishu: ${line}`);
@@ -63,6 +64,27 @@ export default function contribute(server: PluginServerContext) {
     dir: async () => (await readSettings())?.auditDir || defaultAuditDir(),
     log,
   });
+
+  // COMPAT(registerChannel): a fork-only extension point until upstream lands its own shape.
+  // A schedule whose delivery names this channel has its result posted to a routed chat.
+  const host = server as PluginServerContext & {
+    registerChannel?: (channel: { id: string; label?: string; deliver(delivery: ChannelDelivery): Promise<void> }) => void;
+  };
+  if (host.registerChannel) {
+    host.registerChannel({
+      id: "feishu",
+      label: "飞书",
+      deliver: createChannel({
+        readSettings,
+        send: (values, chatId, card, key) =>
+          sendCard({ path: values.larkCli, profile: values.profile }, chatId, card, key),
+        audit,
+        log,
+      }),
+    });
+  } else {
+    log("this Paseo host has no server.registerChannel; scheduled results cannot be delivered to Feishu");
+  }
 
   // Agents created without CLAUDE.md stay that way every time their session opens again.
   const isolation = createIsolation(paseo, log);

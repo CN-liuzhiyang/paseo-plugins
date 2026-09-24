@@ -16,7 +16,11 @@
 
 - 会话里第一条消息起 agent，之后的消息都发给它。agent 还在处理上一条时，新消息排队（卡片显示
   「排队中」），上一轮结束再发，不打断正在跑的那一轮；在 Paseo 里直接跟它对话造成的忙也算。
-- `/new` 开新会话；`/new <内容>` 开新会话并直接问这句。旧会话留在 Paseo 里。
+- `/new` 开新会话；`/new <内容>` 开新会话并直接问这句。旧会话在 Paseo 里归档（还在跑的不动，
+  留在 Paseo 里）。
+- 路由设了「每天开新会话」（`dailyReset`，如 `"05:00"`，daemon 所在机器的本地时间）时，过了这个
+  时间的第一条消息自动开新会话、归档旧的，卡片上会说「新的一天」。不是定时器：没人说话就什么也不发生；
+  旧会话还在跑就等它跑完。
 - 在 Paseo 里把 agent 归档，下一条消息自动开新会话。
 - 会话和 agent 的对应关系是 agent 上的标签 `feishu-chat=<chat_id>`，存在 Paseo 自己的注册表里，
   插件或 daemon 重启后照样接得上。改了路由的 `cwd` 或 `provider` 不影响已有会话，`/new` 之后才生效。
@@ -119,6 +123,19 @@ agent 要权限时，这条消息的卡片变成「等待审批」，每个未�
 要用 `server.paseo`。这是 fork（`CN-liuzhiyang/paseo` 的 `next`）加的扩展点，上游还没有；
 宿主不提供时插件只打一行日志，什么也不做。
 
+## 投递定时任务的结果
+
+Paseo 的 schedule 可以带 `delivery: { channel, to }`（`paseo schedule create --deliver feishu:oc_...`），
+跑完后 daemon 把结果交给名为 `channel` 的插件渠道。本插件注册渠道 `feishu`：把结果作为一条新卡片
+发到 `to` 这个会话，标题是 schedule 的名字；没跑完也发，红色卡片写明原因。在飞书里回复这张卡片，
+消息照常交给这个会话的 agent，被引用的卡片内容一起带过去。
+
+- 只投递到**有路由的会话**。能建 schedule 的不只是人，agent 也能，路由就是机器人会主动发言的会话名单。
+- 用 run id 作飞书的 `uuid`，daemon 重复投递同一次运行时飞书只发一条（飞书的去重窗口是一小时）。
+- 投递结果（成功或失败原因）记在 Paseo 这次运行的记录里，`paseo schedule logs` 能看到；插件另写一条
+  `feishu.delivery` 审计。
+- `server.registerChannel` 也是 fork 加的扩展点；宿主没有时插件打一行日志，其余照常工作，只是收不到投递。
+
 ## 安装
 
 ```bash
@@ -200,7 +217,8 @@ Paseo 的 设置 → 飞书。设置部分是一份草稿，改完点「保存�
         "provider": "claude/claude-sonnet-5",
         "modeId": "default",
         "instructions": "",
-        "claudeMd": false
+        "claudeMd": false,
+        "dailyReset": ""
       }
     ],
     "auditDir": ""

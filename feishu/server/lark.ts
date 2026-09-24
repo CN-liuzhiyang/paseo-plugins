@@ -79,6 +79,28 @@ export async function replyCard(cli: LarkCli, messageId: string, card: object): 
   return cardId;
 }
 
+/**
+ * Sends a card to a chat as a new message and returns its message ID. Feishu sends at most one
+ * message per `uuid` within an hour, so a repeated send with the same key is not a duplicate.
+ */
+export async function sendCard(cli: LarkCli, chatId: string, card: object, uuid?: string): Promise<string> {
+  const data = await run(
+    cli,
+    ["api", "POST", "/open-apis/im/v1/messages", "--params", JSON.stringify({ receive_id_type: "chat_id" }), "--data", "-"],
+    {
+      body: {
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+        ...(uuid ? { uuid: uuid.slice(0, 50) } : {}),
+      },
+    },
+  );
+  const messageId = (data as { message_id?: unknown } | undefined)?.message_id;
+  if (typeof messageId !== "string") throw new Error("Feishu returned no message_id for the card");
+  return messageId;
+}
+
 /** Replaces a card sent by this bot in place. Feishu refuses cards older than 14 days. */
 export async function patchCard(cli: LarkCli, cardId: string, card: object): Promise<void> {
   await call(cli, "PATCH", `/open-apis/im/v1/messages/${cardId}`, { content: JSON.stringify(card) });

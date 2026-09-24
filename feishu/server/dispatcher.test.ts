@@ -6,7 +6,7 @@ import type {
   AgentTimelineItem,
 } from "@getpaseo/protocol/agent-types";
 import { decisionLine, truncateBytes } from "./cards";
-import { createDispatcher, heartbeatMs, type Lark, type Stranger } from "./dispatcher";
+import { createDispatcher, heartbeatMs, lastResetAt, type Lark, type Stranger } from "./dispatcher";
 import { stripMentions, type Incoming } from "./inbound";
 import { memoryPeople, type People } from "./people";
 import { parseButtonName, requestDetail } from "./permissions";
@@ -29,6 +29,7 @@ const settings: Settings = {
       modeId: "default",
       instructions: "",
       claudeMd: false,
+      dailyReset: "",
     },
   ],
   auditDir: "",
@@ -56,6 +57,7 @@ interface FakeAgent {
   labels: Record<string, string>;
   status: "idle" | "running";
   archivedAt: string | null;
+  createdAt: string;
   order: number;
   pendingPermissions: AgentPermissionRequest[];
 }
@@ -88,6 +90,7 @@ function harness(
     readIncoming?: (event: Record<string, unknown>, options?: { command?: RegExp }) => Promise<Incoming>;
     botId?: () => Promise<string | null>;
     people?: People;
+    clock?: number;
   } = {},
 ) {
   const paseo = options.paseo ?? registry();
@@ -96,6 +99,7 @@ function harness(
   const audits: Array<{ kind: string } & Record<string, unknown>> = [];
   const strangers: Stranger[] = [];
   let cards = 0;
+  let clock = options.clock ?? 0;
   const record = (op: "reply" | "patch", id: string, card: object) => {
     const view = card as {
       header: { title: { content: string } };
@@ -124,6 +128,7 @@ function harness(
         labels: input.labels as Record<string, string>,
         status: "idle",
         archivedAt: null,
+        createdAt: new Date(clock).toISOString(),
         order: paseo.agents.size,
         pendingPermissions: [],
       });
@@ -149,6 +154,12 @@ function harness(
         const agent = paseo.agents.get(id);
         if (agent) agent.status = "running";
       },
+      archive: async () => {
+        const agent = paseo.agents.get(id);
+        if (!agent) throw new Error(`no agent ${id}`);
+        agent.archivedAt = new Date(clock).toISOString();
+        return { archivedAt: agent.archivedAt };
+      },
       respondToPermission: async (input: { requestId: string; response: AgentPermissionResponse }) => {
         if (paseo.respondFails) throw new Error("daemon went away");
         paseo.responses.push({ agentId: id, ...input });
@@ -161,7 +172,6 @@ function harness(
       },
     }),
   };
-  let clock = 0;
   const dispatcher = createDispatcher({
     paseo: { agents } as never,
     lark,
@@ -705,6 +715,8 @@ test("/new starts a fresh agent that later messages go to", async () => {
   assert.equal(h.created[1].prompt, undefined);
   const newId = String(h.created[1].agentId);
   assert.equal(h.sent.at(-1)?.title, "已开新会话");
+  assert.match(h.sent.at(-1)?.body ?? "", /之前的会话已在 Paseo 里归档/);
+  assert.notEqual(h.paseo.agents.get(oldId)?.archivedAt, null);
 
   await h.dispatcher.onMessage(message({ message_id: "om_3", content: "从头来" }));
   assert.deepEqual(h.paseo.sends.at(-1), { agentId: newId, text: "从头来" });
@@ -1161,4 +1173,71 @@ test("before there is an admin, a stranger is told how the first one is made, wi
   assert.equal(h.sent[0].title, "还没有管理员");
   assert.equal(buttons(h.sent[0].card).length, 0);
   assert.match(h.sent[0].body, /设为管理员/);
+});
+
+test("/new leaves a conversation that is still working alone", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const oldId = String(h.created[0].agentId);
+
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "/new" }));
+  assert.equal(h.paseo.agents.get(oldId)?.archivedAt, null);
+  assert.match(h.sent.at(-1)?.body ?? "", /之前的会话还在处理，没有归档/);
+});
+
+/** Settings whose one route starts a new conversation daily at `at`. */
+function resetting(at: string): Settings {
+  return { ...settings, routes: settings.routes.map((route) => ({ ...route, dailyReset: at })) };
+}
+
+test("lastResetAt is today's reset time once it has passed, else yesterday's", () => {
+  const morning = new Date(2026, 8, 24, 9, 30).getTime();
+  assert.equal(lastResetAt(morning, "05:00"), new Date(2026, 8, 24, 5, 0).getTime());
+  const night = new Date(2026, 8, 24, 3, 0).getTime();
+  assert.equal(lastResetAt(night, "05:00"), new Date(2026, 8, 23, 5, 0).getTime());
+  assert.equal(lastResetAt(new Date(2026, 8, 24, 5, 0).getTime(), "05:00"), new Date(2026, 8, 24, 5, 0).getTime());
+});
+
+test("the first message after the daily reset time starts a new conversation", async () => {
+  const h = harness({ settings: resetting("05:00"), clock: new Date(2026, 8, 24, 21, 0).getTime() });
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const oldId = String(h.created[0].agentId);
+  await h.end(oldId, "好了。");
+
+  // Still the same day: the conversation goes on.
+  h.advance(2 * 60 * 60_000);
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还有一件事" }));
+  assert.equal(h.created.length, 1);
+  await h.end(oldId, "好。");
+
+  // Past 05:00 the next day.
+  h.advance(7 * 60 * 60_000);
+  await h.dispatcher.onMessage(message({ message_id: "om_3", content: "早" }));
+  assert.equal(h.created.length, 2);
+  const newId = String(h.created[1].agentId);
+  assert.notEqual(h.paseo.agents.get(oldId)?.archivedAt, null);
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId: newId, text: "早" });
+  const received = h.sent.find((card) => card.id === "om_3");
+  assert.match(received?.body ?? "", /新的一天，开了新会话/);
+});
+
+test("the daily reset waits while the conversation is still working", async () => {
+  const h = harness({ settings: resetting("05:00"), clock: new Date(2026, 8, 24, 4, 50).getTime() });
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const oldId = String(h.created[0].agentId);
+
+  h.advance(20 * 60_000);
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "接着" }));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.paseo.agents.get(oldId)?.archivedAt, null);
+});
+
+test("without a daily reset one conversation lasts across days", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message({ message_id: "om_1" }));
+  const oldId = String(h.created[0].agentId);
+  await h.end(oldId, "好了。");
+  h.advance(3 * 24 * 60 * 60_000);
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  assert.equal(h.created.length, 1);
 });

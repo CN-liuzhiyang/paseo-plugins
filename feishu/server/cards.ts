@@ -254,20 +254,39 @@ function stepsPanel(run: RunView, now: number): object[] {
   ];
 }
 
-export function receivedCard(request: string, fresh: boolean): object {
+/** `note` is this plugin's own markdown, said before what happens next. */
+export function receivedCard(request: string, fresh: boolean, note?: string): object {
   const next = fresh ? "正在为这个会话启动 agent。" : "正在发给这个会话的 agent。";
-  return card("已接收", "wathet", `${quote(request)}\n\n${next}`);
+  return card("已接收", "wathet", [quote(request), ...(note ? [note] : []), next].join("\n\n"));
 }
 
 export function queuedCard(request: string, ahead: number): object {
   return card("排队中", "grey", `${quote(request)}\n\nagent 还在处理前面的 ${ahead} 条，处理完就轮到这条。`);
 }
 
-export function newSessionCard(provider: string, agentId: string): object {
+/** `previous` is what became of the conversation before: archived, left alone while working, or none. */
+export function newSessionCard(provider: string, agentId: string, previous: "archived" | "kept" | "none"): object {
+  const before =
+    previous === "archived"
+      ? "之前的会话已在 Paseo 里归档。"
+      : previous === "kept"
+        ? "之前的会话还在处理，没有归档，留在 Paseo 里。"
+        : "";
   return card(
     "已开新会话",
     "wathet",
-    `之后的消息交给新的 agent，之前的会话留在 Paseo 里。\n\n<font color='grey'>${escape(provider)} · agent ${agentId.slice(0, 8)}</font>`,
+    `之后的消息交给新的 agent。${before}\n\n<font color='grey'>${escape(provider)} · agent ${agentId.slice(0, 8)}</font>`,
+  );
+}
+
+/** A result Paseo sends on its own, such as a scheduled run's, as a new message in the chat. */
+export function deliveredCard(title: string, status: "succeeded" | "failed", text: string): object {
+  if (status === "failed") {
+    const why = text.trim() === "" ? "没有给出原因" : truncateBytes(text, MAX_DETAIL_BYTES);
+    return cardOf(`${title} · 没能完成`, "red", [markdown(escape(why))]);
+  }
+  return fitted((budget) =>
+    cardOf(title, "green", [markdown(text.trim() === "" ? "（agent 没有输出文字）" : answer(text, budget))]),
   );
 }
 

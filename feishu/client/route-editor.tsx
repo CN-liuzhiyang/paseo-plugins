@@ -23,8 +23,12 @@ export function blankRoute(choices: Choices): Route {
     modeId: provider ? defaultMode(provider) : "",
     instructions: "",
     claudeMd: false,
+    dailyReset: "",
   };
 }
+
+// A select, not free text: a half-typed time would fail the settings schema and stop the plugin.
+const RESET_TIMES = ["00:00", "03:00", "04:00", "05:00", "06:00"];
 
 function defaultMode(provider: Choices[number]): string {
   return provider.modes.find((mode) => mode.id === "default")?.id ?? provider.modes[0]?.id ?? "";
@@ -48,6 +52,7 @@ export function describeRoute(route: Route, choices: Choices): string {
     `${provider?.label ?? providerId} ${model}`,
     mode,
     route.claudeMd ? "读取 CLAUDE.md" : "不读 CLAUDE.md",
+    ...(route.dailyReset ? [`每天 ${route.dailyReset} 开新会话`] : []),
   ].join(" · ");
 }
 
@@ -165,6 +170,18 @@ export function RouteEditor({
         }
         value={route.claudeMd}
         onValueChange={(claudeMd) => set({ claudeMd })}
+      />
+      <SettingsSelect
+        label="每天开新会话"
+        hint="过了这个时间（daemon 所在机器的本地时间）的第一条消息开新会话，旧会话归档，免得上下文越攒越长"
+        value={route.dailyReset}
+        options={[
+          { label: "不开，一直用同一个会话", value: "" },
+          ...[...new Set([...RESET_TIMES, route.dailyReset].filter((time) => time !== ""))]
+            .sort()
+            .map((time) => ({ label: time, value: time })),
+        ]}
+        onValueChange={(dailyReset) => set({ dailyReset })}
       />
       <SettingsInput
         label="常驻指令"
