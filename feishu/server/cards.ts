@@ -1,5 +1,7 @@
 import { cardMarkdown } from "./markdown";
 import { buttonName, reasonField } from "./permissions";
+import { questionButtonName, questionsOf } from "./questions";
+import type { AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
 import type { Progress, Step } from "./progress";
 
 // One card per request, patched in place: received, running, waiting, and one of done / failed /
@@ -412,6 +414,65 @@ export function staleApprovalCard(): object {
     "grey",
     "这个请求已经不在等待了：可能已在 Paseo 里处理，或者那一轮已经结束。之后的进度在 Paseo 里看。",
   );
+}
+
+/** A separate card survives the turn that asked the question. It is never repainted while open. */
+export function questionCard(
+  agentId: string,
+  request: AgentPermissionRequest,
+  state: { submitting?: boolean; notice?: string; answered?: string; denied?: boolean } = {},
+): object {
+  if (state.answered) return fitted((budget) => card(
+    state.denied ? "提问已结束" : "已回答提问",
+    state.denied ? "grey" : "green",
+    escape(truncateBytes(state.answered!, budget)),
+  ));
+  const questions = questionsOf(request);
+  if (state.submitting) return card("正在提交回答", "wathet", "正在等待 Paseo 确认…");
+  if (questions.length === 0) {
+    return card("等待回答", "orange", "问题格式无法识别，请到 Paseo 里回答。");
+  }
+  const elements: object[] = [];
+  if (state.notice) elements.push(markdown(`<font color='red'>${escape(truncateBytes(state.notice, 500))}</font>`));
+  questions.forEach((question, index) => {
+    elements.push(plain(`${index + 1}. ${truncateBytes(question.text, 500)}`));
+    if (question.options.length > 0) {
+      elements.push({
+        tag: question.multi ? "multi_select_static" : "select_static",
+        name: `choice${index}`,
+        placeholder: { tag: "plain_text", content: question.multi ? "可多选" : "请选择" },
+        options: question.options.map((option, optionIndex) => ({
+          text: { tag: "plain_text", content: truncateBytes(option.label, 80) },
+          value: String(optionIndex),
+        })),
+      });
+      const descriptions = question.options
+        .filter((option) => option.description)
+        .map((option) => `${truncateBytes(option.label, 80)}：${truncateBytes(option.description, 120)}`);
+      if (descriptions.length > 0) elements.push(plain(descriptions.join("\n")));
+    }
+    elements.push({
+      tag: "input",
+      name: `custom${index}`,
+      placeholder: { tag: "plain_text", content: question.options.length ? "其他答案（可选）" : "输入答案" },
+      max_length: 1000,
+    });
+  });
+  elements.push({
+    tag: "button",
+    name: questionButtonName(agentId, request.id),
+    text: { tag: "plain_text", content: "提交回答" },
+    type: "primary_filled",
+    form_action_type: "submit",
+  });
+  return cardOf("等待回答", "orange", [
+    { tag: "form", name: "questionForm", elements },
+    notation("也可以在 Paseo 里回答。"),
+  ]);
+}
+
+export function questionInputErrorCard(why: string): object {
+  return card("回答未提交", "orange", `${escape(truncateBytes(why, 500))}。请在上一张提问卡片里修改后再提交。`);
 }
 
 export function doneTitle(run: RunView, now: number): string {

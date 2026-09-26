@@ -5,11 +5,12 @@ import type {
   AgentPermissionResponse,
   AgentTimelineItem,
 } from "@getpaseo/protocol/agent-types";
-import { decisionLine, truncateBytes } from "./cards";
+import { decisionLine, questionCard, truncateBytes } from "./cards";
 import { createDispatcher, heartbeatMs, lastResetAt, type Lark, type Stranger } from "./dispatcher";
 import { stripMentions, type Incoming } from "./inbound";
 import { memoryPeople, type People } from "./people";
 import { parseButtonName, requestDetail } from "./permissions";
+import { questionButtonName, questionResponse, questionsOf } from "./questions";
 import type { Settings } from "../shared/settings";
 import { describePermission, finalAnswer } from "./timeline";
 
@@ -74,7 +75,7 @@ function registry() {
 }
 
 interface Sent {
-  op: "reply" | "patch";
+  op: "reply" | "send" | "patch";
   id: string;
   title: string;
   /** The card's first element, which is always markdown. */
@@ -100,16 +101,21 @@ function harness(
   const strangers: Stranger[] = [];
   let cards = 0;
   let clock = options.clock ?? 0;
-  const record = (op: "reply" | "patch", id: string, card: object) => {
+  const record = (op: "reply" | "send" | "patch", id: string, card: object) => {
     const view = card as {
       header: { title: { content: string } };
       body: { elements: Array<{ content: string }> };
     };
-    sent.push({ op, id, title: view.header.title.content, body: view.body.elements[0].content, card });
+    sent.push({ op, id, title: view.header.title.content, body: view.body.elements[0].content ?? "", card });
   };
   const lark: Lark = {
     async reply(messageId, card) {
       record("reply", messageId, card);
+      cards += 1;
+      return `om_card${cards}`;
+    },
+    async send(chatId, card) {
+      record("send", chatId, card);
       cards += 1;
       return `om_card${cards}`;
     },
@@ -206,7 +212,7 @@ function harness(
   /** The agent asks for permission: Paseo holds the request open and the hook fires. */
   const ask = async (agentId: string, request: AgentPermissionRequest) => {
     paseo.agents.get(agentId)?.pendingPermissions.push(request);
-    dispatcher.onPermissionRequested({ agent: agent(agentId), request });
+    await dispatcher.onPermissionRequested({ agent: agent(agentId), request });
     await settle();
   };
   /** Paseo settles a request, whoever answered it. */
@@ -220,7 +226,7 @@ function harness(
   let events = 0;
   const click = async (
     name: string,
-    input: { operator?: string; chatId?: string; cardId?: string; reason?: string } = {},
+    input: { operator?: string; chatId?: string; cardId?: string; reason?: string; form?: Record<string, unknown> } = {},
   ) => {
     events += 1;
     const form = parseButtonName(name)?.form ?? 0;
@@ -231,7 +237,7 @@ function harness(
       chat_id: input.chatId ?? CHAT,
       action_tag: "button",
       action_name: name,
-      form_value: JSON.stringify({ [`reason${form}`]: input.reason ?? "" }),
+      form_value: JSON.stringify(input.form ?? { [`reason${form}`]: input.reason ?? "" }),
     });
     await settle();
   };
@@ -459,7 +465,7 @@ test("nobody outside senders can answer, and the card does not change", async ()
   await waiting(h);
   const before = h.sent.length;
   await h.click(buttons(h.sent.at(-1)!.card)[1].name, { operator: "ou_stranger" });
-  assert.deepEqual(h.paseo.responses, []);
+  assert.equal(h.paseo.responses.length, 0);
   assert.equal(h.sent.length, before);
   assert.deepEqual(h.audits.at(-1), {
     kind: "feishu.approval.refused",
@@ -553,18 +559,163 @@ test("a request still open when the turn ends is recorded as never answered", as
   assert.equal(h.audits.at(-1)?.outcome, "abandoned");
 });
 
-test("questions are answered in Paseo, not on the card", async () => {
+test("Claude questions get a separate card with choices and custom input", async () => {
   const h = harness();
-  await waiting(h, {
+  const agentId = await waiting(h, {
     id: "q1",
     provider: "claude",
     name: "AskUserQuestion",
     kind: "question",
-    input: { questions: [{ question: "用哪个分支？" }] },
+    input: { questions: [{ header: "分支", question: "用哪个分支？", options: [
+      { label: "main", description: "主分支" }, { label: "dev", description: "开发分支" },
+    ] }] },
   });
-  const card = h.sent.at(-1)!.card;
-  assert.deepEqual(buttons(card), []);
-  assert.match(JSON.stringify(card), /请到 Paseo 里回答/);
+  const sent = h.sent.at(-1)!;
+  assert.equal(sent.op, "send");
+  assert.equal(sent.title, "等待回答");
+  assert.match(JSON.stringify(sent.card), /"tag":"select_static","name":"choice0"/);
+  assert.match(JSON.stringify(sent.card), /"tag":"input","name":"custom0"/);
+  const name = questionButtonName(agentId, "q1");
+  await h.click(name, { cardId: "om_card2", form: { choice0: "1", custom0: "" } });
+  assert.deepEqual(h.paseo.responses.at(-1)?.response, {
+    behavior: "allow", updatedInput: { answers: { "分支": "dev" } },
+  });
+  await h.resolve(agentId, "q1", h.paseo.responses.at(-1)!.response);
+  assert.equal(h.sent.at(-1)?.id, "om_card2");
+  assert.equal(h.sent.at(-1)?.title, "已回答提问");
+  assert.equal(h.audits.at(-1)?.by, `feishu:${SENDER}`);
+});
+
+test("Codex sync and async use their different answer keys; async survives turn end", async () => {
+  const h = harness();
+  await h.dispatcher.onMessage(message());
+  const agentId = String(h.created[0].agentId);
+  const sync: AgentPermissionRequest = {
+    id: "qs", provider: "codex", name: "request_user_input", kind: "question",
+    input: { questions: [{ header: "Target", question: "Deploy where?", options: [{ label: "stage" }] }] },
+  };
+  await h.ask(agentId, sync);
+  await h.click(questionButtonName(agentId, "qs"), { cardId: "om_card2", form: { choice0: "0" } });
+  assert.deepEqual(h.paseo.responses.at(-1)?.response, {
+    behavior: "allow", updatedInput: { answers: { Target: "stage" } },
+  });
+  await h.resolve(agentId, "qs", h.paseo.responses.at(-1)!.response);
+  await h.end(agentId, "done");
+  const asyncQuestion: AgentPermissionRequest = {
+    ...sync, id: "qa", name: "request_user_input_async",
+    input: { questions: [{ header: "Target", question: "Deploy where?", options: [{ label: "prod" }] }] },
+  };
+  await h.ask(agentId, asyncQuestion);
+  assert.equal(h.sent.at(-1)?.title, "等待回答");
+  await h.click(questionButtonName(agentId, "qa"), { cardId: "om_card3", form: { choice0: "0" } });
+  assert.deepEqual(h.paseo.responses.at(-1)?.response, {
+    behavior: "allow", updatedInput: { answers: { "Question 1": "prod" } },
+  });
+});
+
+test("a question card can still answer after plugin reload and a turn ending", async () => {
+  const shared = registry();
+  const before = harness({ paseo: shared });
+  await before.dispatcher.onMessage(message());
+  const agentId = String(before.created[0].agentId);
+  const request: AgentPermissionRequest = {
+    id: "async-reload", provider: "codex", name: "request_user_input_async", kind: "question",
+    input: { questions: [{ question: "Choose?", options: [{ label: "yes" }] }] },
+  };
+  await before.ask(agentId, request);
+  await before.end(agentId, "Turn finished");
+  assert.equal(before.sent.at(-1)?.title.split(" ")[0], "完成");
+  before.dispatcher.stop();
+
+  const after = harness({ paseo: shared });
+  await after.click(questionButtonName(agentId, request.id), {
+    cardId: "om_card2", form: { choice0: "0" },
+  });
+  assert.deepEqual(shared.responses.at(-1)?.response, {
+    behavior: "allow", updatedInput: { answers: { "Question 1": "yes" } },
+  });
+  await after.resolve(agentId, request.id, shared.responses.at(-1)!.response);
+  assert.equal(after.sent.at(-1)?.id, "om_card2");
+  assert.equal(after.sent.at(-1)?.title, "已回答提问");
+});
+
+test("invalid answers leave the original question form and its entered values untouched", async () => {
+  const h = harness();
+  const agentId = await waiting(h, {
+    id: "q-invalid", provider: "claude", name: "AskUserQuestion", kind: "question",
+    input: { questions: [{ header: "Pick", question: "Pick?", options: [{ label: "A" }] }] },
+  });
+  const cardId = "om_card2";
+  await h.click(questionButtonName(agentId, "q-invalid"), {
+    cardId, form: { choice0: "9", custom0: "typed" },
+  });
+  assert.equal(h.paseo.responses.length, 0);
+  assert.equal(h.sent.filter((entry) => entry.op === "patch" && entry.id === cardId).length, 0);
+  assert.equal(h.sent.at(-1)?.title, "回答未提交");
+  await h.click(questionButtonName(agentId, "q-invalid"), {
+    cardId, form: { custom0: "typed" },
+  });
+  assert.deepEqual(h.paseo.responses.at(-1)?.response, {
+    behavior: "allow", updatedInput: { answers: { Pick: "typed" } },
+  });
+});
+
+test("question answers require an admin, the right chat, and a live Paseo request", async () => {
+  const h = harness();
+  const agentId = await waiting(h, {
+    id: "q-guard", provider: "claude", name: "AskUserQuestion", kind: "question",
+    input: { questions: [{ header: "Choice", question: "Choose?", options: [{ label: "yes" }] }] },
+  });
+  const name = questionButtonName(agentId, "q-guard");
+  await h.click(name, { cardId: "om_card2", operator: "ou_other", form: { choice0: "0" } });
+  await h.click(name, { cardId: "om_card2", chatId: "oc_other", form: { choice0: "0" } });
+  assert.equal(h.paseo.responses.length, 0);
+  assert.equal(h.audits.at(-1)?.why, "the card is not in the agent's chat");
+  await h.resolve(agentId, "q-guard", { behavior: "allow", updatedInput: { answers: { Choice: "no" } } });
+  await h.click(name, { cardId: "om_card2", form: { choice0: "0" } });
+  assert.equal(h.paseo.responses.length, 0);
+  assert.equal(h.audits.at(-1)?.why, "the question is no longer open");
+});
+
+test("multiple questions support multi select and free text, with strict validation", () => {
+  const request: AgentPermissionRequest = {
+    id: "q", provider: "claude", name: "AskUserQuestion", kind: "question",
+    input: { questions: [
+      { header: "Features", question: "Which?", multiSelect: true,
+        options: [{ label: "A" }, { label: "B" }] },
+      { header: "Reason", question: "Why?" },
+    ] },
+  };
+  assert.deepEqual(questionResponse(request, JSON.stringify({
+    choice0: ["0", "1"], custom0: "C", custom1: "  because  ",
+  })), {
+    response: { behavior: "allow", updatedInput: { answers: { Features: "A, B, C", Reason: "because" } } },
+    summary: "1. A、B、C；2. because",
+  });
+  assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["9"], custom1: "because" })), {
+    error: "第 1 题的选项已失效，请重新选择",
+  });
+  assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["0"] })), {
+    error: "请回答第 2 题",
+  });
+  assert.deepEqual(questionsOf({ ...request, provider: "opencode" as never }), []);
+});
+
+test("question cards stay under Feishu's patch size cap", () => {
+  const request: AgentPermissionRequest = {
+    id: "q", provider: "claude", name: "AskUserQuestion", kind: "question",
+    input: { questions: Array.from({ length: 4 }, (_, index) => ({
+      header: `Q${index}`, question: "问题".repeat(1000),
+      options: Array.from({ length: 6 }, (_, option) => ({
+        label: `${option}${"标签".repeat(100)}`, description: "描述".repeat(1000),
+      })),
+    })) },
+  };
+  assert.equal(questionsOf(request).length, 4);
+  assert.ok(Buffer.byteLength(JSON.stringify(questionCard("agent", request)), "utf8") < 30_000);
+  assert.deepEqual(questionsOf({ ...request, input: { questions: [{
+    question: "Too many choices", options: Array.from({ length: 7 }, (_, index) => ({ label: String(index) })),
+  }] } }), []);
 });
 
 test("several open requests each get their own form", async () => {

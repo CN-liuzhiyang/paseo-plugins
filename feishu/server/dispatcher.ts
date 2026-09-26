@@ -1,7 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginLifecycleEvents } from "@getpaseo/plugin/server";
-import type { AgentPermissionAction, AgentPermissionRequest } from "@getpaseo/protocol/agent-types";
+import type { AgentPermissionAction, AgentPermissionRequest, AgentPermissionResponse } from "@getpaseo/protocol/agent-types";
 import type { Route, Settings } from "../shared/settings";
 import type { Audit } from "./audit";
 import {
@@ -22,12 +22,14 @@ import {
   strangerCard,
   letInCard,
   waitingCard,
+  questionCard,
+  questionInputErrorCard,
   type ApprovalView,
   type RunView,
 } from "./cards";
 import { contextOf, systemPrompt } from "./context";
 import { overheardBlock, stripMentions, type Incoming, type Overheard } from "./inbound";
-import { patchCard, replyCard, type LarkCli } from "./lark";
+import { patchCard, replyCard, sendCard, type LarkCli } from "./lark";
 import { createPainter, type Painter } from "./painter";
 import type { Directory } from "./directory";
 import type { People } from "./people";
@@ -40,6 +42,7 @@ import {
   reasonFrom,
   requestDetail,
 } from "./permissions";
+import { parseQuestionButtonName, questionResponse } from "./questions";
 import { applyItem, createProgress } from "./progress";
 import { describePermission, finalAnswer } from "./timeline";
 
@@ -113,6 +116,21 @@ interface Answer {
   timer: NodeJS.Timeout;
 }
 
+interface QuestionPending {
+  request: AgentPermissionRequest;
+  cardId: string;
+  chatId: string;
+  askedAt: number;
+}
+
+interface QuestionAnswer {
+  pending: QuestionPending;
+  operator: string;
+  summary: string;
+  response: AgentPermissionResponse;
+  timer: NodeJS.Timeout;
+}
+
 interface Turn {
   chatId: string;
   messageId: string;
@@ -153,12 +171,14 @@ export function lastResetAt(now: number, hhmm: string): number {
 
 export interface Lark {
   reply(messageId: string, card: object): Promise<string>;
+  send(chatId: string, card: object, uuid?: string): Promise<string>;
   patch(cardId: string, card: object): Promise<void>;
 }
 
 export function larkOf(cli: LarkCli): Lark {
   return {
     reply: (messageId, card) => replyCard(cli, messageId, card),
+    send: (chatId, card, uuid) => sendCard(cli, chatId, card, uuid),
     patch: (cardId, card) => patchCard(cli, cardId, card),
   };
 }
@@ -214,6 +234,8 @@ export function createDispatcher(deps: {
   const seenActions = new Set<string>();
   const runs = new Map<string, Run>();
   const answers = new Map<string, Answer>();
+  const questionCards = new Map<string, QuestionPending>();
+  const questionAnswers = new Map<string, QuestionAnswer>();
   // Cards whose run is no longer followed, as after a restart.
   const orphans = new Map<string, Painter>();
   // Cards already showing how their run ended; a late click must not replace that.
@@ -843,11 +865,42 @@ export function createDispatcher(deps: {
     void drain(event.agent.id).catch((error: unknown) => log(`drain ${event.agent.id}: ${describe(error)}`));
   }
 
-  function onPermissionRequested(event: Event<"agent.permission_requested">): void {
+  async function onPermissionRequested(event: Event<"agent.permission_requested">): Promise<void> {
     const run = runs.get(event.agent.id);
-    if (!run) return;
     const { request } = event;
     const askedAt = now();
+    if (request.kind === "question") {
+      const agentId = event.agent.id;
+      const key = answerKey(agentId, request.id);
+      if (questionCards.has(key)) return;
+      // A request_user_input_async can arrive after its turn has ended. The agent label is the
+      // durable route; the current run is deliberately not involved in this card.
+      const live = await paseo.agents.ref(agentId).refresh().catch(() => null);
+      const chatId = live?.agent.labels[CHAT_LABEL];
+      if (!live || live.agent.archivedAt || !chatId ||
+          !live.agent.pendingPermissions.some((open) => open.id === request.id)) return;
+      try {
+        const uuid = createHash("sha256").update(key).digest("hex").slice(0, 48);
+        const cardId = await lark.send(chatId, questionCard(agentId, request), uuid);
+        const pending = { request, cardId, chatId, askedAt };
+        questionCards.set(key, pending);
+        audit("feishu.approval.ask", {
+          agentId, requestId: request.id, chatId, cardId, tool: request.name,
+          requestKind: request.kind, title: request.title ?? null,
+          what: describePermission(request), input: request.input ?? null, askedAt: iso(askedAt),
+        });
+        // The request may have closed while the card was being sent.
+        const after = await paseo.agents.ref(agentId).refresh().catch(() => null);
+        if (!after?.agent.pendingPermissions.some((open) => open.id === request.id)) {
+          questionCards.delete(key);
+          orphan(cardId).draw(() => staleApprovalCard());
+        }
+      } catch (error) {
+        log(`send question ${request.id} to ${chatId}: ${describe(error)}`);
+      }
+      return;
+    }
+    if (!run) return;
     run.pending.set(request.id, { request, askedAt, notice: null });
     audit("feishu.approval.ask", {
       agentId: run.agentId,
@@ -868,6 +921,8 @@ export function createDispatcher(deps: {
   async function onCardAction(event: Record<string, unknown>): Promise<void> {
     const letIn = letInOf(event);
     if (letIn) return onLetIn(event, letIn);
+    const questionTarget = parseQuestionButtonName(text(event.action_name) ?? "");
+    if (questionTarget) return onQuestionAction(event, questionTarget);
     const target = parseButtonName(text(event.action_name) ?? "");
     if (!target) {
       // A click this plugin cannot place was once dropped without a word, and a button that
@@ -961,6 +1016,81 @@ export function createDispatcher(deps: {
     }
   }
 
+  async function onQuestionAction(
+    event: Record<string, unknown>,
+    target: { agentId: string; requestId: string },
+  ): Promise<void> {
+    const operator = text(event.operator_id);
+    const cardId = text(event.message_id);
+    const chatId = text(event.chat_id);
+    if (stopped || !operator || !cardId || !chatId) return;
+    const eventId = text(event.event_id);
+    if (eventId) {
+      if (seenActions.has(eventId)) return;
+      remember(seenActions, eventId);
+    }
+    const { agentId, requestId } = target;
+    const key = answerKey(agentId, requestId);
+    const refuse = (why: string) => {
+      log(`refused ${operator}'s answer to question ${requestId} on agent ${agentId}: ${why}`);
+      audit("feishu.approval.refused", { agentId, requestId, chatId, cardId, operator, why });
+    };
+    const settings = await readSettings();
+    if (!settings) return refuse("settings are invalid");
+    if (!settings.senders.includes(operator)) return refuse("not in senders");
+    if (questionAnswers.has(key)) return refuse("an answer is already on its way");
+    const live = await paseo.agents.ref(agentId).refresh().catch(() => null);
+    const agent = live?.agent;
+    if (!agent || agent.archivedAt) return refuse("the agent is gone");
+    if (agent.labels[CHAT_LABEL] !== chatId) return refuse("the card is not in the agent's chat");
+    const request = agent.pendingPermissions.find((open) => open.id === requestId);
+    if (!request || request.kind !== "question") {
+      refuse("the question is no longer open");
+      orphan(cardId).draw(() => staleApprovalCard());
+      return;
+    }
+    const parsed = questionResponse(request, event.form_value);
+    if ("error" in parsed) {
+      refuse(parsed.error);
+      // Leave the form untouched so Feishu keeps the values the person just entered.
+      await lark.reply(cardId, questionInputErrorCard(parsed.error)).catch((error: unknown) =>
+        log(`reply to invalid question answer ${requestId}: ${describe(error)}`));
+      return;
+    }
+    const pending = questionCards.get(key) ?? { request, cardId, chatId, askedAt: now() };
+    questionCards.set(key, pending);
+    const answer: QuestionAnswer = {
+      pending, operator, summary: parsed.summary, response: parsed.response,
+      timer: setTimeout(() => failQuestion(key, "Paseo 没有确认这个回答"), CONFIRM_MS).unref(),
+    };
+    questionAnswers.set(key, answer);
+    audit("feishu.approval.answer", {
+      agentId, requestId, chatId, cardId, operator,
+      actionId: null, behavior: "allow", answer: parsed.summary,
+    });
+    orphan(cardId).draw(() => questionCard(agentId, request, { submitting: true }));
+    try {
+      await paseo.agents.ref(agentId).respondToPermission({ requestId, response: parsed.response });
+    } catch (error) {
+      failQuestion(key, `没能提交给 Paseo：${describe(error)}`);
+    }
+  }
+
+  function failQuestion(key: string, why: string): void {
+    const answer = questionAnswers.get(key);
+    if (!answer) return;
+    clearTimeout(answer.timer);
+    questionAnswers.delete(key);
+    const { pending, operator } = answer;
+    const [agentId, requestId] = key.split("\n");
+    audit("feishu.approval.error", {
+      agentId, requestId, chatId: pending.chatId, cardId: pending.cardId,
+      operator, actionId: null, why,
+    });
+    log(`answer to question ${requestId} on agent ${agentId}: ${why}`);
+    orphan(pending.cardId).draw(() => questionCard(agentId!, pending.request, { notice: why }));
+  }
+
   /** An answer from a card that Paseo did not take: say so on the card and let it be tried again. */
   function fail(key: string, why: string): void {
     const answer = answers.get(key);
@@ -991,6 +1121,35 @@ export function createDispatcher(deps: {
     const agentId = event.agent.id;
     const { requestId, resolution } = event;
     const key = answerKey(agentId, requestId);
+    const question = questionCards.get(key);
+    const questionAnswer = questionAnswers.get(key);
+    if (question || questionAnswer) {
+      if (questionAnswer) {
+        clearTimeout(questionAnswer.timer);
+        questionAnswers.delete(key);
+      }
+      questionCards.delete(key);
+      const pending = question ?? questionAnswer!.pending;
+      const byCard = questionAnswer && resolution.behavior === "allow" &&
+        JSON.stringify(resolution.updatedInput?.answers) ===
+          JSON.stringify(questionAnswer.response.behavior === "allow" ? questionAnswer.response.updatedInput?.answers : null);
+      const decidedAt = now();
+      audit("feishu.approval.decision", {
+        agentId, requestId, chatId: pending.chatId,
+        outcome: resolution.behavior === "allow" ? "allowed" : "denied",
+        approved: resolution.behavior === "allow", actionId: null,
+        askedAt: iso(pending.askedAt), decidedAt: iso(decidedAt),
+        waitedMs: decidedAt - pending.askedAt,
+        reason: resolution.behavior === "deny" ? (resolution.message ?? null) : null,
+        by: byCard ? `feishu:${questionAnswer.operator}` : UNATTRIBUTED,
+      });
+      const answerText = resolution.behavior === "deny" ? "这个提问已取消" :
+        byCard ? questionAnswer.summary : "已在 Paseo 里处理";
+      orphan(pending.cardId).draw(() => questionCard(agentId, pending.request, {
+        answered: answerText, denied: resolution.behavior === "deny",
+      }));
+      return;
+    }
     const answer = answers.get(key);
     if (answer) {
       clearTimeout(answer.timer);
@@ -1042,6 +1201,9 @@ export function createDispatcher(deps: {
     ticker = null;
     for (const answer of answers.values()) clearTimeout(answer.timer);
     answers.clear();
+    for (const answer of questionAnswers.values()) clearTimeout(answer.timer);
+    questionAnswers.clear();
+    questionCards.clear();
     for (const run of runs.values()) {
       run.unfollow?.();
       run.painter.stop();
