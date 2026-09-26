@@ -87,9 +87,11 @@ export function questionResponse(
     if (!question.multi && labels.length > 1) return { error: `第 ${index + 1} 题只能选一项` };
     const parts = [...labels, ...(free ? [free] : [])];
     if (parts.length === 0) return { error: `请回答第 ${index + 1} 题` };
-    if (!question.multi && parts.length > 1) return { error: `第 ${index + 1} 题只能选一项或填写自定义答案` };
-    answers[question.key] = parts.join(", ");
-    summary.push(`${index + 1}. ${parts.join("、")}`);
+    const answer = !question.multi && labels.length === 1 && free
+      ? `${labels[0]}（补充：${free}）`
+      : parts.join(", ");
+    answers[question.key] = answer;
+    summary.push(`${index + 1}. ${question.multi ? parts.join("、") : answer}`);
   }
   return { response: { behavior: "allow", updatedInput: { answers } }, summary: summary.join("；") };
 }

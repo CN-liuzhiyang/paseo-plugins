@@ -454,7 +454,7 @@ export function questionCard(
     elements.push({
       tag: "input",
       name: `custom${index}`,
-      placeholder: { tag: "plain_text", content: question.options.length ? "其他答案（可选）" : "输入答案" },
+      placeholder: { tag: "plain_text", content: question.options.length ? "其他答案或补充说明（可选）" : "输入答案" },
       max_length: 1000,
     });
   });

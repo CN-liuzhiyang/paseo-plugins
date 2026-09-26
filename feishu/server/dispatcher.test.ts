@@ -698,6 +698,13 @@ test("multiple questions support multi select and free text, with strict validat
   assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["0"] })), {
     error: "请回答第 2 题",
   });
+  const single = { ...request, input: { questions: [{
+    header: "Choice", question: "Choose?", options: [{ label: "A" }],
+  }] } };
+  assert.deepEqual(questionResponse(single, JSON.stringify({ choice0: "0", custom0: "原因" })), {
+    response: { behavior: "allow", updatedInput: { answers: { Choice: "A（补充：原因）" } } },
+    summary: "1. A（补充：原因）",
+  });
   assert.deepEqual(questionsOf({ ...request, provider: "opencode" as never }), []);
 });
 
