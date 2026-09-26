@@ -437,19 +437,16 @@ export function questionCard(
   questions.forEach((question, index) => {
     elements.push(plain(`${index + 1}. ${truncateBytes(question.text, 500)}`));
     if (question.options.length > 0) {
-      elements.push({
-        tag: question.multi ? "multi_select_static" : "select_static",
-        name: `choice${index}`,
-        placeholder: { tag: "plain_text", content: question.multi ? "可多选" : "请选择" },
-        options: question.options.map((option, optionIndex) => ({
+      elements.push(notation(question.multi ? "可勾选多项" : "请勾选一项"));
+      question.options.forEach((option, optionIndex) => {
+        elements.push({
+          tag: "checker",
+          name: `choice${index}_${optionIndex}`,
+          checked: false,
           text: { tag: "plain_text", content: truncateBytes(option.label, 80) },
-          value: String(optionIndex),
-        })),
+        });
+        if (option.description) elements.push(notation(escape(truncateBytes(option.description, 120))));
       });
-      const descriptions = question.options
-        .filter((option) => option.description)
-        .map((option) => `${truncateBytes(option.label, 80)}：${truncateBytes(option.description, 120)}`);
-      if (descriptions.length > 0) elements.push(plain(descriptions.join("\n")));
     }
     elements.push({
       tag: "input",

@@ -74,17 +74,24 @@ export function questionResponse(
   const answers: Record<string, string> = {};
   const summary: string[] = [];
   for (const [index, question] of questions.entries()) {
+    // Old cards used a dropdown. Keep accepting their values after a plugin reload.
     const picked = values[`choice${index}`];
     const typed = values[`custom${index}`];
     const free = typeof typed === "string" ? typed.trim().slice(0, 1000) : "";
-    let selected: string[] = [];
-    if (typeof picked === "string" && picked) selected = [picked];
-    else if (Array.isArray(picked) && picked.every((value) => typeof value === "string")) selected = picked;
+    const checks = question.options.map((_, optionIndex) => values[`choice${index}_${optionIndex}`]);
+    if (checks.some((value) => value !== undefined && value !== true && value !== false && value !== "true" && value !== "false")) {
+      return { error: `第 ${index + 1} 题的勾选状态无效，请重新选择` };
+    }
+    let selected = checks.flatMap((value, optionIndex) => value === true || value === "true" ? [String(optionIndex)] : []);
+    if (checks.every((value) => value === undefined)) {
+      if (typeof picked === "string" && picked) selected = [picked];
+      else if (Array.isArray(picked) && picked.every((value) => typeof value === "string")) selected = picked;
+    }
     if (selected.some((value) => !question.options.some((option, optionIndex) => `${optionIndex}` === value))) {
       return { error: `第 ${index + 1} 题的选项已失效，请重新选择` };
     }
     const labels = selected.map((value) => question.options[Number(value)]!.label);
-    if (!question.multi && labels.length > 1) return { error: `第 ${index + 1} 题只能选一项` };
+    if (!question.multi && labels.length > 1) return { error: `第 ${index + 1} 题为单选，请只勾选一项` };
     const parts = [...labels, ...(free ? [free] : [])];
     if (parts.length === 0) return { error: `请回答第 ${index + 1} 题` };
     const answer = !question.multi && labels.length === 1 && free

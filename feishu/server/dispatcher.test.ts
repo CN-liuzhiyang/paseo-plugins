@@ -573,10 +573,12 @@ test("Claude questions get a separate card with choices and custom input", async
   const sent = h.sent.at(-1)!;
   assert.equal(sent.op, "send");
   assert.equal(sent.title, "等待回答");
-  assert.match(JSON.stringify(sent.card), /"tag":"select_static","name":"choice0"/);
+  assert.match(JSON.stringify(sent.card), /"tag":"checker","name":"choice0_0"/);
+  assert.match(JSON.stringify(sent.card), /"tag":"checker","name":"choice0_1"/);
+  assert.doesNotMatch(JSON.stringify(sent.card), /"tag":"select_static"/);
   assert.match(JSON.stringify(sent.card), /"tag":"input","name":"custom0"/);
   const name = questionButtonName(agentId, "q1");
-  await h.click(name, { cardId: "om_card2", form: { choice0: "1", custom0: "" } });
+  await h.click(name, { cardId: "om_card2", form: { choice0_0: false, choice0_1: true, custom0: "" } });
   assert.deepEqual(h.paseo.responses.at(-1)?.response, {
     behavior: "allow", updatedInput: { answers: { "分支": "dev" } },
   });
@@ -595,7 +597,7 @@ test("Codex sync and async use their different answer keys; async survives turn 
     input: { questions: [{ header: "Target", question: "Deploy where?", options: [{ label: "stage" }] }] },
   };
   await h.ask(agentId, sync);
-  await h.click(questionButtonName(agentId, "qs"), { cardId: "om_card2", form: { choice0: "0" } });
+  await h.click(questionButtonName(agentId, "qs"), { cardId: "om_card2", form: { choice0_0: true } });
   assert.deepEqual(h.paseo.responses.at(-1)?.response, {
     behavior: "allow", updatedInput: { answers: { Target: "stage" } },
   });
@@ -607,7 +609,7 @@ test("Codex sync and async use their different answer keys; async survives turn 
   };
   await h.ask(agentId, asyncQuestion);
   assert.equal(h.sent.at(-1)?.title, "等待回答");
-  await h.click(questionButtonName(agentId, "qa"), { cardId: "om_card3", form: { choice0: "0" } });
+  await h.click(questionButtonName(agentId, "qa"), { cardId: "om_card3", form: { choice0_0: true } });
   assert.deepEqual(h.paseo.responses.at(-1)?.response, {
     behavior: "allow", updatedInput: { answers: { "Question 1": "prod" } },
   });
@@ -629,7 +631,7 @@ test("a question card can still answer after plugin reload and a turn ending", a
 
   const after = harness({ paseo: shared });
   await after.click(questionButtonName(agentId, request.id), {
-    cardId: "om_card2", form: { choice0: "0" },
+    cardId: "om_card2", form: { choice0_0: true },
   });
   assert.deepEqual(shared.responses.at(-1)?.response, {
     behavior: "allow", updatedInput: { answers: { "Question 1": "yes" } },
@@ -687,13 +689,17 @@ test("multiple questions support multi select and free text, with strict validat
     ] },
   };
   assert.deepEqual(questionResponse(request, JSON.stringify({
-    choice0: ["0", "1"], custom0: "C", custom1: "  because  ",
+    choice0_0: true, choice0_1: "true", custom0: "C", custom1: "  because  ",
   })), {
     response: { behavior: "allow", updatedInput: { answers: { Features: "A, B, C", Reason: "because" } } },
     summary: "1. A、B、C；2. because",
   });
   assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["9"], custom1: "because" })), {
     error: "第 1 题的选项已失效，请重新选择",
+  });
+  assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["0", "1"], custom1: "because" })), {
+    response: { behavior: "allow", updatedInput: { answers: { Features: "A, B", Reason: "because" } } },
+    summary: "1. A、B；2. because",
   });
   assert.deepEqual(questionResponse(request, JSON.stringify({ choice0: ["0"] })), {
     error: "请回答第 2 题",
@@ -704,6 +710,16 @@ test("multiple questions support multi select and free text, with strict validat
   assert.deepEqual(questionResponse(single, JSON.stringify({ choice0: "0", custom0: "原因" })), {
     response: { behavior: "allow", updatedInput: { answers: { Choice: "A（补充：原因）" } } },
     summary: "1. A（补充：原因）",
+  });
+  assert.deepEqual(questionResponse(single, JSON.stringify({ choice0_0: true, custom0: "原因" })), {
+    response: { behavior: "allow", updatedInput: { answers: { Choice: "A（补充：原因）" } } },
+    summary: "1. A（补充：原因）",
+  });
+  const twoChoices = { ...single, input: { questions: [{
+    header: "Choice", question: "Choose?", options: [{ label: "A" }, { label: "B" }],
+  }] } };
+  assert.deepEqual(questionResponse(twoChoices, JSON.stringify({ choice0_0: true, choice0_1: true })), {
+    error: "第 1 题为单选，请只勾选一项",
   });
   assert.deepEqual(questionsOf({ ...request, provider: "opencode" as never }), []);
 });

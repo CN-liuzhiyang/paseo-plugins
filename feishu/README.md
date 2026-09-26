@@ -95,7 +95,7 @@ agent 要权限时，这条消息的卡片变成「等待审批」，每个未�
   15 秒没确认就在卡片上说明，可以再点一次。
 - **卡片上记着谁批的**：审批记录一行一条，写明允许还是拒绝、批的是什么、谁（飞书里点的显示人名，
   在 Paseo 里批的写「在 Paseo 里」，Paseo 不记录是谁）、等了多久。
-- **提问（`question`）单独发卡片**：Claude `AskUserQuestion` 和 Codex `request_user_input` / `request_user_input_async` 可选择单选、多选、填写自定义答案或补充说明，一次提交多个问题。独立卡片不会随 turn 结束消失，插件重载后也能依靠 Paseo 的实时 pending 状态作答。其他 provider 和无法识别的题目提示到 Paseo 回答。
+- **提问（`question`）单独发卡片**：Claude `AskUserQuestion` 和 Codex `request_user_input` / `request_user_input_async` 在卡片上列出全部选项，以勾选器支持单选、多选，也可填写自定义答案或补充说明，一次提交多个问题。独立卡片不会随 turn 结束消失，插件重载后也能依靠 Paseo 的实时 pending 状态作答。旧下拉卡片仍可提交；其他 provider 和无法识别的题目提示到 Paseo 回答。
 - **没有「总是允许」**：放宽权限规则是 Paseo 里的事，卡片只对这一次请求表态。
 
 卡片上凡是 agent 写的文字，都用纯文本组件或转义后显示：否则 agent 输出里的 `<at id=all>`
