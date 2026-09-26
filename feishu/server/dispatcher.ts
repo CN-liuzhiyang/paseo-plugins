@@ -65,7 +65,7 @@ const UNATTRIBUTED = "paseo (unattributed: Paseo does not record who answered)";
 // Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
 // registry, so the conversation survives plugin reloads and daemon restarts.
 export const CHAT_LABEL = "feishu-chat";
-// What a group said while the bot was not @-ed, kept for its next @: the last this many
+// What a group said without triggering a reply, kept for its next turn: the last this many
 // messages, none older than this.
 const OVERHEARD_LIMIT = 20;
 const OVERHEARD_MAX_AGE_MS = 6 * 60 * 60_000;
@@ -748,13 +748,18 @@ export function createDispatcher(deps: {
       return;
     }
     const chatType = event.chat_type === "group" ? "group" : "p2p";
+    const route = settings.routes.find((candidate) => candidate.chatId === chatId);
+    let allowed: boolean | null = null;
     if (chatType === "group" && !(await meantForBot(event))) {
-      // With 「获取群组中所有消息」 Feishu sends everything said in the group. The bot speaks when
-      // @-ed, as a person would; the rest is what it hears in the meantime.
-      if (settings.routes.some((candidate) => candidate.chatId === chatId)) overhear(chatId, messageId, event);
-      return;
+      // Feishu may send every group message. Without a mention, only an opted-in route and an
+      // allowed sender can start a turn. Everyone else stays quiet, as before.
+      if (route?.replyWithoutMention) allowed = await mayTalk(settings, senderId);
+      if (!allowed) {
+        if (route) overhear(chatId, messageId, event);
+        return;
+      }
     }
-    if (!(await mayTalk(settings, senderId))) {
+    if (allowed !== true && !(await mayTalk(settings, senderId))) {
       // Both IDs are per app, so this line is how an operator finds the values to allow.
       log(`dropped ${messageId} from ${senderId} in ${chatId}: not in senders`);
       const name = await nameOf(senderId, chatId, messageId);
@@ -764,7 +769,6 @@ export function createDispatcher(deps: {
     }
     if (deps.directory && !deps.directory.name(senderId)) void nameOf(senderId, chatId, messageId);
     const typed = stripMentions(text(event.content) ?? "", event.mentions);
-    const route = settings.routes.find((candidate) => candidate.chatId === chatId);
     if (!route) {
       log(`no route for ${chatId}`);
       deps.onStranger?.({ senderId, name: deps.directory?.name(senderId) ?? null, chatId, chatType, why: "route", at: now() });

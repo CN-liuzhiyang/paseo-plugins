@@ -20,6 +20,9 @@ export const routeSchema = z.object({
   // private notes anyone in the chat may then read in a reply, and the workspace's own.
   // Claude only; other providers load their own instruction files regardless.
   claudeMd: z.boolean().default(false),
+  // In a group, let allowed senders trigger a reply without mentioning the bot.
+  // Has no effect in a one-to-one chat. Old routes keep the mention requirement.
+  replyWithoutMention: z.boolean().default(false),
   // "HH:MM" in the daemon host's local time: the first message after it each day starts a new
   // conversation, as `/new` would, and the old one is archived. Empty keeps one conversation.
   dailyReset: z

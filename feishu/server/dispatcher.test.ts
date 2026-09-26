@@ -11,7 +11,7 @@ import { stripMentions, type Incoming } from "./inbound";
 import { memoryPeople, type People } from "./people";
 import { parseButtonName, requestDetail } from "./permissions";
 import { questionButtonName, questionResponse, questionsOf } from "./questions";
-import type { Settings } from "../shared/settings";
+import { settingsDefinition, type Settings } from "../shared/settings";
 import { describePermission, finalAnswer } from "./timeline";
 
 const SENDER = "ou_allowed";
@@ -30,6 +30,7 @@ const settings: Settings = {
       modeId: "default",
       instructions: "",
       claudeMd: false,
+      replyWithoutMention: false,
       dailyReset: "",
     },
   ],
@@ -1230,8 +1231,57 @@ test("in a group the bot answers an @ to it, and hears the rest as context for i
   assert.equal(h.paseo.sends[1].text, "好的");
 });
 
+test("old route settings keep requiring a mention", () => {
+  const { replyWithoutMention: _missing, ...oldRoute } = settings.routes[0];
+  const parsed = settingsDefinition.schema.parse({ ...settings, routes: [oldRoute] });
+  assert.equal(parsed.routes[0].replyWithoutMention, false);
+});
+
+test("an opted-in group replies to an allowed sender without an @", async () => {
+  const optedIn = { ...settings, routes: [{ ...settings.routes[0], replyWithoutMention: true }] };
+  const h = harness({ settings: optedIn, botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ content: "大家好" }));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.paseo.sends[0].text, "大家好");
+  assert.equal(h.strangers.length, 0);
+});
+
+test("an opted-in group stays silent for an unmentioned stranger, but answers their @ with a refusal", async () => {
+  const optedIn = { ...settings, routes: [{ ...settings.routes[0], replyWithoutMention: true }] };
+  const h = harness({ settings: optedIn, botId: async () => BOT });
+  await h.dispatcher.onMessage(group({ message_id: "om_unmentioned", sender_id: "ou_guest", content: "大家好" }));
+  assert.equal(h.created.length, 0);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.strangers.length, 0);
+
+  await h.dispatcher.onMessage(group({ message_id: "om_mentioned", sender_id: "ou_guest", content: "@_user_1 在吗", mentions: [atBot] }));
+  assert.equal(h.created.length, 0);
+  assert.equal(h.sent[0].title, "还不能用");
+  assert.equal(h.strangers[0].why, "sender");
+});
+
+test("a member also gets a reply without an @ when the group opts in", async () => {
+  const people = memoryPeople([
+    { openId: "ou_member", name: "乙", by: SENDER, byName: "甲", chatId: CHAT, at: 0 },
+  ]);
+  const optedIn = { ...settings, routes: [{ ...settings.routes[0], replyWithoutMention: true }] };
+  const h = harness({ settings: optedIn, botId: async () => BOT, people });
+  await h.dispatcher.onMessage(group({ sender_id: "ou_member", content: "帮我看看" }));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.paseo.sends[0].text, "帮我看看");
+});
+
+test("the group switch has no effect on a one-to-one chat", async () => {
+  const optedIn = { ...settings, routes: [{ ...settings.routes[0], replyWithoutMention: true }] };
+  const h = harness({ settings: optedIn, botId: async () => BOT });
+  await h.dispatcher.onMessage(message({ chat_type: "p2p", content: "你好" }));
+  assert.equal(h.created.length, 1);
+  assert.equal(h.paseo.sends[0].text, "你好");
+});
+
 test("a group with no route stays quiet until the bot is @-ed", async () => {
-  const h = harness({ botId: async () => BOT });
+  const optedIn = { ...settings, routes: [{ ...settings.routes[0], replyWithoutMention: true }] };
+  const h = harness({ settings: optedIn, botId: async () => BOT });
   await h.dispatcher.onMessage(group({ chat_id: "oc_other", content: "大家好" }));
   assert.equal(h.sent.length, 0);
   assert.equal(h.strangers.length, 0);

@@ -11,6 +11,7 @@ const route: Route = {
   modeId: "default",
   instructions: "你是家里的管家。",
   claudeMd: false,
+  replyWithoutMention: false,
   dailyReset: "",
 };
 
@@ -31,6 +32,7 @@ test("the system prompt says where the agent is, and carries the route's instruc
   assert.ok(!p2p.includes("群里"));
   const group = systemPrompt({ ...route, instructions: "" }, "group");
   assert.match(group, /群里的每个人都看得到你的回复/);
+  assert.match(group, /可能带 @，也可能没有/);
 });
 
 test("an agent labelled without CLAUDE.md opens without it after a restart", async () => {

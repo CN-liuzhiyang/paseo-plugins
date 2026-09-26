@@ -18,6 +18,7 @@ const settings: Settings = {
       modeId: "default",
       instructions: "",
       claudeMd: false,
+      replyWithoutMention: false,
       dailyReset: "",
     },
   ],

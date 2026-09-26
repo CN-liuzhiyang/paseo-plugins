@@ -23,6 +23,7 @@ export function blankRoute(choices: Choices): Route {
     modeId: provider ? defaultMode(provider) : "",
     instructions: "",
     claudeMd: false,
+    replyWithoutMention: false,
     dailyReset: "",
   };
 }
@@ -52,6 +53,7 @@ export function describeRoute(route: Route, choices: Choices): string {
     `${provider?.label ?? providerId} ${model}`,
     mode,
     route.claudeMd ? "读取 CLAUDE.md" : "不读 CLAUDE.md",
+    ...(route.replyWithoutMention ? ["群消息无需 @ 即回复"] : []),
     ...(route.dailyReset ? [`每天 ${route.dailyReset} 开新会话`] : []),
   ].join(" · ");
 }
@@ -161,6 +163,12 @@ export function RouteEditor({
           onValueChange={(next) => set({ thinkingOptionId: next === "" ? undefined : next })}
         />
       ) : null}
+      <SettingsSwitch
+        label="群聊：无需 @ 也回复"
+        hint="仅当这条路由对应群聊时生效；群里有权限的人发言就会触发回复，单聊不受影响。默认关闭。"
+        value={route.replyWithoutMention}
+        onValueChange={(replyWithoutMention) => set({ replyWithoutMention })}
+      />
       <SettingsSwitch
         label="读取 CLAUDE.md"
         hint={
