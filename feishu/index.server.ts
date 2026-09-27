@@ -14,6 +14,7 @@ import { createDirectory, type Directory } from "./server/directory";
 import { createChannel, destinationsOf, type ChannelDelivery } from "./server/channel";
 import { botOpenId, chatMembers, fetchMessages, sendCard } from "./server/lark";
 import { createPeople } from "./server/people";
+import { createChatWorkspaces, createWorkspaceAssignments } from "./server/workspaces";
 
 const log = (line: string) => console.log(`feishu: ${line}`);
 const REMEMBERED_STRANGERS = 20;
@@ -94,6 +95,11 @@ export default function contribute(server: PluginServerContext) {
 
   // Agents created without CLAUDE.md stay that way every time their session opens again.
   const isolation = createIsolation(paseo, log);
+  const chatWorkspaces = createChatWorkspaces({
+    paseo,
+    assignments: createWorkspaceAssignments(path.join(dataRoot(), "workspaces.json")),
+    log,
+  });
   server.before("agent.session_open", async ({ request }) => {
     if (!isClaude(request.provider)) return;
     const env = await isolation.envFor(request.agentId, request.env);
@@ -144,6 +150,7 @@ export default function contribute(server: PluginServerContext) {
     });
     const dispatcher = createDispatcher({
       paseo,
+      workspaces: chatWorkspaces,
       lark: larkOf(cli),
       readSettings,
       log,

@@ -13,18 +13,22 @@
 
 ## 会话
 
-一个飞书会话就是和一个 agent 的一段对话，上下文连续：
+每个飞书单聊或群聊固定一个 Paseo workspace，名字取自路由名，仍使用路由的工作目录；同一目录可以有
+多个聊天 workspace。每段对话是其中一个 agent，上下文连续：
 
 - 会话里第一条消息起 agent，之后的消息都发给它。agent 还在处理上一条时，新消息排队（卡片显示
   「排队中」），上一轮结束再发，不打断正在跑的那一轮；在 Paseo 里直接跟它对话造成的忙也算。
-- `/new` 开新会话；`/new <内容>` 开新会话并直接问这句。旧会话在 Paseo 里归档（还在跑的不动，
-  留在 Paseo 里）。
+- `/new` 开新会话；`/new <内容>` 开新会话并直接问这句。新 agent 留在该聊天的 workspace，旧 agent
+  在 Paseo 里归档（还在跑的不动，留在 Paseo 里）；workspace 本身不归档。
 - 路由设了「每天开新会话」（`dailyReset`，如 `"05:00"`，daemon 所在机器的本地时间）时，过了这个
   时间的第一条消息自动开新会话、归档旧的，卡片上会说「新的一天」。不是定时器：没人说话就什么也不发生；
   旧会话还在跑就等它跑完。
 - 在 Paseo 里把 agent 归档，下一条消息自动开新会话。
 - 会话和 agent 的对应关系是 agent 上的标签 `feishu-chat=<chat_id>`，存在 Paseo 自己的注册表里，
   插件或 daemon 重启后照样接得上。改了路由的 `cwd` 或 `provider` 不影响已有会话，`/new` 之后才生效。
+- chat_id 到 workspace ID 的对应关系存在 `<PASEO_HOME>/plugin-data/feishu/workspaces.json`；升级时会
+  认领该聊天当前 agent 所在的 workspace 并改名，之后新会话复用它。路由改了 `cwd` 后，下一段对话
+  会在新目录创建该聊天的新 workspace。旧的已归档会话不会被搬迁，仍可从 Paseo 历史查看。
 - 排队只在内存里：插件重启时还在排队的消息不会补发，卡片停在「排队中」。
 
 ### 群聊
@@ -160,9 +164,9 @@ paseo plugin logs feishu
 
 ## 数据不在这里
 
-仓库里只有代码和配置的 schema。谁能给机器人发消息、哪个会话路由到哪个 workspace，都存在
-daemon 本机的插件 settings 里（`defineSettings`，scope 为 host，不跨机同步），**默认为空、
-fail-closed**：没配发送者就谁都进不来，没配路由就收到消息也不起 agent。
+仓库里只有代码和配置的 schema。谁能给机器人发消息、哪个会话用哪个工作目录，都存在 daemon 本机的
+插件 settings 里（`defineSettings`，scope 为 host，不跨机同步）；chat_id 到 workspace ID 的映射
+在插件自己的数据文件里。设置**默认为空、fail-closed**：没配发送者就谁都进不来，没配路由就收到消息也不起 agent。
 
 ## 谁能用
 

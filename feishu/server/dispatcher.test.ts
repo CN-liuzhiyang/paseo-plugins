@@ -55,6 +55,7 @@ afterEach(() => {
 
 interface FakeAgent {
   id: string;
+  workspaceId: string;
   provider: string;
   labels: Record<string, string>;
   status: "idle" | "running";
@@ -67,12 +68,13 @@ interface FakeAgent {
 /** Stands in for Paseo's agent registry; share one between harnesses to model a restart. */
 function registry() {
   const agents = new Map<string, FakeAgent>();
+  const workspaces = new Map<string, string>();
   const created: Array<Record<string, unknown>> = [];
   const sends: Array<{ agentId: string; text: string; images?: unknown }> = [];
   const responses: Array<{ agentId: string; requestId: string; response: AgentPermissionResponse }> = [];
   // Live timeline listeners, one per followed agent.
   const streams = new Map<string, (event: unknown) => void>();
-  return { agents, created, sends, responses, streams, respondFails: false };
+  return { agents, workspaces, created, sends, responses, streams, respondFails: false };
 }
 
 interface Sent {
@@ -124,23 +126,25 @@ function harness(
       record("patch", cardId, card);
     },
   };
+  const createAgent = async (input: Record<string, unknown>, workspaceId: string) => {
+    paseo.created.push(input);
+    if (options.createFails) throw new Error("provider is not installed");
+    const id = String(input.agentId);
+    paseo.agents.set(id, {
+      id,
+      workspaceId,
+      provider: "claude",
+      labels: input.labels as Record<string, string>,
+      status: "idle",
+      archivedAt: null,
+      createdAt: new Date(clock).toISOString(),
+      order: paseo.agents.size,
+      pendingPermissions: [],
+    });
+    return { id };
+  };
   const agents = {
-    create: async (input: Record<string, unknown>) => {
-      paseo.created.push(input);
-      if (options.createFails) throw new Error("provider is not installed");
-      const id = String(input.agentId);
-      paseo.agents.set(id, {
-        id,
-        provider: "claude",
-        labels: input.labels as Record<string, string>,
-        status: "idle",
-        archivedAt: null,
-        createdAt: new Date(clock).toISOString(),
-        order: paseo.agents.size,
-        pendingPermissions: [],
-      });
-      return { id };
-    },
+    create: async (input: Record<string, unknown>) => createAgent(input, "wks_legacy"),
     list: async (input: { filter: { labels: Record<string, string> }; page: { limit: number } }) => {
       const matches = [...paseo.agents.values()]
         .filter((agent) => agent.archivedAt === null)
@@ -179,8 +183,19 @@ function harness(
       },
     }),
   };
+  const workspaces = {
+    forChat: async (chatId: string) => {
+      let workspaceId = paseo.workspaces.get(chatId);
+      if (!workspaceId) {
+        workspaceId = `wks_${chatId}`;
+        paseo.workspaces.set(chatId, workspaceId);
+      }
+      return { id: workspaceId, agents: { create: (input: Record<string, unknown>) => createAgent(input, workspaceId) } };
+    },
+  };
   const dispatcher = createDispatcher({
     paseo: { agents } as never,
+    workspaces: workspaces as never,
     lark,
     readSettings: async () => (options.settings === undefined ? settings : options.settings),
     log: (line) => logs.push(line),
@@ -352,7 +367,8 @@ test("a routed message walks one card from received to done", async () => {
   await h.settle();
   assert.equal(h.created.length, 1);
   const input = h.created[0];
-  assert.equal(input.cwd, "/work");
+  assert.equal(input.cwd, undefined);
+  assert.equal(h.paseo.agents.get(String(input.agentId))?.workspaceId, `wks_${CHAT}`);
   assert.equal(input.idempotencyKey, "feishu:om_1");
   const config = input.config as Record<string, unknown>;
   assert.equal(config.provider, "claude/claude-sonnet-5");
@@ -889,6 +905,7 @@ test("/new starts a fresh agent that later messages go to", async () => {
   assert.equal(h.created.length, 2);
   assert.equal(h.created[1].prompt, undefined);
   const newId = String(h.created[1].agentId);
+  assert.equal(h.paseo.agents.get(newId)?.workspaceId, h.paseo.agents.get(oldId)?.workspaceId);
   assert.equal(h.sent.at(-1)?.title, "已开新会话");
   assert.match(h.sent.at(-1)?.body ?? "", /之前的会话已在 Paseo 里归档/);
   assert.notEqual(h.paseo.agents.get(oldId)?.archivedAt, null);
@@ -928,6 +945,7 @@ test("an archived conversation is not resumed", async () => {
 
   await h.dispatcher.onMessage(message({ message_id: "om_2", content: "新问题" }));
   assert.equal(shared.created.length, 2);
+  assert.equal(shared.agents.get(String(shared.created[1].agentId))?.workspaceId, shared.agents.get(agentId)?.workspaceId);
   assert.deepEqual(shared.sends.at(-1), { agentId: String(shared.created[1].agentId), text: "新问题" });
   assert.equal(shared.sends.filter((sent) => sent.agentId === agentId).length, 1);
 });
@@ -1439,6 +1457,7 @@ test("the first message after the daily reset time starts a new conversation", a
   await h.dispatcher.onMessage(message({ message_id: "om_3", content: "早" }));
   assert.equal(h.created.length, 2);
   const newId = String(h.created[1].agentId);
+  assert.equal(h.paseo.agents.get(newId)?.workspaceId, h.paseo.agents.get(oldId)?.workspaceId);
   assert.notEqual(h.paseo.agents.get(oldId)?.archivedAt, null);
   assert.deepEqual(h.paseo.sends.at(-1), { agentId: newId, text: "早" });
   const received = h.sent.find((card) => card.id === "om_3");

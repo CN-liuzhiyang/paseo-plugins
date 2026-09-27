@@ -45,6 +45,7 @@ import {
 import { parseQuestionButtonName, questionResponse } from "./questions";
 import { applyItem, createProgress } from "./progress";
 import { describePermission, finalAnswer } from "./timeline";
+import { CHAT_LABEL, type ChatWorkspaces } from "./workspaces";
 
 // A running card is redrawn on the agent's own events, at most this often (Feishu rate-limits
 // edits to a message), and otherwise on a heartbeat so its clock never looks stuck.
@@ -64,7 +65,7 @@ const REMEMBERED_ORPHANS = 100;
 const UNATTRIBUTED = "paseo (unattributed: Paseo does not record who answered)";
 // Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
 // registry, so the conversation survives plugin reloads and daemon restarts.
-export const CHAT_LABEL = "feishu-chat";
+export { CHAT_LABEL } from "./workspaces";
 // What a group said without triggering a reply, kept for its next turn: the last this many
 // messages, none older than this.
 const OVERHEARD_LIMIT = 20;
@@ -204,6 +205,7 @@ export async function textOnly(
  */
 export function createDispatcher(deps: {
   paseo: Pick<PaseoApi, "agents">;
+  workspaces: ChatWorkspaces;
   lark: Lark;
   readSettings: () => Promise<Settings | null>;
   log: (line: string) => void;
@@ -416,10 +418,10 @@ export function createDispatcher(deps: {
     const agentId = randomUUID();
     const context = contextOf(route);
     if (context.labels["feishu-claude-md"]) deps.isolate?.(agentId);
-    await paseo.agents.create({
+    const workspace = await deps.workspaces.forChat(chatId, route);
+    await workspace.agents.create({
       agentId,
       idempotencyKey: `feishu:${messageId}`,
-      cwd: route.cwd,
       title,
       config: {
         provider: route.provider,
