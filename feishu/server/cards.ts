@@ -25,13 +25,31 @@ const MAX_TODOS = 8;
 
 export type Template = "blue" | "wathet" | "orange" | "green" | "red" | "grey";
 
-function cardOf(title: string, template: Template, elements: object[]): object {
+function cardOf(title: string, template: Template, elements: object[], subtitle?: string): object {
   return {
     schema: "2.0",
     config: { update_multi: true },
-    header: { title: { tag: "plain_text", content: title }, template },
+    header: {
+      title: { tag: "plain_text", content: title },
+      ...(subtitle ? { subtitle: { tag: "plain_text", content: subtitle } } : {}),
+      template,
+    },
     body: { elements },
   };
+}
+
+// A turn no Feishu message started has no message to answer, so its card says so up top. Why it
+// started is not known here: Paseo reports a turn the provider resumed on its own and one someone
+// typed into the Paseo app the same way.
+const ELSEWHERE_TITLE = "会话继续";
+const ELSEWHERE_SUBTITLE =
+  "这一轮不是由飞书消息发起的：可能是后台任务结束后 agent 接着做，也可能是有人在 Paseo 里继续了对话";
+
+/** A card for one run, headed as a turn started elsewhere when it was one. */
+function runCardOf(run: RunView, title: string, template: Template, elements: object[]): object {
+  return run.elsewhere
+    ? cardOf(`${ELSEWHERE_TITLE} · ${title}`, template, elements, ELSEWHERE_SUBTITLE)
+    : cardOf(title, template, elements);
 }
 
 function card(title: string, template: Template, content: string): object {
@@ -73,6 +91,11 @@ export function truncateBytes(text: string, maxBytes: number): string {
   return text.slice(0, low) + TRUNCATED;
 }
 
+/** The request as a quoted line, or nothing for a run no message started. */
+function requestBlock(request: string): object[] {
+  return request === "" ? [] : [markdown(quote(request))];
+}
+
 /** The request as one quoted line. It is what someone typed, but in a group that is not us. */
 function quote(request: string): string {
   const oneLine = request.replace(/\s+/g, " ").trim();
@@ -107,7 +130,7 @@ function fitted(build: (budget: number, withSteps: boolean) => object): object {
  * limit, so it does not stay on "running" for good.
  */
 export function lastResortCard(title: string, template: Template, run: RunView): object {
-  return cardOf(title, template, [
+  return runCardOf(run, title, template, [
     markdown("卡片没能显示完整内容（飞书不接受这张卡片），完整结果在 Paseo 里看。"),
     footer(run),
   ]);
@@ -131,6 +154,8 @@ export interface RunView {
   progress: Progress;
   /** What did not reach the agent with the message, e.g. an image too large to attach. */
   notes: readonly string[];
+  /** Started by no Feishu message; `request` is then empty. */
+  elsewhere?: boolean;
 }
 
 export interface DecisionView {
@@ -296,8 +321,8 @@ export function runningCard(run: RunView, now: number): object {
   const { progress } = run;
   const draft = progress.text.trim();
   return fitted((budget) =>
-    cardOf(`进行中 · ${formatElapsed(now - run.startedAt)}`, "blue", [
-      markdown(quote(run.request)),
+    runCardOf(run, `进行中 · ${formatElapsed(now - run.startedAt)}`, "blue", [
+      ...requestBlock(run.request),
       ...notesBlock(run),
       ...(progress.todos.length > 0 ? [markdown(todoLines(progress).join("\n"))] : []),
       notation(activity(progress, now).join("\n")),
@@ -387,8 +412,8 @@ function approvalElements(approval: ApprovalView, form: number, numbered: boolea
 export function waitingCard(run: RunView, approvals: readonly ApprovalView[]): object {
   const shown = approvals.slice(0, MAX_FORMS);
   const hidden = approvals.length - shown.length;
-  return cardOf("等待审批", "orange", [
-    markdown(quote(run.request)),
+  return runCardOf(run, "等待审批", "orange", [
+    ...requestBlock(run.request),
     ...decisionsBlock(run),
     ...shown.flatMap((approval, form) => approvalElements(approval, form, approvals.length > 1)),
     ...(hidden > 0 ? [markdown(`还有 ${hidden} 个请求，在 Paseo 里处理。`)] : []),
@@ -478,7 +503,7 @@ export function doneTitle(run: RunView, now: number): string {
 
 export function doneCard(run: RunView, result: string, now: number): object {
   return fitted((budget, withSteps) =>
-    cardOf(doneTitle(run, now), "green", [
+    runCardOf(run, doneTitle(run, now), "green", [
       markdown(result.trim() === "" ? "（agent 没有输出文字）" : answer(result, budget)),
       ...notesBlock(run),
       ...(withSteps ? stepsPanel(run, now) : []),
@@ -496,11 +521,15 @@ export function failedCard(
 ): object {
   const { run, now, hint } = options;
   const main = markdown(
-    [quote(request), escape(truncateBytes(error, MAX_DETAIL_BYTES)), ...(hint ? [hint] : [])].join("\n\n"),
+    [
+      ...(request === "" ? [] : [quote(request)]),
+      escape(truncateBytes(error, MAX_DETAIL_BYTES)),
+      ...(hint ? [hint] : []),
+    ].join("\n\n"),
   );
   if (!run) return cardOf("失败", "red", [main]);
   return fitted((_budget, withSteps) =>
-    cardOf("失败", "red", [
+    runCardOf(run, "失败", "red", [
       main,
       ...(withSteps ? stepsPanel(run, now ?? run.startedAt) : []),
       ...decisionsBlock(run),
@@ -511,8 +540,8 @@ export function failedCard(
 
 export function canceledCard(run: RunView, reason: string, now: number): object {
   return fitted((_budget, withSteps) =>
-    cardOf("已取消", "grey", [
-      markdown(`${quote(run.request)}\n\n${escape(reason)}`),
+    runCardOf(run, "已取消", "grey", [
+      markdown([...(run.request === "" ? [] : [quote(run.request)]), escape(reason)].join("\n\n")),
       ...(withSteps ? stepsPanel(run, now) : []),
       ...decisionsBlock(run),
       footer(run),

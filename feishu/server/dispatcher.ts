@@ -103,6 +103,20 @@ interface Run extends RunView {
   unfollow: (() => void) | null;
 }
 
+/**
+ * A turn no Feishu message started, from its turn_started until its run is tracked. While it is
+ * held the agent counts as busy, and what the turn does meanwhile is kept for the run.
+ */
+interface Claim {
+  turnId: string | null;
+  /** Requests opened before the run exists, by request ID. */
+  pending: Map<string, Pending>;
+  /** Requests already resolved, so a stale snapshot does not bring them back. */
+  resolved: Set<string>;
+  /** The turn's end, if it came before the run was tracked. */
+  ended: Event<"agent.turn_ended"> | null;
+}
+
 /** A choice made on a card and sent to Paseo, until Paseo confirms it. */
 interface Answer {
   agentId: string;
@@ -235,6 +249,8 @@ export function createDispatcher(deps: {
   const seen = new Set<string>();
   const seenActions = new Set<string>();
   const runs = new Map<string, Run>();
+  // Turns no Feishu message started whose card is still being opened, by agent.
+  const claims = new Map<string, Claim>();
   const answers = new Map<string, Answer>();
   const questionCards = new Map<string, QuestionPending>();
   const questionAnswers = new Map<string, QuestionAnswer>();
@@ -437,9 +453,20 @@ export function createDispatcher(deps: {
     return chat;
   }
 
+  /** A turn of the agent's that started elsewhere and has not ended, while its card is opened. */
+  function claimed(agentId: string): boolean {
+    const claim = claims.get(agentId);
+    return claim !== undefined && claim.ended === null;
+  }
+
   /** Whether anything is under way on an agent, from this plugin or from anyone else. */
   function busy(agentId: string, live: { agent: { status: string } } | null): boolean {
-    return runs.has(agentId) || (queues.get(agentId)?.length ?? 0) > 0 || live?.agent.status === "running";
+    return (
+      runs.has(agentId) ||
+      claimed(agentId) ||
+      (queues.get(agentId)?.length ?? 0) > 0 ||
+      live?.agent.status === "running"
+    );
   }
 
   /**
@@ -537,8 +564,9 @@ export function createDispatcher(deps: {
       painter: painterFor(cardId),
     };
     const queue = queues.get(chat.agentId) ?? [];
-    // A turn this plugin did not start (someone typing in Paseo) also makes the agent busy.
-    if (running || runs.has(chat.agentId) || queue.length > 0) {
+    // A turn this plugin did not start (someone typing in Paseo, or the agent going on by
+    // itself) also makes the agent busy, even before Paseo's status says so.
+    if (running || runs.has(chat.agentId) || claimed(chat.agentId) || queue.length > 0) {
       queue.push(turn);
       queues.set(chat.agentId, queue);
       log(`${messageId} queued for agent ${chat.agentId} (${queue.length})`);
@@ -595,7 +623,7 @@ export function createDispatcher(deps: {
 
   async function drain(agentId: string) {
     // The agent's current turn drains the queue when it ends.
-    if (stopped || runs.has(agentId)) return;
+    if (stopped || runs.has(agentId) || claimed(agentId)) return;
     const queue = queues.get(agentId);
     const next = queue?.shift();
     if (queue?.length === 0) queues.delete(agentId);
@@ -820,55 +848,159 @@ export function createDispatcher(deps: {
     });
   }
 
+  /**
+   * A turn no Feishu message started: the agent going on after a background task ended, or
+   * someone continuing the conversation in the Paseo app. Paseo reports both the same way, so
+   * both get a card of their own, sent to the agent's chat as a new message, and from then on a
+   * run like any other: live progress, approvals, and how the turn ended.
+   */
+  async function onTurnStarted(event: Event<"agent.turn_started">): Promise<void> {
+    const agentId = event.agent.id;
+    // A turn this plugin sends has its run tracked before the prompt goes out, so a run here is
+    // that turn's own. A subagent's turns are its parent's business, not the chat's.
+    if (stopped || event.agent.parentAgentId !== null || runs.has(agentId) || claimed(agentId)) return;
+    const claim: Claim = { turnId: event.turnId, pending: new Map(), resolved: new Set(), ended: null };
+    claims.set(agentId, claim);
+    try {
+      await openRun(event, claim);
+    } finally {
+      if (claims.get(agentId) === claim) claims.delete(agentId);
+    }
+  }
+
+  async function openRun(event: Event<"agent.turn_started">, claim: Claim): Promise<void> {
+    const agentId = event.agent.id;
+    // The hook's agent carries no labels; Paseo's registry says which chat, if any, it is in.
+    const live = await paseo.agents
+      .ref(agentId)
+      .refresh()
+      .catch((error: unknown) => {
+        log(`no card for a turn of agent ${agentId}: ${describe(error)}`);
+        return null;
+      });
+    const chatId = live?.agent.labels[CHAT_LABEL];
+    if (!live || live.agent.archivedAt || !chatId || stopped) return;
+    // Requests are kept from the events as they come; the snapshot only fills in any the events
+    // missed. Once the turn has ended, what is open belongs to whatever runs next.
+    for (const request of claim.ended ? [] : live.agent.pendingPermissions) {
+      if (request.kind === "question" || claim.pending.has(request.id) || claim.resolved.has(request.id)) continue;
+      claim.pending.set(request.id, { request, askedAt: now(), notice: null });
+    }
+    const base: Omit<Run, "cardId" | "painter"> = {
+      request: "",
+      notes: [],
+      elsewhere: true,
+      agentId,
+      chatId,
+      cwd: event.agent.cwd,
+      provider: event.agent.provider,
+      startedAt: now(),
+      pending: claim.pending,
+      decisions: [],
+      progress: createProgress(),
+      unfollow: null,
+    };
+    // Feishu sends one message per uuid within an hour. A turn ID makes a second card for the
+    // same turn that message again; without one nothing about the turn is both stable and
+    // unique, and a key shared with another turn would hand back that turn's card.
+    const uuid = createHash("sha256")
+      .update(`turn\n${agentId}\n${claim.turnId ?? randomUUID()}`)
+      .digest("hex")
+      .slice(0, 48);
+    let cardId: string;
+    try {
+      cardId = await lark.send(chatId, runningCard(base, now()), uuid);
+    } catch (error) {
+      log(`open a card in ${chatId} for a turn of agent ${agentId}: ${describe(error)}`);
+      return;
+    }
+    const run: Run = { ...base, cardId, painter: painterFor(cardId) };
+    log(`turn ${claim.turnId ?? "-"} of agent ${agentId}, not from a Feishu message -> card ${cardId} in ${chatId}`);
+    for (const { request, askedAt } of run.pending.values()) auditAsk(run, request, askedAt);
+    if (claim.ended) {
+      // The turn ended while its card went out: the card shows how, and nothing follows it.
+      settle(cardId);
+      close(run, claim.ended);
+      return;
+    }
+    // The claim kept every other way of starting a run on this agent shut; only a stop is left.
+    if (!track(agentId, run)) return;
+    claims.delete(agentId);
+    if (run.pending.size > 0) redraw(run);
+    await follow(run);
+  }
+
+  /** Draws how `run`'s turn ended; a request still open then was never answered. */
+  function close(run: Run, event: Event<"agent.turn_ended">): void {
+    for (const [requestId, pending] of run.pending) {
+      const answer = answers.get(answerKey(run.agentId, requestId));
+      if (answer) {
+        clearTimeout(answer.timer);
+        answers.delete(answerKey(run.agentId, requestId));
+      }
+      const decidedAt = now();
+      const waitedMs = decidedAt - pending.askedAt;
+      const what = describePermission(pending.request);
+      run.decisions.push(
+        decisionLine({ outcome: "abandoned", label: "", what, operator: null, waitedMs }),
+      );
+      audit("feishu.approval.decision", {
+        agentId: run.agentId,
+        requestId,
+        chatId: run.chatId,
+        outcome: "abandoned",
+        approved: false,
+        actionId: null,
+        askedAt: iso(pending.askedAt),
+        decidedAt: iso(decidedAt),
+        waitedMs,
+        reason: null,
+        by: "turn ended",
+      });
+    }
+    run.pending.clear();
+    const { outcome } = event;
+    const at = now();
+    if (outcome.kind === "completed") {
+      run.painter.finish(
+        doneCard(run, finalAnswer(event.timeline), at),
+        lastResortCard(doneTitle(run, at), "green", run),
+      );
+    } else if (outcome.kind === "failed") {
+      run.painter.finish(
+        failedCard(run.request, outcome.error.message, { run, now: at }),
+        lastResortCard("失败", "red", run),
+      );
+    } else {
+      run.painter.finish(canceledCard(run, outcome.reason, at), lastResortCard("已取消", "grey", run));
+    }
+  }
+
   function onTurnEnded(event: Event<"agent.turn_ended">): void {
     const run = finish(event.agent.id);
-    if (run) {
-      // A request still open when its turn ends was never answered.
-      for (const [requestId, pending] of run.pending) {
-        const answer = answers.get(answerKey(run.agentId, requestId));
-        if (answer) {
-          clearTimeout(answer.timer);
-          answers.delete(answerKey(run.agentId, requestId));
-        }
-        const decidedAt = now();
-        const waitedMs = decidedAt - pending.askedAt;
-        const what = describePermission(pending.request);
-        run.decisions.push(
-          decisionLine({ outcome: "abandoned", label: "", what, operator: null, waitedMs }),
-        );
-        audit("feishu.approval.decision", {
-          agentId: run.agentId,
-          requestId,
-          chatId: run.chatId,
-          outcome: "abandoned",
-          approved: false,
-          actionId: null,
-          askedAt: iso(pending.askedAt),
-          decidedAt: iso(decidedAt),
-          waitedMs,
-          reason: null,
-          by: "turn ended",
-        });
-      }
-      run.pending.clear();
-      const { outcome } = event;
-      const at = now();
-      if (outcome.kind === "completed") {
-        run.painter.finish(
-          doneCard(run, finalAnswer(event.timeline), at),
-          lastResortCard(doneTitle(run, at), "green", run),
-        );
-      } else if (outcome.kind === "failed") {
-        run.painter.finish(
-          failedCard(run.request, outcome.error.message, { run, now: at }),
-          lastResortCard("失败", "red", run),
-        );
-      } else {
-        run.painter.finish(canceledCard(run, outcome.reason, at), lastResortCard("已取消", "grey", run));
-      }
+    if (run) close(run, event);
+    else {
+      // A turn whose card is still going out: the card shows how it ended once it is up.
+      const claim = claims.get(event.agent.id);
+      if (claim && claim.ended === null && sameTurn(claim.turnId, event.turnId)) claim.ended = event;
     }
     // Whoever started the turn that just ended, the next queued message can go now.
     void drain(event.agent.id).catch((error: unknown) => log(`drain ${event.agent.id}: ${describe(error)}`));
+  }
+
+  function auditAsk(run: Run, request: AgentPermissionRequest, askedAt: number): void {
+    audit("feishu.approval.ask", {
+      agentId: run.agentId,
+      requestId: request.id,
+      chatId: run.chatId,
+      cardId: run.cardId,
+      tool: request.name,
+      requestKind: request.kind,
+      title: request.title ?? null,
+      what: describePermission(request),
+      input: request.input ?? null,
+      askedAt: iso(askedAt),
+    });
   }
 
   async function onPermissionRequested(event: Event<"agent.permission_requested">): Promise<void> {
@@ -906,20 +1038,14 @@ export function createDispatcher(deps: {
       }
       return;
     }
-    if (!run) return;
+    if (!run) {
+      // A turn whose card is still going out keeps the request for its run.
+      const claim = claims.get(event.agent.id);
+      if (claim && claim.ended === null) claim.pending.set(request.id, { request, askedAt, notice: null });
+      return;
+    }
     run.pending.set(request.id, { request, askedAt, notice: null });
-    audit("feishu.approval.ask", {
-      agentId: run.agentId,
-      requestId: request.id,
-      chatId: run.chatId,
-      cardId: run.cardId,
-      tool: request.name,
-      requestKind: request.kind,
-      title: request.title ?? null,
-      what: describePermission(request),
-      input: request.input ?? null,
-      askedAt: iso(askedAt),
-    });
+    auditAsk(run, request, askedAt);
     redraw(run);
   }
 
@@ -1156,6 +1282,11 @@ export function createDispatcher(deps: {
       }));
       return;
     }
+    const claim = claims.get(agentId);
+    if (claim) {
+      claim.pending.delete(requestId);
+      claim.resolved.add(requestId);
+    }
     const answer = answers.get(key);
     if (answer) {
       clearTimeout(answer.timer);
@@ -1215,6 +1346,7 @@ export function createDispatcher(deps: {
       run.painter.stop();
     }
     runs.clear();
+    claims.clear();
     for (const queue of queues.values()) for (const turn of queue) turn.painter.stop();
     queues.clear();
     for (const painter of orphans.values()) painter.stop();
@@ -1224,6 +1356,7 @@ export function createDispatcher(deps: {
   return {
     onMessage,
     onCardAction,
+    onTurnStarted,
     onTurnEnded,
     onPermissionRequested,
     onPermissionResolved,
@@ -1235,6 +1368,11 @@ export function createDispatcher(deps: {
 
 function answerKey(agentId: string, requestId: string): string {
   return `${agentId}\n${requestId}`;
+}
+
+/** Whether two turn IDs can name the same turn; a missing one matches any. */
+function sameTurn(left: string | null, right: string | null): boolean {
+  return left === null || right === null || left === right;
 }
 
 function iso(ms: number | null): string | null {

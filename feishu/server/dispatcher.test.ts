@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { afterEach, test } from "node:test";
 import type {
   AgentPermissionRequest,
@@ -74,13 +75,18 @@ function registry() {
   const responses: Array<{ agentId: string; requestId: string; response: AgentPermissionResponse }> = [];
   // Live timeline listeners, one per followed agent.
   const streams = new Map<string, (event: unknown) => void>();
-  return { agents, workspaces, created, sends, responses, streams, respondFails: false };
+  // Called while a prompt is on its way to the agent, before the send returns.
+  const onSend = null as ((agentId: string) => void) | null;
+  return { agents, workspaces, created, sends, responses, streams, respondFails: false, onSend };
 }
 
 interface Sent {
   op: "reply" | "send" | "patch";
   id: string;
   title: string;
+  subtitle?: string;
+  /** The key a new message was sent with. */
+  uuid?: string;
   /** The card's first element, which is always markdown. */
   body: string;
   card: object;
@@ -104,21 +110,38 @@ function harness(
   const strangers: Stranger[] = [];
   let cards = 0;
   let clock = options.clock ?? 0;
-  const record = (op: "reply" | "send" | "patch", id: string, card: object) => {
+  const record = (op: "reply" | "send" | "patch", id: string, card: object, uuid?: string) => {
     const view = card as {
-      header: { title: { content: string } };
+      header: { title: { content: string }; subtitle?: { content: string } };
       body: { elements: Array<{ content: string }> };
     };
-    sent.push({ op, id, title: view.header.title.content, body: view.body.elements[0].content ?? "", card });
+    sent.push({
+      op,
+      id,
+      title: view.header.title.content,
+      ...(view.header.subtitle ? { subtitle: view.header.subtitle.content } : {}),
+      ...(uuid ? { uuid } : {}),
+      body: view.body.elements[0].content ?? "",
+      card,
+    });
   };
+  // Calls held back until `release`, to line an event up against a call still on its way.
+  const hold = { refresh: false, send: false };
+  const waiters: Array<() => void> = [];
+  const gate = async (kind: "refresh" | "send") => {
+    if (hold[kind]) await new Promise<void>((resolve) => waiters.push(resolve));
+  };
+  const faults = { sendFails: false };
   const lark: Lark = {
     async reply(messageId, card) {
       record("reply", messageId, card);
       cards += 1;
       return `om_card${cards}`;
     },
-    async send(chatId, card) {
-      record("send", chatId, card);
+    async send(chatId, card, uuid) {
+      await gate("send");
+      if (faults.sendFails) throw new Error("bot is not in the chat");
+      record("send", chatId, card, uuid);
       cards += 1;
       return `om_card${cards}`;
     },
@@ -157,11 +180,13 @@ function harness(
     },
     ref: (id: string) => ({
       refresh: async () => {
+        await gate("refresh");
         const agent = paseo.agents.get(id);
         return agent ? { agent } : null;
       },
       send: async (text: string, sendOptions?: { images?: unknown }) => {
         paseo.sends.push({ agentId: id, text, ...(sendOptions?.images ? { images: sendOptions.images } : {}) });
+        paseo.onSend?.(id);
         const agent = paseo.agents.get(id);
         if (agent) agent.status = "running";
       },
@@ -225,6 +250,20 @@ function harness(
     });
     await settle();
   };
+  /** A turn starts that no Feishu message sent, as Paseo's turn_started hook reports it. */
+  const begin = (agentId: string, turnId: string | null = "autonomous-1", parentAgentId: string | null = null) => {
+    const fake = paseo.agents.get(agentId);
+    if (fake) fake.status = "running";
+    return dispatcher.onTurnStarted({ agent: { ...agent(agentId), parentAgentId }, turnId });
+  };
+  /** Lets every held call go on, and what follows from them land. */
+  const release = async () => {
+    hold.refresh = false;
+    hold.send = false;
+    for (const waiter of waiters.splice(0)) waiter();
+    await settle();
+    await settle();
+  };
   /** The agent asks for permission: Paseo holds the request open and the hook fires. */
   const ask = async (agentId: string, request: AgentPermissionRequest) => {
     paseo.agents.get(agentId)?.pendingPermissions.push(request);
@@ -274,6 +313,10 @@ function harness(
     audits,
     settle,
     end,
+    begin,
+    hold,
+    release,
+    faults,
     ask,
     resolve,
     click,
@@ -1483,4 +1526,275 @@ test("without a daily reset one conversation lasts across days", async () => {
   h.advance(3 * 24 * 60 * 60_000);
   await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
   assert.equal(h.created.length, 1);
+});
+
+/** A chat whose agent has finished the turn its first message started; returns the agent's ID. */
+async function idle(h: ReturnType<typeof harness>): Promise<string> {
+  await h.dispatcher.onMessage(message());
+  const agentId = String(h.created[0].agentId);
+  await h.end(agentId, "好了。");
+  return agentId;
+}
+
+function uuidOf(agentId: string, turnId: string): string {
+  return createHash("sha256").update(`turn\n${agentId}\n${turnId}`).digest("hex").slice(0, 48);
+}
+
+test("a turn no Feishu message started gets its own card in the chat, which follows it to the end", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  await h.begin(agentId, "autonomous-7");
+  await h.settle();
+  const opened = h.sent.at(-1)!;
+  assert.equal(opened.op, "send");
+  assert.equal(opened.id, CHAT);
+  assert.equal(opened.title, "会话继续 · 进行中 · 0 秒");
+  // Paseo reports the agent going on by itself and someone typing in Paseo alike, so the card
+  // names both and claims neither.
+  assert.match(opened.subtitle ?? "", /不是由飞书消息发起的/);
+  assert.match(opened.subtitle ?? "", /后台任务结束后/);
+  assert.match(opened.subtitle ?? "", /在 Paseo 里继续/);
+  assert.equal(opened.uuid, uuidOf(agentId, "autonomous-7"));
+  // No message started it, so there is none to quote.
+  assert.ok(!JSON.stringify(opened.card).includes('"content":"> '));
+  assert.match(h.logs.join("\n"), /not from a Feishu message -> card om_card2 in oc_routed/);
+
+  await h.stream(agentId, {
+    type: "tool_call",
+    callId: "c1",
+    name: "Bash",
+    status: "running",
+    detail: { type: "shell", command: "npm test" },
+    error: null,
+  });
+  assert.equal(h.sent.at(-1)?.id, "om_card2");
+  assert.match(JSON.stringify(h.sent.at(-1)!.card), /▶ 运行 npm test/);
+
+  await h.end(agentId, "后台测试全部通过。");
+  const done = h.sent.at(-1)!;
+  assert.equal(done.op, "patch");
+  assert.equal(done.id, "om_card2");
+  assert.match(done.title, /^会话继续 · 完成 · /);
+  assert.match(done.subtitle ?? "", /不是由飞书消息发起的/);
+  assert.match(done.body, /^后台测试全部通过。/);
+});
+
+test("such a turn that is canceled or fails says so under the same heading", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  await h.begin(agentId, "autonomous-1");
+  h.dispatcher.onTurnEnded({
+    agent: agent(agentId),
+    turnId: "autonomous-1",
+    outcome: { kind: "canceled", reason: "stopped in Paseo" },
+    timeline: [],
+  });
+  await h.settle();
+  assert.equal(h.sent.at(-1)?.title, "会话继续 · 已取消");
+  assert.equal(h.sent.at(-1)?.body, "stopped in Paseo");
+
+  await h.begin(agentId, "autonomous-2");
+  h.dispatcher.onTurnEnded({
+    agent: agent(agentId),
+    turnId: "autonomous-2",
+    outcome: { kind: "failed", error: { message: "rate limited" } },
+    timeline: [],
+  });
+  await h.settle();
+  assert.equal(h.sent.at(-1)?.title, "会话继续 · 失败");
+  assert.equal(h.sent.at(-1)?.body, "rate limited");
+});
+
+test("the turn a Feishu message starts opens no second card, even when it starts before the send returns", async () => {
+  const shared = registry();
+  const h = harness({ paseo: shared });
+  // Paseo may report the turn while the plugin's send is still on its way back.
+  shared.onSend = (agentId) => void h.begin(agentId, "turn-from-feishu");
+  await h.dispatcher.onMessage(message());
+  const agentId = String(shared.created[0].agentId);
+  await h.begin(agentId, "turn-from-feishu");
+  await h.settle();
+  assert.equal(h.sent.filter((entry) => entry.op === "send").length, 0);
+  await h.end(agentId, "构建通过。");
+  assert.deepEqual(
+    h.sent.map((entry) => [entry.op, entry.id, entry.title.split(" ")[0]]),
+    [
+      ["reply", "om_1", "已接收"],
+      ["patch", "om_card1", "进行中"],
+      ["patch", "om_card1", "完成"],
+    ],
+  );
+});
+
+test("a Feishu message during such a turn waits for it, then goes to the agent on its own card", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  await h.begin(agentId);
+  await h.settle();
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  assert.equal(h.sent.at(-1)?.title, "排队中");
+  assert.equal(h.paseo.sends.length, 1);
+
+  await h.end(agentId, "后台的事做完了。");
+  await h.settle();
+  assert.ok(h.sent.some((entry) => entry.id === "om_card2" && /^会话继续 · 完成/.test(entry.title)));
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId, text: "还在吗" });
+  // That message's turn is followed on its own card; nothing new is opened for it.
+  await h.begin(agentId, "turn-for-om_2");
+  await h.settle();
+  assert.equal(h.sent.filter((entry) => entry.op === "send").length, 1);
+});
+
+test("a Feishu message that arrives while such a card is being opened waits for that turn", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  h.hold.send = true;
+  // Paseo has not yet said the agent is running: only the plugin knows a turn began.
+  const started = h.dispatcher.onTurnStarted({ agent: agent(agentId), turnId: "autonomous-1" });
+  await h.settle();
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "顺便看看测试" }));
+  await h.settle();
+  assert.equal(h.sent.at(-1)?.title, "排队中");
+  assert.equal(h.paseo.sends.length, 1);
+
+  await h.release();
+  await started;
+  // The queued message's card went out first, so this turn's card is the third.
+  assert.equal(h.sent.at(-1)?.op, "send");
+  await h.end(agentId, "后台任务做完了。");
+  await h.settle();
+  assert.match(h.sent.filter((entry) => entry.id === "om_card3").at(-1)!.title, /^会话继续 · 完成/);
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId, text: "顺便看看测试" });
+});
+
+for (const stage of ["refresh", "send"] as const) {
+  test(`a turn that ends while its card's ${stage} is on its way leaves no card running`, async () => {
+    const h = harness();
+    const agentId = await idle(h);
+    h.hold[stage] = true;
+    const started = h.begin(agentId);
+    await h.settle();
+    await h.end(agentId, "后台任务跑完了：3 个用例失败。");
+    await h.release();
+    await started;
+    const last = h.sent.at(-1)!;
+    assert.equal(last.op, "patch");
+    assert.equal(h.sent.at(-2)?.op, "send");
+    assert.equal(last.id, "om_card2");
+    assert.match(last.title, /^会话继续 · 完成/);
+    assert.match(last.body, /3 个用例失败/);
+
+    // Nothing is left following that turn: the clock does not redraw it, and the agent is free.
+    const before = h.sent.length;
+    h.advance(60_000);
+    h.dispatcher.heartbeat();
+    await h.settle();
+    assert.equal(h.sent.length, before);
+    await h.dispatcher.onMessage(message({ message_id: "om_2", content: "结果呢" }));
+    assert.deepEqual(h.paseo.sends.at(-1), { agentId, text: "结果呢" });
+  });
+
+  test(`a permission asked while the card's ${stage} is on its way still gets its buttons`, async () => {
+    const h = harness();
+    const agentId = await idle(h);
+    h.hold[stage] = true;
+    const started = h.begin(agentId);
+    await h.settle();
+    const second: AgentPermissionRequest = { ...push, id: "toolu_second", input: { command: "rm -rf dist" }, detail: undefined };
+    await h.ask(agentId, push);
+    await h.ask(agentId, second);
+    // Answered in Paseo before the card is up: it must not come back on the card.
+    await h.resolve(agentId, second.id, { behavior: "allow", selectedActionId: "accept" });
+    assert.equal(h.sent.filter((entry) => entry.op === "send").length, 0);
+
+    await h.release();
+    await started;
+    const card = h.sent.at(-1)!;
+    assert.equal(card.title, "会话继续 · 等待审批");
+    assert.deepEqual(
+      buttons(card.card).map(({ name }) => parseButtonName(name)?.requestId),
+      [push.id, push.id],
+    );
+    assert.deepEqual(
+      h.audits.filter((entry) => entry.kind === "feishu.approval.ask").map((entry) => [entry.requestId, entry.cardId]),
+      [[push.id, card.id]],
+    );
+    await h.click(buttons(card.card)[1].name, { cardId: card.id });
+    assert.deepEqual(h.paseo.responses, [
+      { agentId, requestId: push.id, response: { behavior: "allow", selectedActionId: "accept" } },
+    ]);
+    await h.resolve(agentId, push.id, { behavior: "allow", selectedActionId: "accept" });
+    assert.match(h.sent.at(-1)!.title, /^会话继续 · 进行中/);
+    assert.match(JSON.stringify(h.sent.at(-1)!.card), /<person id='ou_allowed'/);
+  });
+}
+
+test("after stop no card is opened, not even for a turn whose card was on its way", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  const before = h.sent.length;
+  h.hold.refresh = true;
+  const started = h.begin(agentId);
+  await h.settle();
+  h.dispatcher.stop();
+  await h.release();
+  await started;
+  await h.begin(agentId, "autonomous-2");
+  await h.settle();
+  assert.equal(h.sent.length, before);
+});
+
+test("turns of agents outside any chat, of subagents and of archived agents open no card", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  h.paseo.agents.set("agent-elsewhere", {
+    id: "agent-elsewhere",
+    workspaceId: "wks_other",
+    provider: "claude",
+    labels: {},
+    status: "idle",
+    archivedAt: null,
+    createdAt: new Date(0).toISOString(),
+    order: 99,
+    pendingPermissions: [],
+  });
+  const before = h.sent.length;
+  await h.begin("agent-elsewhere");
+  // A subagent is not the chat's conversation, even one that carries the chat's label.
+  await h.begin(agentId, "autonomous-sub", "parent-agent");
+  h.paseo.agents.get(agentId)!.archivedAt = "2026-10-04T00:00:00Z";
+  await h.begin(agentId, "autonomous-archived");
+  await h.settle();
+  assert.equal(h.sent.length, before);
+});
+
+test("a card that cannot be opened is logged, and the chat still waits for that turn", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  h.faults.sendFails = true;
+  await h.begin(agentId);
+  await h.settle();
+  assert.match(h.logs.join("\n"), /open a card in oc_routed for a turn of agent .+: bot is not in the chat/);
+
+  h.faults.sendFails = false;
+  await h.dispatcher.onMessage(message({ message_id: "om_2", content: "还在吗" }));
+  assert.equal(h.sent.at(-1)?.title, "排队中");
+  await h.end(agentId, "（那一轮的回答）");
+  await h.settle();
+  assert.deepEqual(h.paseo.sends.at(-1), { agentId, text: "还在吗" });
+});
+
+test("each turn's card has its own key, also when Paseo gives the turn no ID", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  for (const turnId of [null, null, "autonomous-9"]) {
+    await h.begin(agentId, turnId);
+    await h.settle();
+    await h.end(agentId, "好。");
+  }
+  const keys = h.sent.filter((entry) => entry.op === "send").map((entry) => entry.uuid);
+  assert.equal(keys.length, 3);
+  assert.notEqual(keys[0], keys[1]);
+  assert.equal(keys[2], uuidOf(agentId, "autonomous-9"));
+  assert.ok(keys.every((key) => key?.length === 48));
 });

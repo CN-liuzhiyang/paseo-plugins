@@ -300,6 +300,9 @@ export default function contribute(server: PluginServerContext) {
   });
 
   // Hooks return at once: a hook that waits on Feishu would hold up the agent operation behind it.
+  server.on("agent.turn_started", (event) => {
+    void active?.dispatcher.onTurnStarted(event).catch((error: unknown) => log(`turn started: ${String(error)}`));
+  });
   server.on("agent.turn_ended", (event) => active?.dispatcher.onTurnEnded(event));
   server.on("agent.permission_requested", (event) => active?.dispatcher.onPermissionRequested(event));
   server.on("agent.permission_resolved", (event) => active?.dispatcher.onPermissionResolved(event));
