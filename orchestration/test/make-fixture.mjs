@@ -26,7 +26,7 @@ const target = path.join(ROOT, "fixtures", "committee.jsonl");
 
 const logDir = await mkdtemp(path.join(os.tmpdir(), "orch-fixture-"));
 const executor = fakeExecutor({
-  answer: committeeAnswers({ convergeAt: 3, fail: ["respond:codex/gpt-5.6-sol:1"] }),
+  answer: committeeAnswers({ convergeAt: 3, fail: ["respond:codex/gpt-6-luna:1"] }),
   // Claude slower than Codex, as measured on real committees (CONVENTIONS R7).
   delayMs: (request) => (request.provider.startsWith("claude/") ? 120 : 40),
   usd: 0.0123,

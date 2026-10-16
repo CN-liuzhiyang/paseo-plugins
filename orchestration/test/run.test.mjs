@@ -111,7 +111,7 @@ test("committee: two rounds, converges, every event in the contract", async () =
 });
 
 test("committee: a failed respond keeps the member's last position and the paid rounds", async () => {
-  const executor = fakeExecutor({ answer: committeeAnswers({ convergeAt: 3, fail: ["respond:codex/gpt-5.6-sol:1"] }) });
+  const executor = fakeExecutor({ answer: committeeAnswers({ convergeAt: 3, fail: ["respond:codex/gpt-6-luna:1"] }) });
   const result = await run(committee, { input: COMMITTEE_INPUT, executor });
 
   assert.equal(result.outcome, "done");
@@ -121,14 +121,14 @@ test("committee: a failed respond keeps the member's last position and the paid 
   const events = eventsOf(result);
   const failed = events.filter((e) => e.kind === "call.end" && !e.ok);
   assert.equal(failed.length, 1);
-  assert.equal(failed[0].error.message, "fake failure of respond on codex/gpt-5.6-sol");
+  assert.equal(failed[0].error.message, "fake failure of respond on codex/gpt-6-luna");
   // A failed call still ran on an agent and still cost money.
   assert.match(failed[0].agentId, /^fake-agent-/);
   assert.equal(failed[0].cost.usd, 0.01);
 });
 
 test("committee: a failed analyze stops with what the other member said", async () => {
-  const executor = fakeExecutor({ answer: committeeAnswers({ fail: ["analyze:claude/claude-sonnet-5[1m]:1"] }) });
+  const executor = fakeExecutor({ answer: committeeAnswers({ fail: ["analyze:claude/claude-sonnet-5-5:1"] }) });
   const result = await run(committee, { input: COMMITTEE_INPUT, executor });
 
   assert.equal(result.outcome, "stopped");
@@ -156,7 +156,7 @@ test("advisor: one ask, the answer is the value", async () => {
   const executor = fakeExecutor({ answer: () => answer });
   const result = await run(advisor, { input: { question: "Is this right?", role: "fast" }, executor });
   assert.equal(result.outcome, "done");
-  assert.deepEqual(result.value, { question: "Is this right?", advisor: { role: "fast", provider: "claude/claude-haiku-4-5" }, answer });
+  assert.deepEqual(result.value, { question: "Is this right?", advisor: { role: "fast", provider: "claude/claude-haiku-5-5" }, answer });
   const events = eventsOf(result);
   assert.deepEqual(kinds(events), ["run.start", "call.start:c1", "caveat", "call.end:c1", "run.end"]);
   assert.equal(events[0].source, null);
@@ -730,10 +730,10 @@ test("shipped flows say how they came out", async () => {
   const single = await run(committee, { input: { ...COMMITTEE_INPUT, rounds: 1 }, executor: fakeExecutor({ answer: committeeAnswers() }) });
   assert.equal(single.summary, "只做了独立分析，没有裁决");
 
-  const noAssess = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["assess:claude/claude-sonnet-5[1m]:1"] }) }) });
+  const noAssess = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["assess:claude/claude-sonnet-5-5:1"] }) }) });
   assert.equal(noAssess.summary, "裁决失败，1 轮没有结论（1 次调用失败）");
 
-  const stopped = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["analyze:claude/claude-sonnet-5[1m]:1"] }) }) });
+  const stopped = await run(committee, { input: COMMITTEE_INPUT, executor: fakeExecutor({ answer: committeeAnswers({ fail: ["analyze:claude/claude-sonnet-5-5:1"] }) }) });
   assert.equal(stopped.outcome, "stopped");
   assert.equal(stopped.summary, "独立分析失败（worker），没有进入辩论");
 
@@ -820,7 +820,7 @@ test("checkFlow on the shipped flows", async () => {
 });
 
 test("fences: every level has a mode source, unknown families fail closed", () => {
-  assert.equal(fenceFor("claude/claude-haiku-4-5", "none").mode, "auto");
+  assert.equal(fenceFor("claude/claude-haiku-5-5", "none").mode, "auto");
   assert.equal(fenceFor("claude/x", "ask-human").mode, "default");
   assert.equal(fenceFor("codex/gpt-6-astra", "workspace").mode, "auto");
   assert.equal(fenceFor("pi/crs-claude/claude-opus-5", "none").mode, null);

@@ -381,9 +381,10 @@ schema 待在一起（R1）。现在的角色正文都是空的，因为它们�
 **换模型的流程**：改 `provider` → 看一眼 `thinking` 是否还合适（换模型会换默认档）→
 跑 `node runtime/smoke.mjs`（校验模型 id、thinking id 都还存在，每个角色都有栅栏）。
 
-**上下文窗口也写在模型 id 里**：`claude-sonnet-5` 是 200K，`claude-sonnet-5[1m]` 是 1M，
-在 `paseo provider models claude` 里是两个独立的 id（opus-5-5、fable-5-1 也各有 `[1m]` 版）。
-`worker` 用 `[1m]`（2026-09-23 决定：200K 在真实任务里经常不够）。
+**上下文窗口也写在模型 id 里，但要按模型看**：`claude-sonnet-5` 是 200K，`claude-sonnet-5[1m]` 是 1M，
+在 `paseo provider models claude` 里是两个独立的 id；`claude-sonnet-5-5` 的普通 id 本身就是 1M
+（看 `contextWindowMaxTokens`），没有 `[1m]` 版。`worker` 要 1M（2026-09-23 决定：200K 在真实任务里经常不够），
+2026-10-16 换成 `claude-sonnet-5-5` 后用普通 id 即可。
 
 为什么不用别的形态：`roster.json` 装不下成段的指令；Paseo 自己的 agent profiles
 在 CLI 上没有入口（`run --help` 里没有 profile 参数，本机 `list_profiles` 为空，2026-09-23 查）。
