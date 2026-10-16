@@ -487,7 +487,7 @@ flow 要停下来等人拍板时，用 `$.gate({ title, content, brief, timeout,
 | 缺口 | 后果 |
 |---|---|
 | Paseo 不记录**谁**应答的；任何能跑 `paseo permit allow` 的进程都能应答 | 决定记为 `unattributed`，不写成"人批准的"，并作为一条 caveat 进运行。`gate:allow` 这个 grant 不存在，flow 声明它直接报错 |
-| App 的拒绝按钮不带理由；`permit deny --message` 的理由只送到 agent，不回给脚本 | `reason` 只记运行时确知的（超时）；agent 转述的原话另存为 `agentReport`，标明是转述。**命令行不是给人用的审批渠道**，不要让人去敲 `permit deny`。方向见下 |
+| App 的拒绝按钮不带理由；`permit deny --message` 的理由只送到 agent，不回给脚本 | `reason` 只记运行时确知的（超时）；agent 转述的原话另存为 `agentReport`，标明是转述，且只在有人应答过（拒绝、内容不一致）时取，只取载体自己的回话（`logs --filter assistant_message`）；过期时载体卡在卡片上没说过话，取 `text` 会拿到它收到的 prompt 和思考，所以过期记空串。**命令行不是给人用的审批渠道**，不要让人去敲 `permit deny`。方向见下 |
 | 过期（默认 2h）时运行时替人**拒绝** | 需要 `gate:deny` grant。拒绝是保守方向，所以可以给 |
 | 载体是模型，抄长内容可能抄错 | 抄错判 `mismatch`，失败方向是"没批准"，不会误放行。实测 haiku 257 行一字不差 |
 | 内容在载体的 prompt 里，prompt 受命令行长度限制 | 超过 30000 字符直接判 `error`、不起卡片（一个 818 行的补丁就超了）。改成让载体先 Read 文件，人会先看到一张 Read 卡片，所以没这么做；真要解，得让 Paseo 接受文件形式的 prompt（fork 扩展点或插件） |

@@ -21,6 +21,7 @@ export function fakeExecutor({ answer = () => ({}), carrier = "approve", usd = 0
   const agents = new Map();
   const requests = [];
   const denied = [];
+  const transcripts = [];
   let count = 0;
 
   const start = (request, status) => {
@@ -33,6 +34,7 @@ export function fakeExecutor({ answer = () => ({}), carrier = "approve", usd = 0
     agents,
     requests,
     denied,
+    transcripts,
 
     async ask(request) {
       requests.push(request);
@@ -78,8 +80,15 @@ export function fakeExecutor({ answer = () => ({}), carrier = "approve", usd = 0
       return { status: agent.status, usage: { usd, inputTokens: 1200, outputTokens: 300 } };
     },
 
-    async transcript() {
-      return "The write was denied.";
+    // Like `paseo logs --filter`: "assistant_message" is what the agent said;
+    // "text" also has the prompt it was given and its thinking. A carrier
+    // that never got an answer (`hang`) has said nothing.
+    async transcript(agentId, { filter = "text" } = {}) {
+      transcripts.push({ agentId, filter });
+      const said = carrier === "hang" ? "" : "The write was denied.";
+      if (filter === "assistant_message") return said === "" ? "No activity to display." : said;
+      const prompt = agents.get(agentId)?.request.prompt ?? "";
+      return [`[User] ${prompt}`, "[Thought] The user asks me to write a file.", said].filter(Boolean).join("\n");
     },
 
     async deny(agentId) {

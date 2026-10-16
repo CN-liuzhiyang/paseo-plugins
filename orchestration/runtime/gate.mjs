@@ -99,6 +99,15 @@ export function gatePrompt(holdPath, content, brief = "") {
   return { prompt, fits: prompt.length <= CARRIER_PROMPT_LIMIT };
 }
 
+/** The `logs` command's text for an agent that has said nothing (cli/src/commands/agent/logs.ts). */
+const NO_ACTIVITY = "No activity to display.";
+
+/** What the carrier itself said, last three messages, cut to 1000 characters; "" if nothing or unreadable. */
+async function carrierWords(io, agentId) {
+  const said = ((await io.transcript(agentId, { tail: 3, filter: "assistant_message" }).catch(() => "")) ?? "").trim();
+  return said === NO_ACTIVITY ? "" : said.slice(-1000);
+}
+
 /**
  * Hold `content` until a person approves writing it to `holdPath`.
  *
@@ -207,10 +216,15 @@ export async function requestApproval(io, request) {
   // passed to `permit deny --message` reaches only the agent. The agent was
   // told to repeat it, so its last words are kept -- as its report, which is
   // not the same thing as the reason.
-  const agentReport =
-    outcome === "allowed"
-      ? ""
-      : ((await io.transcript(agentId, { tail: 3, filter: "text" }).catch(() => "")) ?? "").trim().slice(-1000);
+  //
+  // Only when a person answered (denied, or approved a copy that differs): on
+  // expiry or lost contact the script closed the card itself, there is nothing
+  // a person said, and the carrier -- stuck on the card -- has not spoken at
+  // all. Asked for "text" it returned the tail of its own prompt plus its
+  // thinking, which then read as its report (2026-09-23, an expired gate). Only
+  // what the carrier itself said counts: the `assistant_message` entries.
+  const answered = outcome === "denied" || outcome === "mismatch";
+  const agentReport = answered ? await carrierWords(io, agentId) : "";
 
   return {
     outcome,

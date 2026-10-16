@@ -5,7 +5,7 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import process from "node:process";
@@ -17,6 +17,7 @@ import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fenceFor } from "../runtime/fences.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
+import { requestApproval } from "../runtime/gate.mjs";
 import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
 import { fakeExecutor, committeeAnswers } from "./fake-executor.mjs";
@@ -402,6 +403,75 @@ test("$.gate: approved, denied, expired; the decision is the output; gate:deny i
   assert.equal(refused.outcome, "failed");
   assert.equal(refused.error.name, "GrantError");
   assert.equal(bare.requests.length, 0);
+});
+
+test("$.gate: agentReport is what the carrier said, and only when a person answered", async () => {
+  const gated = (timeout) =>
+    flow({
+      name: "gated",
+      description: "d",
+      phases: [],
+      inputs: {},
+      grants: ["gate:deny"],
+      run: (_, $) => $.gate({ title: "place a.lua", content: "local x = 1\n", brief: "checks passed", timeout }),
+    });
+
+  // A denial: the carrier's own words, asked for as such -- not the "text" view
+  // that also carries the prompt it was given and its thinking.
+  const answered = fakeExecutor({ carrier: "deny" });
+  const denied = await run(gated("1m"), { executor: answered });
+  assert.equal(denied.value.agentReport, "The write was denied.");
+  assert.deepEqual(answered.transcripts.map((t) => t.filter), ["assistant_message"]);
+
+  // An expiry: the script closed the card, nobody said anything, and the
+  // carrier -- stuck on the card -- has not spoken. Nothing is asked for.
+  const stuck = fakeExecutor({ carrier: "hang" });
+  const expired = await run(gated("1s"), { executor: stuck });
+  assert.equal(expired.value.outcome, "expired");
+  assert.equal(expired.value.agentReport, "");
+  assert.deepEqual(stuck.transcripts, []);
+
+  // A denial after which the carrier said nothing is an empty report, not
+  // the CLI's "No activity to display." line.
+  const silent = fakeExecutor({ carrier: "deny" });
+  silent.transcript = async () => "No activity to display.\n";
+  const quiet = await run(gated("1m"), { executor: silent });
+  assert.equal(quiet.value.outcome, "denied");
+  assert.equal(quiet.value.agentReport, "");
+});
+
+test("requestApproval: a copy that differs is a mismatch, and the carrier's words are kept", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-"));
+  const holdPath = path.join(dir, "hold", "a.lua");
+  const asked = [];
+  const io = {
+    spawn: async () => {
+      await mkdir(path.dirname(holdPath), { recursive: true });
+      await writeFile(holdPath, "local x = 2\n", "utf8");
+      return "carrier-1";
+    },
+    inspect: async () => ({ status: "idle" }),
+    deny: async () => {},
+    stop: async () => {},
+    transcript: async (agentId, how) => {
+      asked.push(how.filter);
+      return `I wrote a different file.${"x".repeat(2000)}`;
+    },
+  };
+  const decision = await requestApproval(io, { holdPath, content: "local x = 1\n", timeout: "1m", pollMs: 5 });
+  assert.equal(decision.outcome, "mismatch");
+  assert.equal(decision.approved, false);
+  assert.deepEqual(asked, ["assistant_message"]);
+  assert.equal(decision.agentReport.length, 1000, "cut to the last 1000 characters");
+  assert.ok(decision.agentReport.endsWith("x"));
+
+  // Approved: the file is the answer, there is no report.
+  const approved = await requestApproval(
+    { ...io, spawn: async () => { await writeFile(holdPath, "local x = 1\n", "utf8"); return "carrier-2"; } },
+    { holdPath, content: "local x = 1\n", timeout: "1m", pollMs: 5 },
+  );
+  assert.equal(approved.outcome, "allowed");
+  assert.equal(approved.agentReport, "");
 });
 
 test("timeout: the run ends, the call in flight is closed with RunEnded", async () => {

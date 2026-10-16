@@ -137,6 +137,8 @@
 `gate` 的 `output` 就是现有 `requestApproval()` 的判定对象，字段不变：
 `{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision }`。
 
+`agentReport` 是载体 agent 自己说的最后几句话（取最后 1000 字），不是人的理由：只在有人应答过（`denied`、`mismatch`）时取，只取载体自己的回话，不含它收到的 prompt 和思考；其余结局（`allowed`、`expired`、`error`）为空串。载体什么都没说时也是空串。
+
 `gate` 的 `call.end.ok` 说的是**人闸这个机制**有没有正常走完，不是人批没批：拒绝、过期、内容不一致、
 甚至判定为 `error`（内容太长起不了卡片、轮询一直失败）都是 `ok: true`，结论看 `output.outcome`
 （或 `output.approved`）。`ok: false` 只在人闸自身抛错时出现（例如起载体 agent 失败），这时 `output` 为 null。
