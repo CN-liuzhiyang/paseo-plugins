@@ -63,7 +63,7 @@ export function fakeExecutor({
   usd = 0.01,
   delayMs = 0,
   providers = ["orch-gate"],
-  typed = "PetNpc 的源文件不对，别批",
+  typed = "这个类的源文件不对，别批",
   message = "denied from the command line",
 } = {}) {
   const agents = new Map();

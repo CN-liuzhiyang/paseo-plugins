@@ -1,0 +1,8 @@
+{
+  "id": "orchestration-gate",
+  "description": "编排人闸：编排运行时（orchestration/）的人闸载体。一个不带模型的 provider，把待批内容做成 Paseo 权限卡片，批准后写回执",
+  "requirements": {
+    "paseo": ">=0.9.1"
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
