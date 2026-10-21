@@ -574,6 +574,36 @@ test("requestApproval: only the expected receipt is an approval", async () => {
   assert.equal(fresh.outcome, "denied");
 });
 
+test("requestApproval: for the provider carrier a matching receipt without an allow record is not an approval", async () => {
+  // The person said no on the card, and a receipt is at the path anyway: the receipt does not outvote the no.
+  const cases = [
+    ["a recorded denial", { behavior: "deny", via: "button", selectedActionId: "deny", message: "Denied by user" }, /recorded a denial \(button\)/],
+    ["no answer at all", null, /recorded no answer/],
+    ["an error record", { error: "cannot record the answer: disk full" }, /recorded an error \(cannot record the answer: disk full\)/],
+  ];
+  for (const [name, answer, reason] of cases) {
+    const gate = await prepared("provider");
+    const decision = await requestApproval(
+      ioDoing(async () => {
+        await mkdir(path.dirname(gate.holdPath), { recursive: true });
+        await writeFile(gate.holdPath, gate.receipt, "utf8");
+        if (answer) await writeFile(gate.answerPath, JSON.stringify(answer), "utf8");
+      }),
+      gate,
+      { pollMs: 5 },
+    );
+    assert.equal(decision.approved, false, name);
+    assert.equal(decision.outcome, "error", name);
+    assert.equal(decision.by, "nobody (the receipt and the answer record disagree)", name);
+    assert.match(decision.reason, reason, name);
+    assert.equal(decision.answeredVia, null, name);
+  }
+  // The model carrier has no answer record: the receipt alone is still its approval.
+  const model = await prepared("model");
+  const alone = await requestApproval(ioDoing(() => writeFile(model.holdPath, model.receipt, "utf8")), model, { pollMs: 5 });
+  assert.equal(alone.outcome, "allowed");
+});
+
 test("requestApproval: what the provider recorded decides nothing without a receipt", async () => {
   // An answer record that says allow, and no receipt: not approved.
   const lying = await prepared("provider");

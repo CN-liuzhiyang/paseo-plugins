@@ -213,9 +213,10 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
     const { request, turnId, permissionId } = waiting;
     let failure: string | null = null;
     try {
-      // The receipt first: the runtime reads it once the turn has ended.
-      if (answer.behavior === "allow") await files.write(request.receiptPath, request.receipt);
+      // The answer first, then the receipt: the runtime takes a receipt only with an allow record
+      // beside it, so a failure in between leaves an allow without a receipt -- an error, not an approval.
       await record(request.answerPath, { permissionId, ...answer });
+      if (answer.behavior === "allow") await files.write(request.receiptPath, request.receipt);
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
       await files.write(request.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: `cannot record the answer: ${failure}` })).catch(() => {});

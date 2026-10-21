@@ -226,6 +226,7 @@ const VIA = ["button", "no-button", "typed"];
 
 export const UNATTRIBUTED = "unattributed (Paseo does not record who answered)";
 const CARRIER_ENDED = "nobody (the carrier ended without an answer)";
+const RECORDS_DISAGREE = "nobody (the receipt and the answer record disagree)";
 
 /**
  * Hold until a person approves the gate `prepared` describes (prepareGate).
@@ -334,18 +335,28 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
   // A polling failure is not read as anything: the gate could not see what happened.
   if (failure) return decision({ ...base, outcome: "error", reason: `polling failed: ${failure.message}`, by: "nobody (gate lost sight of the request)" });
 
-  // The receipt is only ever written by an approved answer, so a matching one
-  // is an approval even when it landed after the deadline.
+  // The carrier writes the receipt only after an approved answer, so a matching
+  // one is an approval even when it landed after the deadline. The provider
+  // carrier also records the answer, before the receipt: a receipt without an
+  // allow record beside it -- none, an error, or a denial the person made --
+  // was not written by this card's allow, and is not one. (Anything that can
+  // write here can write both; this only stops a receipt from outvoting a
+  // recorded no.)
   if (written !== null) {
-    const allowed = canonical(written) === canonical(receipt);
-    const outcome = allowed ? "allowed" : "mismatch";
-    return decision({
-      ...base,
-      outcome,
-      by: UNATTRIBUTED,
-      answeredVia: via,
-      agentReport: !allowed && carrier === "model" ? await carrierWords(io, agentId) : "",
-    });
+    const matches = canonical(written) === canonical(receipt);
+    if (!matches) {
+      return decision({ ...base, outcome: "mismatch", by: UNATTRIBUTED, answeredVia: via, agentReport: carrier === "model" ? await carrierWords(io, agentId) : "" });
+    }
+    if (carrier === "provider" && !(answer?.behavior === "allow" && !answer.error)) {
+      const recorded = answer?.error ? `an error (${String(answer.error).slice(0, 200)})` : answer?.behavior === "deny" ? `a denial (${via ?? "unknown"})` : "no answer";
+      return decision({
+        ...base,
+        outcome: "error",
+        reason: `the receipt is there, but the carrier recorded ${recorded}: it was not written by an allow on this card`,
+        by: RECORDS_DISAGREE,
+      });
+    }
+    return decision({ ...base, outcome: "allowed", by: UNATTRIBUTED, answeredVia: via });
   }
 
   if (expired) return decision({ ...base, outcome: "expired", reason: `no answer within ${timeout}`, by: "gate timeout" });
