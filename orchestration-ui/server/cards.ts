@@ -24,8 +24,10 @@ export const SPACING_MS = 2_000;
 export const RECHECK_MS = 5_000;
 /** The whole directory is listed again this often, in case a file event went missing. */
 export const RESCAN_MS = 30_000;
-/** A caller the daemon does not know yet is tried again this often. Each try is an error line in the daemon log. */
+/** The first wait before trying an unknown caller again; doubles up to MAX_RETRY_MS. Each try is an error line in the daemon log. */
 export const RETRY_MS = 30_000;
+/** The longest wait between two tries. */
+export const MAX_RETRY_MS = 10 * 60_000;
 /** A run that ended longer ago than this gets no card when first seen (after a restart, say). */
 export const RECENT_END_MS = 10 * 60_000;
 /** Files not touched for this long are not looked at, and an unfinished run is given up on. */
@@ -195,11 +197,12 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
         entry.retryAt = 0;
       } catch (error) {
         entry.failures += 1;
+        // Doubling waits: a caller that never comes back (archived) costs a handful of daemon
+        // log lines, not one every 30 seconds for a day.
+        entry.retryAt = at + Math.min(RETRY_MS * 2 ** (entry.failures - 1), MAX_RETRY_MS);
         if (isUnknownAgent(error)) {
-          entry.retryAt = at + RETRY_MS;
           if (entry.failures === 1) log(`cards: agent ${entry.caller} is not loaded; run ${entry.runId} waits for it`);
         } else {
-          entry.retryAt = at + Math.min(RETRY_MS * 2 ** (entry.failures - 1), 120_000);
           log(`cards: appending run ${entry.runId} to ${entry.caller} failed: ${String(error)}`);
         }
       }

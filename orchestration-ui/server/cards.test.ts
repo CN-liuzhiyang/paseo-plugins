@@ -6,7 +6,7 @@ import { after, test } from "node:test";
 import { cardItemId, cardKey, cardOf, urgentChange, type RunCard } from "../shared/card";
 import { foldEvents, runStatus } from "../shared/run";
 import type { Probe } from "./alive";
-import { createCardFeed, isUnknownAgent, readCard, RECENT_END_MS, RETRY_MS, SPACING_MS, type CardItem } from "./cards";
+import { createCardFeed, isUnknownAgent, MAX_RETRY_MS, readCard, RECENT_END_MS, RETRY_MS, SPACING_MS, type CardItem } from "./cards";
 
 const FIXTURES = path.join(import.meta.dirname, "..", "fixtures");
 const BASE = 15 * 60_000;
@@ -315,4 +315,33 @@ test("readCard folds a run straight from its file", async () => {
   const card = await readCard(dir, "x", BASE, { probe: { hostname: HOST, kill: () => true } });
   assert.equal(card?.status, "done");
   await assert.rejects(readCard(dir, "missing", BASE), /ENOENT/);
+});
+
+test("feed: an agent that never comes back is tried less and less often", async () => {
+  let tries = 0;
+  const h = harness({
+    failWith: () => {
+      tries += 1;
+      return new Error("Request failed: Unknown agent 'caller-agent-1'");
+    },
+  });
+  h.start();
+  await h.feed.scan();
+  const at: number[] = [];
+  for (let minute = 0; minute < 60; minute += 0.5) {
+    h.advance(30_000);
+    const before = tries;
+    await h.feed.recheck();
+    if (tries > before) at.push(minute + 0.5);
+  }
+  // 30s, 1m, 2m, 4m, 8m, then every 10m: about a dozen tries in the first hour, not 120.
+  assert.ok(tries <= 12, `tried ${tries} times`);
+  const gaps = at.slice(1).map((value, index) => value - at[index]!);
+  assert.ok(gaps.every((gap, index) => index === 0 || gap >= gaps[index - 1]!), `gaps ${gaps}`);
+  assert.ok(Math.max(...gaps) <= MAX_RETRY_MS / 60_000);
+});
+
+test("card: a run of script steps only shows no cost while it runs", () => {
+  const run = foldEvents(fixture("hotfix-stopped.jsonl").slice(0, 3));
+  assert.equal(cardOf("r7", run, "running", Date.now())!.costUsd, null);
 });

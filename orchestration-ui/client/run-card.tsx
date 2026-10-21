@@ -68,7 +68,8 @@ function Numbers({ card, now }: { card: RunCard; now: number }) {
   const took =
     card.durationMs ?? (started === null ? null : (isFinished(card.status) || card.status === "lost" ? (ms(card.lastEventAt) ?? now) : now) - started);
   const parts = [
-    took === null ? null : `${isFinished(card.status) ? "用时" : "已运行"} ${formatDuration(took)}`,
+    // A finished run's kicker already says how long it took.
+    took === null || card.kicker.includes("用时") ? null : `${isFinished(card.status) ? "用时" : "已运行"} ${formatDuration(took)}`,
     card.costUsd === null ? null : `${formatUsd(card.costUsd)}${card.costNote && !isFinished(card.status) ? " 起" : ""}`,
   ].filter(Boolean);
   return <Text style={ui.styles.small}>{parts.join(" · ")}</Text>;

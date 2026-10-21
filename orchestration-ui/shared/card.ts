@@ -81,10 +81,14 @@ export function cardOf(
   if (end) {
     costUsd = end.cost?.totalUsd ?? null;
     costNote = end.cost?.partial || null;
-  } else {
+  } else if ([...run.calls.values()].some((call) => call.type === "ask")) {
     const soFar = costSoFar(run);
     costUsd = soFar.usd;
     costNote = soFar.uncounted > 0 ? `已结束调用的合计；${soFar.uncounted} 个调用未计入` : "已结束调用的合计";
+  } else {
+    // Only script steps so far: nothing has cost anything, and "$0" would read as a figure.
+    costUsd = null;
+    costNote = null;
   }
   const live = status === "running" || status === "starting";
   const gateCall = live ? openCalls(run).find((call) => call.type === "gate") : undefined;
