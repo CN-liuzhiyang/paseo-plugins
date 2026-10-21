@@ -9,6 +9,7 @@ import { Drawer, spendText } from "./drawer";
 import { EventsView } from "./events-view";
 import { GraphView } from "./graph-view";
 import { HERO_ICON, RUN_LOOK } from "./looks";
+import { ResizableDrawer } from "./resize";
 import { TimelineView } from "./timeline-view";
 import { Badge, Banner, OpenAgent, ProvideUi, useUi } from "./ui";
 
@@ -24,8 +25,6 @@ const TABS: Array<[Tab, string]> = [
   ["timeline", "时间线"],
   ["events", "事件"],
 ];
-
-const DRAWER_WIDTH = 380;
 
 export function RunDetail({
   runId,
@@ -50,6 +49,8 @@ export function RunDetail({
   const [tab, setTab] = useState<Tab>("graph");
   const [picked, setPicked] = useState<string | null>(initialSelect);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The row the drawer sits in; the drawer never takes so much that the graph has no room.
+  const [containerWidth, setContainerWidth] = useState(1200);
   const top = run.start ? hero(run, status, now, { proc: snap.process, staleMs: snap.staleMs }) : null;
   // Nothing picked yet: the node the sentence is about, so the drawer answers it at once.
   const selected = picked ?? top?.select ?? "@start";
@@ -162,13 +163,12 @@ export function RunDetail({
     );
   }
   return (
-    <View style={{ flex: 1, flexDirection: "row", backgroundColor: ui.theme.colors.surface0 }}>
+    <View
+      style={{ flex: 1, flexDirection: "row", backgroundColor: ui.theme.colors.surface0 }}
+      onLayout={(event) => setContainerWidth(event.nativeEvent.layout.width)}
+    >
       <View style={{ flex: 1, minWidth: 0 }}>{main}</View>
-      {drawer ? (
-        <View style={{ width: DRAWER_WIDTH, borderLeftWidth: 1, borderLeftColor: ui.theme.colors.border, backgroundColor: ui.theme.colors.surface1 }}>
-          <ScrollView contentContainerStyle={{ padding: 18, paddingBottom: 48 }}>{drawer}</ScrollView>
-        </View>
-      ) : null}
+      {drawer ? <ResizableDrawer containerWidth={containerWidth}>{drawer}</ResizableDrawer> : null}
     </View>
   );
 }

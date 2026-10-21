@@ -26,7 +26,7 @@ import {
 } from "../shared/run";
 import { GATE_TONE, KIND_LOOK, NODE_LOOK, VISIT_LOOK } from "./looks";
 import { Json, Value } from "./value";
-import { AgentRef, Badge, Block, CopyButton, Fact, Fold, OpenAgent, useUi, type Tone } from "./ui";
+import { AgentRef, Badge, Block, CopyButton, Fact, Fold, LinkButton, OpenAgent, useUi, type Tone } from "./ui";
 
 // What the selected node says, in the order a person asks: what came of it, who did it, what it
 // cost, whether its limits held, where to look further. The prompt, schema and raw JSON are folded
@@ -424,12 +424,22 @@ function CallDrawer({ run, status, graph, call, onSelect }: DrawerProps & { call
     : NODE_LOOK[state];
   const visit = call.visit === null ? null : run.visits[call.visit];
   const where = visit ? `${phaseTitle(run, visit.phase)}${visit.round > 1 ? ` 第 ${visit.round} 次` : ""}` : "阶段之外";
+  const line = headline(call, status);
   return (
     <View style={{ gap: 16 }}>
       <Head title={callTitle(run, call)}>
         <Pill tone={pill.tone} label={pill.label} />
         <Meta text={[kind?.name ?? "未知类型", where, formatDuration(took)].join(" · ")} />
+        {/* Up here, so opening the agent never means scrolling past its output. */}
+        {call.type === "ask" && call.agentId && !remote && ui.navigation?.openAgent ? (
+          <LinkButton icon="ExternalLink" label="在 Paseo 中打开" onPress={() => ui.navigation!.openAgent({ agentId: call.agentId! })} />
+        ) : null}
       </Head>
+      {line ? (
+        <Text style={[ui.styles.strong, { fontSize: 15 }]} selectable>
+          {line}
+        </Text>
+      ) : null}
       {call.type === "gate" ? (
         <GateBody call={call} state={state} remote={remote} />
       ) : call.type === "ask" ? (
@@ -536,7 +546,7 @@ function AskBody({
         ) : null}
       </Sec>
       {call.agentId ? (
-        <OpenAgent agentId={call.agentId} remote={remote} wide />
+        remote || !ui.navigation?.openAgent ? <OpenAgent agentId={call.agentId} remote={remote} wide /> : null
       ) : state === "running" ? (
         <Text style={ui.styles.small}>还不知道是哪个 agent：运行时通常在调用开始后几秒到一分钟内找到它。</Text>
       ) : null}
