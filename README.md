@@ -6,6 +6,7 @@ Plugins and tooling for [Paseo](https://paseo.sh), one directory each.
 |---|---|---|
 | [`feishu/`](feishu/) | Paseo plugin. A resident dispatcher on the daemon that turns Feishu (Lark) messages and card callbacks into agent runs, and sends results, progress and approval requests back as one card updated in place. | Skeleton |
 | [`orchestration-ui/`](orchestration-ui/) | Paseo plugin. A read-only view of orchestration runs: every phase a flow declared, the agent calls, script actions and human gates inside each, and how the run ended -- read from the runtime's event stream (`orchestration/EVENTS.md`). | New |
+| [`orchestration-gate/`](orchestration-gate/) | Paseo plugin. The orchestration runtime's human gate carrier: a provider without a model that turns a gate into Paseo's own permission card -- the decision as the title, the evidence above it, Approve / Deny -- and writes the receipt the runtime decides from. | New |
 | [`orchestration/`](orchestration/) | Not a plugin: a Node runtime for deterministic flows that dispatch Paseo agents through the `paseo` CLI -- steps with output schemas and declared effects, roles, one event stream per run, and a human approval gate. | In use |
 
 Install a plugin straight from this repository:

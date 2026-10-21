@@ -78,7 +78,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 |---|---|---|
 | `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title` | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
-| `$.gate({ title, content, brief?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`holdPath` 不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant | `type: "gate"` |
+| `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
 | `$.all(tasks)` | 并发，等全部结束。**永不因为某个任务失败而 reject**，返回 `[{ ok: true, value } \| { ok: false, error }]`，和 `tasks` 一一对应。任务可以是 promise 或返回 promise 的函数 | 无（并发看调用的时间重叠） |
 | `$.stop(reason, value)` | flow 主动停下，`value` 是部分结果。调用的那一刻运行器就记下这次停止（第一次为准），之后任何新的调用、阶段都抛 `RunEnded`。它也会抛出以便中断当前代码，但**接住它没有用**：结局照样是 `stopped`，接住之后想接着花钱会被拦下。`$.all` 里某个任务调了它，其他任务里已经在跑的调用照常结束，新的起不来 | `run.end.outcome = "stopped"` |
@@ -263,6 +263,7 @@ step 声明 `effects`，**必填、没有默认**：
 | claude | `auto`，不强制 | `auto`，不强制 | `default`，强制 |
 | codex | `auto`，不强制 | `auto`，不强制 | 不支持 |
 | pi | 无 mode，不强制 | 无 mode，不强制 | 不支持 |
+| orch-gate | 不支持 | 不支持 | 无 mode，强制（不带模型，只起一张卡） |
 
 表里没有的 family、或某一格不支持，**直接报错**（fail closed），不会退回 Paseo 的默认 mode——那正是
 "结构化调用卡在没人应答的权限请求上、花完钱才炸"的来路。
@@ -295,7 +296,8 @@ step 声明 `effects`，**必填、没有默认**：
 - **pi 不传 mode**（源码确认，未实测）：私有仓的 `relay-*` 角色走它。
 - **`ask-human` 是人闸载体用的那一档**：要的是"每次写都要人批"。claude 的 `default`（Always Ask）
   实测会把载体唯一的一次 Write 挂成权限卡片（2026-09-23）。codex 的 `on-request` 只在命令越出
-  sandbox 时才问，工作目录里的写不问，所以不支持；载体角色 `fast` 是 claude。
+  sandbox 时才问，工作目录里的写不问，所以不支持。载体角色 `gate` 默认是 `orch-gate/card`（插件 provider，
+  见下文「人闸」）；指向模型时用 claude。
 
 加一个 provider 就是往表里加一行，并写上每一格的依据。这是有意的：换 provider 应该是一次决定。
 跨 provider 统一栅栏语义仍然是空位——这张表只是把"哪里没统一"写成了数据，假装统一了才是 bug。
@@ -464,51 +466,62 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 
 ## 人闸：`$.gate`
 
-flow 要停下来等人拍板时，用 `$.gate({ title, content, brief, timeout, holdPath })`，flow 要声明
-`grants: ["gate:deny"]`。实现在 `runtime/gate.mjs` 的 `requestApproval`。
+flow 要停下来等人拍板时，用 `$.gate({ title, content, name, summary, brief, evidence, timeout, holdPath })`，flow 要声明
+`grants: ["gate:deny"]`。实现在 `runtime/gate.mjs`。
 
-**载体是 Paseo 的权限请求。** 脚本自己发不出权限请求，所以人闸起一个 `fast` 角色的 agent，
-跑在栅栏表 `ask-human` 那一档（claude 的 `default`，Always Ask），唯一的任务是把待审内容 Write 到
-`holdPath`。人在 App 的权限卡片上看到的就是这次 Write，卡片会渲染工具调用详情，所以看到的是**原文**，
-不是摘要。批准，文件落地；拒绝，文件不在。`brief` 排在载体 prompt 的最前面，人在卡片上方的对话里
-先看到它：校验结果、起草方自报的风险、要实现的改动。
+**人批的是一个决定，代码是证据。** 卡片第一眼要让一个新人三秒内看懂"要我批什么、批了会怎样"：
 
-**结果只看文件，不看 agent 说了什么**：文件存在且内容与 `content` 一致（换行符和结尾换行
-不计），判 `allowed`；不存在判 `denied`；内容不一致判 `mismatch`，按未批准处理。真正的写入
-由脚本随后用 `$.do` 自己做，写的是脚本手里的原文。agent 只是载体，不是写入方。
+- `title` 写成决定句，例如"批准 hotfix #1 放进 data/7/1/（回放）"。它是卡片标题、推送正文的开头、回执的第一行。
+- `summary` 是卡片说明，几行纯文本：结论、校验结果、要单独看的 ⚠。没有 ⚠ 也要明说。运行时会在后面补一行
+  "批准意味着什么"，再补一行"不批怎么写理由"。
+- `brief` 是 markdown，放在卡片上方，写判断所需的一切。`evidence` 是折叠的证据行，`kind: "diff"` 按 diff 显示。
+- 原文 `content` 在卡片里，同时也在一行折叠的"待批全文"里。`name` 给原文起名，用来高亮。
+
+**载体和回执。** 脚本自己发不出权限请求，所以人闸起一个载体，人在它的权限卡片上应答。人批准的是一张三行的
+**回执**：决定句、`人闸 <callId> · 运行 <runId>`、`内容 sha256 <原文指纹>`。载体在批准后把回执写到 `holdPath`。
+判定**只看回执文件**：与预期相同判 `allowed`，不同判 `mismatch`，没有文件则按情况判 `denied` / `expired` / `error`
+（见 EVENTS.md）。真正的写入由脚本随后用 `$.do` 自己做，写的是脚本手里的原文，也就是回执里 sha256 指认的那份字节。
+载体只是载体，不是写入方。
+
+载体由角色 `gate` 决定，有两种：
+
+- **`orch-gate/card`（默认）**：`orchestration-gate` 插件的 provider，不带模型。
+  - 运行时在回执旁写一份请求文件，prompt 里只有这份文件的路径和 sha256。
+  - provider 核对两个指纹（请求文件的、原文的）后才起卡片。卡片标题是 `title`，说明是 `summary` 加两行，
+    卡里是原文，按钮是「不批 / 批准」；`brief`、`evidence` 在卡片上方。
+  - 批准后写回执，每次应答都记进 `<callId>.answer.json`。
+  - 卡片挂着时，人在对话底部的消息框里打一句话，按不批处理，那句话记成理由；对话里会立刻回一句"已记为不批"。
+  - 插件没装或不可用时，会动用人闸的 flow 在花第一笔钱之前就被拒（`RunRefused`）。
+- **一个模型（后备）**：在私有 `roles/gate.md` 里把 `gate` 指向便宜模型，例如 `claude/claude-haiku-5-5`，`thinking: off`。
+  - 它跑在栅栏表 `ask-human` 那一档，被要求把回执 Write 到 `holdPath`。卡片是一张 Write 卡，框里是回执。
+  - 决定、说明、证据和原文都在它的 prompt 里，prompt 是脚本写的，载体改不了。
+  - 它抄错、改写，或者把原文当回执写，都判 `mismatch`。这条路受命令行长度限制，原文放不下时判 `error`、不起卡片。
 
 为什么这样搭，而不是让脚本在终端里等人输入：
 
-- 人本来就在 Paseo 里，权限卡片是现成的裁决界面，手机上也能批。
-- `paseo wait` 能区分"卡在权限请求上"（`status: permission`）和"结束了"。之前用过的另一个
-  底座区分不了这两种状态，这是换到 Paseo 之后白捡的能力。
+- 人本来就在 Paseo 里，权限卡片是现成的裁决界面，手机上也能批，推送会带上决定句。
+- `paseo wait` 能区分"卡在权限请求上"和"结束了"。
 
 已知的缺口，照实记下：
 
 | 缺口 | 后果 |
 |---|---|
-| Paseo 不记录**谁**应答的；任何能跑 `paseo permit allow` 的进程都能应答 | 决定记为 `unattributed`，不写成"人批准的"，并作为一条 caveat 进运行。`gate:allow` 这个 grant 不存在，flow 声明它直接报错 |
-| App 的拒绝按钮不带理由；`permit deny --message` 的理由只送到 agent，不回给脚本 | `reason` 只记运行时确知的（超时）；agent 转述的原话另存为 `agentReport`，标明是转述，且只在有人应答过（拒绝、内容不一致）时取，只取载体自己的回话（`logs --filter assistant_message`）；过期时载体卡在卡片上没说过话，取 `text` 会拿到它收到的 prompt 和思考，所以过期记空串。**命令行不是给人用的审批渠道**，不要让人去敲 `permit deny`。方向见下 |
+| Paseo 不记录**谁**应答的；任何能跑 `paseo permit allow` 的进程都能应答 | `by` 记为 `unattributed`，不写成"人批准的"，并作为一条 caveat 进运行。`gate:allow` 这个 grant 不存在，flow 声明它直接报错 |
+| `answeredVia` 只是应答方自报的 | `button`、`no-button`、`typed` 分得出"点了卡片按钮"和"命令行批的"，但本机任何进程都能伪装成任何一种。要知道是哪台设备、哪个 agent，需要 Paseo 在应答上带上连接信息（fork 扩展点，未做） |
+| 有进程绕过卡片，直接把回执写到 `holdPath` | 判 `allowed`。和"任何进程都能 `permit allow`"同属本机信任边界 |
+| App 的拒绝按钮不带理由 | `provider` 载体：人在对话里打的字就是理由，进 `reason`。`model` 载体：理由只到 agent，它转述的原话另存为 `agentReport`，标明是转述。**命令行不是给人用的审批渠道**，不要让人去敲 `permit deny` |
 | 过期（默认 2h）时运行时替人**拒绝** | 需要 `gate:deny` grant。拒绝是保守方向，所以可以给 |
-| 载体是模型，抄长内容可能抄错 | 抄错判 `mismatch`，失败方向是"没批准"，不会误放行。实测 haiku 257 行一字不差 |
-| 内容在载体的 prompt 里，prompt 受命令行长度限制 | 超过 30000 字符直接判 `error`、不起卡片（一个 818 行的补丁就超了）。改成让载体先 Read 文件，人会先看到一张 Read 卡片，所以没这么做；真要解，得让 Paseo 接受文件形式的 prompt（fork 扩展点或插件） |
+| 人可能不看就批（2026-10-21 冒烟：三张一样的卡全被批了） | `title` 和 `summary` 要写出"这张卡要你看什么"；更多建议见私有设计笔记，未实现 |
 
-实测（2026-09-23）：拒绝路径——`permit deny --message` 的理由原样到达 agent，文件未写；
-过期路径——40 秒到期后自动拒绝，判 `expired`；批准路径——一个真实补丁的回放由人在 App 上批准。
-这一轮（2026-09-24）人闸改成经 `$.gate` 调用、mode 改由栅栏表给出，三条路径在假执行层上有单测，
-**没有经真实 Paseo 再跑一次**。
+实测：
+- 2026-09-23，旧机制（载体抄原文）：拒绝路径、过期路径、人在 App 上批准一个真实补丁的回放。
+- 2026-10-21，新机制：`orch-gate` 载体在真 daemon 上起卡；人在 App 上批准判 `allowed / button`；
+  点「不批」判 `denied / button`；在对话里打字判 `denied / typed`，打的字进了 `reason`。用的都是 `flows/gate-smoke.mjs`。
 
-**审批渠道的方向**：判定语义（结果只看文件、超时替人拒绝、没有 `gate:allow`）与渠道分开，
-渠道要能有多种：
-
-- **Paseo 里要展示得更好**——主渠道。现在的权限卡片只是一张 Write 工具调用卡，缺标题、上下文
-  （单号、diff、校验结果）和理由输入框。改进方向是插件或 fork 扩展点，属于"能做成插件就做插件"；
-  事件流里 gate 的 `call.start` 已经带着标题、brief、原文和暂存路径。
-- **在 Paseo 对话里审批**——过渡期可用：人在对话里说"批 / 拒，理由是……"，由会话里的 agent
-  代为应答。这时 agent 是执行者、人是决定者，审计要能关联到那句话；这和 Orchestrator
-  "自己拿主意批"不是一回事。
-- **IM 卡片**（本仓库的 `feishu/` 插件，公司内部 IM 同理）——渠道不同，判定语义不变。卡片能带
-  输入框，拒绝理由可以回到脚本；回调里带着点按钮的人，"谁批的"也有了着落（待实测）。
+**审批渠道的方向**：判定语义（结果只看回执、超时替人拒绝、没有 `gate:allow`）与渠道分开。任何渠道，只要应答的是
+载体的这个权限请求，就落到同一处判定。决定句和说明放在权限请求的标准字段 `title`、`description` 里，IM 渠道
+（本仓库的 `feishu/` 插件，公司内部 IM 同理）不懂编排也能拿到。IM 卡片回调里带着点按钮的人，"谁批的"在那条
+渠道上有着落。
 
 ## 事件里有什么
 

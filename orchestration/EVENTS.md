@@ -93,14 +93,23 @@
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `brief` | string | 给审批人的说明 |
+| `brief` | string | 给审批人的说明（markdown） |
 | `content` | string | 待批准的原文 |
 | `sha256` | string | 原文指纹（换行符统一、去掉结尾换行后的 sha256，与判定对象里的 `sha256` 相同） |
 | `timeout` | string | |
-| `holdPath` | string | 载体要写入的暂存路径，人在权限卡片上看到的就是它 |
-| `provider` | string | 载体 agent 的 `family/model` |
-| `fence` | object | 同 `ask`，`mode` 是"每次写都要人批"那一档 |
-| `prompt` | string | 实际发给载体的完整 prompt（含 `brief`，`brief` 过长时被截断的那份） |
+| `holdPath` | string | **回执**路径：人批准后载体把回执写在这里，判定只看这个文件（以前是"原文的暂存路径"，见下） |
+| `provider` | string | 载体的 `family/model`（角色 `gate`） |
+| `fence` | object | 同 `ask`，`mode` 是"每次写都要人批"那一档；`orch-gate` 载体是 `null`、`enforced: true` |
+| `prompt` | string | 实际发给载体的完整 prompt。`model` 载体：决定、summary、brief、证据、原文、给载体的指令（brief 和证据过长时被截断的那份）；`provider` 载体：指向请求文件的三行（请求文件路径和它的 sha256） |
+| `carrier` | `"provider"` \| `"model"` | 载体种类：`orchestration-gate` 插件的无模型 provider，或者一个写回执的模型 |
+| `contentName` | string | 原文的显示名（高亮、卡片上的"待批全文 x.lua"），flow 没给时是 `content.txt` |
+| `summary` | string | 卡片说明（几行纯文本），flow 没给时是空串 |
+| `evidence` | `{ label, text, kind?: "diff" \| "text", name? }[]` | 卡片上方折叠展示的证据，按顺序 |
+| `receipt` | string | 预期的回执全文：决定、`人闸 <callId> · 运行 <runId>`、`内容 sha256 <原文指纹>` 三行 |
+| `requestPath` | string \| null | `provider` 载体读的请求文件（与回执同目录的 `<callId>.request.json`）；`model` 载体为 null |
+
+`carrier` 起的 6 个字段是后加的（2026-10-21），之前写的文件没有，读者按 null（`evidence` 按空数组）处理；
+之前的 `holdPath` 是原文的暂存路径，载体写的是原文而不是回执。
 
 ### `call.agent`
 
@@ -134,23 +143,38 @@
 在 `run.end` 之前补一条：`ok: false`，`error.name` 为 `"RunEnded"`，`agentId` 照常查。那个 agent
 **没有被停掉**，可能还在跑、还在花钱；之后它的结果不会再进这个文件。
 
-`gate` 的 `output` 就是现有 `requestApproval()` 的判定对象，字段不变：
-`{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision }`。
+`gate` 的 `output` 就是 `requestApproval()` 的判定对象：
+`{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision, answeredVia }`。
 
-`agentReport` 是载体 agent 自己说的最后几句话（取最后 1000 字），不是人的理由：只在有人应答过（`denied`、`mismatch`）时取，只取载体自己的回话，不含它收到的 prompt 和思考；其余结局（`allowed`、`expired`、`error`）为空串。载体什么都没说时也是空串。
+判定只看回执文件：与 `call.start.receipt` 相同（换行符统一、去掉结尾换行）判 `allowed`；有文件但不同判
+`mismatch`；没有文件时，到期判 `expired`，`provider` 载体记下了拒绝判 `denied`，载体被关掉、出错或者
+没留下应答记录就结束判 `error`（以前这种情况记成 `denied`）。`provider` 载体的应答记录（`<callId>.answer.json`）
+只用来说明是怎么答的，它说"批了"而回执不在，不算批准。
+
+`answeredVia`（后加，之前的文件没有，按 null 处理）是应答方自己发来的东西，**弱信号，不是"谁"**：
+`"button"` 带着卡片按钮的 id（Paseo App、IM 卡片会带），`"no-button"` 没带（`paseo permit`、到期替人拒绝、中断），
+`"typed"` 卡片挂着时有人在对话里打了字（按不批处理）；`model` 载体、过期、出错时为 null。本机任何进程都能发出其中任何一种。
+
+`reason`：`expired`、`error` 时是运行时确知的原因；`denied` 时，`typed` 是人在对话里打的那句话，`no-button`
+是应答里带的消息（例如 `permit deny --message`、到期时运行时自己的说明），`button` 为 null（App 的拒绝按钮只发
+固定的 "Denied by user"）。这句话是谁打的，Paseo 不记录。
+
+`agentReport` 是 `model` 载体自己说的最后几句话（取最后 1000 字），不是人的理由：只在有人应答过（`denied`、`mismatch`）时取，只取载体自己的回话，不含它收到的 prompt 和思考；其余结局和 `provider` 载体（它是代码，没有自己的话）为空串。载体什么都没说时也是空串。
 
 `gate` 的 `call.end.ok` 说的是**人闸这个机制**有没有正常走完，不是人批没批：拒绝、过期、内容不一致、
 甚至判定为 `error`（内容太长起不了卡片、轮询一直失败）都是 `ok: true`，结论看 `output.outcome`
 （或 `output.approved`）。`ok: false` 只在人闸自身抛错时出现（例如起载体 agent 失败），这时 `output` 为 null。
 
-`by` 的取值是封闭集合，v1 只有这四个，和 `outcome` 的对应关系固定：
+`by` 是给人看的一句话，和 `outcome` 的对应关系固定。目前的取值如下；读者对不认识的值原样显示（以后加上应答方
+归属时会出现 `<渠道>:<是谁>` 这一类，例如飞书审计里已有的 `feishu:<open_id>`）：
 
 | `by` | 何时 |
 |---|---|
 | `"unattributed (Paseo does not record who answered)"` | `allowed`、`denied`、`mismatch`：有人（或别的进程）应答了卡片，Paseo 不记录是谁 |
 | `"gate timeout"` | `expired`：到期没人应答，运行时替人拒绝 |
 | `"nobody (gate lost sight of the request)"` | `error`：轮询 agent 状态连续失败，不知道发生了什么 |
-| `"nobody (no card was raised)"` | `error`：内容太长，载体 prompt 超限，卡片没起 |
+| `"nobody (no card was raised)"` | `error`：内容太长，`model` 载体的 prompt 超限，卡片没起 |
+| `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，`provider` 载体没起卡（请求文件对不上）或没留下应答记录 |
 
 ### `caveat`
 
@@ -186,5 +210,7 @@
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`，缺省都是 null。
+  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`，缺省都是 null。人闸的 `call.start.carrier`
+  等 6 个字段和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
+- 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

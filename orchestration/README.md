@@ -5,7 +5,7 @@
 
 它**不是** Paseo 插件——插件只该做 CLI 做不到的三件事（常驻进程、daemon 内的 hook、UI），编排
 一样都不需要。它和插件放在同一个仓库，是因为它们一起分发、一起演进：`feishu/` 的审批卡片复用这里
-`gate.mjs` 的判定语义，可视化插件读这里的事件流。
+`gate.mjs` 的判定语义，可视化插件读这里的事件流，人闸的卡片由 `orchestration-gate/` 插件的 provider 承载。
 
 写 flow 前先读 **[CONVENTIONS.md](CONVENTIONS.md)**——那里是规范，这里是结构。事件的契约是
 **[EVENTS.md](EVENTS.md)**。
@@ -21,11 +21,11 @@ runtime/
   events.mjs     事件写入、读取、契约校验
   executor.mjs   执行层：唯一跟 Paseo 说话的地方
   paseo-cli.mjs  CLI 调用（Windows 上绕开 cmd.exe）
-  gate.mjs       人闸：把待审内容变成一张 Paseo 权限卡片，由人裁决
+  gate.mjs       人闸：起一张 Paseo 权限卡片，人批的是回执，判定只看回执文件
   roster.mjs     读 roles/，严格解析；角色绑定
   config.mjs     本机配置（~/.paseo-orchestration/config.json）
   smoke.mjs      升级后回归检查（经真实 Paseo）
-flows/       固化的编排流程（committee、advisor）
+flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟，不花钱）
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例
