@@ -457,12 +457,27 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
   不验证调用的真是它；任何继承了或手工设了这个变量的进程都能以它的名义建 agent。事件里的
   `caller` 和 App 上的父子关系是声明，不是认证，不能当权限依据——grants 由本运行时在进程内检查，
   Paseo 并不知道它们。
-- **跨机时大概会炸（只读了代码，未实测）。** 带 `--host` 时本机的 `PASEO_AGENT_ID` 也会发给
-  远端 daemon，远端没有这个 agent，按上面那段代码会报 `Caller agent ... not found`。
-  第一次跨机派活时先验证；属实的话，`runPaseo` 在 `host` 非空时要去掉这个变量，
-  代价是远端 agent 在 App 上没有父。
+- **跨机时没有父（实测，2026-10-21）。** 带 `--host` 时 CLI 先去目标 daemon 上查 `PASEO_AGENT_ID`，
+  查不到就不传调用方（`cli/src/utils/caller-agent.ts`），不报错；远端 agent 在 App 上没有父，每次
+  `paseo run` 还会在那边新建一个 workspace。事件里的 `caller` 照旧是本机这个 id。
 
 ---
+
+## 跨机：整次运行派到另一台主机
+
+`orch.mjs run <flow> --host <host> --cwd <dir>`：`<host>` 是 `paseo --host` 认的任何形式（`ssh://user@box`
+最省事，CLI 自己开隧道），`<dir>` 是那台机器上的目录，带 `--host` 时必填（本进程的目录是本机路径）。
+运行器、事件流、日志留在本机，每个 `$.ask` 的 agent 都在那台机器上跑。2026-10-21 第一次实测跑通
+（Windows 编排方 → macOS daemon）。
+
+- **只能整次运行派过去**，`$.ask` 还不能按步选主机。
+- **带人闸的 flow 会被拒绝**：`$.gate` 的回执和 hold 文件是本机路径，载体跑到别的主机上会写到那边去。
+- **两边版本要对齐。** 本机 CLI 比远端 daemon 新时，按 label 找回 agent 用的 `ls -a` 会报
+  `Update the host to use background workspaces.`（上游 0.12 的 CLI 对 0.11 的 daemon），运行照常成功，
+  但事件里 `agentId`、`cost` 都是 null。
+- **角色钉的模型要在远端也有**：roster 只在本机解析，远端 provider 的模型列表可能不一样（实测远端
+  Codex CLI 较旧时缺新模型），用 `paseo --host <host> provider models <provider>` 先核对。
+- 运行视图里点开的 agent 在远端，要在 Paseo App 里切到那台主机看。
 
 ## 人闸：`$.gate`
 

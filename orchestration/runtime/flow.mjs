@@ -42,7 +42,7 @@ export const GRANTS = {
 };
 
 /** Inputs share a namespace with the runner's own flags. */
-const RESERVED_INPUTS = ["input", "timeout", "help"];
+const RESERVED_INPUTS = ["input", "timeout", "host", "cwd", "help"];
 
 const ID = /^[a-z][a-z0-9-]*$/;
 const INPUT_NAME = /^[a-z][a-zA-Z0-9]*$/;

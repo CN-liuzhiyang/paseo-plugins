@@ -38,20 +38,23 @@ function agentArgs({ provider, thinking, title, mode, labels }) {
  * @param {{ host?: string | null }} [options]
  */
 export function paseoExecutor({ host = null } = {}) {
-  const opts = (cwd) => ({ cwd, host: host ?? undefined });
+  // Locally the agent's directory is the CLI's own. On another host it is a
+  // path there, which this process cannot start in, so it goes as --cwd.
+  const opts = (cwd) => ({ cwd: host ? undefined : cwd, host: host ?? undefined });
+  const where = (cwd) => (host && cwd ? ["--cwd", cwd] : []);
   return {
     // `--output-schema` makes stdout the agent's structured output, with no
     // agent id in it; the runner finds the agent again by its labels.
     ask: (request) =>
       runPaseoJson(
-        ["run", ...agentArgs(request), "--wait-timeout", request.timeout, "--output-schema", JSON.stringify(request.schema), request.prompt],
+        ["run", ...agentArgs(request), ...where(request.cwd), "--wait-timeout", request.timeout, "--output-schema", JSON.stringify(request.schema), request.prompt],
         opts(request.cwd),
       ),
 
     // Paseo rejects --output-schema with --background, so only unstructured
     // agents (the gate's carrier) are spawned.
     spawn: async (request) => {
-      const started = await runPaseoJson(["run", "--background", ...agentArgs(request), request.prompt], opts(request.cwd));
+      const started = await runPaseoJson(["run", "--background", ...agentArgs(request), ...where(request.cwd), request.prompt], opts(request.cwd));
       return { agentId: started.agentId };
     },
 

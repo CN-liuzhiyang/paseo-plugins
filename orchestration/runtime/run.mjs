@@ -178,6 +178,15 @@ export async function runFlow(target, options = {}) {
     }
     if (timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) throw new RunRefused(`--timeout: ${options.timeout} is out of range (1s to 596h)`);
   }
+  const host = options.host ?? null;
+  if (host) {
+    // This process's directory is a path on this machine; another host's
+    // agents need one on theirs.
+    if (!options.cwd) throw new RunRefused(`a run on another host (${host}) needs cwd: a directory on that host`);
+    // The gate's receipt and hold file are paths this process reads; a
+    // carrier on another host would write them there.
+    if (f.grants.includes("gate:deny")) throw new RunRefused(`flow "${f.name}" can gate, and a gate on another host (${host}) is not supported yet`);
+  }
   let roster = options.roster;
   if (!roster) {
     try {
@@ -213,7 +222,6 @@ export async function runFlow(target, options = {}) {
     }
   }
   const cwd = options.cwd ?? process.cwd();
-  const host = options.host ?? null;
   const caller = options.caller !== undefined ? options.caller : (process.env.PASEO_AGENT_ID ?? null);
   const gatePollMs = options.gatePollMs ?? 10_000;
   const agentProbeDelays = options.agentProbeDelays ?? AGENT_PROBE_DELAYS;

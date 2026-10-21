@@ -1,6 +1,7 @@
 // The command line over run.mjs and flow.mjs.
 //
 //   node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
+//                                        [--host ssh://user@box --cwd /path/on/box]
 //   node runtime/orch.mjs check <flow.mjs>
 //
 // `run` prints one JSON object, { ok, outcome, value, runId, events, cost,
@@ -13,6 +14,10 @@
 // text and choice as strings, count as a number, flag as --name / --no-name,
 // a list of text or numbers by repeating the flag. Groups and other lists go
 // through --input. Flags win over --input, key by key.
+//
+// --host runs every agent of the run on another daemon (any form `paseo
+// --host` takes); --cwd is then required, a directory on that host. The
+// runner and its events stay on this machine.
 
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -23,7 +28,7 @@ import { runFlow, jsonSafe } from "./run.mjs";
 
 const USAGE = [
   "Usage:",
-  "  node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]",
+  "  node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
   "  node runtime/orch.mjs check <flow.mjs>",
 ].join("\n");
 
@@ -85,7 +90,7 @@ async function readInput(raw) {
  */
 export async function parseRunArgs(f, argv) {
   const { options, convert } = inputOptions(f.inputs);
-  const all = { ...options, input: { type: "string" }, timeout: { type: "string" } };
+  const all = { ...options, input: { type: "string" }, timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" } };
   // parseArgs refuses a value that starts with "-" as ambiguous, and a question
   // written as a Markdown list does. A value-taking flag always takes the next
   // argument, so join them before parseArgs sees them.
@@ -112,18 +117,18 @@ export async function parseRunArgs(f, argv) {
   }
   const input = await readInput(parsed.values.input);
   for (const [flag, raw] of Object.entries(parsed.values)) {
-    if (flag === "input" || flag === "timeout") continue;
+    if (["input", "timeout", "host", "cwd"].includes(flag)) continue;
     const [name, value] = convert[flag](raw);
     input[name] = value;
   }
-  return { input, timeout: parsed.values.timeout ?? null };
+  return { input, timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null };
 }
 
 async function run(target, argv) {
   const { flow: f } = await loadFlow(target);
-  const { input, timeout } = await parseRunArgs(f, argv);
+  const { input, timeout, host, cwd } = await parseRunArgs(f, argv);
   // The path, not the loaded value: the runner records it and scans its source.
-  return runFlow(target, { input, timeout });
+  return runFlow(target, { input, timeout, ...(host ? { host } : {}), ...(cwd ? { cwd } : {}) });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

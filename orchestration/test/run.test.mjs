@@ -1189,7 +1189,9 @@ test("CLI arguments are parsed by the flow's input types", async () => {
     run: async () => null,
   });
   const parsed = await parseRunArgs(f, ["--hotfix-id", "42", "--rounds", "3", "--no-write", "--files", "a.lua", "--files", "b.lua", "--mode", "a", "--timeout", "2h"]);
-  assert.deepEqual(parsed, { input: { hotfixId: "42", rounds: 3, write: false, files: ["a.lua", "b.lua"], mode: "a" }, timeout: "2h" });
+  assert.deepEqual(parsed, { input: { hotfixId: "42", rounds: 3, write: false, files: ["a.lua", "b.lua"], mode: "a" }, timeout: "2h", host: null, cwd: null });
+  const remote = await parseRunArgs(f, ["--host", "ssh://mac", "--cwd", "/Users/me/work", "--rounds", "1"]);
+  assert.deepEqual(remote, { input: { rounds: 1 }, timeout: null, host: "ssh://mac", cwd: "/Users/me/work" });
   const merged = await parseRunArgs(f, ["--input", '{"hotfixId":"1","rounds":2}', "--rounds", "5"]);
   assert.deepEqual(merged.input, { hotfixId: "1", rounds: 5 });
   // Values that start with "-": a question written as a list, a negative number.
@@ -1197,6 +1199,23 @@ test("CLI arguments are parsed by the flow's input types", async () => {
   assert.deepEqual(dashed.input, { hotfixId: "- a\n- b", rounds: -1, write: true });
   await assert.rejects(parseRunArgs(f, ["--rounds", "three"]), /not a number/);
   await assert.rejects(parseRunArgs(f, ["--hotfix_id", "1"]), /Unknown option/);
+});
+
+test("a run on another host needs a directory there, and cannot gate yet", async () => {
+  const f = flow({ name: "remote", description: "d", phases: [], inputs: {}, grants: [], run: async () => null });
+  await assert.rejects(
+    runFlow(f, { roster, logDir, caller: null, host: "ssh://mac", executor: fakeExecutor() }),
+    (error) => error instanceof RunRefused && /needs cwd/.test(error.message),
+  );
+  await assert.rejects(
+    runFlow(flow({ name: "remote-gate", description: "d", phases: [], inputs: {}, grants: ["gate:deny"], run: async () => null }), { roster, logDir, caller: null, host: "ssh://mac", cwd: "/Users/me", executor: fakeExecutor() }),
+    (error) => error instanceof RunRefused && /gate on another host/.test(error.message),
+  );
+  const result = await runFlow(f, { roster, logDir, caller: null, host: "ssh://mac", cwd: "/Users/me", executor: fakeExecutor() });
+  assert.equal(result.ok, true);
+  const start = eventsOf(result).find((e) => e.kind === "run.start");
+  assert.equal(start.host, "ssh://mac");
+  assert.equal(start.cwd, "/Users/me");
 });
 
 // --- The contract checker itself ----------------------------------------
