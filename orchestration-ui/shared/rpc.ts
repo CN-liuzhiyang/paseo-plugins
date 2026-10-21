@@ -1,5 +1,6 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
+import { runCardSchema } from "./card";
 
 // What the surface asks the daemon side. The daemon only reads files; the app folds events
 // with shared/run.ts, the same code that summarizes a run for the list.
@@ -104,8 +105,26 @@ export const readRunRpc = defineRpc({
   }),
 });
 
+/** Whether cards go into the conversations that start runs, and if not, why. */
+const cardsState = z.object({
+  /** on: the feed runs; off: turned off in settings; unavailable: this Paseo cannot append to timelines. */
+  state: z.enum(["on", "off", "unavailable"]),
+  detail: z.string(),
+});
+export type CardsState = z.output<typeof cardsState>;
+
 export const statusRpc = defineRpc({
   name: "orchestration-ui.status",
   input: z.object({}),
-  output: z.object({ logDir: logDir.nullable(), detail: z.string() }),
+  output: z.object({ logDir: logDir.nullable(), detail: z.string(), cards: cardsState }),
+});
+
+export const readCardRpc = defineRpc({
+  name: "orchestration-ui.runs.card",
+  input: z.object({ runId: z.string().regex(RUN_ID) }),
+  output: z.object({
+    state: z.enum(["ok", "missing", "unreadable", "config"]),
+    detail: z.string(),
+    card: runCardSchema.nullable(),
+  }),
 });

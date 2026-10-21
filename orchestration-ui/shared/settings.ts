@@ -14,6 +14,8 @@ export const settingsDefinition = defineSettings({
     // A run with no run.end that has been quiet this long reads as lost, unless an open call's
     // own timeout says it may legitimately take longer.
     staleMinutes: z.number().int().min(1).max(24 * 60).default(15),
+    // Put a live card for each run into the conversation of the Paseo agent that started it.
+    cards: z.boolean().default(true),
   }),
 });
 

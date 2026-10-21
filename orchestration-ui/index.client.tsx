@@ -1,5 +1,7 @@
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { CARD_KIND, CARD_VERSION, runCardSchema } from "./shared/card";
+import { makeRunCard } from "./client/run-card";
 import { OrchestrationSettings } from "./client/settings-screen";
 import { RunsSurface, SCREEN_ID } from "./client/surface";
 
@@ -27,6 +29,12 @@ export default function contribute(client: PluginClientContext) {
       onSelect({ openScreen }) {
         openScreen({ screenId: SCREEN_ID });
       },
+    }),
+    client.addTimelineRenderer({
+      kind: CARD_KIND,
+      version: CARD_VERSION,
+      schema: runCardSchema,
+      Component: makeRunCard(({ runId, select }) => client.openScreen({ screenId: SCREEN_ID, params: { run: runId, node: select } })),
     }),
   ];
   return () => {

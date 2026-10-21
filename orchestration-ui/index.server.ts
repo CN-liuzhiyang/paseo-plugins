@@ -1,17 +1,25 @@
+import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { listRunsRpc, readRunRpc, statusRpc } from "./shared/rpc";
+import { listRunsRpc, readCardRpc, readRunRpc, statusRpc, RUN_ID, type CardsState } from "./shared/rpc";
 import { settingsDefinition, type Settings } from "./shared/settings";
+import { createCardFeed, readCard, startCardFeed } from "./server/cards";
 import { defaultHome, resolveLogDir } from "./server/logdir";
 import { createRunIndex, readRun } from "./server/runs";
 
-// Read-only: this side lists and reads <logDir>/runs/*.jsonl and nothing else. It starts no
-// runs, answers no gates, and writes no files.
+// Read-only toward the runs: this side lists and reads <logDir>/runs/*.jsonl and nothing else.
+// It starts no runs, answers no gates, and writes no files. The one thing it writes is a card
+// per run into the timeline of the Paseo agent that started it (daemon memory, see server/cards.ts).
 
-const DEFAULTS: Settings = { logDir: "", staleMinutes: 15 };
+const DEFAULTS: Settings = { logDir: "", staleMinutes: 15, cards: true };
+
+const NO_TIMELINE =
+  "这个 Paseo 没有给插件 server 提供 server.paseo（目前只有 fork 版有），插件没法往对话里贴卡片。列表和运行视图照常可用。";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(settingsDefinition);
   const index = createRunIndex();
+  // COMPAT(server.paseo): a fork-only extension point until upstream lands its own shape.
+  const paseo = (server as PluginServerContext & { readonly paseo?: PaseoApi }).paseo;
 
   const current = async (): Promise<Settings> => {
     const state = await settings.read();
@@ -24,6 +32,37 @@ export default function contribute(server: PluginServerContext) {
     const resolved = await resolveLogDir({ override: values.logDir, env: process.env, home: defaultHome() });
     return { resolved, staleMs: values.staleMinutes * 60_000 };
   };
+
+  const log = (message: string) => console.error(`orchestration-ui: ${message}`);
+  const feed = paseo
+    ? createCardFeed({
+        append: (agentId, item) => paseo.agents.ref(agentId).timeline.append(item),
+        where: async () => {
+          const { resolved, staleMs } = await where();
+          return { runsDir: resolved.ok ? resolved.info.runsDir : null, staleMs };
+        },
+        log,
+      })
+    : null;
+  if (!paseo) log(NO_TIMELINE);
+
+  let stopFeed: (() => void) | null = null;
+  let cards: CardsState = { state: "unavailable", detail: NO_TIMELINE };
+  const applySettings = async () => {
+    if (!feed) return;
+    const values = await current();
+    if (values.cards && !stopFeed) {
+      stopFeed = startCardFeed(feed, { log });
+      cards = { state: "on", detail: "" };
+    } else if (!values.cards && stopFeed) {
+      stopFeed();
+      stopFeed = null;
+    }
+    if (!values.cards) cards = { state: "off", detail: "设置里关掉了：新的运行不再往发起对话里贴卡片，已经贴出的停在最后一次的样子。" };
+    else void feed.scan(); // logDir may have changed.
+  };
+  void applySettings();
+  const unsubscribe = settings.subscribe(() => applySettings());
 
   server.handle(listRunsRpc, async ({ limit }) => {
     const { resolved, staleMs } = await where();
@@ -51,10 +90,28 @@ export default function contribute(server: PluginServerContext) {
     return { ...(await readRun(resolved.info.runsDir, runId, offset, { check: probe })), staleMs };
   });
 
-  server.handle(statusRpc, async () => {
-    const { resolved } = await where();
-    return resolved.ok ? { logDir: resolved.info, detail: "" } : { logDir: null, detail: resolved.detail };
+  server.handle(readCardRpc, async ({ runId }) => {
+    const followed = feed?.card(runId);
+    if (followed) return { state: "ok" as const, detail: "", card: followed };
+    const { resolved, staleMs } = await where();
+    if (!resolved.ok) return { state: "config" as const, detail: resolved.detail, card: null };
+    if (!RUN_ID.test(runId)) return { state: "missing" as const, detail: "", card: null };
+    try {
+      return { state: "ok" as const, detail: "", card: await readCard(resolved.info.runsDir, runId, staleMs) };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT") return { state: "missing" as const, detail: `找不到运行 ${runId}`, card: null };
+      return { state: "unreadable" as const, detail: String(error), card: null };
+    }
   });
 
-  return () => {};
+  server.handle(statusRpc, async () => {
+    const { resolved } = await where();
+    return resolved.ok ? { logDir: resolved.info, detail: "", cards } : { logDir: null, detail: resolved.detail, cards };
+  });
+
+  return () => {
+    unsubscribe();
+    stopFeed?.();
+  };
 }

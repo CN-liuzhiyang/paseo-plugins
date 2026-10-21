@@ -79,7 +79,14 @@ function makeStyles(theme: Theme, compact: boolean) {
   };
 }
 
-export function UiProvider({ props, children }: { props: PluginSurfaceProps; children: ReactNode }) {
+/** A timeline item has no navigation; a surface or panel does. */
+export function UiProvider({
+  props,
+  children,
+}: {
+  props: Pick<PluginSurfaceProps, "theme" | "layout"> & { navigation?: Navigation };
+  children: ReactNode;
+}) {
   const { theme, layout, navigation } = props;
   const ui = useMemo<Ui>(() => {
     const c = theme.colors;

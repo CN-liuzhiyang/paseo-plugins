@@ -143,20 +143,21 @@ function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean })
   );
 }
 
-function Strip({ run }: { run: RunSummary }) {
+/** One segment per declared phase; one plain bar in the run's color when there are none. */
+export function PhaseStrip({ strip, status }: { strip: RunSummary["strip"]; status: RunSummary["status"] }) {
   const ui = useUi();
   const c = ui.theme.colors;
-  if (!run.strip || run.strip.length === 0) {
-    const look = RUN_LOOK[run.status];
+  if (!strip || strip.length === 0) {
+    const look = RUN_LOOK[status];
     return (
       <View style={{ flexDirection: "row", gap: 3 }}>
-        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: run.strip ? ui.tone(look.tone) : c.border }} />
+        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: strip ? ui.tone(look.tone) : c.border }} />
       </View>
     );
   }
   return (
-    <View style={{ flexDirection: "row", gap: 3 }} accessibilityLabel={run.strip.map((s) => `${s.title}：${VISIT_LOOK[s.state].label}`).join("，")}>
-      {run.strip.map((segment, index) => {
+    <View style={{ flexDirection: "row", gap: 3 }} accessibilityLabel={strip.map((s) => `${s.title}：${VISIT_LOOK[s.state].label}`).join("，")}>
+      {strip.map((segment, index) => {
         const look = VISIT_LOOK[segment.state];
         const empty = segment.state === "pending" || segment.state === "skipped";
         // Hosts may give "running" and "done" near-identical colors; a running segment is half-filled.
@@ -232,7 +233,7 @@ function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId:
         </View>
       </View>
       <View style={{ width: ui.compact ? undefined : 180, paddingLeft: ui.compact ? 20 : 0 }}>
-        <Strip run={run} />
+        <PhaseStrip strip={run.strip} status={run.status} />
       </View>
       <View style={{ flexDirection: "row", gap: 14, paddingLeft: ui.compact ? 20 : 0, justifyContent: ui.compact ? "flex-start" : "flex-end" }}>
         <Text style={[ui.styles.small, { width: ui.compact ? undefined : 64, textAlign: ui.compact ? "left" : "right" }]}>{cost}</Text>

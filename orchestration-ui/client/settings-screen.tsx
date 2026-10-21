@@ -1,6 +1,6 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection } from "@getpaseo/plugin/client/ui";
+import { SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useEffect, useState } from "react";
 import { statusRpc } from "../shared/rpc";
 import { settingsDefinition } from "../shared/settings";
@@ -20,7 +20,7 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
     let cancelled = false;
     status({}).then(
       (value) => !cancelled && setWhere(value),
-      (error: unknown) => !cancelled && setWhere({ logDir: null, detail: String(error) }),
+      (error: unknown) => !cancelled && setWhere({ logDir: null, detail: String(error), cards: { state: "unavailable", detail: String(error) } }),
     );
     return () => {
       cancelled = true;
@@ -67,6 +67,18 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
           )}
         </SettingsCard>
       </SettingsSection>
+      <SettingsSection title="发起对话里的运行卡片">
+        <SettingsCard>
+          <SettingsSwitch
+            label="在发起对话里显示运行卡片"
+            hint="从 Paseo agent 里跑的编排运行，会在那个 agent 的对话里放一张卡片：在做什么、到哪一步、花了多少、要不要你处理，跟着运行原地更新。"
+            value={settings.values.cards}
+            disabled={settings.saving}
+            onValueChange={(cards) => void settings.save({ ...settings.values, cards }, settings.revision)}
+          />
+          {where && where.cards.state === "unavailable" ? <SettingsRow label="这里贴不了卡片" error={where.cards.detail} /> : null}
+        </SettingsCard>
+      </SettingsSection>
       <SettingsSection title="设置">
         <SettingsCard>
           <SettingsInput
@@ -91,7 +103,7 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
             disabled={!dirty || staleError !== null || settings.saving}
             onPress={() => {
               void settings
-                .save({ logDir: draftLogDir.trim(), staleMinutes: minutes }, settings.revision)
+                .save({ ...settings.values, logDir: draftLogDir.trim(), staleMinutes: minutes }, settings.revision)
                 .then((saved) => {
                   if (!saved) return;
                   setLogDir(null);
