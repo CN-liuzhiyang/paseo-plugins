@@ -201,13 +201,35 @@ async function carrierWords(io, agentId) {
   return said === NO_ACTIVITY ? "" : said.slice(-1000);
 }
 
+/** How many characters of a tool row's summary `paseo logs` keeps before it cuts with "...". */
+const TOOL_SUMMARY_CHARS = 200;
+
 /**
- * Whether the model carrier asked for anything at all: `paseo logs --filter tools` lists each tool call
- * as "[Name] ...". A carrier that made none never put a card in front of anyone. Null when unreadable.
+ * Whether a `paseo logs --filter tools` transcript has the row of a Write to `holdPath`. Paseo prints a
+ * Write as "[Write] <file path>" whatever its status -- pending, done or failed -- with whitespace collapsed
+ * and the path cut to 200 characters ("..." at the end); every other tool, and a prompt another agent
+ * sent ("[Message received] ..."), is some other row. (Read from the daemon's activity curator and
+ * matched against a recorded pending Write, 2026-10-21. That a denied Write keeps its row is read from
+ * the code, not seen.)
  */
-async function carrierAsked(io, agentId) {
+export function wroteHold(tools, holdPath) {
+  const norm = (p) => p.replace(/\\/g, "/").toLowerCase();
+  const want = norm(holdPath.replace(/\s+/g, " ").trim());
+  return tools.split(/\r?\n/).some((line) => {
+    const row = /^\[Write\] (.+)$/.exec(line.trim());
+    if (!row) return false;
+    const got = norm(row[1]);
+    return want.length > TOOL_SUMMARY_CHARS && got.endsWith("...") ? want.startsWith(got.slice(0, -3)) : got === want;
+  });
+}
+
+/**
+ * Whether the model carrier asked to write the receipt: only then was there a card a person could
+ * answer. Any other tool call is not that card. Null when the transcript cannot be read.
+ */
+async function carrierAsked(io, agentId, holdPath) {
   const tools = await io.transcript(agentId, { filter: "tools" }).catch(() => null);
-  return typeof tools === "string" ? /^\[[^\]\n]+\]/m.test(tools) : null;
+  return typeof tools === "string" ? wroteHold(tools, holdPath) : null;
 }
 
 /** The provider carrier's record of how it was answered; null when there is none, an error record when unreadable. */
@@ -400,10 +422,10 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
   // 10 read a ⚠ in the summary and would not "approve on the person's behalf";
   // started from inside another agent's session, 2 in 2), and then nobody saw
   // a card, let alone said no.
-  const asked = await carrierAsked(io, agentId);
+  const asked = await carrierAsked(io, agentId, holdPath);
   if (asked !== true) {
     const words = await carrierWords(io, agentId);
-    const why = asked === false ? "the carrier made no write, so no card was raised" : "the carrier's timeline could not be read, so whether a card was raised is unknown";
+    const why = asked === false ? "the carrier made no Write to the receipt path, so no card for it was raised" : "the carrier's timeline could not be read, so whether a card was raised is unknown";
     return decision({ ...base, outcome: "error", reason: words ? `${why}; it said: ${words}` : why, by: CARRIER_ENDED });
   }
 

@@ -17,7 +17,7 @@ import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fenceFor } from "../runtime/fences.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
-import { requestApproval, prepareGate, carrierPrompt } from "../runtime/gate.mjs";
+import { requestApproval, prepareGate, carrierPrompt, wroteHold } from "../runtime/gate.mjs";
 import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
 import gateSmoke from "../flows/gate-smoke.mjs";
@@ -500,7 +500,8 @@ test("$.gate (model carrier): the prompt is for the person first; the carrier wr
   // A denial after which the carrier said nothing is an empty report, not
   // the CLI's "No activity to display." line.
   const silent = fakeExecutor({ carrier: "deny" });
-  silent.transcript = async (_, { filter }) => (filter === "tools" ? "[Write] C:/x/c1.receipt.txt" : "No activity to display.\n");
+  const tools = silent.transcript.bind(silent);
+  silent.transcript = async (id, how) => (how.filter === "tools" ? tools(id, how) : "No activity to display.\n");
   const quiet = await run(gatedFlow("1m"), { executor: silent, roster: modelGated() });
   assert.equal(quiet.value.outcome, "denied");
   assert.equal(quiet.value.agentReport, "");
@@ -509,8 +510,35 @@ test("$.gate (model carrier): the prompt is for the person first; the carrier wr
   const declined = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "decline" }), roster: modelGated() });
   assert.equal(declined.value.outcome, "error");
   assert.equal(declined.value.by, "nobody (the carrier ended without an answer)");
-  assert.equal(declined.value.reason, "the carrier made no write, so no card was raised; it said: 我不替你批这次写入。");
+  assert.equal(declined.value.reason, "the carrier made no Write to the receipt path, so no card for it was raised; it said: 我不替你批这次写入。");
   assert.equal(declined.value.agentReport, "");
+});
+
+test("requestApproval: the model carrier asked only if it tried to Write the receipt path", async () => {
+  // A row as `paseo logs --filter tools` printed it for a pending Write in a 2026-10-21 probe (path shortened).
+  const hold = "C:\\Users\\me\\AppData\\Local\\Temp\\runs\\probe-1\\1.receipt.txt";
+  assert.equal(wroteHold(`[Write] ${hold}`, hold), true);
+  assert.equal(wroteHold(`[Write] ${hold.replace(/\\/g, "/").toUpperCase()}`, hold), true, "separators and case are the file system's");
+  for (const tools of [
+    "[Read] C:/x/some.txt",
+    "[Message received] 入口会话\n[Read] C:/x/some.txt", // a prompt from another agent's session is a row too
+    "[Write] C:/x/other.receipt.txt",
+    "No activity to display.",
+  ]) {
+    assert.equal(wroteHold(tools, hold), false, tools);
+  }
+  // Paseo cuts a long path to 200 characters and ends it with "...".
+  const long = `C:/runs/${"d".repeat(220)}/1.receipt.txt`;
+  assert.equal(wroteHold(`[Write] ${long.slice(0, 197)}...`, long), true);
+
+  // A carrier that read something, said no, and ended: no card for the receipt, so nobody said no.
+  for (const tools of ["[Read] C:/x/some.txt", "[Message received] 入口会话"]) {
+    const gate = await prepared("model");
+    const io = { ...ioDoing(async () => {}), transcript: async (_, { filter }) => (filter === "tools" ? tools : "I will not approve on your behalf.") };
+    const decision = await requestApproval(io, gate, { pollMs: 5 });
+    assert.equal(decision.outcome, "error", tools);
+    assert.equal(decision.reason, "the carrier made no Write to the receipt path, so no card for it was raised; it said: I will not approve on your behalf.", tools);
+  }
 });
 
 test("requestApproval: a model carrier whose timeline cannot be read is not counted as a denial", async () => {
