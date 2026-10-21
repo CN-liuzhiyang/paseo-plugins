@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 
 // The gate request: what the orchestration runtime (../../orchestration/runtime/gate.mjs)
 // writes next to the receipt path and points the carrier at. The prompt names the file and its
@@ -68,29 +69,57 @@ export class RequestError extends Error {
   }
 }
 
-/** Read and check the request a prompt points at. Throws RequestError on anything that does not hold. */
+/** The three lines the runtime's receiptFor (gate.mjs) gives; the provider writes this, never the file's own text. */
+export function receiptFor(request: Pick<GateRequest, "title" | "runId" | "callId" | "sha256">): string {
+  const decision = request.title.replace(/\s+/g, " ").trim();
+  return [decision.startsWith("批准") ? decision : `批准：${decision}`, `人闸 ${request.callId} · 运行 ${request.runId}`, `内容 sha256 ${request.sha256}`].join("\n");
+}
+
+const REQUEST_SUFFIX = ".request.json";
+const sameFile = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+/** `file` sits directly in `dir`. */
+const insideDir = (dir: string, file: string) => sameFile(path.dirname(path.resolve(file)), dir);
+
+/**
+ * Read and check the request a prompt points at. Throws RequestError on anything that does not hold.
+ *
+ * Nothing in the request says who wrote it: the sha256 in the prompt comes from whoever sent the prompt.
+ * So the files the provider writes are not taken from it. The answer goes next to the request, named
+ * after it (`<callId>.request.json` -> `<callId>.answer.json`); the receipt must be a `*.receipt.txt`
+ * in the same directory, and its text is the provider's own, from the title, run, call and sha256.
+ * Both are created, never overwritten (the runtime removes them before it starts the carrier).
+ */
 export async function readRequest(prompt: string): Promise<GateRequest> {
   const pointer = parsePointer(prompt);
-  if (!pointer) throw new RequestError("the prompt does not name a gate request (request: / sha256: lines)");
+  if (!pointer) throw new RequestError("the prompt does not name a gate request (人闸 / request: / sha256: lines)");
+  if (!pointer.path.endsWith(REQUEST_SUFFIX)) throw new RequestError(`the request ${pointer.path} is not named <callId>${REQUEST_SUFFIX}`);
+  const dir = path.dirname(path.resolve(pointer.path));
+  const callId = path.basename(pointer.path).slice(0, -REQUEST_SUFFIX.length);
+  // Derived from the pointer alone, so a failure can be recorded before the file is trusted.
+  const answerPath = path.join(dir, `${callId}.answer.json`);
   const text = await readFile(pointer.path, "utf8").catch((error: unknown) => {
-    throw new RequestError(`cannot read the request ${pointer.path}: ${error instanceof Error ? error.message : String(error)}`);
+    throw new RequestError(`cannot read the request ${pointer.path}: ${error instanceof Error ? error.message : String(error)}`, answerPath);
   });
+  if (sha256(text) !== pointer.sha256) throw new RequestError("the request file does not match its sha256: it changed after the runtime wrote it", answerPath);
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new RequestError(`the request ${pointer.path} is not JSON`);
+    throw new RequestError(`the request ${pointer.path} is not JSON`, answerPath);
   }
   const r = (parsed ?? {}) as Record<string, unknown>;
-  const answerPath = isString(r.answerPath) && r.answerPath !== "" ? r.answerPath : null;
-  if (sha256(text) !== pointer.sha256) throw new RequestError("the request file does not match its sha256: it changed after the runtime wrote it", answerPath);
   const fields = ["runId", "callId", "title", "summary", "brief", "name", "content", "sha256", "receipt", "receiptPath", "answerPath", "timeout", "help"];
   const missing = fields.filter((key) => !isString(r[key]));
   if (r.v !== 1 || r.kind !== "orchestration-gate/request" || missing.length > 0 || !Array.isArray(r.evidence) || !r.evidence.every(isEvidence)) {
     throw new RequestError(`the request is not a v1 gate request${missing.length > 0 ? ` (missing ${missing.join(", ")})` : ""}`, answerPath);
   }
   const request = parsed as GateRequest;
+  if (request.callId !== callId) throw new RequestError(`the request names call ${request.callId}, but its file is named for ${callId}`, answerPath);
+  if (!sameFile(request.answerPath, answerPath)) throw new RequestError(`the answer path must be ${answerPath}, next to the request`, answerPath);
+  if (!insideDir(dir, request.receiptPath) || !request.receiptPath.endsWith(".receipt.txt")) {
+    throw new RequestError(`the receipt path must be a *.receipt.txt next to the request, not ${request.receiptPath}`, answerPath);
+  }
   if (contentDigest(request.content) !== request.sha256) throw new RequestError("the content does not match the sha256 the request names", answerPath);
-  if (!request.receipt.includes(request.sha256)) throw new RequestError("the receipt does not name the content's sha256", answerPath);
-  return request;
+  if (request.receipt !== receiptFor(request)) throw new RequestError("the receipt is not the one the title, run, call and sha256 give", answerPath);
+  return { ...request, answerPath };
 }

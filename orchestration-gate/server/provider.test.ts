@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ProviderConnection, ProviderEvent, ProviderInput, ProviderPermissionRequest } from "@getpaseo/plugin/server/provider";
 import { createGateProvider } from "./provider";
-import { contentDigest, type GateRequest } from "./request";
+import { contentDigest, receiptFor, type GateRequest } from "./request";
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
@@ -19,25 +19,24 @@ async function gateFiles(overrides: Partial<GateRequest> = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-provider-"));
   const content = "local x = 1\n";
   const digest = contentDigest(content);
-  const request: GateRequest = {
-    v: 1,
-    kind: "orchestration-gate/request",
+  const fields = {
+    v: 1 as const,
+    kind: "orchestration-gate/request" as const,
     runId: "run-1",
     callId: "c3",
     title: "批准 补丁 #1 放进 data/7/1/（回放）",
     summary: "校验：✅ 2 项通过",
     brief: "## 审阅\n- 一条",
-    evidence: [{ label: "要实现的修复 r9", text: "-a\n+b", kind: "diff", name: "a.lua" }],
+    evidence: [{ label: "要实现的修复 r9", text: "-a\n+b", kind: "diff" as const, name: "a.lua" }],
     name: "1.lua",
     content,
     sha256: digest,
-    receipt: `批准 x\n人闸 c3 · 运行 run-1\n内容 sha256 ${digest}`,
     receiptPath: path.join(dir, "c3.receipt.txt"),
     answerPath: path.join(dir, "c3.answer.json"),
     timeout: "2h",
     help: "不批的话可以点「不批」。",
-    ...overrides,
   };
+  const request: GateRequest = { ...fields, receipt: receiptFor(fields), ...overrides };
   const requestPath = path.join(dir, "c3.request.json");
   const text = JSON.stringify(request, null, 2);
   await writeFile(requestPath, text, "utf8");
@@ -220,4 +219,45 @@ test("the catalog has the one model and no modes", async () => {
   assert.deepEqual(catalog.catalog.models.map((m) => m.id), ["card"]);
   assert.deepEqual(catalog.catalog.modes, []);
   assert.deepEqual([...connection.capabilities].sort(), ["permission", "prompt.message", "prompt.steer"]);
+});
+
+test("the request decides nothing about where the provider writes: elsewhere, another name, other text are refused", async () => {
+  // A request anyone could write: the sha256 in the prompt only says the file did not change since.
+  const outside = await mkdtemp(path.join(os.tmpdir(), "orch-gate-victim-"));
+  const victim = path.join(outside, "authorized_keys");
+  await writeFile(victim, "ORIGINAL\n", "utf8");
+  const cases: Array<[string, (dir: string) => Partial<GateRequest>, RegExp]> = [
+    ["a receipt path in another directory", () => ({ receiptPath: victim }), /receipt path must be a \*\.receipt\.txt next to the request/],
+    ["a receipt path that is not *.receipt.txt", (dir) => ({ receiptPath: path.join(dir, "settings.json") }), /receipt path must be/],
+    ["an answer path elsewhere", () => ({ answerPath: path.join(outside, "c3.answer.json") }), /answer path must be/],
+    ["receipt text of its own", () => ({ receipt: "ssh-rsa AAAA # anything" }), /receipt is not the one the title, run, call and sha256 give/],
+    ["a call id that is not the file's", () => ({ callId: "c9" }), /names call c9, but its file is named for c3/],
+  ];
+  for (const [name, override, error] of cases) {
+    const base = await gateFiles();
+    const forged = await gateFiles({ ...override(base.dir) });
+    // gateFiles wrote the forged request in its own directory as c3.request.json
+    const h = await host();
+    await h.prompt(forged.prompt);
+    assert.equal(h.card(), undefined, name);
+    assert.match((await answerOf({ ...forged.request, answerPath: path.join(forged.dir, "c3.answer.json") })).error, error, name);
+    assert.equal(await readFile(victim, "utf8"), "ORIGINAL\n", name);
+  }
+});
+
+test("a receipt is created, never written over a file that is already there", async () => {
+  const { request, prompt } = await gateFiles();
+  await writeFile(request.receiptPath, "SOMEONE ELSE'S\n", "utf8");
+  const h = await host();
+  await h.prompt(prompt);
+  await h.send({ type: "session.permission", sessionId: "s1", permissionId: h.card()!.id, response: { behavior: "allow", selectedActionId: "approve" } });
+  assert.equal(await readFile(request.receiptPath, "utf8"), "SOMEONE ELSE'S\n");
+  assert.deepEqual(h.turns(), ["started", "failed"], "the turn fails: the receipt could not be written");
+});
+
+test("the card says where the receipt goes", async () => {
+  const { request, prompt } = await gateFiles();
+  const h = await host();
+  await h.prompt(prompt);
+  assert.ok(h.card()!.description!.includes(`批准后这里只写一份三行回执：${request.receiptPath}`), h.card()!.description);
 });

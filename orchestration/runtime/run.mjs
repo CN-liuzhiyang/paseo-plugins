@@ -412,6 +412,10 @@ export async function runFlow(target, options = {}) {
         throw new TypeError('$.gate: evidence must be a list of { label, text, kind?: "diff" | "text", name? }');
       }
       parseDuration(timeout);
+      // The provider writes only a *.receipt.txt next to its request (orchestration-gate request.ts).
+      if (request.holdPath !== undefined && (typeof request.holdPath !== "string" || !request.holdPath.endsWith(".receipt.txt"))) {
+        throw new TypeError("$.gate: holdPath must be a path ending in .receipt.txt");
+      }
       if (!grants.includes("gate:deny")) throw new GrantError("gate:deny", grants);
       const bound = bindRole(roster, { role: GATE_ROLE });
       const fence = fenceFor(bound.provider, "ask-human");

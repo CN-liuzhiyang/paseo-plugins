@@ -1,5 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { writeFile } from "node:fs/promises";
 import {
   negotiateProviderCapabilities,
   requireProviderCapabilities,
@@ -12,7 +11,7 @@ import {
   type ProviderSessionConfig,
   type ProviderTimelineItem,
 } from "@getpaseo/plugin/server/provider";
-import { readRequest, RequestError, type GateRequest } from "./request";
+import { readRequest, receiptFor, RequestError, type GateRequest } from "./request";
 
 // The human gate's carrier, with no model. The orchestration runtime starts it
 // with `paseo run --provider orch-gate/card` and a prompt that points at a gate
@@ -61,15 +60,17 @@ interface Session {
   outcome: string | null;
 }
 
-/** File writes, swappable in tests. */
+/**
+ * File writes, swappable in tests. Only ever a new file, next to the request (request.ts says
+ * which): an existing file is not overwritten, and no directory is made.
+ */
 export interface GateFiles {
-  write(file: string, text: string): Promise<void>;
+  create(file: string, text: string): Promise<void>;
 }
 
 const diskFiles: GateFiles = {
-  async write(file, text) {
-    await mkdir(path.dirname(file), { recursive: true });
-    await writeFile(file, text, "utf8");
+  async create(file, text) {
+    await writeFile(file, text, { encoding: "utf8", flag: "wx" });
   },
 };
 
@@ -129,7 +130,7 @@ export function gateTimeline(request: GateRequest, turn: number): ProviderTimeli
 export function gatePermission(request: GateRequest, permissionId: string): ProviderPermissionRequest {
   const description = [
     ...(request.summary.trim() === "" ? [] : [request.summary.trim()]),
-    `批准 = 同意脚本随后原样写下这 ${lines(request.content)} 行（${request.name}，sha256 ${request.sha256.slice(0, 12)}…）。`,
+    `批准 = 同意脚本随后原样写下这 ${lines(request.content)} 行（${request.name}，sha256 ${request.sha256.slice(0, 12)}…）。批准后这里只写一份三行回执：${request.receiptPath}`,
     request.help,
   ].join("\n");
   return {
@@ -201,7 +202,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
     emit({ type: "timeline.item", sessionId, item: { type: "assistant_message", id, text } });
 
   async function record(answerPath: string, answer: Omit<Answer, "v" | "at">): Promise<void> {
-    await files.write(answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), ...answer }, null, 2));
+    await files.create(answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), ...answer }, null, 2));
   }
 
   /** The card is answered: write what the runtime needs, close the card, end the turn. */
@@ -216,10 +217,10 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
       // The answer first, then the receipt: the runtime takes a receipt only with an allow record
       // beside it, so a failure in between leaves an allow without a receipt -- an error, not an approval.
       await record(request.answerPath, { permissionId, ...answer });
-      if (answer.behavior === "allow") await files.write(request.receiptPath, request.receipt);
+      if (answer.behavior === "allow") await files.create(request.receiptPath, receiptFor(request));
     } catch (error) {
       failure = error instanceof Error ? error.message : String(error);
-      await files.write(request.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: `cannot record the answer: ${failure}` })).catch(() => {});
+      await files.create(request.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: `cannot record the answer: ${failure}` })).catch(() => {});
     }
     emit({ type: "session.permission_resolved", sessionId, permissionId });
     if (failure) {
@@ -260,7 +261,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
       session.outcome = "没有起卡片";
       // The runtime reads this as an error, not as a person's denial.
       if (error instanceof RequestError && error.answerPath) {
-        await files.write(error.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: message })).catch(() => {});
+        await files.create(error.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: message })).catch(() => {});
       }
       emit({ type: "timeline.item", sessionId, item: { type: "error", id: `request-error-${turnId}`, message: `人闸没有起卡片：${message}` } });
       emit({ type: "session.turn", sessionId, turnId, state: "failed", error: { message } });

@@ -453,8 +453,9 @@ test("$.gate: a flow that can gate is refused before any spend when its carrier'
   assert.equal(fallback.value.outcome, "allowed");
 });
 
-test("$.gate: bad evidence or summary is refused at the call", async () => {
-  for (const extra of [{ evidence: [{ label: "", text: "x" }] }, { evidence: [{ label: "a", text: "x", kind: "html" }] }, { summary: 3 }]) {
+test("$.gate: bad evidence, summary or hold path is refused at the call", async () => {
+  // The provider writes only a *.receipt.txt next to its request.
+  for (const extra of [{ evidence: [{ label: "", text: "x" }] }, { evidence: [{ label: "a", text: "x", kind: "html" }] }, { summary: 3 }, { holdPath: "C:/x/a.lua" }]) {
     const result = await run(gatedFlow("1m", extra), { executor: fakeExecutor() });
     assert.equal(result.outcome, "failed", JSON.stringify(extra));
     assert.equal(result.error.name, "TypeError");
