@@ -135,3 +135,24 @@ test("a receipt put at the path after the person said no does not turn the no in
   assert.equal(decision.by, "nobody (the receipt and the answer record disagree)");
   assert.match(decision.reason, /recorded a denial \(button\)/);
 });
+
+test("the carrier failing with its card up: the script closes the card, and that is not a person's no", async () => {
+  let failed = false;
+  const decision = await gateThrough({
+    // The host reports the carrier in error once the card is up; the provider still holds the card.
+    answer: async () => {
+      failed = true;
+    },
+    hostStatus: () => (failed ? "error" : null),
+  });
+  assert.deepEqual(decision.denials, ["gate closed: the script stopped waiting"]);
+  assert.equal(decision.outcome, "error");
+  assert.equal(decision.by, "nobody (the carrier ended without an answer)");
+});
+
+test("an interrupt closes the card without a verdict: an error, by interrupted", async () => {
+  const decision = await gateThrough((send) => send({ type: "session.interrupt", requestId: "i", sessionId: "s" }));
+  assert.equal(decision.outcome, "error");
+  assert.equal(decision.by, "nobody (the carrier was interrupted)");
+  assert.equal(decision.approved, false);
+});

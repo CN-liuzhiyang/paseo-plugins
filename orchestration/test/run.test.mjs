@@ -605,6 +605,40 @@ test("requestApproval: for the provider carrier a matching receipt without an al
   assert.equal(alone.outcome, "allowed");
 });
 
+test("requestApproval: denials nobody made -- the script's own close-out, an interrupt -- are errors", async () => {
+  // The carrier failed with its card up; the script's deny closes the card and comes back as an answer.
+  const gate = await prepared("provider");
+  const io = {
+    ...ioDoing(async () => {}, "error"),
+    deny: (_, { message }) => writeFile(gate.answerPath, JSON.stringify({ behavior: "deny", via: "no-button", selectedActionId: null, message }), "utf8"),
+  };
+  const closed = await requestApproval(io, gate, { pollMs: 5 });
+  assert.equal(closed.outcome, "error");
+  assert.equal(closed.by, "nobody (the carrier ended without an answer)");
+  assert.match(closed.reason, /the script closed the card, nobody answered it/);
+
+  // A person's own command-line denial in the same state is still a denial.
+  const theirs = await prepared("provider");
+  const person = await requestApproval(
+    ioDoing(() => writeFile(theirs.answerPath, JSON.stringify({ behavior: "deny", via: "no-button", message: "not this one" }), "utf8")),
+    theirs,
+    { pollMs: 5 },
+  );
+  assert.equal(person.outcome, "denied");
+  assert.equal(person.reason, "not this one");
+
+  // An interrupt closed the card.
+  const cut = await prepared("provider");
+  const interrupted = await requestApproval(
+    ioDoing(() => writeFile(cut.answerPath, JSON.stringify({ behavior: "deny", via: "interrupt", selectedActionId: null, message: null }), "utf8")),
+    cut,
+    { pollMs: 5 },
+  );
+  assert.equal(interrupted.outcome, "error");
+  assert.equal(interrupted.by, "nobody (the carrier was interrupted)");
+  assert.equal(interrupted.answeredVia, null);
+});
+
 test("requestApproval: what the provider recorded decides nothing without a receipt", async () => {
   // An answer record that says allow, and no receipt: not approved.
   const lying = await prepared("provider");

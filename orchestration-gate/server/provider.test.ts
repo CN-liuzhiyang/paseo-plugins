@@ -136,7 +136,7 @@ test("deny: no receipt; button, command line, typed reply and interrupt each say
     ["button", (h, id) => h.send({ type: "session.permission", sessionId: "s1", permissionId: id, response: { behavior: "deny", selectedActionId: "deny", message: "Denied by user" } }), { via: "button", message: "Denied by user" }],
     ["cli", (h, id) => h.send({ type: "session.permission", sessionId: "s1", permissionId: id, response: { behavior: "deny", message: "gate expired after 2h without an answer" } }), { via: "no-button", message: "gate expired after 2h without an answer" }],
     ["typed", (h) => h.prompt("这个类的源文件不对", "steer", true), { via: "typed", typed: "这个类的源文件不对" }],
-    ["interrupt", (h) => h.send({ type: "session.interrupt", requestId: "i1", sessionId: "s1" }), { via: "no-button", message: "interrupted" }],
+    ["interrupt", (h) => h.send({ type: "session.interrupt", requestId: "i1", sessionId: "s1" }), { via: "interrupt", message: null }],
   ];
   for (const [name, answer, expected] of cases) {
     const { request, prompt } = await gateFiles();
@@ -154,7 +154,7 @@ test("deny: no receipt; button, command line, typed reply and interrupt each say
       .filter((e) => e.type === "timeline.item" && (e as { item: { type: string } }).item.type === "assistant_message")
       .map((e) => (e as { item: { text: string } }).item.text)
       .at(-1);
-    assert.ok(said?.startsWith("**已记为不批**"), `${name}: ${said}`);
+    assert.ok(said?.startsWith(name === "interrupt" ? "**卡片被中断关闭了**" : "**已记为不批**"), `${name}: ${said}`);
     assert.ok(said?.includes("什么都不会写入"), name);
     if (name === "typed") {
       assert.ok(said?.includes("被当作这个人闸的裁决，不是普通聊天"), said);

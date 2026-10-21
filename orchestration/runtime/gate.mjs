@@ -227,6 +227,7 @@ const VIA = ["button", "no-button", "typed"];
 export const UNATTRIBUTED = "unattributed (Paseo does not record who answered)";
 const CARRIER_ENDED = "nobody (the carrier ended without an answer)";
 const RECORDS_DISAGREE = "nobody (the receipt and the answer record disagree)";
+const INTERRUPTED = "nobody (the carrier was interrupted)";
 
 /**
  * Hold until a person approves the gate `prepared` describes (prepareGate).
@@ -321,9 +322,10 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
   // below decides. The stop matters as much: a denied agent keeps running, and
   // a carrier that asks again would put a live-looking card in front of a
   // person after the script has stopped listening.
+  const closeMessage = expired ? `gate expired after ${timeout} without an answer` : "gate closed: the script stopped waiting";
+  const closedByScript = status !== "idle" && !expired;
   if (status !== "idle") {
-    const message = expired ? `gate expired after ${timeout} without an answer` : "gate closed: the script stopped waiting";
-    await io.deny(agentId, { message }).catch(() => null);
+    await io.deny(agentId, { message: closeMessage }).catch(() => null);
     await io.stop(agentId).catch(() => null);
   }
 
@@ -363,6 +365,19 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
 
   // The provider carrier says how it was answered, or why it could not ask.
   if (answer?.error) return decision({ ...base, outcome: "error", reason: `carrier: ${String(answer.error).slice(0, 500)}`, by: CARRIER_ENDED });
+
+  // Denials nobody made. The script's own close-out deny above, sent because the
+  // carrier closed or failed with its card still up, comes back as an answer
+  // without a button and with the script's message: that is the script, not a person.
+  const ownDenial = answer?.behavior === "deny" && via === "no-button" && answer.message === closeMessage;
+  if (closedByScript && ownDenial) {
+    return decision({ ...base, outcome: "error", reason: `the carrier ended (${status ?? "unknown"}) with its card up; the script closed the card, nobody answered it`, by: CARRIER_ENDED });
+  }
+  // An interrupt -- the stop button, or Paseo reloading, replacing or rewinding the
+  // agent -- closes the card without anyone deciding on it.
+  if (answer?.via === "interrupt") {
+    return decision({ ...base, outcome: "error", reason: "the card was closed by an interrupt (a stop, reload or replace of the carrier), not answered", by: INTERRUPTED });
+  }
   if (answer?.behavior === "deny") {
     const words = via === "typed" ? answer.typed : via === "no-button" ? answer.message : null;
     return decision({

@@ -39,7 +39,7 @@ export interface Answer {
   at: string;
   permissionId: string | null;
   behavior: "allow" | "deny";
-  via: "button" | "no-button" | "typed";
+  via: "button" | "no-button" | "typed" | "interrupt";
   selectedActionId: string | null;
   message: string | null;
   typed: string | null;
@@ -172,9 +172,12 @@ export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, r
       (answer.typed ? `\n\n理由：${quote(answer.typed)}` : "")
     );
   }
+  if (answer.via === "interrupt") {
+    return "**卡片被中断关闭了**（停止，或者 Paseo 重载、替换了这个会话），不是谁的裁决。脚本按出错处理，什么都不会写入。";
+  }
   if (answer.via === "button") return "**已记为不批**（你点了卡片上的「不批」）。卡片已关闭，脚本按不批处理，什么都不会写入。";
   return (
-    "**已记为不批**（这次没有经过卡片按钮，例如命令行、到期、中断）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
+    "**已记为不批**（这次没有经过卡片按钮，例如命令行或到期）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
     (answer.message ? quote(answer.message) : "")
   );
 }
@@ -349,7 +352,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
       case "session.interrupt": {
         const session = sessions.get(input.sessionId);
         if (session?.waiting) {
-          await settle(input.sessionId, session, { behavior: "deny", via: "no-button", selectedActionId: null, message: "interrupted", typed: null });
+          await settle(input.sessionId, session, { behavior: "deny", via: "interrupt", selectedActionId: null, message: null, typed: null });
         }
         emit({ type: "request.completed", requestId: input.requestId });
         return;
