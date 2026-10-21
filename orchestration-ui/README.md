@@ -1,7 +1,15 @@
 # orchestration-ui：编排运行
 
-只读地查看编排运行时（[`../orchestration/`](../orchestration/)）每次运行干了什么。详情页分四层，
-每层回答一个问题：
+只读地查看编排运行时（[`../orchestration/`](../orchestration/)）每次运行干了什么。运行出现在三个地方：
+
+- **发起它的对话里的卡片**：从 Paseo agent 里跑的 flow，会在那个 agent 的对话里放一张卡片，跟着运行原地更新：
+  flow 和输入、一句话（在做什么 / 等你审批什么 / 结论）、阶段色带、用时、花费；人闸在等时卡片变黄，多一个
+  「去审批」。点「打开运行」进下面的标签页。
+- **workspace 里的「编排运行」标签页**：发起的 agent 和它派出的 agent 都在同一个 workspace 里，运行也作为
+  一个标签放在那里，去某个 agent 的对话、再回来，各点一次标签。顶上是这个 workspace 发起过的运行。
+- **侧边栏「编排运行」**：全部运行的索引。终端里跑的（没有发起对话）、别的机器上的，只在这里。
+
+详情页分四层，每层回答一个问题：
 
 1. **结论条**：一句话说在干什么、结果如何、要不要你动手，旁边是唯一的主按钮（人闸在等时是
    「在 Paseo 打开审批卡片」，打开承载人闸的 agent；失联或失败时打开那个 agent）。下面一行关键数字：
@@ -9,15 +17,30 @@
 2. **流程图**：阶段是框，调用是框里的节点，时间从左往右；时间上重叠的并排上下堆叠，重新进入的阶段
    收进「↻ N 轮」容器，声明了没走到的阶段是虚线占位，两端是输入和结局。另有「时间线」（甘特条，
    看时间花在哪）和「事件」（原始事件表）两个视图。
-3. **详情抽屉**：点任何节点，右边依次是结论、谁做的、花费、约束有没有被机械强制、在 Paseo 中打开；
-   窄屏时是弹出的面板。
+3. **详情抽屉**：点任何节点，右边是标题行（状态、一句话、「在 Paseo 中打开」），再往下依次是结论、谁做的、
+   花费、约束有没有被机械强制。长输出默认折叠：超过 8 行或 600 字的文本先显示 6 行，超过 5 项的列表先显示
+   3 项，都可以展开、复制全文。拖动抽屉左边沿可以调宽，宽度在这台设备上记住。窄屏时是弹出的面板。
 4. **证据**：prompt、输出 schema、完整输出 JSON、栅栏说明、运行事实（pid、cwd、runId、flow 文件），
    默认全部折叠。
 
 列表页按「需要你处理（人闸在等、失联）/ 运行中 / 最近结束」分组，每行是 flow 名加输入里最能认出它
 的值、阶段色带、和详情页结论条同一句话、花费、开始时间。
 
-它不启动运行、不批人闸、不改任何文件。
+它不启动运行、不批人闸、不改任何文件；唯一写的东西是发起对话里的那张卡片（在 daemon 内存里，见下）。
+
+## 发起对话里的卡片
+
+- **贴给谁**：`run.start.caller` 那个 agent，三条都满足才贴：caller 不为 null（终端里跑的没有）；`run.start.hostname`
+  是 daemon 所在的机器（别的机器上的 agent id 对这个 daemon 没意义）；daemon 认得这个 agent。
+- **怎么更新**：daemon 侧监视 `<logDir>/runs`（文件事件、每 5 秒复查没结束的运行、每 30 秒全目录兜底），用同一个
+  id 往 caller 的时间线追加卡片，Paseo 把它原位替换。卡片内容变了才追加，两次至少隔 2 秒；人闸开或关、运行结束、
+  失联立即追加。卡片挂在屏幕上、运行没结束时，它自己每 5 秒问一次最新状态（`runs.card`），插件不回答时卡片上写明。
+- **重启**：Paseo 只在 daemon 内存里保存插件追加的时间线项。插件 reload 后按同一个 id 重贴，不会出第二张；
+  daemon 重启后卡片都没了，只补没结束的和 10 分钟内结束的运行，贴在对话末尾。caller 还没加载（daemon 刚重启、
+  还没人打开它）时，从 30 秒起翻倍重试，最长每 10 分钟一次。
+- **需要 `server.paseo`**：插件 server 往对话里写东西靠宿主给的 `server.paseo`，目前只有
+  [fork 版 Paseo](https://github.com/CN-liuzhiyang/paseo) 提供。没有它的宿主上插件照常装、照常用，只是不贴卡片：
+  daemon 日志里有一行说明，设置页「发起对话里的运行卡片」下写着原因。设置里也可以自己关掉卡片。
 
 ## 数据从哪来
 
@@ -76,8 +99,9 @@ cd orchestration-ui && npm install
 paseo plugin install /absolute/path/to/paseo-plugins/orchestration-ui
 ```
 
-daemon 的 `pluginsEnabled` 要开着。装完 `paseo plugin ls` 里应是 `running`，侧边栏出现「编排运行」，
-Command Center 里有「打开编排运行」，设置 → 插件下有它的设置页。
+要求 Paseo 0.11 及以上（screen 参数），发起对话里的卡片另外要 `server.paseo`（见上）。daemon 的
+`pluginsEnabled` 要开着。装完 `paseo plugin ls` 里应是 `running`，侧边栏出现「编排运行」，workspace 的
+新标签里有「编排运行」，Command Center 里有「打开编排运行」，设置 → 插件下有它的设置页。
 
 ## 开发
 
@@ -93,7 +117,7 @@ npm test
 一个调用有了 agent 还没结束、一个不认识的事件、末尾半行、没有 `run.end`）、`docfix-waiting`（人闸
 正在等人：准备阶段四个 `do`、一轮起草⇄校验的修复、阶段外的 `do`、人闸和另一个 ask 并行、一个声明了
 还没到的阶段；带人话 `title` 和 `headline`，没有 `run.end`）。前四份是旧日志，没有新字段，用来测退化。
-单测（`server/run.test.ts`、`server/graph.test.ts`、`server/files.test.ts`）和手工预览都用它们：
+单测（`server/run.test.ts`、`server/graph.test.ts`、`server/files.test.ts`、`server/cards.test.ts`）和手工预览都用它们（卡片投递的单测另外在临时目录里逐条写合成事件流；折叠、拖宽上下限、标签页焦点在 `server/fold.test.ts`、`server/focus.test.ts`）：
 按 `<runId>.jsonl` 拷进某个 logDir 的 `runs/` 就能在界面里看。要演示 pid 判定，把 `run.start` 的
 `hostname` 改成本机、`pid` 改成一个活的或已退出的进程；`docfix-waiting` 最好再把时间戳整体挪到
 最近，否则「已等」会是好几个小时。
@@ -112,23 +136,31 @@ daemon（DevTools 的 URL 屏蔽拦不住 WebSocket）；Chrome 的本地网络�
 ## 目录
 
 ```
-index.server.ts     注册设置和三个 RPC：runs.list / runs.read / status
-index.client.tsx    侧边栏入口、整页 surface、设置页、Command Center 项
+index.server.ts     注册设置和四个 RPC：runs.list / runs.read / runs.card / status；起卡片投递
+index.client.tsx    侧边栏入口、整页 screen、workspace 标签页、卡片渲染器、设置页、Command Center 项
+shared/card.ts      发起对话里那张卡片：数据、schema、去重键、哪些变化要立即贴
 shared/run.ts       事件折叠成运行状态（纯函数，daemon 和 app 共用）；运行/阶段/调用的状态判定、阶段访问
 shared/graph.ts     运行状态推出图（访问、并行列、循环、脚本组、占位）、结论条 hero、节点一句话 headline
 shared/format.ts    给人看的文字：时长、成本、「正在做什么」
 shared/rpc.ts       RPC 契约
-shared/settings.ts  logDir 覆盖、失联阈值
+shared/settings.ts  logDir 覆盖、失联阈值、卡片开关
 server/lines.ts     按字节偏移读 JSONL：首行、末尾若干行、从偏移起的完整行
 server/runs.ts      列表摘要（缓存 + 增量折叠）与单次运行的增量读取
 server/logdir.ts    logDir 解析
 server/alive.ts     未结束的运行的进程还在不在（只在同一台机器上查）
+server/cards.ts     卡片投递：监视 runs/、跟踪本机有 caller 的运行、节流追加、重试、重启补齐
 client/run-list.tsx      列表页：按要不要你处理分组
 client/run-detail.tsx    详情页：结论条、数字行、三个视图、抽屉（窄屏时是 Modal）
 client/graph-view.tsx    流程图，只用 View、flex 和边框（插件 SDK 没有 SVG），颜色全取宿主主题
 client/timeline-view.tsx 时间线（甘特条）
 client/events-view.tsx   原始事件表
 client/drawer.tsx        选中节点的详情与折叠的证据
-client/value.tsx         按 schema 渲染结构化输出
+client/value.tsx         按 schema 渲染结构化输出，长文本、长列表折叠
+client/fold.ts           折叠规则
+client/resize.tsx        可拖宽的抽屉；client/sizes.ts 是它的宽度上下限
+client/run-card.tsx      时间线里的运行卡片
+client/run-panel.tsx     workspace 的「编排运行」标签页
+client/focus.ts          标签页显示哪个运行、哪个节点（打开它的地方先写，标签页读）
+client/surface.tsx       侧边栏 screen：列表或一个运行，运行 id 在 screen 参数里
 fixtures/           样例运行
 ```
