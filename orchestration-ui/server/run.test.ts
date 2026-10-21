@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { activity, fenceLabel, formatDuration } from "../shared/format";
+import { activity, byLabel, fenceLabel, formatDuration } from "../shared/format";
 import {
   callStatus,
   caveatsOf,
@@ -203,4 +203,14 @@ test("durations", () => {
   assert.equal(parseDuration("5 minutes"), null);
   assert.equal(formatDuration(3_723_000), "1 小时 2 分");
   assert.equal(formatDuration(65_000), "1 分 05 秒");
+});
+
+test("byLabel: the runtime's by values read as sentences, unknown ones as they are", () => {
+  assert.equal(byLabel("unattributed (Paseo does not record who answered)"), "未能归属到具体的人：Paseo 不记录是谁应答的（unattributed）");
+  assert.equal(byLabel("gate timeout"), "没人应答：到期后由运行时替人拒绝");
+  assert.equal(byLabel("nobody (no card was raised)"), "没有人：内容太长，卡片没有起来");
+  assert.equal(byLabel("nobody (gate lost sight of the request)"), "没有人：一直查不到载体状态，人闸不知道发生了什么");
+  assert.equal(byLabel("nobody (the carrier ended without an answer)"), "没有人：载体没等到应答就结束了");
+  assert.equal(byLabel("feishu:ou_x"), "feishu:ou_x");
+  assert.equal(byLabel(null), "不知道是谁（判定里没有 by）");
 });

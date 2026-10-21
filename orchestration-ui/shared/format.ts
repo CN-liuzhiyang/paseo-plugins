@@ -136,9 +136,18 @@ export function askLine(call: CallState): string | null {
     .join(" · ");
 }
 
+/**
+ * The gate decision's `by`, for a person. The runtime writes a sentence with a
+ * parenthesis ("unattributed (Paseo does not record who answered)"), so the
+ * known values are matched by how they start; anything else is shown as is.
+ */
 export function byLabel(by: string | null): string {
   if (by === null || by === "") return "不知道是谁（判定里没有 by）";
-  if (by === "unattributed") return "未能归属到具体的人（unattributed）";
+  if (by.startsWith("unattributed")) return "未能归属到具体的人：Paseo 不记录是谁应答的（unattributed）";
+  if (by === "gate timeout") return "没人应答：到期后由运行时替人拒绝";
+  if (by.startsWith("nobody (no card was raised")) return "没有人：内容太长，卡片没有起来";
+  if (by.startsWith("nobody (gate lost sight")) return "没有人：一直查不到载体状态，人闸不知道发生了什么";
+  if (by.startsWith("nobody (the carrier ended")) return "没有人：载体没等到应答就结束了";
   return by;
 }
 
