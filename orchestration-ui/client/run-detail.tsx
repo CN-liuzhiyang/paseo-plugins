@@ -27,14 +27,14 @@ const TABS: Array<[Tab, string]> = [
 
 const DRAWER_WIDTH = 380;
 
-export function RunDetail({ runId, onBack }: { runId: string; onBack(): void }) {
+export function RunDetail({ runId, initialSelect = null, onBack }: { runId: string; initialSelect?: string | null; onBack(): void }) {
   const ui = useUi();
   const snap = useRun(runId);
   const run = snap.run;
   const now = useNow(snap.polling);
   const status = runStatus(run, now, snap.staleMs, snap.process);
   const [tab, setTab] = useState<Tab>("graph");
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initialSelect);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const top = run.start ? hero(run, status, now, { proc: snap.process, staleMs: snap.staleMs }) : null;
   // Nothing picked yet: the node the sentence is about, so the drawer answers it at once.

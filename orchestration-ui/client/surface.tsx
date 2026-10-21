@@ -1,18 +1,25 @@
-import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
-import { useState } from "react";
+import type { PluginOpenScreenInput, PluginScreenProps } from "@getpaseo/plugin/client";
 import { RunDetail } from "./run-detail";
 import { RunList } from "./run-list";
 import { UiProvider } from "./ui";
 
-/** The sidebar surface: the list of runs, or one run. Read-only throughout. */
-export function RunsSurface(props: PluginSurfaceProps & { openSettings(): void }) {
-  const [selected, setSelected] = useState<string | null>(null);
+export const SCREEN_ID = "runs";
+
+/**
+ * The sidebar screen: the list of runs, or one run. The run travels in the screen's params, so
+ * going back, reloading or coming back from an agent lands on the same run. Read-only throughout.
+ */
+export function RunsSurface(
+  props: PluginScreenProps & { openSettings(): void; openScreen(input: PluginOpenScreenInput): void },
+) {
+  const runId = props.params.run ?? null;
+  const open = (run: string | null) => props.openScreen({ screenId: SCREEN_ID, params: run ? { run } : {} });
   return (
     <UiProvider props={props}>
-      {selected === null ? (
-        <RunList host={props.host.label} onOpen={setSelected} onSettings={props.openSettings} />
+      {runId === null ? (
+        <RunList host={props.host.label} onOpen={open} onSettings={props.openSettings} />
       ) : (
-        <RunDetail key={selected} runId={selected} onBack={() => setSelected(null)} />
+        <RunDetail key={runId} runId={runId} initialSelect={props.params.node ?? null} onBack={() => open(null)} />
       )}
     </UiProvider>
   );
