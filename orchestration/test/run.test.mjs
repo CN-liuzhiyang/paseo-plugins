@@ -963,12 +963,13 @@ test("a flow file with an undeclared phase is refused before run.start", async (
 });
 
 test("gate-smoke: one gate over made-up content, said in one line", async () => {
-  const typed = await run(gateSmoke, { input: { round: "2", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "typed", typed: "不批" }) });
+  const typed = await run(gateSmoke, { input: { round: "补测 B", task: "请打字", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "typed", typed: "不批" }) });
   assert.equal(typed.summary, "人闸：不批（answeredVia typed，理由：不批）");
   const start = eventsOf(typed).find((e) => e.kind === "call.start");
-  assert.equal(start.title, "批准 冒烟第 2 次：greet.lua 放进 smoke/（假内容）");
+  assert.equal(start.title, "冒烟补测 B：请打字（假内容）");
+  assert.ok(start.receipt.startsWith("批准：冒烟补测 B：请打字（假内容）\n"));
   assert.equal(start.evidence[0].kind, "diff");
-  const approved = await run(gateSmoke, { input: { round: "3", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "approve" }) });
+  const approved = await run(gateSmoke, { input: { round: "3", task: "请点「批准」", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "approve" }) });
   assert.equal(approved.summary, "人闸：批准（answeredVia button）");
 });
 
