@@ -162,7 +162,7 @@ export function viaOf(response: ProviderPermissionResponse): "button" | "no-butt
  */
 export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, receiptPath: string): string {
   if (answer.behavior === "allow") {
-    const how = answer.via === "button" ? "你点了卡片上的「批准」" : "这次批准没有经过卡片按钮（例如命令行）";
+    const how = answer.via === "button" ? "收到的应答带着卡片「批准」按钮的 id" : "收到的应答没有带卡片按钮的 id，例如命令行";
     return `**已记为批准**（${how}）。回执已写到 \`${receiptPath}\`，脚本核对回执后写入。`;
   }
   const quote = (text: string) => `\n\n> ${text.replace(/\n/g, "\n> ")}`;
@@ -175,9 +175,9 @@ export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, r
   if (answer.via === "interrupt") {
     return "**卡片被中断关闭了**（停止，或者 Paseo 重载、替换了这个会话），不是谁的裁决。脚本按出错处理，什么都不会写入。";
   }
-  if (answer.via === "button") return "**已记为不批**（你点了卡片上的「不批」）。卡片已关闭，脚本按不批处理，什么都不会写入。";
+  if (answer.via === "button") return "**已记为不批**（收到的应答带着卡片「不批」按钮的 id）。卡片已关闭，脚本按不批处理，什么都不会写入。";
   return (
-    "**已记为不批**（这次没有经过卡片按钮，例如命令行或到期）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
+    "**已记为不批**（收到的应答没有带卡片按钮的 id，例如命令行或到期）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
     (answer.message ? quote(answer.message) : "")
   );
 }

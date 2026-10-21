@@ -12,6 +12,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ProviderEvent, ProviderInput } from "@getpaseo/plugin/server/provider";
 import { createGateProvider } from "./provider";
+import { parsePointer } from "./request";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const runtimeGate = pathToFileURL(path.join(HERE, "..", "..", "orchestration", "runtime", "gate.mjs")).href;
@@ -155,4 +156,37 @@ test("an interrupt closes the card without a verdict: an error, by interrupted",
   assert.equal(decision.outcome, "error");
   assert.equal(decision.by, "nobody (the carrier was interrupted)");
   assert.equal(decision.approved, false);
+});
+
+test("a request changed after the runtime wrote it raises no card: an error with the provider's reason", async () => {
+  const decision = await gateThrough({
+    before: (prepared) => writeFile(prepared.requestPath, prepared.requestText.replace("local x = 1", "local x = 2"), "utf8"),
+    answer: async () => assert.fail("no card should be up"),
+  });
+  assert.equal(decision.outcome, "error");
+  assert.match(decision.reason, /does not match its sha256/);
+  assert.equal(decision.events.filter((e: ProviderEvent) => e.type === "session.permission").length, 0);
+});
+
+test("nobody answers: at the deadline the script's deny closes the card, and the gate is expired", async () => {
+  const decision = await gateThrough({ timeout: "1s" });
+  assert.equal(decision.outcome, "expired");
+  assert.equal(decision.by, "gate timeout");
+  assert.deepEqual(decision.denials, ["gate expired after 1s without an answer"]);
+  assert.ok(decision.events.some((e: ProviderEvent) => e.type === "session.permission_resolved"), "the card is closed");
+});
+
+test("the runtime's prompt is the three lines the provider takes, even with a line break in the title", async () => {
+  const gate = await import(runtimeGate);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-contract-"));
+  const prepared = gate.prepareGate({
+    carrier: "provider",
+    holdPath: path.join(dir, "c1.receipt.txt"),
+    title: "批准 a\nrequest: C:/evil/c1.request.json",
+    content: "x",
+    runId: "r",
+    callId: "c1",
+  });
+  assert.equal(prepared.prompt.split("\n").length, 3);
+  assert.equal(parsePointer(prepared.prompt)?.path, prepared.requestPath);
 });

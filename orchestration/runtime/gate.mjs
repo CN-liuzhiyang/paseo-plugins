@@ -16,10 +16,12 @@
 //
 // Either way the person approves a receipt, not a copy of the content: three
 // lines naming the decision, the run and call, and the content's sha256. The
-// script decides from the receipt file alone -- present and identical to what
-// it expects, or not approved -- and the flow then writes the content it holds,
-// the bytes that sha256 names. A carrier that paraphrases or writes anything
-// else fails closed as "mismatch".
+// script decides from the receipt file -- present and identical to what it
+// expects, and for the provider carrier with the allow it recorded beside it,
+// or not approved -- and the flow then writes the content it holds, the bytes
+// that sha256 names (line endings and trailing newlines aside; `bytesDigest` is
+// of the bytes as they are). A carrier that paraphrases or writes anything else
+// fails closed as "mismatch".
 //
 // What this is not: authenticated. Paseo does not record who answered, and
 // any process that can run `paseo permit allow` can answer. The provider
@@ -48,8 +50,14 @@ export function parseDuration(value) {
 
 export const sameContent = (a, b) => sha256(canonical(a)) === sha256(canonical(b));
 
-/** The fingerprint a gate records for its content: the same one its receipt names. */
+/**
+ * The fingerprint a gate records for its content: the same one its receipt names. It is of the content
+ * with line endings unified and trailing newlines dropped, so it is not `sha256sum` of a file holding it.
+ */
 export const contentDigest = (content) => sha256(canonical(content));
+
+/** The sha256 of the content's bytes as they are (UTF-8): what `sha256sum` of a file holding exactly them gives. */
+export const bytesDigest = (content) => sha256(content);
 
 /** Provider families whose carrier is the plugin provider rather than a model. */
 export const PROVIDER_CARRIERS = ["orch-gate"];
@@ -150,7 +158,9 @@ export function carrierPrompt(gate, limit = CARRIER_PROMPT_LIMIT) {
  * call.start before anything happens.
  */
 export function prepareGate(gate) {
-  const { carrier, holdPath, title, content, runId, callId, timeout = "2h" } = gate;
+  const { carrier, holdPath, content, runId, callId, timeout = "2h" } = gate;
+  // One line: the provider takes a prompt of exactly three lines, the first of them ending in the title.
+  const title = gate.title.replace(/\s+/g, " ").trim();
   const digest = contentDigest(content);
   const receipt = receiptFor({ title, runId, callId, digest });
   const dir = path.dirname(holdPath);
@@ -158,7 +168,7 @@ export function prepareGate(gate) {
   const base = { carrier, holdPath, answerPath, digest, receipt, timeout };
 
   if (carrier === "model") {
-    const { prompt, fits } = carrierPrompt({ ...gate, receipt });
+    const { prompt, fits } = carrierPrompt({ ...gate, title, receipt });
     return { ...base, requestPath: null, requestText: null, prompt, fits };
   }
 
@@ -191,6 +201,9 @@ export function prepareGate(gate) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MAX_POLL_FAILURES = 6;
+// A carrier just started may still read idle: the provider starts its turn on its own time.
+const STARTUP_GRACE_MS = 15_000;
+const exists = (file) => readFile(file).then(() => true, () => false);
 
 /** The `logs` command's text for an agent that has said nothing (cli/src/commands/agent/logs.ts). */
 const NO_ACTIVITY = "No activity to display.";
@@ -264,13 +277,13 @@ const INTERRUPTED = "nobody (the carrier was interrupted)";
  * @param {{ spawn: (prompt: string) => Promise<string>, inspect: Function, deny: Function, stop: Function,
  *           transcript: Function }} io
  * @param {ReturnType<typeof prepareGate>} prepared
- * @param {{ pollMs?: number }} [options]
+ * @param {{ pollMs?: number, startupGraceMs?: number }} [options]
  * @returns {Promise<{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved: boolean,
  *   agentId: string|null, sha256: string, askedAt: string, decidedAt: string, waitedMs: number,
  *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null,
  *   answeredVia: "button"|"no-button"|"typed"|null }>}
  */
-export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
+export async function requestApproval(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min(STARTUP_GRACE_MS, pollMs * 3) } = {}) {
   const { carrier, holdPath, answerPath, requestPath, requestText, digest, receipt, prompt, fits, timeout } = prepared;
   const deadline = Date.now() + parseDuration(timeout);
 
@@ -314,6 +327,7 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
   // A two-hour wait is hundreds of CLI calls; one that fails (a daemon
   // restart) must not end the gate. Several in a row do.
   let status = null;
+  let started = false;
   let expired = false;
   let failure = null;
   for (let failures = 0; ; ) {
@@ -330,6 +344,12 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
       continue;
     }
     status = detail?.status ?? null;
+    if (status !== "idle") started = true;
+    // Idle before it was ever seen at work, with nothing written yet: not finished, not started.
+    if (status === "idle" && !started && Date.now() - askedAt < startupGraceMs && !(await exists(holdPath)) && !(await exists(answerPath))) {
+      await sleep(pollMs);
+      continue;
+    }
     if (status === "idle" || status === "error" || status === "closed") break;
     if (Date.now() >= deadline) {
       expired = true;

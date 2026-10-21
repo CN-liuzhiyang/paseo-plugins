@@ -23,7 +23,7 @@ import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog } from "./events.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
-import { requestApproval, prepareGate, carrierKind, parseDuration } from "./gate.mjs";
+import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest } from "./gate.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
@@ -231,6 +231,8 @@ export async function runFlow(target, options = {}) {
   const open = new Map(); // callId -> { callId, labels, agentId, startedAt }
   const spent = new Map(); // agentId -> cost
   const caveats = [];
+  // Receipt paths of the gates started in this run, resolved.
+  const gateHolds = new Set();
   let calls = 0;
   // Set the moment the flow's outcome is decided: when it returns, throws or
   // times out, or when it first calls $.stop. Code still running after that
@@ -421,12 +423,20 @@ export async function runFlow(target, options = {}) {
       const fence = fenceFor(bound.provider, "ask-human");
       const carrier = carrierKind(bound.provider);
 
+      // Two gates on one receipt path would remove each other's receipt (each starts by clearing its own).
+      if (request.holdPath !== undefined && gateHolds.has(path.resolve(request.holdPath))) {
+        throw new TypeError(`$.gate: holdPath ${request.holdPath} is already another gate's in this run`);
+      }
+      // One line: it heads the provider's three-line prompt, and a line break in it could pass for a pointer.
+      const oneLineTitle = sentTitle(title.replace(/\s+/g, " ").trim());
+
       const record = startCall();
       const holdPath = request.holdPath ?? path.join(runDir, "gate", `${record.callId}.receipt.txt`);
+      gateHolds.add(path.resolve(holdPath));
       const prepared = prepareGate({
         carrier,
         holdPath,
-        title: sentTitle(title),
+        title: oneLineTitle,
         content,
         name,
         summary,
@@ -440,11 +450,12 @@ export async function runFlow(target, options = {}) {
         callId: record.callId,
         type: "gate",
         name: "gate",
-        title: sentTitle(title),
+        title: oneLineTitle,
         phase: currentPhase(),
         brief,
         content,
         sha256: prepared.digest,
+        bytesSha256: bytesDigest(content),
         timeout,
         holdPath,
         provider: bound.provider,
@@ -469,7 +480,7 @@ export async function runFlow(target, options = {}) {
             provider: bound.provider,
             thinking: bound.thinking,
             mode: fence.mode,
-            title: sentTitle(`[gate] ${title}`),
+            title: sentTitle(`[gate] ${oneLineTitle}`),
             labels: { ...record.labels, "orch-step": "gate" },
             prompt: composePrompt(bound, prompt),
             cwd: path.dirname(holdPath),

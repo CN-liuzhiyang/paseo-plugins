@@ -95,12 +95,13 @@
 |---|---|---|
 | `brief` | string | 给审批人的说明（markdown） |
 | `content` | string | 待批准的原文 |
-| `sha256` | string | 原文指纹（换行符统一、去掉结尾换行后的 sha256，与判定对象里的 `sha256` 相同） |
+| `sha256` | string | 原文指纹：换行符统一、去掉结尾换行后的 sha256，与判定对象里的 `sha256`、回执里的相同。**不是**存着原文的文件的 `sha256sum`，那个看 `bytesSha256` |
+| `bytesSha256` | string | 原文原样（UTF-8 字节）的 sha256：flow 把原文原样写进文件时，文件的 `sha256sum` 就是它。核对落盘文件用这个 |
 | `timeout` | string | |
-| `holdPath` | string | **回执**路径：人批准后载体把回执写在这里，判定只看这个文件（以前是"原文的暂存路径"，见下） |
+| `holdPath` | string | **回执**路径，以 `.receipt.txt` 结尾：人批准后载体把回执写在这里（以前是"原文的暂存路径"，见下）。同一次运行里两个人闸不能共用 |
 | `provider` | string | 载体的 `family/model`（角色 `gate`） |
 | `fence` | object | 同 `ask`，`mode` 是"每次写都要人批"那一档；`orch-gate` 载体是 `null`、`enforced: true` |
-| `prompt` | string | 实际发给载体的完整 prompt。`model` 载体：决定、summary、brief、证据、原文、给载体的指令（brief 和证据过长时被截断的那份）；`provider` 载体：指向请求文件的三行（请求文件路径和它的 sha256） |
+| `prompt` | string | 实际发给载体的完整 prompt。`model` 载体：决定、summary、brief、证据、原文、给载体的指令（brief 和证据过长时被截断的那份）；`provider` 载体：恰好三行，`人闸 <callId> · 运行 <runId>：<title>`、请求文件路径、它的 sha256 |
 | `carrier` | `"provider"` \| `"model"` | 载体种类：`orchestration-gate` 插件的无模型 provider，或者一个写回执的模型 |
 | `contentName` | string | 原文的显示名（高亮、卡片上的"待批全文 x.lua"），flow 没给时是 `content.txt` |
 | `summary` | string | 卡片说明（几行纯文本），flow 没给时是空串 |
@@ -108,7 +109,8 @@
 | `receipt` | string | 预期的回执全文：决定、`人闸 <callId> · 运行 <runId>`、`内容 sha256 <原文指纹>` 三行 |
 | `requestPath` | string \| null | `provider` 载体读的请求文件（与回执同目录的 `<callId>.request.json`）；`model` 载体为 null |
 
-`carrier` 起的 6 个字段是后加的（2026-10-21），之前写的文件没有，读者按 null（`evidence` 按空数组）处理；
+`carrier` 起的 6 个字段和 `bytesSha256` 是后加的（2026-10-21），之前写的文件没有，读者按 null（`evidence` 按空数组）处理；
+`title` 现在是一行（换行和连续空白压成一个空格）；
 之前的 `holdPath` 是原文的暂存路径，载体写的是原文而不是回执。
 
 ### `call.agent`
@@ -146,15 +148,27 @@
 `gate` 的 `output` 就是 `requestApproval()` 的判定对象：
 `{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision, answeredVia }`。
 
-判定只看回执文件：与 `call.start.receipt` 相同（换行符统一、去掉结尾换行）判 `allowed`；有文件但不同判
-`mismatch`；没有文件时，到期判 `expired`，`provider` 载体记下了拒绝判 `denied`，`model` 载体提出过写入
-（它的 tool 记录里有调用）判 `denied`；载体被关掉、出错，没留下应答记录，或者 `model` 载体根本没提出写入（没起卡片）
-就结束，判 `error`（以前这几种情况记成 `denied`）。`provider` 载体的应答记录（`<callId>.answer.json`）
-只用来说明是怎么答的，它说"批了"而回执不在，不算批准。
+判定以回执文件为准：
+
+- **回执与 `call.start.receipt` 相同**（换行符统一、去掉结尾换行）：`model` 载体判 `allowed`。`provider` 载体还要
+  它的应答记录（`<callId>.answer.json`）是 `allow`；记录缺失、出错或是拒绝时判 `error`（回执和记录对不上）。
+  回执推翻不了已经记下的拒绝。
+- **有回执但不同**：`mismatch`。
+- **没有回执**：到期判 `expired`。`provider` 载体记下了人的拒绝判 `denied`；`model` 载体的 tool 记录里有写回执路径
+  的那一行（`[Write] <holdPath>`）判 `denied`。下面这些不是谁的拒绝，判 `error`（以前都记成 `denied`）：
+  - 载体被关掉、出错；
+  - 运行时收尾时自己发的拒绝（载体出错时卡片还挂着，运行时去关它）；
+  - 卡片被中断关闭（停止按钮，或 Paseo 重载、替换这个 agent；`answer.json` 里 `via` 是 `"interrupt"`）；
+  - `provider` 载体没留下应答记录；
+  - `model` 载体没有写回执路径的那一行（它拒绝当载体，或只调了别的工具），或者读不到它的 tool 记录。
+- `provider` 载体的应答记录说"批了"而回执不在，不算批准。
+- 已知限制：`model` 载体在挂着卡片时被 daemon 重启打断，tool 记录里有那一行、却没人应答，仍判 `denied`。
+  被拒绝的 Write 在 tool 记录里还留着那一行，是读 Paseo 代码得出的，没有实测。
 
 `answeredVia`（后加，之前的文件没有，按 null 处理）是应答方自己发来的东西，**弱信号，不是"谁"**：
-`"button"` 带着卡片按钮的 id（Paseo App、IM 卡片会带），`"no-button"` 没带（`paseo permit`、到期替人拒绝、中断），
-`"typed"` 卡片挂着时有人在对话里打了字（按不批处理）；`model` 载体、过期、出错时为 null。本机任何进程都能发出其中任何一种。
+`"button"` 带着卡片按钮的 id（Paseo App、IM 卡片会带），`"no-button"` 没带（`paseo permit`、到期替人拒绝），
+`"typed"` 卡片挂着时有人在对话里打了字（按不批处理）；`model` 载体、过期、出错时为 null（中断判 `error`，也是 null）。
+本机任何进程都能发出其中任何一种，所以它挡不住有意伪造；flow 可以用它挡"顺手用命令行批了"，例如写盘只认 `button`。
 
 `reason`：`expired`、`error` 时是运行时确知的原因；`denied` 时，`typed` 是人在对话里打的那句话，`no-button`
 是应答里带的消息（例如 `permit deny --message`、到期时运行时自己的说明），`button` 为 null（App 的拒绝按钮只发
@@ -175,7 +189,9 @@
 | `"gate timeout"` | `expired`：到期没人应答，运行时替人拒绝 |
 | `"nobody (gate lost sight of the request)"` | `error`：轮询 agent 状态连续失败，不知道发生了什么 |
 | `"nobody (no card was raised)"` | `error`：内容太长，`model` 载体的 prompt 超限，卡片没起 |
-| `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，`provider` 载体没起卡（请求文件对不上）或没留下应答记录，`model` 载体没提出写入（`reason` 里带着它说的话）或读不到它的 tool 记录 |
+| `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，或者运行时收尾时自己发的拒绝；`provider` 载体没起卡（请求文件对不上）或没留下应答记录；`model` 载体没有写回执路径（`reason` 里带着它说的话）或读不到它的 tool 记录 |
+| `"nobody (the carrier was interrupted)"` | `error`（后加）：卡片被中断关闭，没有裁决 |
+| `"nobody (the receipt and the answer record disagree)"` | `error`（后加）：`provider` 载体有回执，应答记录却不是 `allow`（缺失、出错或是拒绝），`reason` 写明记的是什么 |
 
 ### `caveat`
 
@@ -212,6 +228,6 @@
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
   目前后加的：`call.start.headline`（`ask`）、`run.end.summary`，缺省都是 null。人闸的 `call.start.carrier`
-  等 6 个字段和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
+  等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

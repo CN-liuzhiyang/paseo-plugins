@@ -38,11 +38,21 @@ const sha256 = (text: string) => createHash("sha256").update(text, "utf8").diges
 /** The runtime's "same content": line endings and trailing newlines aside (gate.mjs `canonical`). */
 export const contentDigest = (content: string) => sha256(content.replace(/\r\n/g, "\n").replace(/\n+$/, ""));
 
-/** `request: <path>` and `sha256: <hex>` lines of the carrier's prompt, or null. */
+const XML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'" };
+
+/**
+ * The carrier's prompt is exactly three lines -- `人闸 <callId> · 运行 <runId>：<title>`, `request: <path>`,
+ * `sha256: <hex>` (gate.mjs prepareGate, which keeps the title to one line) -- or null. Nothing before,
+ * between or after: a pointer cannot be slipped in through the title. When the run was started from
+ * inside another agent's session, Paseo hands the prompt over wrapped as that agent's message
+ * (`<paseo-system ...>` ... `</paseo-system>`, its text XML-escaped); that wrapper is taken off first.
+ */
 export function parsePointer(prompt: string): { path: string; sha256: string } | null {
-  const file = /^request: (.+)$/m.exec(prompt)?.[1]?.trim();
-  const hash = /^sha256: ([0-9a-f]{64})$/m.exec(prompt)?.[1];
-  return file && hash ? { path: file, sha256: hash } : null;
+  let text = prompt.replace(/\r\n/g, "\n").trim();
+  const envelope = /^<paseo-system(?:\s+[a-z-]+="[^"<>]*")*>\n([\s\S]*)\n<\/paseo-system>$/.exec(text);
+  if (envelope) text = envelope[1].replace(/&(amp|lt|gt|quot|apos|#39);/g, (_, name: string) => XML_ENTITIES[name]).trim();
+  const lines = /^人闸 [^\n]*\nrequest: ([^\n]+)\nsha256: ([0-9a-f]{64})$/.exec(text);
+  return lines ? { path: lines[1].trim(), sha256: lines[2] } : null;
 }
 
 const isString = (value: unknown): value is string => typeof value === "string";
