@@ -509,6 +509,23 @@ test("requestApproval: a carrier that still reads idle just after it started is 
   const decision = await requestApproval(io, gate, { pollMs: 5, startupGraceMs: 2_000 });
   assert.equal(decision.outcome, "allowed");
 
+  // The grace counts from when spawn returned: a spawn slower than the whole grace still gets it.
+  const slow = await prepared("provider");
+  const after = ["idle", "running"];
+  const slowIo = {
+    ...ioDoing(async () => {}),
+    spawn: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      return "carrier-1";
+    },
+    inspect: async () => {
+      const status = after.shift() ?? "idle";
+      if (status === "running") await carryAs("approve", slow.prompt, {});
+      return { status };
+    },
+  };
+  assert.equal((await requestApproval(slowIo, slow, { pollMs: 5, startupGraceMs: 100 })).outcome, "allowed");
+
   // After the grace, idle with nothing written is the end, as before.
   const late = await prepared("provider");
   const none = await requestApproval(ioDoing(async () => {}), late, { pollMs: 5, startupGraceMs: 20 });
@@ -721,7 +738,7 @@ test("requestApproval: denials nobody made -- the script's own close-out, an int
 });
 
 test("requestApproval: what the provider recorded decides nothing without a receipt", async () => {
-  // An answer record that says allow, and no receipt: not approved.
+  // An answer record that says allow, and no receipt: not approved, and the reason says which half is missing.
   const lying = await prepared("provider");
   const said = await requestApproval(
     ioDoing(() => writeFile(lying.answerPath, JSON.stringify({ behavior: "allow", via: "button" }), "utf8")),
@@ -730,7 +747,8 @@ test("requestApproval: what the provider recorded decides nothing without a rece
   );
   assert.equal(said.approved, false);
   assert.equal(said.outcome, "error");
-  assert.equal(said.by, "nobody (the carrier ended without an answer)");
+  assert.equal(said.reason, "an allow was recorded but the receipt was not written");
+  assert.equal(said.by, "nobody (the receipt and the answer record disagree)");
 
   // A request file changed after the runtime wrote it: the provider refuses to ask.
   const tampered = await prepared("provider");

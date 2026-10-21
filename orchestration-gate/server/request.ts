@@ -124,6 +124,9 @@ export async function readRequest(prompt: string): Promise<GateRequest> {
     throw new RequestError(`the request is not a v1 gate request${missing.length > 0 ? ` (missing ${missing.join(", ")})` : ""}`, answerPath);
   }
   const request = parsed as GateRequest;
+  // Both go into the receipt's second line as they are; a line break would add a line of the caller's choosing.
+  const broken = (["runId", "callId"] as const).filter((key) => /[\r\n\u0085\u2028\u2029]/.test(request[key]));
+  if (broken.length > 0) throw new RequestError(`the request's ${broken.join(" and ")} must be one line`, answerPath);
   if (request.callId !== callId) throw new RequestError(`the request names call ${request.callId}, but its file is named for ${callId}`, answerPath);
   if (!sameFile(request.answerPath, answerPath)) throw new RequestError(`the answer path must be ${answerPath}, next to the request`, answerPath);
   if (!insideDir(dir, request.receiptPath) || !request.receiptPath.endsWith(".receipt.txt")) {

@@ -232,6 +232,9 @@ test("the request decides nothing about where the provider writes: elsewhere, an
     ["an answer path elsewhere", () => ({ answerPath: path.join(outside, "c3.answer.json") }), /answer path must be/],
     ["receipt text of its own", () => ({ receipt: "ssh-rsa AAAA # anything" }), /receipt is not the one the title, run, call and sha256 give/],
     ["a call id that is not the file's", () => ({ callId: "c9" }), /names call c9, but its file is named for c3/],
+    // The receipt's second line takes both as they are: a line break would add a line of the request's choosing.
+    ["a run id over two lines", () => ({ runId: "run-1\nssh-rsa AAAA" }), /runId must be one line/],
+    ["a call id with a lone carriage return", () => ({ callId: "c3\rssh-rsa AAAA" }), /callId must be one line/],
   ];
   for (const [name, override, error] of cases) {
     const base = await gateFiles();

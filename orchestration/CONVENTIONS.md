@@ -484,6 +484,8 @@ flow 要停下来等人拍板时，用 `$.gate({ title, content, name, summary, 
 没有文件则按情况判 `denied` / `expired` / `error`（见 EVENTS.md）。真正的写入由脚本随后用 `$.do` 自己做，写的是脚本
 手里的原文。回执里的 sha256 指认的是这份原文，但不计换行符差异和结尾换行。核对落盘文件的字节，要用 `call.start.bytesSha256`。
 载体只是载体，不是写入方。`holdPath` 要以 `.receipt.txt` 结尾，同一次运行里两个人闸不能共用。
+这一条是第二个人闸开始时才查的：`holdPath` 往往在运行中才算出来，`check` 和开跑前查不了，所以前面已经花的钱照花。
+在同一次运行里给多个人闸显式写 `holdPath` 时，自己保证路径各不相同。
 
 载体由角色 `gate` 决定，有两种：
 

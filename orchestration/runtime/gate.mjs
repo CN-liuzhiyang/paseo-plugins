@@ -323,6 +323,10 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
   if (requestPath) await writeFile(requestPath, requestText, "utf8");
 
   const agentId = await io.spawn(prompt);
+  // The grace counts from here, not from askedAt: on a slow machine starting the
+  // carrier can take most of it, and the first poll would then read the idle of
+  // an agent that has not begun as one that is done.
+  const spawnedAt = Date.now();
 
   // A two-hour wait is hundreds of CLI calls; one that fails (a daemon
   // restart) must not end the gate. Several in a row do.
@@ -346,7 +350,7 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
     status = detail?.status ?? null;
     if (status !== "idle") started = true;
     // Idle before it was ever seen at work, with nothing written yet: not finished, not started.
-    if (status === "idle" && !started && Date.now() - askedAt < startupGraceMs && !(await exists(holdPath)) && !(await exists(answerPath))) {
+    if (status === "idle" && !started && Date.now() - spawnedAt < startupGraceMs && !(await exists(holdPath)) && !(await exists(answerPath))) {
       await sleep(pollMs);
       continue;
     }
@@ -429,6 +433,12 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
       answeredVia: via,
       reason: typeof words === "string" && words.trim() !== "" ? words.trim().slice(0, 2000) : null,
     });
+  }
+
+  // An allow on record but no receipt: the provider records the answer first, so
+  // it was stopped, or failed to create the receipt, in between.
+  if (carrier === "provider" && answer?.behavior === "allow") {
+    return decision({ ...base, outcome: "error", reason: "an allow was recorded but the receipt was not written", by: RECORDS_DISAGREE });
   }
 
   // No receipt and no answer: a carrier that was closed, failed, or (the
