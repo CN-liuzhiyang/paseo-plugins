@@ -616,7 +616,12 @@ test("requestApproval: a carrier closed or failed without a receipt is an error,
   for (const status of ["closed", "error"]) {
     const gate = await prepared("model");
     const denials = [];
-    const io = { ...ioDoing(async () => {}, status), deny: async (id) => denials.push(id) };
+    // It had asked -- a card was up -- and then it was closed or failed: still nobody said no.
+    const io = {
+      ...ioDoing(async () => {}, status),
+      deny: async (id) => denials.push(id),
+      transcript: async (_, { filter }) => (filter === "tools" ? `[Write] ${gate.holdPath}` : ""),
+    };
     const decision = await requestApproval(io, gate, { pollMs: 5 });
     assert.equal(decision.outcome, "error", status);
     assert.equal(decision.by, "nobody (the carrier ended without an answer)");
