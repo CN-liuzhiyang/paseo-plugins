@@ -150,6 +150,17 @@ test("deny: no receipt; button, command line, typed reply and interrupt each say
     for (const [key, value] of Object.entries(expected)) assert.equal(recorded[key], value, `${name}: ${key}`);
     assert.ok(h.events.some((e) => e.type === "session.permission_resolved"), name);
     assert.equal(h.turns().at(-1), "completed", name);
+    // Right after the answer the conversation says it was the verdict.
+    const said = h.events
+      .filter((e) => e.type === "timeline.item" && (e as { item: { type: string } }).item.type === "assistant_message")
+      .map((e) => (e as { item: { text: string } }).item.text)
+      .at(-1);
+    assert.ok(said?.startsWith("**已记为不批**"), `${name}: ${said}`);
+    assert.ok(said?.includes("什么都不会写入"), name);
+    if (name === "typed") {
+      assert.ok(said?.includes("被当作这个人闸的裁决，不是普通聊天"), said);
+      assert.ok(said?.endsWith("> 这个类的源文件不对"), said);
+    }
   }
 });
 

@@ -402,6 +402,8 @@ test("$.gate (provider carrier): the person approves a receipt that names the co
   assert.equal(request.sha256, start.sha256);
   assert.deepEqual(request.evidence, evidence);
   assert.equal(request.summary, "校验：✅ 2 项通过");
+  // "The box below" sent a person looking for a box in the card (2026-10-21).
+  assert.equal(request.help, "不批的话点「不批」；想说明理由，就在对话底部的消息框里写一句发出，按不批处理。1m 内没人处理按不批。");
   const announced = events.find((e) => e.kind === "call.agent");
   assert.equal(announced.agentId, approved.value.agentId, "the carrier is announced as soon as it is spawned");
   assert.ok(approved.caveats.some((c) => c.includes("answeredVia") && c.includes("weak signal")));
@@ -474,6 +476,7 @@ test("$.gate (model carrier): the prompt is for the person first; the carrier wr
   assert.ok(start.prompt.indexOf("checks passed") < start.prompt.indexOf("【证据】diff"));
   assert.ok(start.prompt.indexOf("【证据】diff") < start.prompt.indexOf("【待批全文】content.txt，1 行"));
   assert.ok(start.prompt.includes(`<<<RECEIPT\n${start.receipt}\nRECEIPT>>>`));
+  assert.ok(start.prompt.includes("不批的话点「Deny」；想说明理由，就在对话底部的消息框里写一句发出"), "a Write card's deny button is Deny");
 
   const copied = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "paraphrase" }), roster: modelGated() });
   assert.equal(copied.value.outcome, "mismatch", "a carrier that writes the content instead of the receipt fails closed");

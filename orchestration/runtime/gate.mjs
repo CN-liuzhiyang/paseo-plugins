@@ -69,9 +69,14 @@ export function receiptFor({ title, runId, callId, digest }) {
 
 const lineCount = (text) => (text === "" ? 0 : canonical(text).split("\n").length);
 
-/** The lines a card's description ends with, whoever the carrier is: what each answer does. */
-export const answerHelp = (timeout) =>
-  `不批的话可以点「不批」，也可以直接在下面输入框写理由发出（按不批处理）。${timeout} 内没人处理按不批。`;
+/**
+ * The line a card's description ends with: what each answer does. "The box
+ * below" read as a box in the card (2026-10-21, a person looked for one), so it
+ * names the message box at the bottom of the conversation. `deny` is the deny
+ * button's label: 不批 on the provider's card, Deny on a Write card.
+ */
+export const answerHelp = (timeout, deny = "不批") =>
+  `不批的话点「${deny}」；想说明理由，就在对话底部的消息框里写一句发出，按不批处理。${timeout} 内没人处理按不批。`;
 
 // Under COMMAND_LINE_BUDGET (paseo-cli.mjs) with room for the rest of the
 // command line. Only the model carrier's prompt carries the content; the
@@ -95,7 +100,7 @@ export function carrierPrompt(gate, limit = CARRIER_PROMPT_LIMIT) {
     [
       `【要你决定】${title}`,
       ...(summary.trim() === "" ? [] : [summary.trim()]),
-      `批准：允许下面卡片里这次写入（Accept）。${answerHelp(timeout)}`,
+      `批准：允许下面卡片里这次写入（Accept）。${answerHelp(timeout, "Deny")}`,
       ...(keptBrief.trim() === "" ? [] : ["", keptBrief.trim()]),
       ...keptEvidence.flatMap((e) => ["", `【证据】${e.label}`, e.text]),
       "",

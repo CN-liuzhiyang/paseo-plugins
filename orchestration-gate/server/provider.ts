@@ -153,6 +153,31 @@ export function viaOf(response: ProviderPermissionResponse): "button" | "no-butt
   return response.selectedActionId === own ? "button" : "no-button";
 }
 
+/**
+ * What the conversation says right after an answer: that it was taken as the
+ * gate's verdict, and what happens next. A person who typed a line did not
+ * know it would close the card (2026-10-21: "居然还能这样"), so a typed reply
+ * is told, in so many words, that it was read as a no rather than as chat.
+ */
+export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, receiptPath: string): string {
+  if (answer.behavior === "allow") {
+    const how = answer.via === "button" ? "你点了卡片上的「批准」" : "这次批准没有经过卡片按钮（例如命令行）";
+    return `**已记为批准**（${how}）。回执已写到 \`${receiptPath}\`，脚本核对回执后写入。`;
+  }
+  const quote = (text: string) => `\n\n> ${text.replace(/\n/g, "\n> ")}`;
+  if (answer.via === "typed") {
+    return (
+      "**已记为不批**：你在对话里发的这句话被当作这个人闸的裁决，不是普通聊天。卡片已关闭，脚本按不批处理，什么都不会写入。" +
+      (answer.typed ? `\n\n理由：${quote(answer.typed)}` : "")
+    );
+  }
+  if (answer.via === "button") return "**已记为不批**（你点了卡片上的「不批」）。卡片已关闭，脚本按不批处理，什么都不会写入。";
+  return (
+    "**已记为不批**（这次没有经过卡片按钮，例如命令行、到期、中断）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
+    (answer.message ? quote(answer.message) : "")
+  );
+}
+
 const promptText = (input: Extract<ProviderInput, { type: "session.prompt" }>) =>
   input.prompt.input.type === "message"
     ? input.prompt.input.content
@@ -202,16 +227,8 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
       emit({ type: "session.turn", sessionId, turnId, state: "failed", error: { message: failure } });
       return;
     }
-    session.outcome = answer.behavior === "allow" ? "批准" : "未批准";
-    const how = answer.via === "typed" ? "在对话里回复了" : answer.via === "button" ? "点了卡片按钮" : "没有经过卡片按钮（例如命令行）";
-    const words = answer.typed ?? (answer.via === "no-button" ? answer.message : null);
-    say(
-      sessionId,
-      `answer-${turnId}`,
-      answer.behavior === "allow"
-        ? `已批准（${how}）。回执已写到 \`${request.receiptPath}\`，脚本核对回执后写入。`
-        : `未批准（${how}）。${words ? `\n\n> ${words.replace(/\n/g, "\n> ")}` : ""}`,
-    );
+    session.outcome = answer.behavior === "allow" ? "批准" : "不批";
+    say(sessionId, `answer-${turnId}`, verdictText(answer, request.receiptPath));
     emit({ type: "session.turn", sessionId, turnId, state: "completed" });
   }
 
