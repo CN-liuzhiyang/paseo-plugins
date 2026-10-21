@@ -18,6 +18,7 @@ import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fenceFor } from "../runtime/fences.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
+import { parseConfig } from "../runtime/config.mjs";
 import { requestApproval, prepareGate, carrierPrompt, wroteHold } from "../runtime/gate.mjs";
 import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
@@ -1211,6 +1212,13 @@ test("a run on another host needs a directory there, and cannot gate yet", async
     runFlow(flow({ name: "remote-gate", description: "d", phases: [], inputs: {}, grants: ["gate:deny"], run: async () => null }), { roster, logDir, caller: null, host: "ssh://mac", cwd: "/Users/me", executor: fakeExecutor() }),
     (error) => error instanceof RunRefused && /gate on another host/.test(error.message),
   );
+  // A pairing URL is a credential: it has to be named in config.json, never recorded.
+  await assert.rejects(
+    runFlow(f, { roster, logDir, caller: null, host: "https://app.paseo.sh/#offer=abc", cwd: "/Users/me", executor: fakeExecutor() }),
+    (error) => error instanceof RunRefused && /pairing URL is a credential/.test(error.message),
+  );
+  assert.deepEqual(parseConfig('{"hosts":{"home":"https://app.paseo.sh/#offer=abc"}}', "x").hosts, { home: "https://app.paseo.sh/#offer=abc" });
+  assert.throws(() => parseConfig('{"hosts":{"home":""}}', "x"), /"hosts" has the wrong shape/);
   const result = await runFlow(f, { roster, logDir, caller: null, host: "ssh://mac", cwd: "/Users/me", executor: fakeExecutor() });
   assert.equal(result.ok, true);
   const start = eventsOf(result).find((e) => e.kind === "run.start");

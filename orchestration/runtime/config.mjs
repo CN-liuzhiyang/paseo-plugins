@@ -6,8 +6,13 @@
 //   {
 //     "paseoInstallDir": "C:\\Users\\me\\AppData\\Local\\Programs\\Paseo",
 //     "rolesDirs": ["D:\\private\\roles"],
-//     "logDir": "D:\\private\\logs"
+//     "logDir": "D:\\private\\logs",
+//     "hosts": { "build-box": "ssh://me@build-box", "home": "https://app.paseo.sh/#offer=..." }
 //   }
+//
+// `hosts` names the daemons `orch.mjs run --host <name>` can reach. A pairing
+// URL is a credential -- whoever holds it can drive that daemon -- so it lives
+// here and runs record only the name.
 //
 // Every key is optional; a missing file means all defaults. Parsing is strict
 // for the same reason roles are: a misspelled key that is silently ignored is a
@@ -25,6 +30,8 @@ const KEYS = {
   paseoInstallDir: (v) => typeof v === "string" && v.length > 0,
   rolesDirs: (v) => Array.isArray(v) && v.every((d) => typeof d === "string" && d.length > 0),
   logDir: (v) => typeof v === "string" && v.length > 0,
+  hosts: (v) =>
+    v !== null && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((e) => typeof e === "string" && e.length > 0),
 };
 
 /** Parse one config document. Throws naming the file on anything unexpected. */
@@ -73,4 +80,20 @@ export function loadConfig() {
  */
 export function logDir() {
   return process.env.ORCH_LOG_DIR ?? loadConfig().logDir ?? path.join(CONFIG_HOME, "logs");
+}
+
+/**
+ * A run's --host: a name from `hosts` in config.json, or an endpoint given
+ * as is. Returns what Paseo connects to and what the run records. A pairing
+ * URL given directly is refused, so that it never lands in an events file.
+ *
+ * @returns {{ endpoint: string, label: string }}
+ */
+export function resolveHost(host) {
+  const hosts = loadConfig().hosts ?? {};
+  if (Object.hasOwn(hosts, host)) return { endpoint: hosts[host], label: host };
+  if (host.includes("#offer=")) {
+    throw new Error(`--host: a pairing URL is a credential; name it under "hosts" in ${path.join(CONFIG_HOME, "config.json")} and pass the name`);
+  }
+  return { endpoint: host, label: host };
 }

@@ -465,18 +465,21 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 
 ## 跨机：整次运行派到另一台主机
 
-`orch.mjs run <flow> --host <host> --cwd <dir>`：`<host>` 是 `paseo --host` 认的任何形式（`ssh://user@box`
-最省事，CLI 自己开隧道），`<dir>` 是那台机器上的目录，带 `--host` 时必填（本进程的目录是本机路径）。
-运行器、事件流、日志留在本机，每个 `$.ask` 的 agent 都在那台机器上跑。2026-10-21 第一次实测跑通
-（Windows 编排方 → macOS daemon）。
+`orch.mjs run <flow> --host <host> --cwd <dir>`：`<host>` 是 config.json 里 `hosts` 的名字，或 `paseo --host`
+认的任何形式（`ssh://user@box` 最省事，CLI 自己开隧道）；`<dir>` 是那台机器上的目录，带 `--host` 时必填
+（本进程的目录是本机路径）。运行器、事件流、日志留在本机，每个 `$.ask` 的 agent 都在那台机器上跑。
+2026-10-21 实测跑通两条路：SSH 到一台 macOS daemon，relay 配对链接到一台 Windows daemon。
 
+- **配对链接是凭据**（`https://app.paseo.sh/#offer=...`，拿到就能操作那台 daemon），只能写进 `hosts`、经名字用；
+  直接传给 `--host` 会被拒绝，事件里只记名字。连不上 SSH 的机器只能走它。
 - **只能整次运行派过去**，`$.ask` 还不能按步选主机。
 - **带人闸的 flow 会被拒绝**：`$.gate` 的回执和 hold 文件是本机路径，载体跑到别的主机上会写到那边去。
 - **两边版本要对齐。** 本机 CLI 比远端 daemon 新时，按 label 找回 agent 用的 `ls -a` 会报
   `Update the host to use background workspaces.`（上游 0.12 的 CLI 对 0.11 的 daemon），运行照常成功，
-  但事件里 `agentId`、`cost` 都是 null。
+  但事件里 `agentId`、`cost` 都是 null。同版本时都拿得到。
 - **角色钉的模型要在远端也有**：roster 只在本机解析，远端 provider 的模型列表可能不一样（实测远端
   Codex CLI 较旧时缺新模型），用 `paseo --host <host> provider models <provider>` 先核对。
+- **经 relay 测连通别用 `paseo status`**：它的连接超时约 2 秒，relay 建连要 2–5 秒，必然报超时；用 `ls`。
 - 运行视图里点开的 agent 在远端，要在 Paseo App 里切到那台主机看。
 
 ## 人闸：`$.gate`

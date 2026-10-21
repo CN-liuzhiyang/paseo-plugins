@@ -67,7 +67,8 @@ const result = await runFlow("/abs/path/flows/advisor.mjs", { input: { question,
 {
   "paseoInstallDir": "C:/Users/me/AppData/Local/Programs/Paseo",
   "rolesDirs": ["D:/private/roles"],
-  "logDir": "D:/private/logs"
+  "logDir": "D:/private/logs",
+  "hosts": { "build-box": "ssh://me@build-box", "home": "https://app.paseo.sh/#offer=..." }
 }
 ```
 
@@ -76,6 +77,7 @@ const result = await runFlow("/abs/path/flows/advisor.mjs", { input: { question,
 | `paseoInstallDir` | `%LOCALAPPDATA%\Programs\Paseo` | fork 构建或第二份安装在别处时指过去 |
 | `rolesDirs` | 无 | 私有角色（内部中转、公司模型）放在自己的仓库里，这里加进来。和自带角色重名直接报错，不做覆盖 |
 | `logDir` | `~/.paseo-orchestration/logs` | 事件文件在 `<logDir>/runs/<runId>.jsonl`，里面是完整的 prompt 和 agent 输出，所以默认就不在任何 checkout 里 |
+| `hosts` | 无 | `orch.mjs run --host <名字>` 能派到的 daemon。值是 `paseo --host` 认的任何形式；配对链接是凭据，只能经名字用，运行只记名字 |
 
 解析是严格的：未知键、类型不对都直接报错。`ORCH_CONFIG` 指向另一个文件；老的环境变量
 `PASEO_INSTALL_DIR`、`ORCH_LOG_DIR` 仍然优先于文件。

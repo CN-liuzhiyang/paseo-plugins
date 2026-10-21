@@ -24,7 +24,7 @@ import { fenceFor } from "./fences.mjs";
 import { EventLog } from "./events.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest } from "./gate.mjs";
-import { logDir as configuredLogDir } from "./config.mjs";
+import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
 export const DEFAULT_CALL_TIMEOUT = "30m";
@@ -178,7 +178,16 @@ export async function runFlow(target, options = {}) {
     }
     if (timeoutMs <= 0 || timeoutMs > MAX_TIMEOUT_MS) throw new RunRefused(`--timeout: ${options.timeout} is out of range (1s to 596h)`);
   }
-  const host = options.host ?? null;
+  // What the run records is the name; what Paseo connects to may be a credential.
+  let remote = null;
+  if (options.host) {
+    try {
+      remote = resolveHost(options.host);
+    } catch (error) {
+      throw new RunRefused(error.message);
+    }
+  }
+  const host = remote?.label ?? null;
   if (host) {
     // This process's directory is a path on this machine; another host's
     // agents need one on theirs.
@@ -195,7 +204,7 @@ export async function runFlow(target, options = {}) {
       throw new RunRefused(`cannot load roles: ${error.message}`);
     }
   }
-  const executor = options.executor ?? paseoExecutor({ host: options.host ?? null });
+  const executor = options.executor ?? paseoExecutor({ host: remote?.endpoint ?? null });
   const grants = [...DEFAULT_GRANTS, ...f.grants];
   // A flow that can gate needs its carrier before the first spend: finding out
   // at the gate would throw away every paid step before it.
