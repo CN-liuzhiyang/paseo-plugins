@@ -27,7 +27,21 @@ const TABS: Array<[Tab, string]> = [
 
 const DRAWER_WIDTH = 380;
 
-export function RunDetail({ runId, initialSelect = null, onBack }: { runId: string; initialSelect?: string | null; onBack(): void }) {
+export function RunDetail({
+  runId,
+  initialSelect = null,
+  onBack,
+  onPick,
+  action,
+}: {
+  runId: string;
+  initialSelect?: string | null;
+  onBack(): void;
+  /** Told whenever the person selects a node, so the place can be kept. */
+  onPick?(key: string): void;
+  /** Shown beside the back link: another place to open this run. */
+  action?: ReactNode;
+}) {
   const ui = useUi();
   const snap = useRun(runId);
   const run = snap.run;
@@ -44,9 +58,10 @@ export function RunDetail({ runId, initialSelect = null, onBack }: { runId: stri
   const select = useCallback(
     (key: string) => {
       setPicked(key);
+      onPick?.(key);
       if (ui.compact) setDrawerOpen(true);
     },
-    [ui.compact],
+    [ui.compact, onPick],
   );
 
   const ready = snap.loaded && (run.start !== null || run.eventCount > 0);
@@ -67,15 +82,18 @@ export function RunDetail({ runId, initialSelect = null, onBack }: { runId: stri
 
   const main = (
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
-      <Pressable
-        accessibilityRole="button"
-        accessibilityLabel="返回运行列表"
-        onPress={onBack}
-        style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" }}
-      >
-        <Icon name="ArrowLeft" size={16} color={ui.theme.colors.foregroundMuted} />
-        <Text style={ui.styles.muted}>全部运行</Text>
-      </Pressable>
+      <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="返回运行列表"
+          onPress={onBack}
+          style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" }}
+        >
+          <Icon name="ArrowLeft" size={16} color={ui.theme.colors.foregroundMuted} />
+          <Text style={ui.styles.muted}>全部运行</Text>
+        </Pressable>
+        {action}
+      </View>
       <Notices snap={snap} />
       {!snap.loaded ? <Text style={ui.styles.muted}>正在读取……</Text> : null}
       {ready ? (
