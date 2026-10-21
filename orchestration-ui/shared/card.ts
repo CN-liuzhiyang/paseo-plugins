@@ -63,6 +63,11 @@ export function isFinished(status: RunStatus): boolean {
   return status !== "running" && status !== "starting" && status !== "lost";
 }
 
+/** Nothing more will happen: finished, or lost with its process known to be gone. */
+export function isOver(card: Pick<RunCard, "status" | "lost">): boolean {
+  return isFinished(card.status) || (card.status === "lost" && card.lost?.procGone === true);
+}
+
 /** Null until run.start has been read. */
 export function cardOf(
   runId: string,

@@ -68,7 +68,7 @@ export function RunsSurface(props: PluginScreenProps & { actions: SurfaceActions
       {runId === null ? (
         <RunList host={props.host.label} onOpen={open} onSettings={actions.openSettings} />
       ) : (
-        <OneRun key={runId} runId={runId} node={props.params.node ?? null} actions={actions} onBack={() => open(null)} />
+        <OneRun key={`${runId}:${props.params.node ?? ""}`} runId={runId} node={props.params.node ?? null} actions={actions} onBack={() => open(null)} />
       )}
     </UiProvider>
   );

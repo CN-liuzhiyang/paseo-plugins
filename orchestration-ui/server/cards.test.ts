@@ -298,6 +298,16 @@ test("feed: after a restart, runs that ended a while ago get no card; recent one
   assert.equal(recent.last().status, "done");
 });
 
+test("feed: after a restart, a run that died long ago without run.end gets no card", async () => {
+  const h = harness({ alive: false });
+  h.start();
+  h.emit("phase.start", { phase: "a" });
+  h.advance(RECENT_END_MS * 2);
+  await h.feed.scan();
+  assert.equal(h.appended.length, 0);
+  assert.deepEqual(h.feed.following(), []);
+});
+
 test("feed: files untouched for a day are not looked at", async () => {
   const h = harness();
   h.start();

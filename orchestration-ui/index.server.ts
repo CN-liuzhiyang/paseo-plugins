@@ -46,20 +46,23 @@ export default function contribute(server: PluginServerContext) {
     : null;
   if (!paseo) log(NO_TIMELINE);
 
-  let stopFeed: (() => void) | null = null;
+  let running: ReturnType<typeof startCardFeed> | null = null;
+  let disposed = false;
   let cards: CardsState = { state: "unavailable", detail: NO_TIMELINE };
   const applySettings = async () => {
     if (!feed) return;
     const values = await current();
-    if (values.cards && !stopFeed) {
-      stopFeed = startCardFeed(feed, { log });
+    // Stopped while the settings were read: starting now would leave timers nobody stops.
+    if (disposed) return;
+    if (values.cards) {
+      if (running) running.rescan(); // logDir may have changed.
+      else running = startCardFeed(feed, { log });
       cards = { state: "on", detail: "" };
-    } else if (!values.cards && stopFeed) {
-      stopFeed();
-      stopFeed = null;
+    } else {
+      running?.stop();
+      running = null;
+      cards = { state: "off", detail: "设置里关掉了：新的运行不再往发起对话里贴卡片。" };
     }
-    if (!values.cards) cards = { state: "off", detail: "设置里关掉了：新的运行不再往发起对话里贴卡片，已经贴出的停在最后一次的样子。" };
-    else void feed.scan(); // logDir may have changed.
   };
   void applySettings();
   const unsubscribe = settings.subscribe(() => applySettings());
@@ -91,7 +94,8 @@ export default function contribute(server: PluginServerContext) {
   });
 
   server.handle(readCardRpc, async ({ runId }) => {
-    const followed = feed?.card(runId);
+    // Only while the feed runs: a stopped feed keeps its last cards, which would never change again.
+    const followed = running ? feed?.card(runId) : null;
     if (followed) return { state: "ok" as const, detail: "", card: followed };
     const { resolved, staleMs } = await where();
     if (!resolved.ok) return { state: "config" as const, detail: resolved.detail, card: null };
@@ -111,7 +115,9 @@ export default function contribute(server: PluginServerContext) {
   });
 
   return () => {
+    disposed = true;
     unsubscribe();
-    stopFeed?.();
+    running?.stop();
+    running = null;
   };
 }

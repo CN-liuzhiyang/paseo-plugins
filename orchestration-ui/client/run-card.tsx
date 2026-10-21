@@ -2,7 +2,7 @@ import { useRpc, useAgent, type PluginTimelineItemProps } from "@getpaseo/plugin
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
-import { isFinished, type RunCard } from "../shared/card";
+import { isFinished, isOver, type RunCard } from "../shared/card";
 import { formatDuration, formatTime, formatUsd } from "../shared/format";
 import { readCardRpc } from "../shared/rpc";
 import { ms } from "../shared/run";
@@ -37,7 +37,7 @@ function useLiveCard(initial: RunCard): Freshness {
   const [fetched, setFetched] = useState<RunCard | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const card = newer(initial, fetched);
-  const live = !isFinished(card.status);
+  const live = !isOver(card);
   useEffect(() => {
     if (!live) return;
     let cancelled = false;
@@ -103,7 +103,7 @@ function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string
   const ui = useUi();
   const c = ui.theme.colors;
   const { card, failed } = useLiveCard(initial);
-  const live = !isFinished(card.status);
+  const live = !isOver(card);
   const now = useNow(live);
   const workspaceId = useAgent(agentId, (agent) => agent.workspaceId);
   const tone = ui.tone(card.tone);

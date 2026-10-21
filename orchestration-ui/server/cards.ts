@@ -1,7 +1,7 @@
 import { watch as fsWatch } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { CARD_KIND, CARD_VERSION, cardItemId, cardKey, cardOf, isFinished, urgentChange, type RunCard } from "../shared/card";
+import { CARD_KIND, CARD_VERSION, cardItemId, cardKey, cardOf, isOver, urgentChange, type RunCard } from "../shared/card";
 import { applyEvent, createRun, foldEvents, runStatus, type RunState } from "../shared/run";
 import { checkProcess, localProbe, type Probe } from "./alive";
 import { readFrom, readHeadLine, readTailLines } from "./lines";
@@ -167,7 +167,9 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
       return;
     }
     // Look at the process before reading: one that wrote run.end and exited is then fully read.
-    const proc = entry.run.end ? null : checkProcess(entry.run.start, probe);
+    // On the first look run.start is not read yet, so look after (the next recheck settles a race).
+    const first = entry.run.start === null;
+    let proc = entry.run.end ? null : checkProcess(entry.run.start, probe);
     while (entry.offset < info.size) {
       const chunk = await readFrom(entry.file, entry.offset, 4 << 20);
       for (const line of chunk.lines) {
@@ -177,6 +179,7 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
       entry.offset = chunk.nextOffset;
       if (!chunk.more) break;
     }
+    if (first) proc = entry.run.end ? null : checkProcess(entry.run.start, probe);
     const at = now();
     const status = runStatus(entry.run, at, staleMs, entry.run.end ? null : proc);
     entry.card = cardOf(entry.runId, entry.run, status, at, { proc: entry.run.end ? null : proc });
@@ -187,6 +190,16 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
     const card = entry.card;
     if (!card) return;
     const at = now();
+    const over = isOver(card);
+    const endedAt = Date.parse(card.endedAt ?? card.lastEventAt ?? "");
+    const longOver = over && Number.isFinite(endedAt) && at - endedAt > RECENT_END_MS;
+    // First seen long after it ended (a run that died without run.end, found after a restart):
+    // a card now would land at the bottom of the conversation as if it had just happened.
+    if (entry.sent === null && longOver) {
+      tracked.delete(entry.runId);
+      settled.add(entry.runId);
+      return;
+    }
     const fresh = entry.sent === null || cardKey(entry.sent) !== cardKey(card);
     if (fresh && at >= entry.retryAt && (urgentChange(entry.sent, card) || at - entry.sentAt >= SPACING_MS)) {
       try {
@@ -207,11 +220,8 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
         }
       }
     }
-    const over = isFinished(card.status) || (card.status === "lost" && card.lost?.procGone === true);
     const delivered = entry.sent !== null && cardKey(entry.sent) === cardKey(card);
-    const endedAt = Date.parse(card.endedAt ?? card.lastEventAt ?? "");
-    const gaveUp =
-      (over && Number.isFinite(endedAt) && at - endedAt > RECENT_END_MS) || at - entry.firstSeen > HORIZON_MS;
+    const gaveUp = longOver || at - entry.firstSeen > HORIZON_MS;
     if ((over && delivered) || gaveUp) {
       tracked.delete(entry.runId);
       settled.add(entry.runId);
@@ -321,9 +331,12 @@ export async function readCard(
 
 /**
  * Runs a feed: an initial scan, file events coalesced per run, a recheck of unfinished runs and
- * a slow rescan. Returns a stop function.
+ * a slow rescan. `rescan` looks at the directory now (after a settings change, say).
  */
-export function startCardFeed(feed: CardFeed, { log = () => {} }: { log?: (message: string) => void } = {}): () => void {
+export function startCardFeed(
+  feed: CardFeed,
+  { log = () => {} }: { log?: (message: string) => void } = {},
+): { stop(): void; rescan(): void } {
   let stopped = false;
   let watcher: ReturnType<typeof fsWatch> | null = null;
   let watching: string | null = null;
@@ -352,6 +365,7 @@ export function startCardFeed(feed: CardFeed, { log = () => {} }: { log?: (messa
         log(`cards: watching ${dir} failed (${String(error)}); the ${RESCAN_MS / 1000}s rescan still runs`);
         watcher?.close();
         watcher = null;
+        watching = null; // so the next rescan watches again
       });
     } catch (error) {
       // The directory may not exist yet: the rescan picks it up.
@@ -364,11 +378,14 @@ export function startCardFeed(feed: CardFeed, { log = () => {} }: { log?: (messa
   scan();
   const recheck = setInterval(() => void feed.recheck(), RECHECK_MS);
   const rescan = setInterval(scan, RESCAN_MS);
-  return () => {
-    stopped = true;
-    clearInterval(recheck);
-    clearInterval(rescan);
-    clearTimeout(flush);
-    watcher?.close();
+  return {
+    stop() {
+      stopped = true;
+      clearInterval(recheck);
+      clearInterval(rescan);
+      clearTimeout(flush);
+      watcher?.close();
+    },
+    rescan: scan,
   };
 }
