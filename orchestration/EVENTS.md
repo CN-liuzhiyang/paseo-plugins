@@ -147,8 +147,9 @@
 `{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved, agentId, sha256, askedAt, decidedAt, waitedMs, reason, agentReport, by, agentStatusAtDecision, answeredVia }`。
 
 判定只看回执文件：与 `call.start.receipt` 相同（换行符统一、去掉结尾换行）判 `allowed`；有文件但不同判
-`mismatch`；没有文件时，到期判 `expired`，`provider` 载体记下了拒绝判 `denied`，载体被关掉、出错或者
-没留下应答记录就结束判 `error`（以前这种情况记成 `denied`）。`provider` 载体的应答记录（`<callId>.answer.json`）
+`mismatch`；没有文件时，到期判 `expired`，`provider` 载体记下了拒绝判 `denied`，`model` 载体提出过写入
+（它的 tool 记录里有调用）判 `denied`；载体被关掉、出错，没留下应答记录，或者 `model` 载体根本没提出写入（没起卡片）
+就结束，判 `error`（以前这几种情况记成 `denied`）。`provider` 载体的应答记录（`<callId>.answer.json`）
 只用来说明是怎么答的，它说"批了"而回执不在，不算批准。
 
 `answeredVia`（后加，之前的文件没有，按 null 处理）是应答方自己发来的东西，**弱信号，不是"谁"**：
@@ -174,7 +175,7 @@
 | `"gate timeout"` | `expired`：到期没人应答，运行时替人拒绝 |
 | `"nobody (gate lost sight of the request)"` | `error`：轮询 agent 状态连续失败，不知道发生了什么 |
 | `"nobody (no card was raised)"` | `error`：内容太长，`model` 载体的 prompt 超限，卡片没起 |
-| `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，`provider` 载体没起卡（请求文件对不上）或没留下应答记录 |
+| `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，`provider` 载体没起卡（请求文件对不上）或没留下应答记录，`model` 载体没提出写入（`reason` 里带着它说的话）或读不到它的 tool 记录 |
 
 ### `caveat`
 

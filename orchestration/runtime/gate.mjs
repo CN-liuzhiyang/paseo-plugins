@@ -201,6 +201,15 @@ async function carrierWords(io, agentId) {
   return said === NO_ACTIVITY ? "" : said.slice(-1000);
 }
 
+/**
+ * Whether the model carrier asked for anything at all: `paseo logs --filter tools` lists each tool call
+ * as "[Name] ...". A carrier that made none never put a card in front of anyone. Null when unreadable.
+ */
+async function carrierAsked(io, agentId) {
+  const tools = await io.transcript(agentId, { filter: "tools" }).catch(() => null);
+  return typeof tools === "string" ? /^\[[^\]\n]+\]/m.test(tools) : null;
+}
+
 /** The provider carrier's record of how it was answered; null when there is none, an error record when unreadable. */
 async function readAnswer(answerPath) {
   const text = await readFile(answerPath, "utf8").catch(() => null);
@@ -358,6 +367,18 @@ export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
   // provider) finished without recording one. Nobody is known to have said no.
   if (status === "error" || status === "closed" || carrier === "provider") {
     return decision({ ...base, outcome: "error", reason: `the carrier ended (${status ?? "unknown"}) without an answer`, by: CARRIER_ENDED });
+  }
+
+  // The model carrier finished without a receipt. It is a denial only if it
+  // asked: a model can decline to be the carrier (2026-10-21 probe: haiku, 1 in
+  // 10 read a ⚠ in the summary and would not "approve on the person's behalf";
+  // started from inside another agent's session, 2 in 2), and then nobody saw
+  // a card, let alone said no.
+  const asked = await carrierAsked(io, agentId);
+  if (asked !== true) {
+    const words = await carrierWords(io, agentId);
+    const why = asked === false ? "the carrier made no write, so no card was raised" : "the carrier's timeline could not be read, so whether a card was raised is unknown";
+    return decision({ ...base, outcome: "error", reason: words ? `${why}; it said: ${words}` : why, by: CARRIER_ENDED });
   }
 
   // The model carrier, denied: Paseo does not return the person's words to the

@@ -486,7 +486,7 @@ test("$.gate (model carrier): the prompt is for the person first; the carrier wr
   const denied = await run(gatedFlow("1m"), { executor: answered, roster: modelGated() });
   assert.equal(denied.value.outcome, "denied");
   assert.equal(denied.value.agentReport, "The write was denied.");
-  assert.deepEqual(answered.transcripts.map((t) => t.filter), ["assistant_message"]);
+  assert.deepEqual(answered.transcripts.map((t) => t.filter), ["tools", "assistant_message"], "it asked, then its words are kept");
 
   // An expiry: the script closed the card, nobody said anything, and the
   // carrier -- stuck on the card -- has not spoken. Nothing is asked for.
@@ -499,10 +499,25 @@ test("$.gate (model carrier): the prompt is for the person first; the carrier wr
   // A denial after which the carrier said nothing is an empty report, not
   // the CLI's "No activity to display." line.
   const silent = fakeExecutor({ carrier: "deny" });
-  silent.transcript = async () => "No activity to display.\n";
+  silent.transcript = async (_, { filter }) => (filter === "tools" ? "[Write] C:/x/c1.receipt.txt" : "No activity to display.\n");
   const quiet = await run(gatedFlow("1m"), { executor: silent, roster: modelGated() });
   assert.equal(quiet.value.outcome, "denied");
   assert.equal(quiet.value.agentReport, "");
+
+  // A model that declines to be the carrier makes no write: no card, so nobody said no.
+  const declined = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "decline" }), roster: modelGated() });
+  assert.equal(declined.value.outcome, "error");
+  assert.equal(declined.value.by, "nobody (the carrier ended without an answer)");
+  assert.equal(declined.value.reason, "the carrier made no write, so no card was raised; it said: 我不替你批这次写入。");
+  assert.equal(declined.value.agentReport, "");
+});
+
+test("requestApproval: a model carrier whose timeline cannot be read is not counted as a denial", async () => {
+  const gate = await prepared("model");
+  const io = { ...ioDoing(async () => {}), transcript: async () => Promise.reject(new Error("daemon gone")) };
+  const decision = await requestApproval(io, gate, { pollMs: 5 });
+  assert.equal(decision.outcome, "error");
+  assert.match(decision.reason, /could not be read/);
 });
 
 /** A gate prepared for requestApproval, in a fresh directory. */

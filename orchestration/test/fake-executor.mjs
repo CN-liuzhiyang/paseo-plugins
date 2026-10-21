@@ -16,6 +16,7 @@
 //   "typed"      provider only: the person typed a reply instead (`typed` is the text)
 //   "cli-deny"   provider only: denied without a button id, with `message`
 //   "paraphrase" the content is written in place of the receipt
+//   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
 // `providers` is what providerAvailable reports as available.
 
@@ -124,12 +125,17 @@ export function fakeExecutor({
     },
 
     // Like `paseo logs --filter`: "assistant_message" is what the agent said;
-    // "text" also has the prompt it was given and its thinking. A carrier
-    // that never got an answer (`hang`) has said nothing.
+    // "tools" lists its tool calls as "[Name] ..."; "text" also has the prompt
+    // it was given and its thinking. A carrier that never got an answer
+    // (`hang`) has said nothing; one that declined made no tool call.
     async transcript(agentId, { filter = "text" } = {}) {
       transcripts.push({ agentId, filter });
-      const said = carrier === "hang" ? "" : "The write was denied.";
+      const said = carrier === "hang" ? "" : carrier === "decline" ? "我不替你批这次写入。" : "The write was denied.";
       if (filter === "assistant_message") return said === "" ? "No activity to display." : said;
+      if (filter === "tools") {
+        const holdPath = /with file_path (.+) and the receipt/.exec(agents.get(agentId)?.request.prompt ?? "")?.[1];
+        return carrier === "decline" || !holdPath ? "No activity to display." : `[Write] ${holdPath}`;
+      }
       const prompt = agents.get(agentId)?.request.prompt ?? "";
       return [`[User] ${prompt}`, "[Thought] The user asks me to write a file.", said].filter(Boolean).join("\n");
     },
