@@ -15,6 +15,7 @@
 //   "deny"       nothing is written; the provider records a button deny
 //   "typed"      provider only: the person typed a reply instead (`typed` is the text)
 //   "cli-deny"   provider only: denied without a button id, with `message`
+//   "cli-allow"  provider only: allowed without a button id (`paseo permit allow`)
 //   "paraphrase" the content is written in place of the receipt
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
@@ -37,9 +38,9 @@ export async function carryAs(carrier, prompt, { typed, message }) {
     const record = (answer) => writeFile(request.answerPath, JSON.stringify(answer), "utf8");
     if (sha256(text) !== pointer[2]) return record({ error: "request file does not match its sha256" });
     await mkdir(path.dirname(request.receiptPath), { recursive: true });
-    if (carrier === "approve") {
-      await writeFile(request.receiptPath, request.receipt, "utf8");
-      return record({ behavior: "allow", via: "button", selectedActionId: "approve" });
+    if (carrier === "approve" || carrier === "cli-allow") {
+      await record(carrier === "approve" ? { behavior: "allow", via: "button", selectedActionId: "approve" } : { behavior: "allow", via: "no-button", selectedActionId: null });
+      return writeFile(request.receiptPath, request.receipt, "utf8");
     }
     if (carrier === "paraphrase") {
       await writeFile(request.receiptPath, request.content, "utf8");
