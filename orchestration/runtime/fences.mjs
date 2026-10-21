@@ -68,6 +68,17 @@ export const FENCES = {
     // No ask-human: on-request only asks when a command leaves the sandbox,
     // so writes inside the workspace would land without a person.
   },
+  // The orchestration-gate plugin's provider: no model, so nothing to fence
+  // but the one thing it does. It only ever raises the gate's card and writes
+  // the receipt after an allow; it cannot run a step, so none and workspace
+  // are absent and a step on it fails closed.
+  "orch-gate": {
+    "ask-human": {
+      mode: null,
+      enforced: true,
+      note: "orchestration-gate provider: no model; it raises one permission card and writes the receipt only after an allow",
+    },
+  },
   // The private relay-* roles run here. Pi has no modes at all -- setMode
   // throws "Pi does not expose selectable modes" (pi/agent.ts) -- so no
   // --mode is passed, and its permission requests are only extension

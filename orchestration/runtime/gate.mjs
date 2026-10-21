@@ -3,23 +3,31 @@
 //
 // Paseo has one decision surface -- the permission request an agent raises,
 // answered in the app (or `paseo permit`). A script cannot raise one itself,
-// so the gate starts a small agent in the provider's ask-human mode (fences.mjs) whose only
-// job is to write the artifact under review to a holding path. The write is
-// what the person approves: the app's permission card renders the tool call,
-// so they see the exact content, not a summary of it.
+// so the gate starts a carrier agent whose permission request is what the
+// person answers. Two carriers, picked by the `gate` role's provider family:
 //
-// The agent is the carrier, not the writer of record. The script decides the
-// outcome from the file alone -- present and identical to what it asked for
-// (line endings and a trailing newline aside, see `canonical`), or not
-// approved -- and then does the real write itself. An agent that paraphrases
-// the content fails closed as "mismatch".
+//   provider  the orchestration-gate plugin's `orch-gate` provider: no model.
+//             It reads a request file this module writes, shows the decision
+//             as the card's title and description, the evidence above the card,
+//             and the content in it; on an allow it writes the receipt itself.
+//   model     an agent in the provider's ask-human mode (fences.mjs), told to
+//             Write the receipt. The card is a Write card; the decision, brief,
+//             evidence and content are in its prompt, which the script wrote.
+//
+// Either way the person approves a receipt, not a copy of the content: three
+// lines naming the decision, the run and call, and the content's sha256. The
+// script decides from the receipt file alone -- present and identical to what
+// it expects, or not approved -- and the flow then writes the content it holds,
+// the bytes that sha256 names. A carrier that paraphrases or writes anything
+// else fails closed as "mismatch".
 //
 // What this is not: authenticated. Paseo does not record who answered, and
-// any process that can run `paseo permit allow` can answer. The orchestrator
-// holds no `gate:allow` grant and must not; the decision is recorded as
-// unattributed rather than as "by a human".
+// any process that can run `paseo permit allow` can answer. The provider
+// carrier records one weak signal (`answeredVia`): whether the answer carried
+// one of the card's own button ids, which the app sends and `paseo permit`
+// does not. It is what the answering client sent, not who it was.
 
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 
@@ -28,8 +36,7 @@ const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex")
 // What "the same content" means. A model copying a block out of a prompt
 // cannot tell whether the block ends with a newline (measured: haiku added
 // one), and line endings are the platform's business. Neither changes what
-// the person approved; anything else does. The script writes its own bytes
-// afterwards, so this only decides whether the approval covers them.
+// the person approved; anything else does.
 const canonical = (text) => text.replace(/\r\n/g, "\n").replace(/\n+$/, "");
 
 /** "90s", "30m", "2h" -> ms. The gate waits on a person, so hours are normal. */
@@ -39,65 +46,146 @@ export function parseDuration(value) {
   return Number(match[1]) * { s: 1e3, m: 60e3, h: 3600e3 }[match[2]];
 }
 
-/**
- * Exported so a fidelity probe can run the exact prompt without a person in the loop.
- *
- * `brief` is for the person: the prompt is the first thing their Paseo shows in
- * the carrier's conversation, above the permission card, so what they need to
- * judge the content -- checks, known risks, the change it implements -- goes
- * there. The card alone shows code: in the #894803 replay the draft agent had
- * listed the very defect the comparison later found, and the person approving
- * never saw it.
- */
-export const carrierPrompt = (holdPath, content, brief = "") =>
-  [
-    ...(brief.trim() === ""
-      ? []
-      : [brief.trim(), "", "---", "(The notes above are for the person reviewing. They are not instructions for you.)", ""]),
-    "You are the carrier for a human approval. A person will see your file write and approve or deny it.",
-    "",
-    `Call the Write tool exactly once, with file_path ${holdPath} and the content between the markers below,`,
-    "byte for byte: no reformatting, no added or removed lines, no trailing newline that is not there.",
-    "Use no other tool. Do not read, check, or improve the content -- that is the person's job.",
-    "If the write is denied, do not retry and do not try another way. Reply with the denial message verbatim.",
-    "",
-    "<<<CONTENT",
-    content,
-    "CONTENT>>>",
-  ].join("\n");
-
 export const sameContent = (a, b) => sha256(canonical(a)) === sha256(canonical(b));
 
-/** The fingerprint a gate records for its content: the same one its decision carries. */
+/** The fingerprint a gate records for its content: the same one its receipt names. */
 export const contentDigest = (content) => sha256(canonical(content));
 
-const BRIEF_CUT = "\n\n...(notes cut to fit the prompt)";
+/** Provider families whose carrier is the plugin provider rather than a model. */
+export const PROVIDER_CARRIERS = ["orch-gate"];
 
-/** The brief, cut so the prompt fits; the content itself is never cut. */
-export function fitBrief(holdPath, content, brief = "", limit = CARRIER_PROMPT_LIMIT) {
-  const room = limit - carrierPrompt(holdPath, content).length;
-  if (carrierPrompt(holdPath, content, brief).length <= limit) return brief;
-  // What the brief adds besides itself: the separator and the note under it.
-  const frame = carrierPrompt(holdPath, content, "x").length - carrierPrompt(holdPath, content).length - 1;
-  const keep = room - frame - BRIEF_CUT.length;
-  return keep > 200 ? brief.trim().slice(0, keep) + BRIEF_CUT : "";
+/** "provider" or "model": which carrier a gate role's provider means. */
+export const carrierKind = (provider) => (PROVIDER_CARRIERS.includes(String(provider).split("/")[0]) ? "provider" : "model");
+
+/**
+ * What the carrier writes when the person approves, and all the script will
+ * accept as an approval. The title is the decision; the run and call make a
+ * receipt from another gate useless; the digest names the bytes.
+ */
+export function receiptFor({ title, runId, callId, digest }) {
+  const decision = title.replace(/\s+/g, " ").trim();
+  return [decision.startsWith("批准") ? decision : `批准：${decision}`, `人闸 ${callId} · 运行 ${runId}`, `内容 sha256 ${digest}`].join("\n");
+}
+
+const lineCount = (text) => (text === "" ? 0 : canonical(text).split("\n").length);
+
+/** The lines a card's description ends with, whoever the carrier is: what each answer does. */
+export const answerHelp = (timeout) =>
+  `不批的话可以点「不批」，也可以直接在下面输入框写理由发出（按不批处理）。${timeout} 内没人处理按不批。`;
+
+// Under COMMAND_LINE_BUDGET (paseo-cli.mjs) with room for the rest of the
+// command line. Only the model carrier's prompt carries the content; the
+// provider carrier's prompt is a pointer.
+const CARRIER_PROMPT_LIMIT = 30_000;
+const BRIEF_CUT = "\n\n...(说明太长，后面的截掉了)";
+
+/**
+ * The model carrier's prompt: for the person first -- the decision, the
+ * summary, the brief, the evidence, the content -- then the carrier's
+ * instructions, which name the receipt and nothing else to write.
+ *
+ * The prompt is shown as plain text above a Write card that shows only the
+ * receipt, so the person reads the content here; the script wrote all of it.
+ * Brief and evidence are cut to fit, the content never is: `fits` is false
+ * when the parts that cannot be cut are over the limit.
+ */
+export function carrierPrompt(gate, limit = CARRIER_PROMPT_LIMIT) {
+  const { holdPath, title, summary = "", brief = "", evidence = [], name = "content.txt", content, receipt, timeout = "2h" } = gate;
+  const build = (keptBrief, keptEvidence) =>
+    [
+      `【要你决定】${title}`,
+      ...(summary.trim() === "" ? [] : [summary.trim()]),
+      `批准：允许下面卡片里这次写入（Accept）。${answerHelp(timeout)}`,
+      ...(keptBrief.trim() === "" ? [] : ["", keptBrief.trim()]),
+      ...keptEvidence.flatMap((e) => ["", `【证据】${e.label}`, e.text]),
+      "",
+      `【待批全文】${name}，${lineCount(content)} 行，sha256 ${contentDigest(content).slice(0, 12)}…`,
+      content,
+      "",
+      "---",
+      "（以下是给载体 agent 的指令，审批人不用看。）",
+      "You are the carrier for a human approval. A person will see your file write and approve or deny it.",
+      "",
+      `Call the Write tool exactly once, with file_path ${holdPath} and the receipt between the markers below,`,
+      "byte for byte: no reformatting, no added or removed lines. Write the receipt only -- not the content above.",
+      "Use no other tool. Do not read, check, or improve anything -- that is the person's job.",
+      "If the write is denied, do not retry and do not try another way. Reply with the denial message verbatim.",
+      "",
+      "<<<RECEIPT",
+      receipt,
+      "RECEIPT>>>",
+    ].join("\n");
+
+  const bare = build("", []);
+  if (bare.length > limit) return { prompt: bare, fits: false };
+
+  // Every evidence entry is at least named, with a note in place of a text
+  // that does not fit; room for those notes is kept before the brief is cut.
+  const kept = evidence.map((entry) => ({ label: entry.label, text: `（${entry.text.length} 字，放不下，没有带上）` }));
+  const noted = build("", kept);
+  if (noted.length > limit) kept.length = 0;
+  let keptBrief = brief;
+  if (build(brief, kept).length > limit) {
+    const keep = limit - build("", kept).length - 2 - BRIEF_CUT.length;
+    keptBrief = keep > 200 ? brief.trim().slice(0, keep) + BRIEF_CUT : "";
+  }
+  // Then, in order, each entry whose text fits replaces its note.
+  for (const [i, entry] of evidence.entries()) {
+    if (i >= kept.length) break;
+    const whole = kept.map((e, j) => (j === i ? entry : e));
+    if (build(keptBrief, whole).length <= limit) kept[i] = entry;
+  }
+  return { prompt: build(keptBrief, kept), fits: true };
+}
+
+/**
+ * Everything one gate needs before its carrier starts: the digest, the
+ * receipt, the prompt to send and record, and for the provider carrier the
+ * request file it will read. Pure, so the runner can record the prompt in
+ * call.start before anything happens.
+ */
+export function prepareGate(gate) {
+  const { carrier, holdPath, title, content, runId, callId, timeout = "2h" } = gate;
+  const digest = contentDigest(content);
+  const receipt = receiptFor({ title, runId, callId, digest });
+  const dir = path.dirname(holdPath);
+  const answerPath = path.join(dir, `${callId}.answer.json`);
+  const base = { carrier, holdPath, answerPath, digest, receipt, timeout };
+
+  if (carrier === "model") {
+    const { prompt, fits } = carrierPrompt({ ...gate, receipt });
+    return { ...base, requestPath: null, requestText: null, prompt, fits };
+  }
+
+  const requestPath = path.join(dir, `${callId}.request.json`);
+  const requestText = JSON.stringify(
+    {
+      v: 1,
+      kind: "orchestration-gate/request",
+      runId,
+      callId,
+      title,
+      summary: gate.summary ?? "",
+      brief: gate.brief ?? "",
+      evidence: gate.evidence ?? [],
+      name: gate.name ?? "content.txt",
+      content,
+      sha256: digest,
+      receipt,
+      receiptPath: holdPath,
+      answerPath,
+      timeout,
+      help: answerHelp(timeout),
+    },
+    null,
+    2,
+  );
+  const prompt = [`人闸 ${callId} · 运行 ${runId}：${title}`, `request: ${requestPath}`, `sha256: ${sha256(requestText)}`].join("\n");
+  return { ...base, requestPath, requestText, prompt, fits: true };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MAX_POLL_FAILURES = 6;
-// Under COMMAND_LINE_BUDGET with room for the rest of the command line.
-const CARRIER_PROMPT_LIMIT = 30_000;
-
-/**
- * The prompt the carrier gets for this request: the brief cut to fit, the
- * content whole. `fits` is false when even the content alone is over the
- * limit, and then no card can be raised. Exported so the runner can record
- * the exact prompt before the carrier starts.
- */
-export function gatePrompt(holdPath, content, brief = "") {
-  const prompt = carrierPrompt(holdPath, content, fitBrief(holdPath, content, brief));
-  return { prompt, fits: prompt.length <= CARRIER_PROMPT_LIMIT };
-}
 
 /** The `logs` command's text for an agent that has said nothing (cli/src/commands/agent/logs.ts). */
 const NO_ACTIVITY = "No activity to display.";
@@ -108,56 +196,80 @@ async function carrierWords(io, agentId) {
   return said === NO_ACTIVITY ? "" : said.slice(-1000);
 }
 
+/** The provider carrier's record of how it was answered; null when there is none, an error record when unreadable. */
+async function readAnswer(answerPath) {
+  const text = await readFile(answerPath, "utf8").catch(() => null);
+  if (text === null) return null;
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === "object" ? parsed : { error: "the answer record is not an object" };
+  } catch {
+    return { error: "the answer record is not JSON" };
+  }
+}
+
+const VIA = ["button", "no-button", "typed"];
+
+export const UNATTRIBUTED = "unattributed (Paseo does not record who answered)";
+const CARRIER_ENDED = "nobody (the carrier ended without an answer)";
+
 /**
- * Hold `content` until a person approves writing it to `holdPath`.
+ * Hold until a person approves the gate `prepared` describes (prepareGate).
  *
  * `io` is what the gate needs from the executor, already bound to this call:
- * `spawn(prompt)` starts the carrier (in the provider's ask-human mode, see
- * fences.mjs) and resolves to its agent id; `inspect`, `deny`, `stop` and
- * `transcript` take that id. Denying is only ever used to close a request the
- * script has stopped waiting for (expiry, lost contact): the conservative
- * direction, under the `gate:deny` grant the caller checks. Nothing here can
- * allow.
+ * `spawn(prompt)` starts the carrier and resolves to its agent id; `inspect`,
+ * `deny`, `stop` and `transcript` take that id. Denying is only ever used to
+ * close a request the script has stopped waiting for (expiry, lost contact):
+ * the conservative direction, under the `gate:deny` grant the caller checks.
+ * Nothing here can allow.
  *
  * @param {{ spawn: (prompt: string) => Promise<string>, inspect: Function, deny: Function, stop: Function,
  *           transcript: Function }} io
- * @param {{ holdPath: string, content: string, brief?: string, timeout?: string, pollMs?: number }} request
+ * @param {ReturnType<typeof prepareGate>} prepared
+ * @param {{ pollMs?: number }} [options]
  * @returns {Promise<{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved: boolean,
  *   agentId: string|null, sha256: string, askedAt: string, decidedAt: string, waitedMs: number,
- *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null }>}
+ *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null,
+ *   answeredVia: "button"|"no-button"|"typed"|null }>}
  */
-export async function requestApproval(io, request) {
-  const { holdPath, content, brief = "", timeout = "2h", pollMs = 10_000 } = request;
+export async function requestApproval(io, prepared, { pollMs = 10_000 } = {}) {
+  const { carrier, holdPath, answerPath, requestPath, requestText, digest, receipt, prompt, fits, timeout } = prepared;
   const deadline = Date.now() + parseDuration(timeout);
-  const digest = sha256(canonical(content));
 
-  // A stale file at the holding path would read as an approval.
+  // A stale file at any of these paths would read as an answer.
   await mkdir(path.dirname(holdPath), { recursive: true });
   await rm(holdPath, { force: true });
+  await rm(answerPath, { force: true });
 
   const askedAt = new Date();
-
-  // The carrier gets the content in its prompt, and the prompt is a command-
-  // line argument (see COMMAND_LINE_BUDGET). Measured 2026-09-23: 257 lines
-  // copied exactly; an 818-line hotfix could not be sent at all. Reading the
-  // content from a file instead would put a Read card in front of the person
-  // before the Write card, so for now a gate this size is refused, not faked.
-  const { prompt, fits } = gatePrompt(holdPath, content, brief);
-  if (!fits) {
+  const decision = (fields) => {
+    const decidedAt = new Date();
     return {
-      outcome: "error",
-      approved: false,
+      approved: fields.outcome === "allowed",
       agentId: null,
       sha256: digest,
       askedAt: askedAt.toISOString(),
-      decidedAt: askedAt.toISOString(),
-      waitedMs: 0,
-      reason: `content too long to carry: ${prompt.length} characters of prompt, limit ${CARRIER_PROMPT_LIMIT}`,
+      decidedAt: decidedAt.toISOString(),
+      waitedMs: decidedAt - askedAt,
+      reason: null,
       agentReport: "",
-      by: "nobody (no card was raised)",
       agentStatusAtDecision: null,
+      answeredVia: null,
+      ...fields,
     };
+  };
+
+  // The model carrier gets the content in its prompt, and the prompt is a
+  // command-line argument. Measured 2026-09-23: an 818-line hotfix could not
+  // be sent at all. A gate this size is refused, not faked.
+  if (!fits) {
+    return decision({
+      outcome: "error",
+      reason: `content too long to carry: ${prompt.length} characters of prompt, limit ${CARRIER_PROMPT_LIMIT}`,
+      by: "nobody (no card was raised)",
+    });
   }
+  if (requestPath) await writeFile(requestPath, requestText, "utf8");
 
   const agentId = await io.spawn(prompt);
 
@@ -200,43 +312,54 @@ export async function requestApproval(io, request) {
     await io.stop(agentId).catch(() => null);
   }
 
-  const decidedAt = new Date();
   const written = await readFile(holdPath, "utf8").catch(() => null);
-  // The file is only ever written by an approved Write, so a matching file is
-  // an approval even when it landed after the deadline. A polling failure is
-  // not read as anything: the gate could not see what happened.
-  const outcome = failure
-    ? "error"
-    : written !== null
-      ? sha256(canonical(written)) === digest ? "allowed" : "mismatch"
-      : expired ? "expired" : "denied";
+  const answer = carrier === "provider" ? await readAnswer(answerPath) : null;
+  const via = VIA.includes(answer?.via) ? answer.via : null;
+  const base = { agentId, agentStatusAtDecision: status };
 
-  // Why it was denied is a person's words, and Paseo does not return them to
-  // the script: the app's deny button sends a fixed message, and a message
-  // passed to `permit deny --message` reaches only the agent. The agent was
-  // told to repeat it, so its last words are kept -- as its report, which is
-  // not the same thing as the reason.
-  //
-  // Only when a person answered (denied, or approved a copy that differs): on
-  // expiry or lost contact the script closed the card itself, there is nothing
-  // a person said, and the carrier -- stuck on the card -- has not spoken at
-  // all. Asked for "text" it returned the tail of its own prompt plus its
-  // thinking, which then read as its report (2026-09-23, an expired gate). Only
-  // what the carrier itself said counts: the `assistant_message` entries.
-  const answered = outcome === "denied" || outcome === "mismatch";
-  const agentReport = answered ? await carrierWords(io, agentId) : "";
+  // A polling failure is not read as anything: the gate could not see what happened.
+  if (failure) return decision({ ...base, outcome: "error", reason: `polling failed: ${failure.message}`, by: "nobody (gate lost sight of the request)" });
 
-  return {
-    outcome,
-    approved: outcome === "allowed",
-    agentId,
-    sha256: digest,
-    askedAt: askedAt.toISOString(),
-    decidedAt: decidedAt.toISOString(),
-    waitedMs: decidedAt - askedAt,
-    reason: outcome === "expired" ? `no answer within ${timeout}` : outcome === "error" ? `polling failed: ${failure.message}` : null,
-    agentReport,
-    by: outcome === "expired" ? "gate timeout" : outcome === "error" ? "nobody (gate lost sight of the request)" : "unattributed (Paseo does not record who answered)",
-    agentStatusAtDecision: status,
-  };
+  // The receipt is only ever written by an approved answer, so a matching one
+  // is an approval even when it landed after the deadline.
+  if (written !== null) {
+    const allowed = canonical(written) === canonical(receipt);
+    const outcome = allowed ? "allowed" : "mismatch";
+    return decision({
+      ...base,
+      outcome,
+      by: UNATTRIBUTED,
+      answeredVia: via,
+      agentReport: !allowed && carrier === "model" ? await carrierWords(io, agentId) : "",
+    });
+  }
+
+  if (expired) return decision({ ...base, outcome: "expired", reason: `no answer within ${timeout}`, by: "gate timeout" });
+
+  // The provider carrier says how it was answered, or why it could not ask.
+  if (answer?.error) return decision({ ...base, outcome: "error", reason: `carrier: ${String(answer.error).slice(0, 500)}`, by: CARRIER_ENDED });
+  if (answer?.behavior === "deny") {
+    const words = via === "typed" ? answer.typed : via === "no-button" ? answer.message : null;
+    return decision({
+      ...base,
+      outcome: "denied",
+      by: UNATTRIBUTED,
+      answeredVia: via,
+      reason: typeof words === "string" && words.trim() !== "" ? words.trim().slice(0, 2000) : null,
+    });
+  }
+
+  // No receipt and no answer: a carrier that was closed, failed, or (the
+  // provider) finished without recording one. Nobody is known to have said no.
+  if (status === "error" || status === "closed" || carrier === "provider") {
+    return decision({ ...base, outcome: "error", reason: `the carrier ended (${status ?? "unknown"}) without an answer`, by: CARRIER_ENDED });
+  }
+
+  // The model carrier, denied: Paseo does not return the person's words to the
+  // script. The app's deny button sends a fixed message, and a message passed
+  // to `permit deny --message` reaches only the agent. The agent was told to
+  // repeat it, so its last words are kept -- as its report, which is not the
+  // same thing as the reason. Only what the carrier itself said counts: the
+  // `assistant_message` entries (asked for "text" it returned its own prompt).
+  return decision({ ...base, outcome: "denied", by: UNATTRIBUTED, agentReport: await carrierWords(io, agentId) });
 }

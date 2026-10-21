@@ -74,11 +74,31 @@ export interface AskOptions {
   mode?: never;
 }
 
+export interface GateEvidence {
+  /** One line naming what this is, e.g. "要实现的修复 r7237410". */
+  label: string;
+  text: string;
+  /** "diff" is shown as a diff (unified format); "text" as a file. Default "text". */
+  kind?: "diff" | "text";
+  /** A file name for syntax highlighting. */
+  name?: string;
+}
+
 export interface GateRequest {
+  /** The decision, as the person reads it on the card: "批准 hotfix #1 放进 …". Up to 120 characters. */
   title: string;
+  /** The bytes being approved; the flow writes these after an approval. */
   content: string;
+  /** The content's file name, for highlighting and the card. Default "content.txt". */
+  name?: string;
+  /** The card's description: a few short plain-text lines -- the result, the checks, what to look at. */
+  summary?: string;
+  /** Markdown above the card: everything a person needs to judge the content. */
   brief?: string;
+  /** Shown above the card, folded, in order. */
+  evidence?: GateEvidence[];
   timeout?: Duration;
+  /** Where the receipt goes. Default <runDir>/gate/<callId>.receipt.txt. */
   holdPath?: string;
 }
 
@@ -94,6 +114,8 @@ export interface GateDecision {
   agentReport: string;
   by: string;
   agentStatusAtDecision: string | null;
+  /** How the answer came, as the answering client sent it -- a weak signal, not who answered. Null when not known. */
+  answeredVia: "button" | "no-button" | "typed" | null;
 }
 
 export type Settled<T> = { ok: true; value: T } | { ok: false; error: Error };

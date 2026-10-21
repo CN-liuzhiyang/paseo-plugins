@@ -8,21 +8,70 @@
 // throw to fail the call. `delayMs` spaces calls out so that durations and
 // overlap look like something.
 //
-// The gate's carrier is simulated from its prompt: `carrier: "approve"` writes
-// the content to the hold path (what an approved Write does), "deny" writes
-// nothing, "hang" never finishes (the gate expires).
+// The gate's carrier is simulated from its prompt, for either carrier
+// (gate.mjs): the provider's pointer prompt is followed to its request file,
+// the model's prompt is read for its receipt. `carrier`:
+//   "approve"    the receipt is written (an approved Write, or the provider after an allow)
+//   "deny"       nothing is written; the provider records a button deny
+//   "typed"      provider only: the person typed a reply instead (`typed` is the text)
+//   "cli-deny"   provider only: denied without a button id, with `message`
+//   "paraphrase" the content is written in place of the receipt
+//   "hang"       never finishes (the gate expires)
+// `providers` is what providerAvailable reports as available.
 
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-export function fakeExecutor({ answer = () => ({}), carrier = "approve", usd = 0.01, delayMs = 0 } = {}) {
+const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
+
+/** What an answered carrier leaves behind, per `carrier` (see above). */
+export async function carryAs(carrier, prompt, { typed, message }) {
+  const pointer = /^request: (.+)\nsha256: ([0-9a-f]{64})$/m.exec(prompt);
+  if (pointer) {
+    const text = await readFile(pointer[1], "utf8");
+    const request = JSON.parse(text);
+    const record = (answer) => writeFile(request.answerPath, JSON.stringify(answer), "utf8");
+    if (sha256(text) !== pointer[2]) return record({ error: "request file does not match its sha256" });
+    await mkdir(path.dirname(request.receiptPath), { recursive: true });
+    if (carrier === "approve") {
+      await writeFile(request.receiptPath, request.receipt, "utf8");
+      return record({ behavior: "allow", via: "button", selectedActionId: "approve" });
+    }
+    if (carrier === "paraphrase") {
+      await writeFile(request.receiptPath, request.content, "utf8");
+      return record({ behavior: "allow", via: "button", selectedActionId: "approve" });
+    }
+    if (carrier === "typed") return record({ behavior: "deny", via: "typed", typed });
+    if (carrier === "cli-deny") return record({ behavior: "deny", via: "no-button", message });
+    return record({ behavior: "deny", via: "button", selectedActionId: "deny", message: "Denied by user" });
+  }
+  const holdPath = /with file_path (.+) and the receipt/.exec(prompt)?.[1];
+  const receipt = /<<<RECEIPT\n([\s\S]*)\nRECEIPT>>>/.exec(prompt)?.[1];
+  const content = /【待批全文】[^\n]*\n([\s\S]*)\n\n---\n（以下是给载体/.exec(prompt)?.[1];
+  if (carrier === "approve" || carrier === "paraphrase") {
+    await mkdir(path.dirname(holdPath), { recursive: true });
+    await writeFile(holdPath, carrier === "approve" ? receipt : content, "utf8");
+  }
+}
+
+export function fakeExecutor({
+  answer = () => ({}),
+  carrier = "approve",
+  usd = 0.01,
+  delayMs = 0,
+  providers = ["orch-gate"],
+  typed = "PetNpc 的源文件不对，别批",
+  message = "denied from the command line",
+} = {}) {
   const agents = new Map();
   const requests = [];
   const denied = [];
   const transcripts = [];
   let count = 0;
+  const carry = (prompt) => carryAs(carrier, prompt, { typed, message });
 
   const start = (request, status) => {
     const id = `fake-agent-${++count}`;
@@ -53,18 +102,12 @@ export function fakeExecutor({ answer = () => ({}), carrier = "approve", usd = 0
     async spawn(request) {
       requests.push(request);
       const id = start(request, "running");
-      const holdPath = /with file_path (.+) and the content/.exec(request.prompt)?.[1];
-      const content = /<<<CONTENT\n([\s\S]*)\nCONTENT>>>/.exec(request.prompt)?.[1];
-      if (carrier !== "hang") {
-        setTimeout(async () => {
-          if (carrier === "approve") {
-            await mkdir(path.dirname(holdPath), { recursive: true });
-            await writeFile(holdPath, content, "utf8");
-          }
-          agents.get(id).status = "idle";
-        }, 5);
-      }
+      if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), 5);
       return { agentId: id };
+    },
+
+    async providerAvailable(family) {
+      return providers.includes(family);
     },
 
     async findAgent(labels) {

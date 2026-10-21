@@ -22,7 +22,7 @@ import { flow, checkFlow } from "./flow.mjs";
 import { fenceFor, FENCES } from "./fences.mjs";
 import { runFlow } from "./run.mjs";
 import { readEvents, checkEvents } from "./events.mjs";
-import { carrierPrompt, fitBrief } from "./gate.mjs";
+import { carrierPrompt } from "./gate.mjs";
 import { COMMITTEES } from "../flows/committee.mjs";
 
 const FLOWS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "flows");
@@ -88,18 +88,14 @@ check(
 
 // --- Gate brief ---------------------------------------------------------
 
-const briefed = carrierPrompt("C:/hold/a.lua", "local x = 1", "Ticket #1: checks passed");
+const gateBase = { holdPath: "C:/hold/c1.receipt.txt", title: "批准 a", content: "local x = 1", receipt: "批准 a\nr\nh" };
+const briefed = carrierPrompt({ ...gateBase, brief: "Ticket #1: checks passed" }).prompt;
 check(
-  "gate: the brief comes first, the content is intact",
-  briefed.startsWith("Ticket #1") && briefed.includes("<<<CONTENT\nlocal x = 1\nCONTENT>>>"),
+  "gate: the decision comes first, the content is intact, the carrier writes only the receipt",
+  briefed.startsWith("【要你决定】批准 a") && briefed.includes("\nlocal x = 1\n") && briefed.includes("<<<RECEIPT\n批准 a\nr\nh\nRECEIPT>>>"),
 );
-check("gate: no brief, no notes section", !carrierPrompt("C:/hold/a.lua", "x").includes("notes above"));
-const cut = fitBrief("C:/hold/a.lua", "y".repeat(2_000), "z".repeat(5_000), 4_000);
-check(
-  "gate: a long brief is cut to fit, never the content",
-  cut.length < 5_000 && carrierPrompt("C:/hold/a.lua", "y".repeat(2_000), cut).length <= 4_000,
-  `${cut.length} characters kept`,
-);
+const cut = carrierPrompt({ ...gateBase, content: "y".repeat(2_000), brief: "z".repeat(5_000) }, 4_000);
+check("gate: a long brief is cut to fit, never the content", cut.fits && cut.prompt.length <= 4_000 && cut.prompt.includes("y".repeat(2_000)));
 
 // --- Role files -------------------------------------------------------
 //
@@ -207,11 +203,12 @@ check("roles: committees name real roles", unknownMembers.length === 0, unknownM
 // Every role needs a fence to run behind, and the gate's carrier needs the
 // ask-human one. A role without one is refused at its first call, which is
 // free, but finding out here is freer.
-const unfenced = Object.entries(roster.roles).flatMap(([name, entry]) =>
+// The gate's carrier runs no steps; it is checked for ask-human below.
+const unfenced = Object.entries(roster.roles).filter(([name]) => name !== "gate").flatMap(([name, entry]) =>
   ["none", "workspace"].filter((level) => throws(() => fenceFor(entry.provider, level))).map((level) => `${name}:${level}`),
 );
 check("fences: every role can run a none and a workspace step", unfenced.length === 0, unfenced.join(", ") || Object.keys(FENCES).join(", "));
-check("fences: the gate's carrier (fast) can ask a person", !throws(() => fenceFor(roster.roles.fast.provider, "ask-human")));
+check("fences: the gate's carrier (role gate) can ask a person", !throws(() => fenceFor(roster.roles.gate.provider, "ask-human")));
 
 // --- Flows -------------------------------------------------------------
 

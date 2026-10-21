@@ -13,6 +13,7 @@
 //   transcript(agentId, { tail, filter })   the agent's timeline as text
 //   deny(agentId, { message })              deny every pending permission request
 //   stop(agentId)                           interrupt it
+//   providerAvailable(family)               true when Paseo lists it as available and enabled
 //
 // A request is { provider, thinking, mode, title, labels, prompt, cwd } plus,
 // for ask, { schema, timeout }.
@@ -92,6 +93,13 @@ export function paseoExecutor({ host = null } = {}) {
 
     stop: async (agentId) => {
       await runPaseoJson(["stop", agentId], opts());
+    },
+
+    // `provider ls --json` rows are { provider, status: "available" | ..., enabled: "Enabled" | "Disabled" }
+    // (cli/src/commands/provider/ls.ts). Plugin providers are listed with the rest.
+    providerAvailable: async (family) => {
+      const rows = (await runPaseoJson(["provider", "ls"], opts())) ?? [];
+      return rows.some((row) => row.provider === family && row.status === "available" && row.enabled === "Enabled");
     },
   };
 }

@@ -17,10 +17,11 @@ import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fenceFor } from "../runtime/fences.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
-import { requestApproval } from "../runtime/gate.mjs";
+import { requestApproval, prepareGate, carrierPrompt } from "../runtime/gate.mjs";
 import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
-import { fakeExecutor, committeeAnswers } from "./fake-executor.mjs";
+import gateSmoke from "../flows/gate-smoke.mjs";
+import { fakeExecutor, committeeAnswers, carryAs } from "./fake-executor.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let roster;
@@ -357,42 +358,78 @@ test("$.ask refuses mode, unknown options, unknown providers -- before the call 
   }
 });
 
-test("$.gate: approved, denied, expired; the decision is the output; gate:deny is required", async () => {
-  const gated = (timeout) =>
-    flow({
-      name: "gated",
-      description: "d",
-      phases: [{ id: "review", title: "Review" }],
-      inputs: {},
-      grants: ["gate:deny"],
-      run: (_, $) => $.phase("review", () => $.gate({ title: "place a.lua", content: "local x = 1\n", brief: "checks passed", timeout })),
-    });
+const gatedFlow = (timeout, extra = {}) =>
+  flow({
+    name: "gated",
+    description: "d",
+    phases: [{ id: "review", title: "Review" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: (_, $) =>
+      $.phase("review", () => $.gate({ title: "批准 a.lua 放进 x/", content: "local x = 1\n", brief: "checks passed", timeout, ...extra })),
+  });
 
-  const approved = await run(gated("1m"), { executor: fakeExecutor({ carrier: "approve" }) });
+/** The roster with role `gate` pointed at a model: the fallback carrier. */
+const modelGated = () => ({ ...roster, roles: { ...roster.roles, gate: roster.roles.fast } });
+
+test("$.gate (provider carrier): the person approves a receipt that names the content; gate:deny is required", async () => {
+  const evidence = [{ label: "要实现的修复", text: "-a\n+b", kind: "diff", name: "a.lua" }];
+  const approved = await run(gatedFlow("1m", { name: "a.lua", summary: "校验：✅ 2 项通过", evidence }), {
+    executor: fakeExecutor({ carrier: "approve" }),
+  });
   assert.equal(approved.value.outcome, "allowed");
   assert.equal(approved.value.approved, true);
-  let events = eventsOf(approved);
+  assert.equal(approved.value.answeredVia, "button");
+  assert.equal(approved.value.agentReport, "");
+  const events = eventsOf(approved);
   const start = events.find((e) => e.kind === "call.start");
   assert.equal(start.type, "gate");
   assert.equal(start.phase, "review");
-  assert.equal(start.fence.mode, "default");
-  assert.ok(start.holdPath.startsWith(path.join(logDir, "runs", approved.runId, "gate")), start.holdPath);
-  assert.ok(start.prompt.startsWith("checks passed"), "the carrier's prompt as sent is recorded");
-  const end = events.find((e) => e.kind === "call.end");
-  assert.equal(end.agentId, approved.value.agentId);
+  assert.equal(start.carrier, "provider");
+  assert.equal(start.provider, "orch-gate/card");
+  assert.equal(start.fence.mode, null);
+  assert.equal(start.fence.enforced, true);
+  assert.equal(start.holdPath, path.join(logDir, "runs", approved.runId, "gate", "c1.receipt.txt"));
+  assert.equal(start.contentName, "a.lua");
+  assert.equal(start.summary, "校验：✅ 2 项通过");
+  assert.deepEqual(start.evidence, evidence);
+  assert.equal(start.receipt, ["批准 a.lua 放进 x/", `人闸 c1 · 运行 ${approved.runId}`, `内容 sha256 ${start.sha256}`].join("\n"));
+  assert.match(start.prompt, /^request: .+c1\.request\.json$/m, "the provider gets a pointer, not the content");
+  assert.ok(!start.prompt.includes("local x = 1"));
+  assert.equal(await readFile(start.holdPath, "utf8"), start.receipt, "the receipt is what was approved");
+  const request = JSON.parse(await readFile(start.requestPath, "utf8"));
+  assert.equal(request.content, "local x = 1\n");
+  assert.equal(request.sha256, start.sha256);
+  assert.deepEqual(request.evidence, evidence);
+  assert.equal(request.summary, "校验：✅ 2 项通过");
   const announced = events.find((e) => e.kind === "call.agent");
   assert.equal(announced.agentId, approved.value.agentId, "the carrier is announced as soon as it is spawned");
-  assert.ok(announced.seq < end.seq);
-  assert.ok(approved.caveats.some((c) => c.includes("unattributed")));
+  assert.ok(approved.caveats.some((c) => c.includes("answeredVia") && c.includes("weak signal")));
 
-  const denied = await run(gated("1m"), { executor: fakeExecutor({ carrier: "deny" }) });
+  const denied = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "deny" }) });
   assert.equal(denied.value.outcome, "denied");
-  assert.equal(denied.value.agentReport, "The write was denied.");
+  assert.equal(denied.value.answeredVia, "button");
+  assert.equal(denied.value.reason, null, "the app's button sends a fixed message, which is not a reason");
+  assert.equal(denied.value.agentReport, "", "the provider is code; it has no words of its own");
   eventsOf(denied);
 
+  const typed = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "typed", typed: "  别批，理由在这  " }) });
+  assert.equal(typed.value.outcome, "denied");
+  assert.equal(typed.value.answeredVia, "typed");
+  assert.equal(typed.value.reason, "别批，理由在这");
+
+  const cli = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "cli-deny", message: "no" }) });
+  assert.equal(cli.value.answeredVia, "no-button");
+  assert.equal(cli.value.reason, "no");
+
+  const copied = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "paraphrase" }) });
+  assert.equal(copied.value.outcome, "mismatch", "the content in place of the receipt is not an approval");
+  assert.equal(copied.value.approved, false);
+
   const executor = fakeExecutor({ carrier: "hang" });
-  const expired = await run(gated("1s"), { executor });
+  const expired = await run(gatedFlow("1s"), { executor });
   assert.equal(expired.value.outcome, "expired");
+  assert.equal(expired.value.by, "gate timeout");
   assert.deepEqual(executor.denied, [expired.value.agentId], "the expired card was denied on the person's behalf");
   eventsOf(expired);
 
@@ -405,28 +442,53 @@ test("$.gate: approved, denied, expired; the decision is the output; gate:deny i
   assert.equal(bare.requests.length, 0);
 });
 
-test("$.gate: agentReport is what the carrier said, and only when a person answered", async () => {
-  const gated = (timeout) =>
-    flow({
-      name: "gated",
-      description: "d",
-      phases: [],
-      inputs: {},
-      grants: ["gate:deny"],
-      run: (_, $) => $.gate({ title: "place a.lua", content: "local x = 1\n", brief: "checks passed", timeout }),
-    });
+test("$.gate: a flow that can gate is refused before any spend when its carrier's provider is not available", async () => {
+  const executor = fakeExecutor({ providers: [] });
+  await assert.rejects(run(gatedFlow("1m"), { executor }), (error) => error instanceof RunRefused && /orchestration-gate plugin/.test(error.message));
+  assert.equal(executor.requests.length, 0);
+  // A model carrier needs no plugin.
+  const fallback = await run(gatedFlow("1m"), { executor: fakeExecutor({ providers: [] }), roster: modelGated() });
+  assert.equal(fallback.value.outcome, "allowed");
+});
 
-  // A denial: the carrier's own words, asked for as such -- not the "text" view
-  // that also carries the prompt it was given and its thinking.
+test("$.gate: bad evidence or summary is refused at the call", async () => {
+  for (const extra of [{ evidence: [{ label: "", text: "x" }] }, { evidence: [{ label: "a", text: "x", kind: "html" }] }, { summary: 3 }]) {
+    const result = await run(gatedFlow("1m", extra), { executor: fakeExecutor() });
+    assert.equal(result.outcome, "failed", JSON.stringify(extra));
+    assert.equal(result.error.name, "TypeError");
+  }
+});
+
+test("$.gate (model carrier): the prompt is for the person first; the carrier writes the receipt", async () => {
+  const approved = await run(gatedFlow("1m", { summary: "校验：✅", evidence: [{ label: "diff", text: "+b", kind: "diff" }] }), {
+    executor: fakeExecutor({ carrier: "approve" }),
+    roster: modelGated(),
+  });
+  assert.equal(approved.value.outcome, "allowed");
+  assert.equal(approved.value.answeredVia, null, "a Write card says nothing about how it was answered");
+  const start = eventsOf(approved).find((e) => e.kind === "call.start");
+  assert.equal(start.carrier, "model");
+  assert.equal(start.fence.mode, "default");
+  assert.equal(start.requestPath, null);
+  assert.ok(start.prompt.startsWith("【要你决定】批准 a.lua 放进 x/\n校验：✅"), start.prompt.slice(0, 80));
+  assert.ok(start.prompt.indexOf("checks passed") < start.prompt.indexOf("【证据】diff"));
+  assert.ok(start.prompt.indexOf("【证据】diff") < start.prompt.indexOf("【待批全文】content.txt，1 行"));
+  assert.ok(start.prompt.includes(`<<<RECEIPT\n${start.receipt}\nRECEIPT>>>`));
+
+  const copied = await run(gatedFlow("1m"), { executor: fakeExecutor({ carrier: "paraphrase" }), roster: modelGated() });
+  assert.equal(copied.value.outcome, "mismatch", "a carrier that writes the content instead of the receipt fails closed");
+  assert.equal(copied.value.agentReport, "The write was denied.");
+
   const answered = fakeExecutor({ carrier: "deny" });
-  const denied = await run(gated("1m"), { executor: answered });
+  const denied = await run(gatedFlow("1m"), { executor: answered, roster: modelGated() });
+  assert.equal(denied.value.outcome, "denied");
   assert.equal(denied.value.agentReport, "The write was denied.");
   assert.deepEqual(answered.transcripts.map((t) => t.filter), ["assistant_message"]);
 
   // An expiry: the script closed the card, nobody said anything, and the
   // carrier -- stuck on the card -- has not spoken. Nothing is asked for.
   const stuck = fakeExecutor({ carrier: "hang" });
-  const expired = await run(gated("1s"), { executor: stuck });
+  const expired = await run(gatedFlow("1s"), { executor: stuck, roster: modelGated() });
   assert.equal(expired.value.outcome, "expired");
   assert.equal(expired.value.agentReport, "");
   assert.deepEqual(stuck.transcripts, []);
@@ -435,43 +497,133 @@ test("$.gate: agentReport is what the carrier said, and only when a person answe
   // the CLI's "No activity to display." line.
   const silent = fakeExecutor({ carrier: "deny" });
   silent.transcript = async () => "No activity to display.\n";
-  const quiet = await run(gated("1m"), { executor: silent });
+  const quiet = await run(gatedFlow("1m"), { executor: silent, roster: modelGated() });
   assert.equal(quiet.value.outcome, "denied");
   assert.equal(quiet.value.agentReport, "");
 });
 
-test("requestApproval: a copy that differs is a mismatch, and the carrier's words are kept", async () => {
+/** A gate prepared for requestApproval, in a fresh directory. */
+async function prepared(carrier, extra = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-"));
-  const holdPath = path.join(dir, "hold", "a.lua");
-  const asked = [];
-  const io = {
-    spawn: async () => {
-      await mkdir(path.dirname(holdPath), { recursive: true });
-      await writeFile(holdPath, "local x = 2\n", "utf8");
-      return "carrier-1";
-    },
-    inspect: async () => ({ status: "idle" }),
-    deny: async () => {},
-    stop: async () => {},
-    transcript: async (agentId, how) => {
-      asked.push(how.filter);
-      return `I wrote a different file.${"x".repeat(2000)}`;
-    },
-  };
-  const decision = await requestApproval(io, { holdPath, content: "local x = 1\n", timeout: "1m", pollMs: 5 });
-  assert.equal(decision.outcome, "mismatch");
-  assert.equal(decision.approved, false);
-  assert.deepEqual(asked, ["assistant_message"]);
-  assert.equal(decision.agentReport.length, 1000, "cut to the last 1000 characters");
-  assert.ok(decision.agentReport.endsWith("x"));
+  return prepareGate({
+    carrier,
+    holdPath: path.join(dir, "gate", "c1.receipt.txt"),
+    title: "批准 a.lua",
+    content: "local x = 1\n",
+    runId: "run-1",
+    callId: "c1",
+    timeout: "1m",
+    ...extra,
+  });
+}
 
-  // Approved: the file is the answer, there is no report.
-  const approved = await requestApproval(
-    { ...io, spawn: async () => { await writeFile(holdPath, "local x = 1\n", "utf8"); return "carrier-2"; } },
-    { holdPath, content: "local x = 1\n", timeout: "1m", pollMs: 5 },
+/** io for requestApproval whose carrier does `act(prompt)` and then reports `status`. */
+const ioDoing = (act, status = "idle", words = "") => ({
+  spawn: async (prompt) => {
+    await act(prompt);
+    return "carrier-1";
+  },
+  inspect: async () => ({ status }),
+  deny: async () => {},
+  stop: async () => {},
+  transcript: async () => words,
+});
+
+test("requestApproval: only the expected receipt is an approval", async () => {
+  // A model that ends the receipt with a newline still copied it.
+  const gate = await prepared("model");
+  const trailing = await requestApproval(ioDoing(() => writeFile(gate.holdPath, `${gate.receipt}\r\n`, "utf8")), gate, { pollMs: 5 });
+  assert.equal(trailing.outcome, "allowed");
+
+  // A receipt from another gate -- another call, another run -- is not this one's.
+  const other = prepareGate({ carrier: "model", holdPath: "C:/x/c2.receipt.txt", title: "批准 a.lua", content: "local x = 1\n", runId: "run-1", callId: "c2", timeout: "1m" });
+  const stale = await prepared("model");
+  const reused = await requestApproval(ioDoing(() => writeFile(stale.holdPath, other.receipt, "utf8")), stale, { pollMs: 5 });
+  assert.equal(reused.outcome, "mismatch");
+
+  // A receipt naming other content.
+  const changed = await prepared("model");
+  const forged = changed.receipt.replace(/sha256 [0-9a-f]+/, `sha256 ${"0".repeat(64)}`);
+  const wrong = await requestApproval(ioDoing(() => writeFile(changed.holdPath, forged, "utf8"), "idle", "I wrote it."), changed, { pollMs: 5 });
+  assert.equal(wrong.outcome, "mismatch");
+  assert.equal(wrong.agentReport, "I wrote it.", "a model carrier that wrote something else: its words are kept");
+
+  // A stale receipt left at the path before the gate started is removed first.
+  const leftover = await prepared("provider");
+  await mkdir(path.dirname(leftover.holdPath), { recursive: true });
+  await writeFile(leftover.holdPath, leftover.receipt, "utf8");
+  const fresh = await requestApproval(ioDoing(() => carryAs("deny", leftover.prompt, {})), leftover, { pollMs: 5 });
+  assert.equal(fresh.outcome, "denied");
+});
+
+test("requestApproval: what the provider recorded decides nothing without a receipt", async () => {
+  // An answer record that says allow, and no receipt: not approved.
+  const lying = await prepared("provider");
+  const said = await requestApproval(
+    ioDoing(() => writeFile(lying.answerPath, JSON.stringify({ behavior: "allow", via: "button" }), "utf8")),
+    lying,
+    { pollMs: 5 },
   );
-  assert.equal(approved.outcome, "allowed");
-  assert.equal(approved.agentReport, "");
+  assert.equal(said.approved, false);
+  assert.equal(said.outcome, "error");
+  assert.equal(said.by, "nobody (the carrier ended without an answer)");
+
+  // A request file changed after the runtime wrote it: the provider refuses to ask.
+  const tampered = await prepared("provider");
+  const refused = await requestApproval(
+    ioDoing(async (prompt) => {
+      await writeFile(tampered.requestPath, tampered.requestText.replace("local x = 1", "local x = 2"), "utf8");
+      await carryAs("approve", prompt, {});
+    }),
+    tampered,
+    { pollMs: 5 },
+  );
+  assert.equal(refused.outcome, "error");
+  assert.match(refused.reason, /does not match its sha256/);
+  assert.equal(await readFile(tampered.holdPath, "utf8").catch(() => null), null);
+
+  // The provider finished without a record: nobody is known to have said no.
+  const silent = await prepared("provider");
+  const none = await requestApproval(ioDoing(async () => {}), silent, { pollMs: 5 });
+  assert.equal(none.outcome, "error");
+  assert.match(none.reason, /without an answer/);
+
+  // An unreadable record is an error, not a denial.
+  const garbled = await prepared("provider");
+  const unread = await requestApproval(ioDoing(() => writeFile(garbled.answerPath, "{", "utf8")), garbled, { pollMs: 5 });
+  assert.equal(unread.outcome, "error");
+});
+
+test("requestApproval: a carrier closed or failed without a receipt is an error, not a person's denial", async () => {
+  for (const status of ["closed", "error"]) {
+    const gate = await prepared("model");
+    const denials = [];
+    const io = { ...ioDoing(async () => {}, status), deny: async (id) => denials.push(id) };
+    const decision = await requestApproval(io, gate, { pollMs: 5 });
+    assert.equal(decision.outcome, "error", status);
+    assert.equal(decision.by, "nobody (the carrier ended without an answer)");
+    assert.equal(decision.agentStatusAtDecision, status);
+    assert.deepEqual(denials, ["carrier-1"], "the card is closed on the way out");
+  }
+});
+
+test("carrierPrompt: the content is never cut; brief and evidence are, and say so", async () => {
+  const base = { holdPath: "C:/hold/c1.receipt.txt", title: "批准 a", content: "y".repeat(2_000), receipt: "批准 a\nr\nh" };
+  const { prompt, fits } = carrierPrompt({ ...base, brief: "z".repeat(5_000), evidence: [{ label: "diff", text: "d".repeat(3_000) }] }, 4_000);
+  assert.equal(fits, true);
+  assert.ok(prompt.length <= 4_000, `${prompt.length}`);
+  assert.ok(prompt.includes("y".repeat(2_000)));
+  assert.ok(prompt.includes("说明太长"));
+  assert.ok(prompt.includes("【证据】diff\n（3000 字，放不下，没有带上）"));
+  assert.equal(carrierPrompt({ ...base, content: "y".repeat(5_000) }, 4_000).fits, false);
+
+  // Too long to carry: no card is raised.
+  const gate = await prepared("model", { content: "y".repeat(40_000) });
+  let spawned = false;
+  const decision = await requestApproval(ioDoing(async () => (spawned = true)), gate, { pollMs: 5 });
+  assert.equal(decision.outcome, "error");
+  assert.equal(decision.by, "nobody (no card was raised)");
+  assert.equal(spawned, false);
 });
 
 test("timeout: the run ends, the call in flight is closed with RunEnded", async () => {
@@ -810,8 +962,18 @@ test("a flow file with an undeclared phase is refused before run.start", async (
   assert.equal(existsSync(path.join(dir, "runs")), false);
 });
 
+test("gate-smoke: one gate over made-up content, said in one line", async () => {
+  const typed = await run(gateSmoke, { input: { round: "2", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "typed", typed: "不批" }) });
+  assert.equal(typed.summary, "人闸：不批（answeredVia typed，理由：不批）");
+  const start = eventsOf(typed).find((e) => e.kind === "call.start");
+  assert.equal(start.title, "批准 冒烟第 2 次：greet.lua 放进 smoke/（假内容）");
+  assert.equal(start.evidence[0].kind, "diff");
+  const approved = await run(gateSmoke, { input: { round: "3", gateTimeout: "1m" }, executor: fakeExecutor({ carrier: "approve" }) });
+  assert.equal(approved.summary, "人闸：批准（answeredVia button）");
+});
+
 test("checkFlow on the shipped flows", async () => {
-  for (const name of ["committee", "advisor"]) {
+  for (const name of ["committee", "advisor", "gate-smoke"]) {
     const checked = await checkFlow(path.join(HERE, "..", "flows", `${name}.mjs`), { roster });
     assert.equal(checked.ok, true, checked.problems.join("; "));
     assert.equal(checked.flow.name, name);

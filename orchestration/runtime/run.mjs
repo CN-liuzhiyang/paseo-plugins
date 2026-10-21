@@ -23,13 +23,17 @@ import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog } from "./events.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
-import { requestApproval, gatePrompt, contentDigest, parseDuration } from "./gate.mjs";
+import { requestApproval, prepareGate, carrierKind, parseDuration } from "./gate.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
 export const DEFAULT_CALL_TIMEOUT = "30m";
-/** The gate's carrier only copies text into a Write call; the cheap role is enough. */
-const GATE_ROLE = "fast";
+/**
+ * The gate's carrier. Shipped as the orchestration-gate plugin's provider,
+ * which needs no model; a private role file can point it at a cheap model
+ * instead, which then Writes the receipt (gate.mjs).
+ */
+export const GATE_ROLE = "gate";
 /** `do` outputs are the script's own values, often file contents; the event keeps a prefix. */
 const DO_STRING_LIMIT = 2_000;
 /**
@@ -71,6 +75,16 @@ class StopSignal extends Error {
     this.phase = phase;
   }
 }
+
+/** One `$.gate` evidence entry: what the person can unfold above the card. */
+const isEvidence = (e) =>
+  e !== null &&
+  typeof e === "object" &&
+  typeof e.label === "string" &&
+  e.label.trim() !== "" &&
+  typeof e.text === "string" &&
+  (e.kind === undefined || e.kind === "diff" || e.kind === "text") &&
+  (e.name === undefined || typeof e.name === "string");
 
 class RunEnded extends Error {
   constructor() {
@@ -174,6 +188,30 @@ export async function runFlow(target, options = {}) {
   }
   const executor = options.executor ?? paseoExecutor({ host: options.host ?? null });
   const grants = [...DEFAULT_GRANTS, ...f.grants];
+  // A flow that can gate needs its carrier before the first spend: finding out
+  // at the gate would throw away every paid step before it.
+  if (grants.includes("gate:deny")) {
+    let bound;
+    try {
+      bound = bindRole(roster, { role: GATE_ROLE });
+      fenceFor(bound.provider, "ask-human");
+    } catch (error) {
+      throw new RunRefused(`flow "${f.name}" can gate, but its carrier cannot run: ${error.message}`);
+    }
+    if (carrierKind(bound.provider) === "provider") {
+      const family = bound.provider.split("/")[0];
+      if (typeof executor.providerAvailable !== "function") throw new RunRefused("the executor cannot say which providers are available");
+      const available = await executor.providerAvailable(family).catch((error) => {
+        throw new RunRefused(`cannot check that the gate's provider "${family}" is available: ${error.message}`);
+      });
+      if (!available) {
+        throw new RunRefused(
+          `flow "${f.name}" can gate, but Paseo has no available provider "${family}" (role "${GATE_ROLE}" is ${bound.provider}). ` +
+            `Install and enable the orchestration-gate plugin, or point role "${GATE_ROLE}" at a model (roles/${GATE_ROLE}.md in a rolesDirs entry).`,
+        );
+      }
+    }
+  }
   const cwd = options.cwd ?? process.cwd();
   const host = options.host ?? null;
   const caller = options.caller !== undefined ? options.caller : (process.env.PASEO_AGENT_ID ?? null);
@@ -363,18 +401,37 @@ export async function runFlow(target, options = {}) {
      * is -- check `approved` -- and throws only when the gate itself broke.
      */
     async gate(request) {
-      checkKeys("$.gate", request, ["title", "content", "brief", "timeout", "holdPath"]);
-      const { title, content, brief = "", timeout = "2h" } = request ?? {};
+      checkKeys("$.gate", request, ["title", "content", "name", "summary", "brief", "evidence", "timeout", "holdPath"]);
+      const { title, content, name = "content.txt", summary = "", brief = "", evidence = [], timeout = "2h" } = request ?? {};
       if (typeof title !== "string" || title.trim() === "") throw new TypeError("$.gate needs a title");
       if (typeof content !== "string") throw new TypeError("$.gate: content must be a string");
-      if (typeof brief !== "string") throw new TypeError("$.gate: brief must be a string");
+      for (const [key, value] of Object.entries({ name, summary, brief })) {
+        if (typeof value !== "string") throw new TypeError(`$.gate: ${key} must be a string`);
+      }
+      if (!Array.isArray(evidence) || !evidence.every(isEvidence)) {
+        throw new TypeError('$.gate: evidence must be a list of { label, text, kind?: "diff" | "text", name? }');
+      }
       parseDuration(timeout);
       if (!grants.includes("gate:deny")) throw new GrantError("gate:deny", grants);
       const bound = bindRole(roster, { role: GATE_ROLE });
       const fence = fenceFor(bound.provider, "ask-human");
+      const carrier = carrierKind(bound.provider);
 
       const record = startCall();
-      const holdPath = request.holdPath ?? path.join(runDir, "gate", `${record.callId}.txt`);
+      const holdPath = request.holdPath ?? path.join(runDir, "gate", `${record.callId}.receipt.txt`);
+      const prepared = prepareGate({
+        carrier,
+        holdPath,
+        title: sentTitle(title),
+        content,
+        name,
+        summary,
+        brief,
+        evidence,
+        timeout,
+        runId,
+        callId: record.callId,
+      });
       log.emit("call.start", {
         callId: record.callId,
         type: "gate",
@@ -383,14 +440,24 @@ export async function runFlow(target, options = {}) {
         phase: currentPhase(),
         brief,
         content,
-        sha256: contentDigest(content),
+        sha256: prepared.digest,
         timeout,
         holdPath,
         provider: bound.provider,
         fence,
-        prompt: composePrompt(bound, gatePrompt(holdPath, content, brief).prompt),
+        prompt: composePrompt(bound, prepared.prompt),
+        carrier,
+        contentName: name,
+        summary,
+        evidence,
+        receipt: prepared.receipt,
+        requestPath: prepared.requestPath,
       });
-      caveat("gate: Paseo does not record who answers a permission card, so an approval is recorded as unattributed", record.callId);
+      caveat(
+        "gate: Paseo does not record who answers a permission card; answeredVia is what the answering client sent " +
+          "(a card button id or none), a weak signal, and any local process can send either",
+        record.callId,
+      );
 
       const io = {
         spawn: async (prompt) => {
@@ -413,7 +480,7 @@ export async function runFlow(target, options = {}) {
       };
       let decision;
       try {
-        decision = await requestApproval(io, { holdPath, content, brief, timeout, pollMs: gatePollMs });
+        decision = await requestApproval(io, prepared, { pollMs: gatePollMs });
       } catch (error) {
         endCall(record, { ok: false, output: null, error, ...(await settleAgent(record)) });
         throw error;
