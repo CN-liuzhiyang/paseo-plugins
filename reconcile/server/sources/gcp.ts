@@ -257,6 +257,8 @@ export function createGcpSource(
         if (typeof listed?.total_count === "number") total = listed.total_count;
         if (list.length >= PER_PAGE && pages <= page) pages = page + 1;
       }
+      // Fewer rows than it says it has: the window stays, to be listed again at the next poll.
+      const short = listedAll && total !== null && rows.length < total;
       if (listedAll && total !== null && total !== rows.length) errors.push(`列表说有 ${total} 条，读到 ${rows.length} 条`);
       const seen = { ...cursor.seen };
       const incomplete = { ...cursor.incomplete };
@@ -376,7 +378,7 @@ export function createGcpSource(
       }
       const next: Cursor = {
         // Unread rows keep the list's window open so they are listed again.
-        since: left.length === 0 && later.length === 0 && peopleLeft === 0 && listedAll ? deps.addDays(today, -1) : since,
+        since: left.length === 0 && later.length === 0 && peopleLeft === 0 && listedAll && !short ? deps.addDays(today, -1) : since,
         seen,
         pending: [...left, ...later].filter((id) => !watched.has(id)),
         watchedAt,

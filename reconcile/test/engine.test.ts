@@ -901,11 +901,15 @@ test("an outward version file that cannot be read does not hold back the freeze 
     },
   ));
 
-test("an issue kept without a commit that could not be read: nothing said about a freeze it may have missed, and the page says why", () =>
+test("an issue read before, then kept without a new commit that could not be read: the mark reaches the journal, nothing is said on it, and the page says why", () =>
   withWorld({ start: "2026-10-21 22:00", config: { rules: { "release-followup.mjs": exampleRule(VERSIONED) } } }, async (w) => {
-    w.items.set("gcp-demo:1", { ...frozen([onStable(150, true), onStable(170)]), incomplete: ["R-171: svn: E170001: Authorization failed"] });
+    w.items.set("gcp-demo:1", frozen([onStable(150, true)]));
+    await w.run("2026-10-22 09:00");
+    assert.equal(w.store.state.items["gcp-demo:1"]!.incomplete, undefined);
+    // Its next read: a second commit, on a branch that cannot be read; everything else the same.
+    w.items.set("gcp-demo:1", { ...frozen([onStable(150, true)]), incomplete: ["R-170: svn: E170001: Authorization failed"] });
     await w.run("2026-10-22 10:00");
+    assert.deepEqual(w.store.state.items["gcp-demo:1"]!.incomplete, ["R-170: svn: E170001: Authorization failed"]);
     assert.equal(w.cards.length, 0);
-    assert.equal(w.store.state.notes["gcp-demo:1"]?.["freeze.main"], undefined);
-    assert.ok(status(w).problems.some((p) => /^gcp-demo:1 有提交一直读不到，按读到的判断（不据此提醒）：R-171/.test(p)));
+    assert.ok(status(w).problems.some((p) => /^gcp-demo:1 有提交一直读不到，按读到的判断（不据此提醒）：R-170/.test(p)));
   }));

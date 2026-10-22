@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { issue, makeWorld, type World } from "./helpers";
+import { loadConfig } from "../server/config";
+import { createEngine, type Carrier } from "../server/engine";
+import type { Source } from "../server/sources/source";
+import { openStore } from "../server/store";
+import { at, issue, makeWorld, type World } from "./helpers";
 
 // A source that cannot be read: who is told, and what it holds back.
 
@@ -71,3 +75,98 @@ test("data that may be old holds back only the questions resting on it: what a j
     const stale = (n: number) => w.store.state.assessments[`gcp-demo:${n}`]!.stale;
     assert.deepEqual([stale(1), stale(2), stale(3)], [true, true, false], "the judgment itself read it in 1 and 2");
   }));
+
+// One case, one question per entry, all asked at the same time; uses as given.
+const usesRule = (uses: Record<string, string[] | null>) => `export default {
+  name: "uses",
+  description: "x",
+  applies: { source: "gcp-demo" },
+  params: {},
+  stages: ["s"],
+  assess(kase, ctx) {
+    const uses = ${JSON.stringify(uses)};
+    return { stage: "s", health: "waiting", headline: "h", next: { actor: "me", what: "" }, facts: [], commitments: Object.entries(uses).map(([h, u]) => ({
+      key: "q:" + h + ":" + kase.id, title: "q " + h, domain: "work", owner: "owner",
+      trigger: { at: ctx.at("2026-10-14", "18:00") },
+      ask: { header: h, question: h + "?", options: [{ id: "a", label: "A", description: "" }], allowOther: true },
+      brief: "b", nag: { everyWorkdays: 1, at: "10:00", max: 1 }, backstop: { at: ctx.at("2026-12-31", "18:00") }, level: "push",
+      ...(u ? { uses: u } : {}) })) };
+  },
+};`;
+
+test("a file of a switch source not read holds a question that uses the file, or the whole source; one that uses only its case's source goes", () =>
+  withWorld({ start: "2026-10-13 10:00", config: { rules: { "uses.mjs": usesRule({ DEF: null, SRC: ["flags-demo"], FILE: ["flags-demo:outer"], NONE: [] }) } } }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    // Not read for an hour and a half: stale, but not long enough for an outage card.
+    await w.run("2026-10-14 17:00");
+    w.fail.files.add("outer");
+    await w.run("2026-10-14 18:30");
+    assert.deepEqual(w.cards.flatMap((c) => c.content.questions.map((q) => q.header)), ["NONE"]);
+    assert.ok(plans(w).some((p) => p.summary === "数据可能过时（flags-demo:outer），先不问：DEF、SRC、FILE"));
+  }));
+
+test("a name in uses that is no source, file or known item fails the judgment instead of holding nothing", () =>
+  withWorld({ start: "2026-10-13 10:00", config: { rules: { "uses.mjs": usesRule({ TYPO: ["flag-demo:outer"] }) } } }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    await w.run("2026-10-13 10:30");
+    assert.match(w.store.state.assessments["gcp-demo:1"]!.error!, /uses 里的 "flag-demo:outer" 不是配置里的来源、文件或已有的数据项/);
+    assert.equal(Object.keys(w.store.state.commitments).length, 0);
+  }));
+
+test("with no admin, a long outage is said on the page: nobody gets the card", () =>
+  withWorld({ start: "2026-10-21 10:00", config: { persons: { owner: { name: "测试用户", admin: false, tz: "Asia/Shanghai", quiet: { work: "workdays 09:30-20:00" }, pushPerDay: 8 } } } }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-30" }));
+    await w.run("2026-10-21 10:30");
+    w.fail.source = new Error("boom");
+    await w.run("2026-10-21 19:00");
+    assert.equal(w.cards.length, 0);
+    assert.ok(w.engine.status().problems.some((p) => /^gcp-demo 从 10-21 1\d:\d\d 起读不到，但 persons.json 里没有 admin，没人收故障卡$/.test(p)));
+  }));
+
+test("an outage card nobody answers expires after a week, and is no candidate for evaluation", () =>
+  withWorld({ start: "2026-10-21 10:00" }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-12-30" }));
+    await w.run("2026-10-21 10:30");
+    w.fail.source = new Error("boom");
+    await w.run("2026-10-30 12:00", 60);
+    const outage = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("source-down:"))!;
+    assert.equal(outage.status, "expired");
+    assert.equal(w.store.state.evals, 1, "only the source being down");
+  }));
+
+test("an engine stopped while a card's carrier is being raised writes nothing, and archives the carrier that came back", async () => {
+  const w = await makeWorld({ start: "2026-10-13 10:00" });
+  w.store.close();
+  let open!: () => void;
+  const gate = new Promise<void>((resolve) => (open = resolve));
+  const archived: string[] = [];
+  const carrier: Carrier = {
+    async raise() {
+      await gate;
+      return "agent-late";
+    },
+    async archive(agentId) {
+      archived.push(agentId);
+    },
+  };
+  const source: Source = { id: "gcp-demo", domain: "work", poll: async () => ({ snapshots: [], cursor: null, calls: 1, errors: [], more: false }) };
+  try {
+    const store = openStore({ dir: w.dataDir, now: () => w.clock.now });
+    const engine = createEngine({ config: loadConfig(w.configDir), store, sources: [source], carrier, mode: "live", instanceId: "t", home: w.dir, tickSeconds: 60, now: () => w.clock.now, log: () => {}, writeStatus: () => {} });
+    await engine.recover();
+    assert.equal(engine.testCard().ok, true);
+    w.clock.now = at("2026-10-13 10:01");
+    const tick = engine.tick();
+    for (let i = 0; i < 50 && Object.keys(store.state.cards).length === 0; i++) await new Promise((r) => setTimeout(r, 10));
+    const stopping = engine.stop();
+    open();
+    await tick;
+    await stopping;
+    assert.deepEqual(archived, ["agent-late"]);
+    const [card] = Object.values(store.state.cards);
+    assert.equal(card!.agentId, null, "no record of a carrier nobody would track");
+    store.close();
+  } finally {
+    w.close();
+  }
+});

@@ -122,6 +122,8 @@ test("a full page is followed by the next even when the list gives no page count
   const q = await short.poll(input);
   assert.deepEqual(pagesAsked, [1]);
   assert.match(q.errors.join(), /列表说有 140 条，读到 40 条/);
+  assert.equal((q.cursor as { since: string }).since, "2026-10-08", "fewer rows than it says: the window stays");
+  assert.equal(q.more, false, "and is listed again at the next regular poll, not at once");
 });
 
 test("a key that is a plain word ('test') is not taken from an issue's prose", async () => {

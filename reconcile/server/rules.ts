@@ -53,8 +53,9 @@ const commitmentSpec = z
     level: z.enum(["silent", "push"]),
     /**
      * What the question rests on besides the case's own source: item keys (a file of a file
-     * source) or source ids. Only these going stale hold it back. Absent: whatever the rule read
-     * for the case (every item it looked up, and the switch files).
+     * source) or source ids (any of its files). Only these going stale hold it back. Absent:
+     * whatever the rule read for the case (every item it looked up, and the switch files). A name
+     * that is no configured source, file or known item fails the judgment.
      */
     uses: z.array(z.string().min(1)).max(50).optional(),
   })
@@ -275,7 +276,8 @@ export interface Judged {
 }
 
 /** Runs the rule for a case. A throw or an output outside the vocabulary is an assessment with an error, not a crash. */
-export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprint: string): Judged {
+/** check: what the caller knows that the schema does not (names the output refers to); an error string fails it. */
+export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprint: string, check?: (out: RuleOutput) => string | null): Judged {
   const base = { caseId: kase.id, at: ctx.now, rule: rule.name, rulesFingerprint: fingerprint, stale: false };
   const failed = (error: string): Judged => ({
     assessment: { ...base, stage: "error", health: "conflict", headline: `规则出错：${rule.name}`, next: { actor: "me", what: "看一眼规则" }, error },
@@ -296,6 +298,8 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
     const ids = spec.ask.options.map((o) => o.id);
     if (new Set(ids).size !== ids.length) return failed(`${rule.file}: duplicate option ids in ${spec.key}`);
   }
+  const wrong = check?.(out);
+  if (wrong) return failed(`${rule.file}: ${wrong}`);
   return {
     assessment: { ...base, stage: out.stage, health: out.health, headline: out.headline, next: out.next, notice: out.notice ?? null, error: null },
     output: out,

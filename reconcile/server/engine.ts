@@ -120,6 +120,8 @@ export function createEngine(deps: EngineDeps) {
     return out;
   }
 
+  /** What a commitment's uses may name besides items already read: a source, or a configured file. */
+  const knownNames = new Set(config.sources.flatMap((s) => [s.id, ...(s.kind === "flags" ? s.files.map((f) => `${s.id}:${f.id}`) : [])]));
   /** Files switch keys come from: every case's links and heat are read from them. */
   const switchFiles = config.sources.flatMap((s) => (s.kind === "flags" && s.itemKind === "flags" ? s.files.map((f) => `${s.id}:${f.id}`) : []));
   /** What each case's last judgment read, and what each commitment says it rests on (null: the case's reads). */
@@ -130,7 +132,8 @@ export function createEngine(deps: EngineDeps) {
   function blockers(deps: Iterable<string> | undefined, stale: string[]): string[] {
     if (!deps) return stale;
     const on = [...deps];
-    return stale.filter((e) => on.some((d) => d === e || d.startsWith(`${e}:`)));
+    // A source stale holds what rests on any of its files; a file stale holds what rests on its source.
+    return stale.filter((e) => on.some((d) => d === e || d.startsWith(`${e}:`) || e.startsWith(`${d}:`)));
   }
 
   function diffItem(before: Item, after: Item): Array<{ field: string; from: string; to: string }> {
@@ -145,7 +148,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   function readMore(before: Item, after: Item): boolean {
-    const extra = (item: Item) => JSON.stringify([item.text, item.revisions, item.lastHumanAt, item.labels, item.url, item.parent]);
+    const extra = (item: Item) => JSON.stringify([item.text, item.revisions, item.incomplete ?? null, item.lastHumanAt, item.labels, item.url, item.parent]);
     return extra(before) !== extra(after);
   }
 
@@ -401,7 +404,10 @@ export function createEngine(deps: EngineDeps) {
       if (!hot.has(item.key)) continue;
       const reads = new Set([item.source, ...switchFiles]);
       const ctx = makeContext({ ...inputs, reads }, rule.params);
-      const judged = judge(rule, { id: item.key, primary: item, items: [item], flags }, ctx, set.fingerprint);
+      const judged = judge(rule, { id: item.key, primary: item, items: [item], flags }, ctx, set.fingerprint, (out) => {
+        const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !knownNames.has(u) && !state.items[u]));
+        return unknown.length > 0 ? `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项` : null;
+      });
       lastReads.set(item.key, reads);
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);
       // Judged on what may be old: its own source, a switch file, or an item it looked up is not fresh.
@@ -576,6 +582,7 @@ export function createEngine(deps: EngineDeps) {
         if (nowMs - Date.parse(since) < limitMs) continue;
         const key = `source-down:${what}:${since}`;
         ongoing.add(key);
+        if (!admin) lastProblems.push(`${what} 从 ${since.slice(5, 16).replace("T", " ")} 起读不到，但 persons.json 里没有 admin，没人收故障卡`);
         if (!admin || state.commitments[commitmentId(key)]) continue;
         const at = since.slice(5, 16).replace("T", " ");
         const said = `${what} 从 ${at} 起读不到，依赖它的判断和提醒先停着`;
@@ -632,7 +639,7 @@ export function createEngine(deps: EngineDeps) {
     for (const c of Object.values(state.commitments)) {
       if (!backstopPassed(c, nowMs)) continue;
       expiring.push({ type: "commitment.changed", id: c.id, patch: { status: "expired", reason: "到了兜底时间还没有回答", updatedAt: nowIso(nowMs) } });
-      expiring.push({ type: "eval.candidate", kind: "commitment-expired", subject: c.id, detail: c.title });
+      if (c.origin.by !== "controller") expiring.push({ type: "eval.candidate", kind: "commitment-expired", subject: c.id, detail: c.title });
       plan.push({ at: nowIso(nowMs), kind: "expire", person: c.owner, summary: `兜底到期${c.rounds === 0 ? "（一次都没问到）" : ""}：${c.title}` });
     }
     append(expiring);
@@ -758,6 +765,12 @@ export function createEngine(deps: EngineDeps) {
     const attempt = card.attempts + 1;
     try {
       const agentId = await deps.carrier!.raise(card, contentOf(card), attempt);
+      // Stopped while it was being raised: nothing may be written now, and the next engine raises
+      // the card again, so this carrier would be one nobody tracks. It goes.
+      if (stopped) {
+        await deps.carrier!.archive(agentId).catch((error: unknown) => deps.log(`archiving ${agentId} after a stop failed: ${(error as Error).message}`));
+        return;
+      }
       append([
         { type: "card.changed", id: card.id, patch: { status: "raised", agentId, attempts: attempt } },
         ...dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody),
