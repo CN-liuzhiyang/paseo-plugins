@@ -1,0 +1,164 @@
+# reconcile（事务）
+
+一个常驻在 Paseo daemon 里的**对账控制器**：定期读外部系统（项目跟踪系统、版本库的提交记录、按 URL
+拉的开关文件），按私有规则判断每件事卡在哪、下一步该谁动。**能读到的先自己读**，读不到或者几处说法对不上，
+才在 Paseo 里起一张**问题卡**问你，你的回答就是下一步的依据。判断全是确定性代码，不调模型、不花 token。
+
+典型用法：单子关了不等于外放了，外放了不等于灰度全量了，这两步单子上没人记。规则从单子正文和关联提交的
+diff 里找灰度 key，看提交什么时候进了各地区的发布分支、外网版本文件是不是在那之后出的包、外网开关文件里这个
+key 是多少，自己判断外放、灰度中、全量、回退。外放在后台核对：外放日过了还没进发布分支、或者进了但外网版本一直
+没动，就在事务上写一句提醒（陈述，不是问题），同时发一张只有「知道了」（外加「其他」，顺手说的一句记在单子上）的
+卡；确认过的同一个情况不再提醒，情况变了才再发。靠整目录复制同步的发布分支，那次复制就是封版：一读到新的复制，
+目标是紧接着那一班的单子里有提交没被带进去，马上用同样的卡说一声（比外放日之后的提醒早），单子进入「等单独
+merge」阶段，它的提交出现在发布分支上就往下走。只有 key 找不到或有好几个、key 从外网文件里消失这类说不清、又影响
+下一步的情况才问人。
+
+## 模型
+
+- **来源（source）**：只读地拉外部系统，变化记成观察（observation）。拉不到时退避重试，连续失败标成不可用。
+  一个判断依赖的数据最近没读到，它就带上「数据可能过时」，规则据此要问的问题先不发，等读到了再说。「依赖」按读过什么算：
+  单子自己的来源、开关文件（每个判断都从它们认 key），以及规则通过 `ctx.item` / `ctx.observations` 查过的每一项；
+  规则也可以在承诺上写 `uses` 说明这个问题只依赖哪些（`uses: []` 就是只依赖单子自己的来源）。示例规则的封版提醒
+  只看版本库，所以版本文件读不到不会压住它。一个来源（或开关来源里的一份文件）连续 `sourceDownHours` 小时读不到，
+  给 admin 发一张只有「知道了」的卡，写明哪个来源、从什么时候起、最后一次的错误；同一次故障只说一次，读到了卡就撤掉。
+  两种：
+  - `gcp`：项目跟踪系统，经它的命令行工具调网关（`gateway` 里配路径和目标）。列表按页拉回（按返回的 `total_page`，
+    一页满了也接着读，一轮最多 10 页；返回的 `total_count` 和读到的条数对不上会在来源的错误里说）状态、更新时间和配置的几列（`columns`）；只有值得的行才详读（单子正文、关联提交、
+    操作历史），详读时按 `changes` 用只读的 `svn log` / `svn diff` 看每个提交是在哪个分支提交的、新加了哪些标识符、
+    现在哪些分支里有它、什么时候进去的，以及靠复制同步的分支最近一次从它所在分支复制是哪次（`copied`，封版）。热的单子可以按 `refreshHotMinutes` 定期重读，看提交后来进了哪些分支。
+  - `flags`：按 URL 拉几份 JSON 开关文件，把配置的几节摊平成「节.key → 值」，一份文件是一件 item。每次的代价
+    和单子多少无关；值变了才算观察，只叫醒关联到这个 key 的事。`sections` 里写 `""` 取顶层的标量，`itemKind`
+    换成别的（比如 `version`）就只是一份被读的文件、不当开关来源，外网版本文件就这样接。
+- **关联**：一件单子关联到哪些开关 key，是确定性的交集：开关文件里所有的 key ∩（单子正文 + 关联提交 diff 里净
+  新增的标识符）。每个命中带证据（单子哪段文字、哪个提交的哪一行），规则拿 `kase.flags` 用。开关条目里像标识符的
+  字符串值（比如版本检查函数名）算这个 key 的别名，只在单子自己的提交新加了它时才算，和直接命中分开记（`aliases`）。
+  规则还能看兄弟单（`ctx.siblings`、`ctx.flagsOf`）：示例规则按「直接命中 → 唯一的别名 → 兄弟单的 key 作候选再问」认 key。
+  灰度是 key 层面的事：自己的提交新加了这个 key 的单子是主单（好几张时取外放日最晚的），别的对上同一个 key 的单子
+  外放后跟着主单走、不单独问，主单结束时一起结束；主单这一轮没在跟（冷了或者没跟踪）时才自己问（`ctx.naming`）。
+  别名只认规则列出的字段（示例规则的 `aliasProperties`），分支名这类字段的值说明不了是哪张单。
+  别名来自「能力检查」类字段（示例规则的 `capabilityProperties`）时不算 key，而是一条依赖边：这张单提供 key 需要的能力，
+  外放了就结束，并叫醒持有这个 key 的单子（规则输出 `wake`，被叫醒的单子在最近 `recentDays` 天里算热）。
+- **冷热**：每轮只判断热的事。热 = 有没结束的承诺，或在关注列表里，或最近 `recentDays` 天有人（不算 API 用户和
+  自动化规则）改过，或 `dateFields` 里的日期在前后 `dateWindowDays` 天内，或关联的开关最近变过。冷的不判断、
+  不显示、不详读，列表里它的状态或配置的列变了才重新看。标题里有 `coldTitles` 之一的（总单、长期维护单这类）
+  只有有没结束的承诺或在关注列表里才热，但照样当父单：子单照常跟，兄弟单推 key、依赖边不受影响。
+  单子正文和提交里都只认「像个名字」的 key（带下划线、数字或驼峰）；`test`、`Ratio` 这类普通词的 key 两边都认不出来，
+  这样的单子只能靠问人要 key。
+- **规则（rule）**：私有的 `.mjs`，输入是单子当前的样子、最近的观察、已经记下的事实和这件事的承诺，输出是
+  阶段、一句话现状、下一步谁动，以及**承诺（commitment）**：「某个时间问某个人某个问题」。规则是**受信任的代码**：
+  它来自私有配置目录，能改这个目录的人本来就能改插件的行为。约定是规则不读时钟、不 import、不联网，所有东西都从
+  `ctx` 和 `kase` 拿；加载时用正则扫一遍源码挡住明显的写法（`Date.now()`、无参的 `new Date()`、`import`、`require`、
+  `process` 之类），运行时入参是冻结的，输出按 schema 校验。**这不是沙箱**：绕开扫描的写法有的是，规则跑在插件进程里，
+  也没有超时，死循环会卡住整个控制器。把 `Date` 换成固定值、给规则调用加时间上限，是以后的事。
+- **承诺**按 key 去重，规则每次重算都只是「确保它在」。到点了按人的不打扰时段和每天的上限决定发不发；同一个人
+  同时到期的几个问题并成一张卡；没人答按 `nag` 再问，问满了等兜底时间到期。下一步问什么由规则根据上一个
+  回答推出来，控制器不知道「外放」「灰度」是什么。承诺的 id 由 key 算出来：同一个 key 一旦答过、过期或取消，就
+  再也不会重建，所以规则要在 key 里放上能区分「这一轮」的东西（示例规则用日期、轮次、出了什么情况）。规则把触发时间
+  改晚了，已经问过的这一轮会收回，到新的时间再问。
+- **问题卡**：插件自带一个没有模型的 provider（`reconcile/inbox`），一张卡就是一个这个 provider 的 agent，放在
+  名为「事务」的 workspace 里。它在对话里先写清楚已知的情况，再发一个 `question` 权限请求——App 把它画成原生的
+  选择题（选项 + 「其他」），并推到手机上。选项、在「其他」里写字、直接在对话里打字都算回答；收起不算，到下次
+  追问时间会再问。答完的卡会被归档。人在侧边栏里归档一张没答的卡，90 秒后算「关掉了」；Paseo 退出时会先关掉所有 agent，
+  这种关掉不算，重启后同一张卡会再起一个载体（不打扰时段里先不起，到能打扰时再起，也不重复占每天的额度）。
+- **日志**：所有判断和动作按事件追加进 `<dataDir>/journal/YYYY-MM.jsonl`，定期写快照；重启时重放。每次对账写
+  `status.json` 和 `plan.md`（这一轮打算做什么、在管的事）。
+
+## 配置
+
+插件设置（设置 → 插件 → 事务）：
+
+| 字段 | 意思 |
+|---|---|
+| `configDir` | 私有配置目录，见下 |
+| `home` | 这个控制器该在哪个 `PASEO_HOME` 下发卡。和 daemon 的不一致时只演练 |
+| `mode` | `dry-run`（默认）或 `live` |
+| `instanceId` | 这套部署叫什么，记进日志 |
+| `tickSeconds` | 多久对账一次，默认 60 |
+| `dataDir` | 日志放哪，默认 `<PASEO_HOME>/plugin-data/reconcile` |
+
+私有配置目录（不进这个仓库）：
+
+```
+persons.json       { "<id>": { name, admin, tz, quiet: { work?, personal?, family? }, pushPerDay } }
+sources.json       [ { id, kind: "gcp", command, gateway: { path, tool, target }, gcpHost, projectId,
+                       lookbackDays, watch, activeHours,
+                       everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain,
+                       columns?: { <列 id>: <字段名> }, watchEveryMinutes?,
+                       journals?: { automationNotePrefixes },
+                       refreshHotMinutes?,
+                       changes?: { command, timeoutSeconds, maxRevisions, recheckMinutes?, maxCallsPerPoll?,
+                                   repos: [ { name, pattern, branches: [ { name, url, copied? } ] } ] } },
+                     { id, kind: "flags", files: [ { id, url, labels } ], sections, itemKind?, activeHours,
+                       everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain } ]
+policy.json        { tz, ruleBreakerNewCommitments, sourceDownHours,
+                     hot?: { recentDays, dateWindowDays, dateFields }, coldTitles? }
+calendar/<年>.json { holidays: [日期], workdays: [调休上班的日期] }
+rules/*.mjs        规则；examples/release-followup.mjs 是一份可以照抄的
+```
+
+`quiet` 里写的是**可以打扰**的时段，比如 `"workdays 09:30-20:00"`、`"daily 08:00-23:00"`；`workdays` 按日历算节假日
+和调休。`command` 是不经 shell 直接起的跟踪系统命令行工具，写绝对路径：`["<node.exe>", "<…>/cli.js"]`，
+要先在这台机器上登录；`gateway` 是它调用网关用的路径、工具名和目标，只写在私有配置里。缺某一年的日历时状态里会提示，
+按周一到周五算。
+
+`changes.repos[].pattern` 是匹配跟踪系统里提交编号的正则，第一个捕获组是版本号；`branches` 按顺序试，第一个
+`svn log -c` 有这个版本的就是它提交的分支。靠**整目录复制**（不是 merge）从别的分支同步的分支，把复制的目录写进
+`copied`：对这些目录问 `svn log -c`（会顺着复制历史找到），找到了就用这次复制（`--stop-on-copy` 的第一条）的
+revision 和时间当「进分支的时刻」；还没进的过 `recheckMinutes` 再问。`journals.automationNotePrefixes`
+是自动化规则写的备注前缀，这类改动不算「有人改过」。`files[].labels` 原样给规则，用来区分环境和地区。
+一张单子关联的提交里有一个读不到（网络、服务器），这张单这一轮不算读过，下一次正常轮询再读，不会带着缺了的提交去判断；
+svn 说「那个分支在那个版本还不存在」不算读不到。连续 3 次都读不全（比如某个分支这个账号没有权限），就按读到的收下，
+标成不完整（`incomplete`），页面上提示；示例规则对不完整的单子不说封版和外放的提醒。
+
+## 安全边界
+
+- **演练（dry-run）**：照样读来源、判断、算出该问谁什么，但不起任何 agent（演练时连载体都不建），计划只列在「事务」
+  页面和 `plan.md` 里，也不记「已经问过」——切到 live 后该问的照样会问。第一次接上一套新配置先演练一轮，看过计划再切。
+  演练也会落盘：日志、快照、`status.json`、`plan.md`，承诺照样会到期。
+- **home 守卫**：只有设置里的 `home` 和 daemon 的 `PASEO_HOME` 一致、并且宿主提供了 `server.paseo`（fork 的扩展点），
+  才会真的发卡；否则自动降成演练，并在状态里说明原因。开发 daemon 读到同一份设置不会重复发卡。
+- **规则改动的熔断**：规则文件一改（指纹变了），如果新规则会一下子新建超过 `ruleBreakerNewCommitments` 条承诺，
+  这一版规则挂起：判断照新规则算，承诺不建、卡不发，等你在「事务」页面上放行。
+- **一个数据目录只能有一个进程**：`LOCK` 文件里记着 pid，持有它的进程每次对账都碰一下它；pid 还活着、而且最近碰过，
+  才算被占着（崩溃后 pid 可能被别的进程用了）。被占着时每分钟再试一次。同一个进程里同一个目录只能开一次。改设置时先等这一轮对账跑完（最多 30 秒），
+  再关日志、重开；接连几次设置写入按先后排队，一次换完再换下一次；内容没变的设置写入不重启。一轮对账跑得比
+  max(10 分钟, 5 个周期) 还久，页面按卡住算。
+- 来源只读：跟踪系统只调 `list_issues`、`get_issue_base`、`get_issue_changesets`、`get_issue_journals`；版本库只跑
+  `svn log`、`svn diff`；开关文件只 GET。跟踪系统每个来源每小时调用次数有上限，svn 每次轮询最多 `maxCallsPerPoll`
+  次（默认 300），命令输出超过 16 MB 截断（diff 8 MB）。
+
+## 装
+
+```bash
+cd reconcile && npm install
+paseo plugin install /absolute/path/to/paseo-plugins/reconcile
+```
+
+要 Paseo 0.11 及以上；发卡另外要 fork 的 `server.paseo`。装完侧边栏有「事务」，设置 → 插件下有它的设置页。
+装好后在页面上点「发测试卡」可以发一张不对应任何事务的测试卡，验证卡片能显示、能回答。
+
+## 开发
+
+```bash
+npm install
+npm run typecheck
+npm test
+npm run check:bundle -- <Paseo 源码 checkout>   # 用 Paseo 自己的插件编译器真打一次包，不安装
+```
+
+Paseo 打包时按目录分边界：`client/`、`index.client.tsx` 不能碰 `server/`（**类型导入也不行**），`shared/` 只能引用
+`shared/` 和宿主提供的模块（不能 `node:*`），别的目录（`test/`、`examples/`、`scripts/`）不能被两个入口引用。
+`test/boundaries.test.ts` 按同样的规则走一遍两个入口的 import 图，不需要 Paseo 源码；`check:bundle` 跑真编译器，
+源码要和 daemon 是同一个版本。
+
+单测在 `test/`：时间和工作日、日志、规则加载和校验、跟踪系统的解包和逐行详读（手写的假数据）、svn 读取、
+开关文件、关联和冷热、问题卡 provider，以及控制器端到端（假来源、假载体、走动的时钟，覆盖靠读数据走完外放
+和灰度、回退、key 消失、多个候选 key、没有机器信号时问人、冷热、演练、不打扰时段、追问和兜底、改日期、并卡、
+重启重发、载体起不来、规则熔断、来源故障，以及停下重启、设置接连写入、来源读不全、数据过时这些边角）。所有单号、人名、key、版本号和时刻都是编的。
+
+## 还没有
+
+- 只有规则产生的承诺（人手登记、agent 登记还没有）；规则只能问人，不能起 flow 或 agent。
+- 卡片只在 Paseo 里；投递到 IM 渠道等 fork 的 `server.deliver`。
+- 「知道了」类的提醒卡和要回答的问题卡共用每天的推送额度。
+- 规则改动后「先演练、出 diff、等人确认再生效」现在只在新建承诺超过阈值时触发。

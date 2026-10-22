@@ -1,0 +1,8 @@
+{
+  "id": "reconcile",
+  "description": "事务：定期对账外部系统里的事务，按私有规则判断每件事卡在哪，到点在 Paseo 卡片上问你（对账控制器 + 承诺）",
+  "requirements": {
+    "paseo": ">=0.11.0"
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
