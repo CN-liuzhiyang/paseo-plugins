@@ -3,6 +3,8 @@ import { test } from "node:test";
 import type { Settings } from "../shared/settings";
 import { createChannel, destinationsOf, type ChannelDelivery } from "./channel";
 
+const fromPlugin = (title: string) => ({ kind: "plugin" as const, pluginId: "controller", title });
+
 const CHAT = "oc_routed";
 
 const settings: Settings = {
@@ -74,6 +76,35 @@ test("a failed run tells the chat it did not finish, with the reason", async () 
   assert.equal(card.title, "每晚日报 · 没能完成");
   assert.equal(card.template, "red");
   assert.match(card.body, /agent 在等权限/);
+});
+
+test("a message another plugin sent is posted under its title, with its text as written", async () => {
+  const h = harness();
+  await h.deliver(delivery({ idempotencyKey: "reminder-7", source: fromPlugin("发版确认"), text: "外放了吗？" }));
+  assert.equal(h.sent[0].key, "reminder-7");
+  assert.deepEqual(view(h.sent[0].card), { title: "发版确认", template: "green", body: "外放了吗？" });
+  assert.deepEqual(h.audits[0].source, fromPlugin("发版确认"));
+});
+
+test("a plugin message that failed uses the failed card, under its own title", async () => {
+  const h = harness();
+  await h.deliver(delivery({ status: "failed", source: fromPlugin("发版确认"), text: "没人回复" }));
+  const card = view(h.sent[0].card);
+  assert.equal(card.title, "发版确认 · 没能完成");
+  assert.equal(card.template, "red");
+  assert.match(card.body, /没人回复/);
+});
+
+test("a source kind this plugin does not know is read like a plugin message, and never refused", async () => {
+  const h = harness();
+  const later = { kind: "workflow", title: "夜间检查", runId: "r1" } as unknown as ChannelDelivery["source"];
+  await h.deliver(delivery({ source: later }));
+  assert.equal(view(h.sent[0].card).title, "夜间检查");
+  // Without a title it still gets one.
+  await h.deliver(delivery({ source: { kind: "workflow" } as unknown as ChannelDelivery["source"] }));
+  assert.equal(view(h.sent[1].card).title, "通知");
+  await h.deliver(delivery({ source: fromPlugin("  ") }));
+  assert.equal(view(h.sent[2].card).title, "通知");
 });
 
 test("a chat without a route is refused, so a schedule cannot post anywhere the bot is", async () => {

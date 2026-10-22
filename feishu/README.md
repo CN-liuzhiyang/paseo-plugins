@@ -148,6 +148,9 @@ Paseo 的 schedule 可以带 `delivery: { channel, to }`（`paseo schedule creat
 - 用 run id 作飞书的 `uuid`，daemon 重复投递同一次运行时飞书只发一条（飞书的去重窗口是一小时）。
 - 投递结果（成功或失败原因）记在 Paseo 这次运行的记录里，`paseo schedule logs` 能看到；插件另写一条
   `feishu.delivery` 审计。
+- 别的插件也可以用 `server.deliver` 往这个渠道发消息（来源是 `{ kind: "plugin", pluginId, title }`）：卡片标题用
+  `title`，正文原样，不带「定时任务」字样；失败照样是红色卡片。不认识的来源类型按这种方式处理，不会被拒绝。
+  用的 `uuid` 是发送方给的 `idempotencyKey`。
 - `server.registerChannel` 也是 fork 加的扩展点；宿主没有时插件打一行日志，其余照常工作，只是收不到投递。
 
 ## 安装
