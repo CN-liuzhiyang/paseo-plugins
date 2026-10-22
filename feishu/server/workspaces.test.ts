@@ -8,7 +8,7 @@ import { createChatWorkspaces, createWorkspaceAssignments, memoryWorkspaceAssign
 
 const route: Route = {
   chatId: "oc_person",
-  name: "知洋的单聊",
+  name: "测试用户的单聊",
   cwd: "/work",
   provider: "codex/gpt-6-sol",
   modeId: "default",
@@ -65,7 +65,7 @@ test("each chat keeps a named workspace across plugin reloads, even with the sam
     const person = await first.forChat(route.chatId, route);
     const group = await first.forChat("oc_group", { ...route, chatId: "oc_group", name: "假期群" });
     assert.notEqual(person.id, group.id);
-    assert.equal(fake.snapshots.get(person.id)?.title, "飞书：知洋的单聊");
+    assert.equal(fake.snapshots.get(person.id)?.title, "飞书：测试用户的单聊");
     assert.equal(fake.snapshots.get(group.id)?.title, "飞书：假期群");
 
     const restarted = createChatWorkspaces({ paseo: fake.paseo as never, assignments: createWorkspaceAssignments(file), log: () => {} });
@@ -87,7 +87,7 @@ test("an existing live chat workspace is adopted and renamed on upgrade", async 
   const manager = createChatWorkspaces({ paseo: fake.paseo as never, assignments, log: () => {} });
   assert.equal((await manager.forChat(route.chatId, route)).id, "wks_current");
   assert.equal(await assignments.get(route.chatId), "wks_current");
-  assert.deepEqual(fake.renamed, [{ id: "wks_current", title: "飞书：知洋的单聊" }]);
+  assert.deepEqual(fake.renamed, [{ id: "wks_current", title: "飞书：测试用户的单聊" }]);
   assert.deepEqual(fake.created, []);
 });
 
