@@ -6,7 +6,7 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type RuleSet } from "./rules";
-import { clip, clipMd, finishRequest, KIND_LABEL, notOwnWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
+import { clip, clipMd, finishRequest, KIND_LABEL, notOwnWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
 import type { Store } from "./store";
@@ -357,6 +357,8 @@ export function createEngine(deps: EngineDeps) {
     request?: Request;
     /** The words as sent, when the card shows them shortened. */
     original?: string;
+    /** Taken as the person's own: the turn and words that vouched for it. */
+    vouch?: string;
   }
 
   /** Receipts to write once this reconcile has judged, so that they can say what the words did. */
@@ -440,9 +442,13 @@ export function createEngine(deps: EngineDeps) {
     }
     // Not run in a Paseo conversation: there is nobody whose words these could be, and nobody to ask about them.
     if (!r.via) return reject("命令不是在 Paseo 的对话里跑的（没有 PASEO_AGENT_ID）", caseId);
-    const notOwn = deps.conversation ? notOwnWords(r.said, await deps.conversation(r.via).catch(() => null)) : "这个 Paseo 没给插件查对话的接口";
+    const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
+    let notOwn = deps.conversation ? notOwnWords(r, conversation) : "这个 Paseo 没给插件查对话的接口";
+    // One sentence of the person's vouches for one request: a second on the same words in the same turn waits for a card.
+    const vouch = conversation?.turn ? vouchKey(r.via, conversation.turn.id, r.said) : undefined;
+    if (!notOwn && Object.values(state.requests).some((q) => q.vouch === vouch)) notOwn = "这句原话这一轮里已经用过一次了，一句话只算一条";
     if (notOwn) return propose(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, notOwn, admin, nowMs);
-    return applySaid(r, caseId, target, admin.id, "own-words", nowMs);
+    return { ...applySaid(r, caseId, target, admin.id, "own-words", nowMs), vouch };
   }
 
   function applySaid(r: Request, caseId: string, target: Annotation | null, by: string, how: Annotation["how"], nowMs: number): Handled {
@@ -594,7 +600,7 @@ export function createEngine(deps: EngineDeps) {
       const before = new Map(Object.values(state.commitments).filter((c) => handled.caseId && c.caseId === handled.caseId).map((c) => [c.id, c.status] as const));
       append([
         ...handled.events,
-        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}) },
+        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}) },
       ]);
       plan.push({ at: nowIso(nowMs), kind: "said", person: null, summary: handled.detail.split("\n")[0]! });
       const undoOf = "request" in incoming && incoming.request.cmd === "undo" && handled.outcome === "applied" ? (state.annotations[handled.annotation!]?.kind ?? null) : null;
@@ -606,10 +612,17 @@ export function createEngine(deps: EngineDeps) {
   function effectsOf(caseId: string, before: Map<string, Commitment["status"]>, undoOf: Annotation["kind"] | null): string[] {
     const now = Object.values(state.commitments).filter((c) => c.caseId === caseId && c.origin.by === "rule");
     const closed = now.filter((c) => isOpen(before.get(c.id)) && !isOpen(c.status)).length;
-    const opened = now.filter((c) => !isOpen(before.get(c.id)) && isOpen(c.status)).length;
+    const opened = now.filter((c) => !isOpen(before.get(c.id)) && isOpen(c.status));
+    // Back with its rounds asked to the end (they count across a reopen): not asked again, only waiting for its backstop.
+    const spent = opened.filter((c) => nextStep(afterHolds(c), tz, calendar)?.what === "exhausted");
     const lines: string[] = [];
     if (closed > 0) lines.push(`效果：收回了 ${closed} 个要问你的问题，已经发出的卡上也去掉了（卡上没别的问题就整张收起）。`);
-    if (opened > 0) lines.push(`效果：重新排上了 ${opened} 个要问你的问题。`);
+    if (opened.length > spent.length) lines.push(`效果：重新排上了 ${opened.length - spent.length} 个要问你的问题。`);
+    for (const c of spent) {
+      lines.push(`「${c.ask.header}」之前已经问过 ${c.rounds} 次，不会再问，到 ${nowIso(Date.parse(afterHolds(c).backstop.at)).slice(5, 16).replace("T", " ")} 记成没人答。`);
+    }
+    // A hold taken back: what was held is asked at its own next time, not at once.
+    if (undoOf === "hold") for (const c of now.filter((c) => isOpen(c.status))) lines.push(`接下来：「${c.ask.header}」${describeStep(c)}。`);
     const left = undoOf === "drop" ? now.filter((c) => c.status === "cancelled" && c.reason === DROPPED).length : 0;
     if (left > 0) lines.push(`有 ${left} 个之前收回的问题这次没重新排上（最后期限已经过了，或者现在的判断不需要它），见「事项追踪」页上的计划。`);
     if (deps.mode === "dry-run") lines.push("现在是演练：这句话已经记下、照样生效，只是不发卡也不收卡。");
@@ -1212,7 +1225,7 @@ export function createEngine(deps: EngineDeps) {
         archived: false,
         closedAt: null,
         reason: null,
-        cutFrom: card.cutFrom ?? card.id,
+        cutFrom: card.id,
       };
       // The old one closes first: its carrier, archived at the end of this reconcile, then closes on nothing.
       append([
@@ -1279,7 +1292,13 @@ export function createEngine(deps: EngineDeps) {
   }
 
   const labelOf = (target: { channel: string; label?: string }) => target.label ?? target.channel;
-  const notifyKey = (card: Card, target: { channel: string; to: string }) => `notify:${card.id}:${target.channel}:${target.to}`;
+  const notifyKey = (card: { id: string }, target: { channel: string; to: string }) => `notify:${card.id}:${target.channel}:${target.to}`;
+  /** The cards a card was cut down from, nearest first. */
+  const cutFrom = (card: Card): string[] => {
+    const out: string[] = [];
+    for (let c: Card | undefined = card; c?.cutFrom && !out.includes(c.cutFrom); c = state.cards[c.cutFrom]) out.push(c.cutFrom);
+    return out;
+  };
 
   /** What a card says on a channel where it cannot be answered: statements in full, questions with their options. */
   function notifyText(card: Card): string {
@@ -1301,9 +1320,10 @@ export function createEngine(deps: EngineDeps) {
    */
   async function notify(card: Card, nowMs: number): Promise<void> {
     const person = config.persons[card.person];
-    // A card cut down from one already sent is not sent again.
-    if (!person || !deps.deliver || stopped || card.cutFrom) return;
+    if (!person || !deps.deliver || stopped) return;
     for (const target of person.notify) {
+      // A card cut down from one is not sent again where that one got through; where it did not, it is.
+      if (cutFrom(card).some((id) => state.ledger[notifyKey({ id }, target)]?.status === "done")) continue;
       const key = notifyKey(card, target);
       const before = state.ledger[key];
       if (before?.status === "done") continue;
@@ -1332,6 +1352,44 @@ export function createEngine(deps: EngineDeps) {
       }
       append([{ type: "card.changed", id: card.id, patch: { archived: true } }]);
     }
+  }
+
+  /**
+   * The answers on a card's form, as events: for each question still open on it (of `only`, when
+   * given), the chosen option or the words typed. The form's headers are the card's own.
+   */
+  function answersOn(card: Card, only: Set<string> | null, answer: Exclude<CardAnswer, { kind: "closed" | "dismissed" }>, at: string): { events: EventBody[]; lines: string[] } {
+    const events: EventBody[] = [];
+    const lines: string[] = [];
+    const headers = headersOf(card.commitments.map(({ id }) => id));
+    for (const { id } of card.commitments) {
+      const c = state.commitments[id];
+      if (!c || (c.status !== "waiting" && c.status !== "scheduled") || (only && !only.has(id))) continue;
+      let raw: string | undefined;
+      if (answer.kind === "answers") raw = answer.answers[headers.get(id)!];
+      else if (card.commitments.length === 1) raw = answer.text;
+      if (raw === undefined || raw.trim() === "") continue;
+      const option = c.ask.options.find((o) => o.label === raw);
+      const recorded = { option: option?.id ?? null, label: option?.label ?? "其他", text: option ? null : raw, at, via: answer.kind === "answers" ? answer.via : "typed" };
+      events.push({ type: "commitment.changed", id, patch: { status: "done", answer: recorded, reason: null, updatedAt: at } });
+      events.push({
+        type: "obs",
+        obs: {
+          id: hash(`${card.id}\0${id}`).slice(0, 16),
+          at,
+          seenAt: at,
+          source: "ask",
+          key: c.caseId ?? c.id,
+          kind: "answer",
+          trust: "human",
+          actor: { name: personName(card.person), machine: false },
+          changes: [],
+          text: `${c.ask.question} → ${option ? option.label : raw}`,
+        },
+      });
+      lines.push(`- ${headers.get(id)}：${option ? option.label : `「${raw}」`}`);
+    }
+    return { events, lines };
   }
 
   // ---- public -----------------------------------------------------------------------------
@@ -1413,8 +1471,20 @@ export function createEngine(deps: EngineDeps) {
     answer(cardId: string, answer: CardAnswer): string {
       const card = state.cards[cardId];
       const nowMs = deps.now();
-      if (!card || (card.status !== "pending" && card.status !== "raised")) return "这张卡已经结束了，这次的回答没有记下。";
       const at = nowIso(nowMs);
+      if (card && card.status === "closed" && answer.kind === "answers") {
+        // A form still open on a card cut down since: what the card in its place still asks is taken from it.
+        const after = openCards().find((c) => cutFrom(c).includes(cardId));
+        if (after) {
+          const { events, lines } = answersOn(card, new Set(after.commitments.map(({ id }) => id)), answer, at);
+          if (lines.length === 0) return "这张卡已经换成了一张去掉一些问题的新卡，这次的回答里没有新卡上还在问的，没有记下。";
+          const done = new Set(events.flatMap((e) => (e.type === "commitment.changed" ? [e.id] : [])));
+          if (after.commitments.every(({ id }) => done.has(id) || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: after.id, patch: { status: "answered", closedAt: at } });
+          append(events);
+          return ["**已记下**（这张卡换成了新卡，只记新卡上还在问的）：", ...lines, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
+        }
+      }
+      if (!card || (card.status !== "pending" && card.status !== "raised")) return "这张卡已经结束了，这次的回答没有记下。";
       if (answer.kind === "closed") {
         append([{ type: "card.changed", id: cardId, patch: { status: "closed", reason: "卡片被关掉了，没有回答", closedAt: at, archived: true } }]);
         return "";
@@ -1423,36 +1493,7 @@ export function createEngine(deps: EngineDeps) {
         append([{ type: "card.changed", id: cardId, patch: { status: "closed", reason: "收起了，没有回答", closedAt: at } }]);
         return "**已收起**，没有记任何回答。到下次追问的时间会再问。";
       }
-      const events: EventBody[] = [];
-      const lines: string[] = [];
-      const headers = headersOf(card.commitments.map(({ id }) => id));
-      for (const { id } of card.commitments) {
-        const c = state.commitments[id];
-        if (!c || (c.status !== "waiting" && c.status !== "scheduled")) continue;
-        let raw: string | undefined;
-        if (answer.kind === "answers") raw = answer.answers[headers.get(id)!];
-        else if (card.commitments.length === 1) raw = answer.text;
-        if (raw === undefined || raw.trim() === "") continue;
-        const option = c.ask.options.find((o) => o.label === raw);
-        const recorded = { option: option?.id ?? null, label: option?.label ?? "其他", text: option ? null : raw, at, via: answer.kind === "answers" ? answer.via : "typed" };
-        events.push({ type: "commitment.changed", id, patch: { status: "done", answer: recorded, reason: null, updatedAt: at } });
-        events.push({
-          type: "obs",
-          obs: {
-            id: hash(`${cardId}\0${id}`).slice(0, 16),
-            at,
-            seenAt: at,
-            source: "ask",
-            key: c.caseId ?? c.id,
-            kind: "answer",
-            trust: "human",
-            actor: { name: personName(card.person), machine: false },
-            changes: [],
-            text: `${c.ask.question} → ${option ? option.label : raw}`,
-          },
-        });
-        lines.push(`- ${headers.get(id)}：${option ? option.label : `「${raw}」`}`);
-      }
+      const { events, lines } = answersOn(card, null, answer, at);
       if (lines.length === 0) {
         if (answer.kind === "typed") {
           append([{ type: "card.changed", id: cardId, patch: { status: "closed", reason: "在对话里打了字，没法对应到具体问题", closedAt: at } }]);
@@ -1527,7 +1568,7 @@ export function createEngine(deps: EngineDeps) {
     if (wanted.length > 0 && !deps.deliver) out.push(`这个 daemon 不支持投递，${[...new Set(wanted)].join("、")} 收不到`);
     for (const card of openCards()) {
       for (const target of config.persons[card.person]?.notify ?? []) {
-        const a = state.ledger[notifyKey(card.cutFrom ? { ...card, id: card.cutFrom } : card, target)];
+        const a = state.ledger[notifyKey(card, target)];
         if (a?.status !== "failed") continue;
         out.push(`${labelOf(target)} 没发出去：${a.reason ?? "不知道原因"}${(a.tries ?? 0) >= MAX_NOTIFY_TRIES ? `（试了 ${a.tries} 次，不再试）` : ""}`);
       }

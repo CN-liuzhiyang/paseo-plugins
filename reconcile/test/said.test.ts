@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { EngineStatus, PlanEntry } from "../server/engine";
 import { DROPPED } from "../server/engine";
 import { planText } from "../index.server";
-import { commandOf, currentTurn, notOwnWords, readConversation, TIMELINE_PAGE, type Conversation, type ConversationSource } from "../server/requests";
+import { commandOf, commandWords, currentTurn, notOwnWords, readConversation, sayCalls, TIMELINE_PAGE, type Conversation, type ConversationSource, type Request } from "../server/requests";
 import { issue, makeWorld, TEST_POLICY, type World } from "./helpers";
 
 // What a person says in a conversation about an item, handed over by bin/reconcile-say.mjs as
@@ -45,15 +45,39 @@ async function withWorld(body: (w: World) => Promise<void>, policy: Record<strin
   }
 }
 
-/** The person's own conversation, running a turn with these messages, in which the agent ran reconcile-say with each. */
-const own = (w: World, ...messages: string[]) => w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: { messages, commands: messages.map(ran) } });
-const ran = (said: string) => `node bin/reconcile-say.mjs say --item "#1" --kind drop --said "${said}"`;
+const quoted = (v: unknown) => `"${String(v).replace(/["\\]/g, "\\$&")}"`;
+/** The command an agent runs for a request, as a POSIX shell would read it. */
+const commandFor = (r: Record<string, unknown>) => {
+  const flags =
+    r.cmd === "undo"
+      ? [r.target === "last" ? "--last" : `--id ${r.target}`]
+      : [`--item ${quoted(r.item)}`, `--kind ${r.kind}`, ...["until", "person", "what", "expected"].filter((k) => r[k] !== undefined).map((k) => `--${k} ${quoted(r[k])}`)];
+  return `node D:/plugins/reconcile/bin/reconcile-say.mjs ${r.cmd} ${flags.join(" ")} --said ${quoted(r.said)}`;
+};
+let turns = 0;
+const owned = new WeakSet<Conversation>();
+/** The person's own conversation, running a new turn that these messages of theirs started. */
+const own = (w: World, ...messages: string[]) => {
+  const c: Conversation = { labels: {}, cwd: "/work", turn: { id: `t${++turns}`, steps: messages.map((text) => ({ kind: "person" as const, text })) } };
+  owned.add(c);
+  w.conversations.set("agent-me", c);
+};
+/** A request from the agent's conversation; in the person's own (see own), its command runs in the turn first. */
+const say = (w: World, request: Record<string, unknown>) => {
+  const c = w.conversations.get("agent-me");
+  if (c?.turn && owned.has(c)) c.turn.steps.push({ kind: "command", text: commandFor({ cmd: "say", ...request }) });
+  return w.say(request);
+};
+/** A turn of these steps: the person's messages, then the commands. */
+const turnOf = (messages: string[], commands: string[], id = "t1"): Conversation["turn"] => ({ id, steps: [...messages.map((text) => ({ kind: "person" as const, text })), ...commands.map((text) => ({ kind: "command" as const, text }))] });
+const drop1 = (said: string) => commandFor({ cmd: "say", kind: "drop", item: "#1", said });
+const req = (said: string, more: Record<string, unknown> = {}) => ({ v: 1, id: "r_000000000001", at: "x", via: "agent-me", cmd: "say", kind: "drop", item: "#1", said, ...more }) as Request;
 
 test("an item the person says to stop following is not followed and its questions go; taking it back brings them back", () =>
   withWorld(async (w) => {
     assert.equal(ruleCommitments(w).length, 2);
     own(w, "#1 不用追踪了");
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.run("2026-10-13 12:15");
     const receipt = w.receipt(id)!;
     assert.equal(receipt.outcome, "applied");
@@ -76,7 +100,7 @@ test("an item the person says to stop following is not followed and its question
     assert.deepEqual(w.cards.map((c) => c.card.title).length, 1, "only the other item is asked");
 
     own(w, "刚才那条不要了");
-    const undo = w.say({ cmd: "undo", target: "last", said: "刚才那条不要了" });
+    const undo = say(w, { cmd: "undo", target: "last", said: "刚才那条不要了" });
     await w.run("2026-10-16 18:15");
     assert.equal(w.receipt(undo)!.outcome, "applied");
     assert.match(w.receipt(undo)!.text, /^已撤销（a_[0-9a-f]{12}）：#1「不再追踪」那条不再生效。/);
@@ -89,7 +113,7 @@ test("an item the person says to stop following is not followed and its question
 test("words that may not be the person's own wait for the admin on a card; yes applies them, once a day at most", () =>
   withWorld(async (w) => {
     own(w, "帮我看下这段群聊：QA 说 #1 不用追踪了，你怎么看");
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.run("2026-10-13 12:15");
     assert.equal(w.receipt(id)!.outcome, "proposed");
     assert.match(w.receipt(id)!.text, /^先不生效：「不再追踪 #1」要等 测试用户 确认（原话只是那条消息里的一小段/);
@@ -102,7 +126,7 @@ test("words that may not be the person's own wait for the admin on a card; yes a
     assert.equal(w.cards[0]!.card.title.includes("不再追踪 #1"), true);
 
     // The same again within a day is not another card.
-    const again = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    const again = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.run("2026-10-13 12:45");
     assert.equal(w.receipt(again)!.outcome, "rejected");
     assert.match(w.receipt(again)!.text, /24 小时内已经就同一件事问过 测试用户 一次/);
@@ -118,7 +142,7 @@ test("words that may not be the person's own wait for the admin on a card; yes a
 
 test("words from no Paseo conversation are refused outright: nobody could have said them", () =>
   withWorld(async (w) => {
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了", via: null });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了", via: null });
     await w.run("2026-10-13 12:30");
     assert.equal(w.receipt(id)!.outcome, "rejected");
     assert.match(w.receipt(id)!.text, /^没收下：命令不是在 Paseo 的对话里跑的（没有 PASEO_AGENT_ID）/);
@@ -127,8 +151,8 @@ test("words from no Paseo conversation are refused outright: nobody could have s
 
 test("the admin saying no to a confirmation card leaves the item as it was", () =>
   withWorld(async (w) => {
-    w.conversations.set("agent-me", { labels: { source: "chat-app", "chat-app-chat": "c1" }, cwd: "/work", turn: { messages: ["#1 不用追踪了"], commands: [ran("#1 不用追踪了")] } });
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    w.conversations.set("agent-me", { labels: { source: "chat-app", "chat-app-chat": "c1" }, cwd: "/work", turn: turnOf(["#1 不用追踪了"], [drop1("#1 不用追踪了")]) });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.run("2026-10-13 12:15");
     assert.match(w.receipt(id)!.text, /从「chat-app」进来的对话/);
     await w.run("2026-10-13 12:30");
@@ -145,7 +169,7 @@ test("a hold keeps a question back until the day, and its backstop moves past th
     w.items.set("gcp-demo:1", issue(1, { fields: { Release: "2026-10-16", Backstop: "2026-10-17" }, sourceUpdatedAt: "2026-10-13T12:01:00+08:00" }));
     await w.run("2026-10-13 12:30");
     own(w, "#1 先别问我，等到下周一");
-    const id = w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-19", said: "#1 先别问我，等到下周一" });
+    const id = say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-19", said: "#1 先别问我，等到下周一" });
     await w.run("2026-10-13 12:45");
     assert.match(w.receipt(id)!.text, /2026-10-19 之前不问你 #1 的事，那天起照常问；最后期限跟着顺延/);
     await w.run("2026-10-16 18:00");
@@ -167,8 +191,8 @@ test("a hold keeps a question back until the day, and its backstop moves past th
 test("a hold must end on a later day, within 90 days", () =>
   withWorld(async (w) => {
     own(w, "先别问", "先别问");
-    const past = w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-13", said: "先别问" });
-    const far = w.say({ cmd: "say", kind: "hold", item: "#1", until: "2027-03-01", said: "先别问" });
+    const past = say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-13", said: "先别问" });
+    const far = say(w, { cmd: "say", kind: "hold", item: "#1", until: "2027-03-01", said: "先别问" });
     await w.run("2026-10-13 12:15");
     assert.match(w.receipt(past)!.text, /不在今天之后/);
     assert.match(w.receipt(far)!.text, /太远了/);
@@ -178,7 +202,7 @@ test("this judgment is wrong becomes an evaluation candidate with the words, and
   withWorld(async (w) => {
     own(w, "#1 这个判断错了，它其实已经外放了");
     const evals = w.store.state.evals;
-    const id = w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了，它其实已经外放了", what: "阶段", expected: "已外放" });
+    const id = say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了，它其实已经外放了", what: "阶段", expected: "已外放" });
     await w.run("2026-10-13 12:15");
     assert.match(w.receipt(id)!.text, /记成了一条评测候选/);
     assert.equal(w.store.state.evals, evals + 1);
@@ -189,16 +213,18 @@ test("this judgment is wrong becomes an evaluation candidate with the words, and
 
 test("requests are read like input from outside: name, size, shape, a few per reconcile, and once per id", () =>
   withWorld(async (w) => {
-    own(w, "#1 这个判断错了");
+    // One sentence of the person's for each request: a sentence vouches for one request a turn.
+    const nth = (i: number) => `#1 这个判断错了，第 ${i + 1} 条`;
+    own(w, "#1 这个判断错了", ...Array.from({ length: 10 }, (_, i) => nth(i)));
     const dir = path.join(w.dataDir, "requests");
     writeFileSync(path.join(dir, "notes.json"), "{}");
     writeFileSync(path.join(dir, "r_00000000big1.json"), "x".repeat(9000));
     const big = "r_00000000b1ff";
     writeFileSync(path.join(dir, `${big}.json`), JSON.stringify({ v: 1, id: big, at: "x", via: "agent-me", cmd: "say", kind: "wrong", item: "#1", said: "x".repeat(20), pad: "x".repeat(9000) }));
-    const shape = w.say({ cmd: "say", kind: "wrong", said: "#1 这个判断错了" });
-    const other = w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: "r_0000000000aa" });
+    const shape = say(w, { cmd: "say", kind: "wrong", said: "#1 这个判断错了" });
+    const other = say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: "r_0000000000aa" });
     writeFileSync(path.join(dir, "r_0000000000ab.json"), JSON.stringify({ v: 1, id: "r_0000000000ac", at: "x", via: "agent-me", cmd: "undo", target: "last", said: "x" }));
-    const many = Array.from({ length: 10 }, () => w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
+    const many = Array.from({ length: 10 }, (_, i) => say(w, { cmd: "say", kind: "wrong", item: "#1", said: nth(i) }));
     await w.engine.tick();
     assert.equal(readdirSync(path.join(dir, "done")).length, 10, "ten a reconcile");
     await w.engine.tick();
@@ -214,7 +240,7 @@ test("requests are read like input from outside: name, size, shape, a few per re
     // A crash after the journal and before the receipt: the same request again is not done twice.
     const evals = w.store.state.evals;
     rmSync(path.join(dir, "done", `${other}.json`));
-    w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: other });
+    say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: other });
     await w.engine.tick();
     assert.equal(w.store.state.evals, evals, "not recorded a second time");
     assert.equal(w.receipt(other)!.outcome, "applied", "the receipt is written again");
@@ -224,8 +250,8 @@ test("requests are read like input from outside: name, size, shape, a few per re
 test("an undo needs something in force to take back", () =>
   withWorld(async (w) => {
     own(w, "刚才那条不要了");
-    const last = w.say({ cmd: "undo", target: "last", said: "刚才那条不要了" });
-    const none = w.say({ cmd: "undo", target: "a_000000000000", said: "刚才那条不要了" });
+    const last = say(w, { cmd: "undo", target: "last", said: "刚才那条不要了" });
+    const none = say(w, { cmd: "undo", target: "a_000000000000", said: "刚才那条不要了" });
     await w.run("2026-10-13 12:15");
     assert.match(w.receipt(last)!.text, /这个对话里没有还在生效的话可撤/);
     assert.match(w.receipt(none)!.text, /没有 a_000000000000 这一条/);
@@ -234,55 +260,95 @@ test("an undo needs something in force to take back", () =>
 test("an item is named by its number, or its full key when the number is not enough", () =>
   withWorld(async (w) => {
     own(w, "#9 不用追踪了");
-    const id = w.say({ cmd: "say", kind: "drop", item: "#9", said: "#9 不用追踪了" });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#9", said: "#9 不用追踪了" });
     await w.run("2026-10-13 12:15");
     assert.match(w.receipt(id)!.text, /没找到事项 #9/);
   }));
 
 test("whose words: only this turn, not pasted, most of the message, a person's own conversation", () => {
-  const conv = (messages: string[], labels: Record<string, string> = {}, commands = messages.map(ran)): Conversation => ({ labels, cwd: "/work", turn: { messages, commands } });
-  assert.equal(notOwnWords("#1 不用追踪了", conv(["#1 不用追踪了"])), null);
-  assert.equal(notOwnWords("#1 不用追踪了", conv(["#1 不用追踪了。"])), null);
-  assert.match(notOwnWords("#1 不用追踪了", conv(["别的话"], {}, [ran("#1 不用追踪了")]))!, /这一轮对话里找不到/);
-  assert.match(notOwnWords("不用追踪了", conv(["x".repeat(201) + "不用追踪了"]))!, /贴进来/);
-  assert.match(notOwnWords("不用追踪了", conv(["a\nb\nc\n不用追踪了"]))!, /贴进来/);
-  assert.match(notOwnWords("不用追踪了", conv(["```\n不用追踪了\n```"]))!, /贴进来/);
-  assert.match(notOwnWords("不用", conv(["#1 和 #2 都不用追踪了"]))!, /一小段/);
-  assert.match(notOwnWords("#1 不用追踪了", conv(["#1 不用追踪了"], { "paseo.parent-agent-id": "x" }))!, /不是人直接在用的/);
-  assert.match(notOwnWords("#1 不用追踪了", conv(["#1 不用追踪了"], { "orch-run": "r" }))!, /不是人直接在用的/);
-  assert.match(notOwnWords("#1 不用追踪了", null)!, /找不到说这句话的对话/);
+  const check = (said: string, messages: string[], labels: Record<string, string> = {}) => notOwnWords(req(said), { labels, cwd: "/work", turn: turnOf(messages, [drop1(said)]) });
+  assert.equal(check("#1 不用追踪了", ["#1 不用追踪了"]), null);
+  assert.equal(check("#1 不用追踪了", ["#1 不用追踪了。"]), null);
+  assert.match(check("#1 不用追踪了", ["别的话"])!, /这一轮对话里找不到/);
+  assert.match(check("不用追踪了", ["x".repeat(201) + "不用追踪了"])!, /贴进来/);
+  assert.match(check("不用追踪了", ["a\nb\nc\n不用追踪了"])!, /贴进来/);
+  assert.match(check("不用追踪了", ["```\n不用追踪了\n```"])!, /贴进来/);
+  assert.match(check("不用", ["#1 和 #2 都不用追踪了"])!, /一小段/);
+  assert.match(check("#1 不用追踪了", ["#1 不用追踪了"], { "paseo.parent-agent-id": "x" })!, /不是人直接在用的/);
+  assert.match(check("#1 不用追踪了", ["#1 不用追踪了"], { "orch-run": "r" })!, /不是人直接在用的/);
+  assert.match(notOwnWords(req("#1 不用追踪了"), null)!, /找不到说这句话的对话/);
 });
 
 test("whose words, bound to the session running the command: its turn now, started by the person, with this command in it", () => {
   const conv = (turn: Conversation["turn"], labels: Record<string, string> = {}): Conversation => ({ labels, cwd: "/work", turn });
   const said = "#1 不用追踪了";
+  const r = req(said);
   // A chat channel's conversation, whatever its directory: told by its source label.
-  assert.match(notOwnWords(said, conv({ messages: [said], commands: [ran(said)] }, { source: "feishu", "feishu-chat": "oc_1" }))!, /从「feishu」进来的对话/);
-  assert.match(notOwnWords(said, conv({ messages: [said], commands: [ran(said)] }, { source: "other-im" }))!, /聊天软件或别的插件/);
+  assert.match(notOwnWords(r, conv(turnOf([said], [drop1(said)]), { source: "feishu", "feishu-chat": "oc_1" }))!, /从「feishu」进来的对话/);
+  assert.match(notOwnWords(r, conv(turnOf([said], [drop1(said)]), { source: "other-im" }))!, /聊天软件或别的插件/);
   // Not running a turn: nothing to bind the words to.
-  assert.match(notOwnWords(said, conv(null))!, /这会儿没在跑/);
+  assert.match(notOwnWords(r, conv(null))!, /这会儿没在跑/);
   // Woken by a notice or a timer: no message of the person's in this turn, and an earlier one does not count.
-  assert.match(notOwnWords(said, conv({ messages: [], commands: [ran(said)] }))!, /不是人发消息开始的/);
+  assert.match(notOwnWords(r, conv(turnOf([], [drop1(said)])))!, /不是人发消息开始的/);
   // The turn never ran the command, or ran it with other words; a call the host shows no command for cannot be checked.
-  assert.match(notOwnWords(said, conv({ messages: [said], commands: [] }))!, /找不到带这句原话的 reconcile-say 调用/);
-  assert.match(notOwnWords(said, conv({ messages: [said], commands: [ran("#2 不用追踪了")] }))!, /找不到带这句原话/);
-  assert.match(notOwnWords(said, conv({ messages: [said], commands: [`echo "${said}"`] }))!, /找不到带这句原话/);
+  assert.match(notOwnWords(r, conv(turnOf([said], [])))!, /找不到这次的 reconcile-say 调用/);
+  assert.match(notOwnWords(r, conv(turnOf([said], [drop1("#2 不用追踪了")])))!, /找不到这次的 reconcile-say 调用/);
+  assert.match(notOwnWords(r, conv(turnOf([said], [`echo "${said}"`])))!, /找不到这次的/);
   // Quoting and escaping a shell adds do not matter.
-  assert.equal(notOwnWords('他说 "好的" 就行', conv({ messages: ['他说 "好的" 就行'], commands: ['node reconcile-say.mjs say --said "他说 \\"好的\\" 就行"'] })), null);
-  assert.equal(notOwnWords('他说 "好的" 就行', conv({ messages: ['他说 "好的" 就行'], commands: ["node reconcile-say.mjs say --said '他说 `\"好的`\" 就行'"] })), null);
+  const q = req('他说 "好的" 就行');
+  assert.equal(notOwnWords(q, conv(turnOf([q.said], ['node reconcile-say.mjs say --item "#1" --kind drop --said "他说 \\"好的\\" 就行"']))), null);
+  assert.equal(notOwnWords(q, conv(turnOf([q.said], ["node reconcile-say.mjs say --item '#1' --kind drop --said \"他说 `\"好的`\" 就行\""]))), null);
+});
+
+test("whose words, bound to this very request: the command must run reconcile-say for its item, kind and words, with no other agent in between", () => {
+  const said = "不用追踪了";
+  const conv = (steps: Conversation["turn"]): Conversation => ({ labels: {}, cwd: "/work", turn: steps });
+  const ok = turnOf([said], [drop1(said)]);
+  // The person's words said for #1 do not do something else: another item, another kind, another day.
+  assert.equal(notOwnWords(req(said), conv(ok)), null);
+  assert.match(notOwnWords(req(said, { item: "#2" }), conv(ok))!, /找不到这次的 reconcile-say 调用/);
+  assert.match(notOwnWords(req(said, { kind: "hold", item: "#2", until: "2026-12-01" }), conv(ok))!, /找不到这次的/);
+  const hold = req(said, { kind: "hold", until: "2026-10-30" });
+  assert.equal(notOwnWords(hold, conv(turnOf([said], [commandFor({ ...hold })]))), null);
+  assert.match(notOwnWords({ ...hold, until: "2026-12-01" } as Request, conv(turnOf([said], [commandFor({ ...hold })])))!, /找不到这次的/);
+  // Naming the program is not running it: grep, echo, a comment, its help.
+  for (const line of [`grep -n "reconcile-say" README.md # ${said}`, `echo node reconcile-say.mjs say --item "#1" --kind drop --said "${said}"`, `# ${drop1(said)}`, `node bin/reconcile-say.mjs --help # ${said}`]) {
+    assert.match(notOwnWords(req(said), conv(turnOf([said], [line])))!, /找不到这次的/, line);
+  }
+  // Another agent's message came into the turn after the person spoke: whose meaning is it.
+  const steered: Conversation["turn"] = { id: "t1", steps: [{ kind: "person", text: said }, { kind: "agent" }, { kind: "command", text: drop1(said) }] };
+  assert.match(notOwnWords(req(said), conv(steered))!, /进来过别的 agent 的消息/);
+  // One before the person spoke does not matter.
+  const before: Conversation["turn"] = { id: "t1", steps: [{ kind: "agent" }, { kind: "person", text: said }, { kind: "command", text: drop1(said) }] };
+  assert.equal(notOwnWords(req(said), conv(before)), null);
+  // The way commands are written here: PowerShell's call operator and a Windows path, a cd before it, --said=.
+  const ps = `cd D:\\work; & node "D:\\git\\paseo-plugins\\reconcile\\bin\\reconcile-say.mjs" say --item "#1" --kind drop --said "${said}"`;
+  assert.equal(notOwnWords(req(said), conv(turnOf([said], [ps]))), null);
+  assert.equal(notOwnWords(req(said), conv(turnOf([said], [`RECONCILE_DATA_DIR=/d node --no-warnings bin/reconcile-say.mjs say --kind drop --item=#1 --said=${said}`]))), null);
+  // undo: --last or --id, as the request says.
+  const last = req("刚才那条不要了", { cmd: "undo", target: "last" });
+  assert.equal(notOwnWords(last, conv(turnOf([last.said], [commandFor({ ...last })]))), null);
+  assert.match(notOwnWords({ ...last, target: "a_000000000001" } as Request, conv(turnOf([last.said], [commandFor({ ...last })])))!, /找不到这次的/);
+});
+
+test("a command line is read as a shell reads it: quotes, escapes, comments, and the commands it runs", () => {
+  assert.deepEqual(commandWords(`a "b c" 'd ''e'' k' f\\ g # h\nx; y && z | w`), [["a", "b c", "d 'e' k", "f g"], ["x"], ["y"], ["z"], ["w"]]);
+  assert.deepEqual(commandWords('node "C:\\x\\reconcile-say.mjs"'), [["node", "C:\\x\\reconcile-say.mjs"]]);
+  assert.deepEqual(sayCalls(`cat x; node r/reconcile-say.mjs undo --last --said "好"`), [{ cmd: "undo", flags: { last: true, said: "好" } }]);
+  assert.deepEqual(sayCalls("grep reconcile-say x"), []);
 });
 
 test("the turn running now is the host's active turn, and only it", () => {
   const entries = [
     { type: "user_message", text: "#1 不用追踪了", turnId: "t1" },
-    { type: "tool_call", command: ran("#1 不用追踪了"), turnId: "t1" },
+    { type: "tool_call", command: drop1("#1 不用追踪了"), turnId: "t1" },
     { type: "assistant_message", text: "好", turnId: "t1" },
-    { type: "tool_call", turnId: "t2" },
-    { type: "tool_call", command: ran("#1 不用追踪了"), turnId: "t2" },
+    { type: "tool_call", agent: true, turnId: "t2" },
+    { type: "tool_call", command: drop1("#1 不用追踪了"), turnId: "t2" },
   ];
   // t2 was woken without a message: the person's words of t1 are not carried over.
-  assert.deepEqual(currentTurn(entries, "t2"), { messages: [], commands: [ran("#1 不用追踪了")] });
-  assert.deepEqual(currentTurn(entries, "t1"), { messages: ["#1 不用追踪了"], commands: [ran("#1 不用追踪了")] });
+  assert.deepEqual(currentTurn(entries, "t2"), { id: "t2", steps: [{ kind: "agent" }, { kind: "command", text: drop1("#1 不用追踪了") }] });
+  assert.deepEqual(currentTurn(entries, "t1"), turnOf(["#1 不用追踪了"], [drop1("#1 不用追踪了")]));
   assert.equal(currentTurn(entries, null), null, "not running a turn");
   // A tool call's command: a shell call's, or a string command in the input of one the host does not know.
   assert.equal(commandOf({ type: "tool_call", detail: { type: "shell", command: "ls" } }), "ls");
@@ -295,7 +361,10 @@ test("the turn running now is the host's active turn, and only it", () => {
 test("the command writes the request, waits for the receipt and prints it", () =>
   withWorld(async (w) => {
     own(w, "#1 不用追踪了");
-    const child = spawn(process.execPath, [SAY, "say", "--item", "#1", "--kind", "drop", "--said", "#1 不用追踪了", "--data", w.dataDir, "--wait", "30"], {
+    const args = ["say", "--item", "#1", "--kind", "drop", "--said", "#1 不用追踪了", "--data", w.dataDir, "--wait", "30"];
+    // The turn shows the command the way the agent wrote it.
+    w.conversations.get("agent-me")!.turn!.steps.push({ kind: "command", text: `node ${SAY} ${args.map(quoted).join(" ")}` });
+    const child = spawn(process.execPath, [SAY, ...args], {
       env: { ...process.env, PASEO_AGENT_ID: "agent-me" },
     });
     let out = "";
@@ -335,13 +404,13 @@ test("the command explains itself and refuses what it cannot send", async () => 
 test("a turn without a message of the person's, or a session not running one, sends the words to a confirmation card", () =>
   withWorld(async (w) => {
     // Woken by a notice: the turn has the command but no message; what the person said in an earlier turn does not count.
-    w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: { messages: [], commands: [ran("#1 不用追踪了")] } });
-    const woken = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: turnOf([], [drop1("#1 不用追踪了")]) });
+    const woken = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.engine.tick();
     assert.equal(w.receipt(woken)!.outcome, "proposed");
     assert.match(w.receipt(woken)!.text, /这一轮不是人发消息开始的/);
     w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: null });
-    const idle = w.say({ cmd: "say", kind: "hold", item: "#2", until: "2026-10-20", said: "#2 先别问" });
+    const idle = say(w, { cmd: "say", kind: "hold", item: "#2", until: "2026-10-20", said: "#2 先别问" });
     await w.engine.tick();
     assert.equal(w.receipt(idle)!.outcome, "proposed");
     assert.match(w.receipt(idle)!.text, /这会儿没在跑/);
@@ -357,7 +426,7 @@ test("a hold takes its question off a card already up: cut down to the rest, or 
     assert.equal(first.commitments.length, 2, "#1 and #2 on one card");
     const pushes = status(w).pushesToday["测试用户"];
     own(w, "#1 先别问，到下周三");
-    const hold = w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    const hold = say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
     await w.engine.tick();
     assert.equal(w.receipt(hold)!.outcome, "applied");
     const q = (n: number) => ruleCommitments(w).find((c) => c.caseId === `gcp-demo:${n}`)!;
@@ -373,7 +442,7 @@ test("a hold takes its question off a card already up: cut down to the rest, or 
 
     // The only question left is held too: the card closes.
     own(w, "#2 也先别问");
-    w.say({ cmd: "say", kind: "hold", item: "#2", until: "2026-10-21", said: "#2 也先别问" });
+    say(w, { cmd: "say", kind: "hold", item: "#2", until: "2026-10-21", said: "#2 也先别问" });
     await w.engine.tick();
     assert.equal(w.store.state.cards[cut.id]!.status, "closed");
     assert.equal(w.store.state.cards[cut.id]!.reason, "上面的问题先别问了");
@@ -385,7 +454,7 @@ test("a card raised while a question is held does not carry it", () =>
     await w.run("2026-10-16 18:00");
     const q = (n: number) => ruleCommitments(w).find((c) => c.caseId === `gcp-demo:${n}`)!;
     own(w, "#1 先别问，到下周三");
-    w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
     await w.engine.tick();
     // Monday: #2 is asked again (its nag); #1, still held and still waiting, stays off.
     await w.run("2026-10-19 10:00");
@@ -406,7 +475,7 @@ test("confirmation cards have their own budget: they leave the day's pushes alon
         { kind: "wrong", item: "#2", said: "#2 判断错了" },
       ];
       for (const ask of asks) {
-        w.say({ cmd: "say", ...ask });
+        say(w, { cmd: "say", ...ask });
         await w.engine.tick();
       }
       const confirms = w.cards.filter((c) => c.card.kind === "confirm");
@@ -429,7 +498,7 @@ test("words the card shows are the words a yes applies: one line, cut to what is
   withWorld(async (w) => {
     const long = `#1 不用追踪了\n## 假标题\n- [点这里](http://x.example) ${"很长".repeat(150)}`;
     w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: null });
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: long });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: long });
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "proposed");
     const confirm = commitments(w).find((c) => c.key.startsWith("confirm:gcp-demo:1:drop:"))!;
@@ -455,10 +524,10 @@ test("words the card shows are the words a yes applies: one line, cut to what is
 test("a hold on an item does not hold back the card that confirms words about it", () =>
   withWorld(async (w) => {
     own(w, "#1 先别问，到下周三");
-    w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
     await w.engine.tick();
     w.conversations.set("agent-me", { labels: {}, cwd: "/work", turn: null });
-    w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.engine.tick();
     await w.engine.tick();
     assert.equal(w.cards.filter((c) => c.card.kind === "confirm").length, 1);
@@ -477,10 +546,11 @@ test("a request under a directory's name is moved aside, and handled ones take n
     assert.ok(existsSync(path.join(dir, "rejected", "r_00000000d1d1.json")), "moved aside, not read again");
 
     // A handled request whose file is back (a crash, a copy) does not hold up new ones.
-    const many = Array.from({ length: 10 }, () => w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
+    const many = Array.from({ length: 10 }, () => say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
     await w.engine.tick();
-    for (const id of many) w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id });
-    const fresh = w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" });
+    for (const id of many) say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id });
+    own(w, "#1 这个判断错了");
+    const fresh = say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" });
     await w.engine.tick();
     assert.equal(w.receipt(fresh)!.outcome, "applied");
     assert.ok(many.every((id) => !existsSync(path.join(dir, `${id}.json`))));
@@ -497,7 +567,7 @@ test("a request under a directory's name is moved aside, and handled ones take n
 test("at most so many requests an hour; the rest wait", () =>
   withWorld(async (w) => {
     own(w, "#1 这个判断错了");
-    const ids = Array.from({ length: 35 }, () => w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
+    const ids = Array.from({ length: 35 }, () => say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
     for (let i = 0; i < 4; i++) await w.engine.tick();
     assert.equal(ids.filter((id) => w.receipt(id)).length, 30);
     assert.ok(plan(w, "deferred").some((p) => p.summary.includes("每小时最多 30")));
@@ -510,7 +580,7 @@ test("in a rehearsal the receipt says the words count but no card is sent or tak
   withWorld(async (w) => {
     await w.restart("dry-run");
     own(w, "#1 不用追踪了");
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.engine.tick();
     assert.match(w.receipt(id)!.text, /现在是演练：这句话已经记下、照样生效，只是不发卡也不收卡。/);
   }));
@@ -521,11 +591,11 @@ test("an undo whose questions cannot come back says so", () =>
     w.items.set("gcp-demo:1", issue(1, { fields: { Release: "2026-10-16", Backstop: "2026-10-14" }, sourceUpdatedAt: "2026-10-13T12:01:00+08:00" }));
     await w.run("2026-10-13 12:30");
     own(w, "#1 不用追踪了");
-    w.say({ cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
     await w.engine.tick();
     await w.run("2026-10-15 10:00");
     own(w, "刚才那条不要了");
-    const undo = w.say({ cmd: "undo", target: "last", said: "刚才那条不要了" });
+    const undo = say(w, { cmd: "undo", target: "last", said: "刚才那条不要了" });
     await w.engine.tick();
     assert.equal(w.receipt(undo)!.outcome, "applied");
     assert.match(w.receipt(undo)!.text, /有 1 个之前收回的问题这次没重新排上（最后期限已经过了，或者现在的判断不需要它）/);
@@ -535,8 +605,8 @@ test("an undo whose questions cannot come back says so", () =>
 test("requests are taken oldest first, by when they were written", () =>
   withWorld(async (w) => {
     own(w, "#1 这个判断错了");
-    const late = Array.from({ length: 10 }, () => w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
-    const early = w.say({ cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: "r_ffffffffffff" });
+    const late = Array.from({ length: 10 }, () => say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了" }));
+    const early = say(w, { cmd: "say", kind: "wrong", item: "#1", said: "#1 这个判断错了", id: "r_ffffffffffff" });
     const before = Date.now() / 1000 - 600;
     utimesSync(path.join(w.dataDir, "requests", `${early}.json`), before, before);
     await w.engine.tick();
@@ -549,7 +619,7 @@ test("on the first reconcile after a start, an item is looked for only among tho
     assert.ok(w.store.state.items["flags-demo:outer"], "read, but no rule follows it");
     await w.restart();
     own(w, "flags-demo:outer 不用追踪了");
-    const id = w.say({ cmd: "say", kind: "drop", item: "flags-demo:outer", said: "flags-demo:outer 不用追踪了" });
+    const id = say(w, { cmd: "say", kind: "drop", item: "flags-demo:outer", said: "flags-demo:outer 不用追踪了" });
     await w.engine.tick();
     assert.match(w.receipt(id)!.text, /没找到事项 flags-demo:outer/);
     assert.equal(Object.keys(w.store.state.annotations).length, 0);
@@ -557,7 +627,7 @@ test("on the first reconcile after a start, an item is looked for only among tho
 
 test("the conversation is read from the host: its running turn only, paging back to where that turn starts", async () => {
   const entry = (turnId: string, item: Record<string, unknown>) => ({ turnId, item });
-  const say = ran("#1 不用追踪了");
+  const cmd = drop1("#1 不用追踪了");
   const fake = (agent: Record<string, unknown>, pages: Array<{ entries: Array<{ turnId: string; item: unknown }>; hasOlder: boolean }>) => {
     const asked: unknown[] = [];
     let i = 0;
@@ -578,10 +648,11 @@ test("the conversation is read from the host: its running turn only, paging back
   const now = [
     entry("t1", { type: "user_message", text: "昨天说的" }),
     entry("t2", { type: "user_message", text: "#1 不用追踪了" }),
-    entry("t2", { type: "tool_call", detail: { type: "unknown", input: { command: say }, output: null } }),
+    entry("t2", { type: "tool_call", detail: { type: "unknown", input: { command: cmd }, output: null } }),
+    entry("t2", { type: "tool_call", name: "agent_message", detail: { type: "plain_text", text: "x" } }),
   ];
   const running = fake({ status: "running", activeTurn: { turnId: "t2" }, labels, cwd: "/work" }, [{ entries: now, hasOlder: false }]);
-  assert.deepEqual((await readConversation(running.ref))!.turn, { messages: ["#1 不用追踪了"], commands: [say] });
+  assert.deepEqual((await readConversation(running.ref))!.turn, { id: "t2", steps: [{ kind: "person", text: "#1 不用追踪了" }, { kind: "command", text: cmd }, { kind: "agent" }] });
   assert.deepEqual(running.asked, [{ direction: "tail", limit: TIMELINE_PAGE }]);
 
   // The same timeline, the session idle: no turn to bind the words to.
@@ -593,10 +664,10 @@ test("the conversation is read from the host: its running turn only, paging back
 
   // A long turn: the newest page is all of it, and the person's message is on the page before.
   const long = fake({ status: "running", activeTurn: { turnId: "t2" }, labels, cwd: "/work" }, [
-    { entries: [entry("t2", { type: "tool_call", detail: { type: "shell", command: say } })], hasOlder: true },
+    { entries: [entry("t2", { type: "tool_call", detail: { type: "shell", command: cmd } })], hasOlder: true },
     { entries: [entry("t1", { type: "assistant_message", text: "好" }), entry("t2", { type: "user_message", text: "#1 不用追踪了" })], hasOlder: true },
   ]);
-  assert.deepEqual((await readConversation(long.ref))!.turn, { messages: ["#1 不用追踪了"], commands: [say] });
+  assert.deepEqual((await readConversation(long.ref))!.turn, turnOf(["#1 不用追踪了"], [cmd], "t2"));
   assert.equal(long.asked.length, 2, "stops once the turn's start is in");
   assert.deepEqual(long.asked[1], { direction: "before", cursor: { seq: 1 }, limit: TIMELINE_PAGE });
 });
@@ -607,7 +678,7 @@ test("a card cut down after a hold is not sent to the person's channels again", 
       await w.run("2026-10-16 18:00");
       assert.equal(w.deliveries.length, 1, "the card went to the channel once");
       own(w, "#1 先别问，到下周三");
-      w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+      say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
       await w.engine.tick();
       assert.equal(w.cards.length, 2, "cut down and up again");
       assert.equal(w.deliveries.length, 1, "not sent again");
@@ -624,7 +695,7 @@ test("in a rehearsal a card left up from before is not cut, but what is asked ne
     assert.equal(first.commitments.length, 2);
     await w.restart("dry-run");
     own(w, "#1 先别问，到下周三");
-    w.say({ cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
     await w.engine.tick();
     assert.equal(w.store.state.cards[first.id]!.status, "raised", "a rehearsal changes no card");
     // Monday: #2 is nagged; the card it would go on carries only #2.
@@ -636,7 +707,7 @@ test("a person's own words of more than one line are one line wherever they are 
   withWorld(async (w) => {
     const said = "#1 不用追踪了\n[点这里](http://x.example)";
     own(w, said);
-    const id = w.say({ cmd: "say", kind: "drop", item: "#1", said });
+    const id = say(w, { cmd: "say", kind: "drop", item: "#1", said });
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "applied");
     assert.equal(Object.values(w.store.state.annotations)[0]!.said, said, "kept as said");
@@ -644,4 +715,93 @@ test("a person's own words of more than one line are one line wherever they are 
     const text = planText(status(w));
     assert.match(text, /说「\\#1 不用追踪了 \\\[点这里\\\]\\\(http:\/\/x\.example\\\)」/);
     assert.ok(!/^\[点这里\]/m.test(text));
+  }));
+
+test("a sentence of the person's vouches for the one request its command asked for, once a turn", () =>
+  withWorld(async (w) => {
+    own(w, "不用追踪了");
+    const first = say(w, { cmd: "say", kind: "drop", item: "#1", said: "不用追踪了" });
+    // The same words in two more files, for another item and another change: no command asked for them.
+    const other = w.say({ cmd: "say", kind: "drop", item: "#2", said: "不用追踪了" });
+    const held = w.say({ cmd: "say", kind: "hold", item: "#2", until: "2026-12-01", said: "不用追踪了" });
+    await w.engine.tick();
+    assert.equal(w.receipt(first)!.outcome, "applied");
+    assert.equal(w.receipt(other)!.outcome, "proposed");
+    assert.match(w.receipt(other)!.text, /找不到这次的 reconcile-say 调用/);
+    assert.equal(w.receipt(held)!.outcome, "proposed");
+    assert.equal(stage(w, "gcp-demo:2"), "s", "#2 is still followed");
+    // The command run again in the same turn, for the same words: the second waits for a card.
+    const again = say(w, { cmd: "say", kind: "wrong", item: "#1", said: "不用追踪了" });
+    await w.engine.tick();
+    assert.equal(w.receipt(again)!.outcome, "proposed");
+    assert.match(w.receipt(again)!.text, /这句原话这一轮里已经用过一次了/);
+  }));
+
+test("a card cut down while its channel message was still failing is sent to the channel itself", () =>
+  withWorld(
+    async (w) => {
+      w.fail.deliver = new Error("channel down");
+      await w.run("2026-10-16 18:00");
+      assert.deepEqual(w.deliveries.map((d) => d.ok), [false]);
+      w.fail.deliver = null;
+      own(w, "#1 先别问，到下周三");
+      say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+      await w.engine.tick();
+      const cut = w.cards[w.cards.length - 1]!.card;
+      assert.ok(cut.cutFrom);
+      assert.deepEqual(w.deliveries.map((d) => d.ok), [false, true], "the rest reaches the channel");
+      assert.equal(w.deliveries[1]!.title, cut.title);
+      await w.engine.tick();
+      assert.equal(w.deliveries.length, 2, "once");
+    },
+    {},
+    { owner: { name: "测试用户", admin: true, tz: "Asia/Shanghai", quiet: { work: "workdays 09:30-20:00" }, pushPerDay: 8, notify: [{ channel: "im", to: "p2p:someone", label: "IM" }] } },
+  ));
+
+test("taking back a drop says plainly when a question comes back asked to the end", () =>
+  withWorld(async (w) => {
+    await w.run("2026-10-20 10:00");
+    const q1 = () => ruleCommitments(w).find((c) => c.caseId === "gcp-demo:1")!;
+    assert.equal(q1().rounds, 3, "asked three times, unanswered");
+    own(w, "#1 不用追踪了");
+    say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    await w.engine.tick();
+    own(w, "还是追踪吧");
+    const undo = say(w, { cmd: "undo", target: "last", said: "还是追踪吧" });
+    await w.engine.tick();
+    const text = w.receipt(undo)!.text;
+    assert.match(text, /「gcp-demo:1」之前已经问过 3 次，不会再问，到 12-31 18:00 记成没人答。/);
+    assert.doesNotMatch(text, /重新排上了/);
+    assert.equal(q1().status, "waiting");
+  }));
+
+test("answers on a form still open on a card since cut down are kept for what the new card still asks", () =>
+  withWorld(async (w) => {
+    await w.run("2026-10-16 18:00");
+    const old = w.cards[0]!.card;
+    own(w, "#1 先别问，到下周三");
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    await w.engine.tick();
+    const cut = w.cards[w.cards.length - 1]!.card;
+    const q = (n: number) => ruleCommitments(w).find((c) => c.caseId === `gcp-demo:${n}`)!;
+    const reply = w.engine.answer(old.id, { kind: "answers", answers: { "gcp-demo:1": "A", "gcp-demo:2": "A" }, via: "form" });
+    assert.match(reply, /^\*\*已记下\*\*（这张卡换成了新卡，只记新卡上还在问的）：\n- gcp-demo:2：A/);
+    assert.doesNotMatch(reply, /gcp-demo:1/);
+    assert.equal(q(2).status, "done");
+    assert.equal(q(1).status, "waiting", "the held one is not taken from it");
+    assert.equal(w.store.state.cards[cut.id]!.status, "answered", "nothing left on the new card");
+    // A form with nothing the new card asks says so.
+    assert.match(w.engine.answer(old.id, { kind: "answers", answers: { "gcp-demo:1": "A" }, via: "form" }), /这张卡已经结束了/);
+  }));
+
+test("taking back a hold says when what was held is asked again", () =>
+  withWorld(async (w) => {
+    await w.run("2026-10-16 18:00");
+    own(w, "#1 先别问，到下周三");
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    await w.engine.tick();
+    own(w, "刚才那条不要了");
+    const undo = say(w, { cmd: "undo", target: "last", said: "刚才那条不要了" });
+    await w.engine.tick();
+    assert.match(w.receipt(undo)!.text, /接下来：「gcp-demo:1」10-19 10:00 第 2 次问。/);
   }));

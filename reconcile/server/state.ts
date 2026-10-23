@@ -26,7 +26,7 @@ export type EventBody =
   | { type: "annotation.added"; annotation: Annotation }
   | { type: "annotation.revoked"; id: string; said: string; by: string }
   /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
-  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string }
+  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
@@ -56,7 +56,8 @@ export interface State {
   workspaceId: string | null;
   evals: number;
   annotations: Record<string, Annotation>;
-  requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request }>;
+  /** vouch: for words taken as the person's own, the turn and words that vouched for them (once per turn). */
+  requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string }>;
 }
 
 export function emptyState(): State {
@@ -144,7 +145,7 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     }
     case "request.handled":
-      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}) };
+      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}), ...(event.vouch ? { vouch: event.vouch } : {}) };
       return;
     case "workspace":
       state.workspaceId = event.workspaceId;
