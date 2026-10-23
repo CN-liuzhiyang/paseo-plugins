@@ -197,3 +197,27 @@ test("a commit keeps only name-like tokens, so a key that is a plain word is fou
   assert.deepEqual(netAdded("+  if test then\n").map(([token]) => token), []);
   assert.deepEqual(netAdded("+  if enable_new_test then\n").map(([token]) => token), ["enable_new_test"]);
 });
+
+test("a change says when the file was last read without it, a read that changed nothing too", async () => {
+  const w = await makeWorld({ start: "2026-10-13 10:00" });
+  try {
+    w.flags.set("feature_x", 0);
+    await w.run("2026-10-13 10:00");
+    w.flags.set("feature_y", 1);
+    await w.run("2026-10-13 10:30");
+    const reads = () => w.store.state.sources["flags-demo"]!.health.readAt!["flags-demo:outer"]!;
+    // Read again since, with nothing changed: no observation, but a read.
+    await w.run("2026-10-13 11:30");
+    const last = reads();
+    assert.ok(last > "2026-10-13T10:30", last);
+    w.flags.set("feature_x", 10);
+    await w.run("2026-10-13 12:30");
+    const obs = w.store.state.recent["flags-demo:outer"]!;
+    const change = obs[obs.length - 1]!;
+    assert.ok(change.changes.some((c) => c.field === "fields.switches.feature_x" && c.to === "10"));
+    assert.equal(change.readBefore, last, "the read before it, not the change before it");
+    assert.ok(change.readBefore! > obs[obs.length - 2]!.seenAt);
+  } finally {
+    w.close();
+  }
+});

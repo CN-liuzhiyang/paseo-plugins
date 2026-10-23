@@ -63,6 +63,8 @@ export interface Observation {
   id: string; // source-native when there is one, else a content hash
   at: string; // when it happened, by the source
   seenAt: string;
+  /** When the item was last read before, still without this change: it came after then. Absent in older ones. */
+  readBefore?: string;
   source: string;
   key: string;
   kind: "changed" | "signal" | "answer" | "report";

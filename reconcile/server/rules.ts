@@ -105,6 +105,7 @@ export interface RuleContext {
   item(key: string): Item | null;
   /** Other items under the same parent as this one (none when it has no parent). */
   siblings(key: string): Item[];
+  /** The latest changes of an item, oldest first: `at` by the source, `seenAt` when read, `readBefore` when last read without the change. */
   observations(key: string): Observation[];
   notes(key: string): Record<string, Note>;
   commitments(caseId: string): Commitment[];

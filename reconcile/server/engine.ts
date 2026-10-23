@@ -220,6 +220,9 @@ export function createEngine(deps: EngineDeps) {
         if (stopped) return;
         const events: EventBody[] = [];
         for (const snapshot of poll.snapshots) {
+          // The last read before this one: a read without a change leaves no observation, so it is
+          // kept here (a file's in the source's state, any item's while this process runs).
+          const readBefore = Math.max(Date.parse(health.readAt?.[snapshot.key] ?? "") || 0, lastRead.get(snapshot.key) ?? 0);
           lastRead.set(snapshot.key, nowMs);
           const before = state.items[snapshot.key];
           if (before) {
@@ -233,6 +236,7 @@ export function createEngine(deps: EngineDeps) {
               id: hash(`${snapshot.key}\0${snapshot.sourceUpdatedAt}\0${JSON.stringify(changes)}`).slice(0, 16),
               at: snapshot.sourceUpdatedAt ?? snapshot.observedAt,
               seenAt: snapshot.observedAt,
+              readBefore: nowIso(Math.max(readBefore, Date.parse(before.observedAt) || 0)),
               source: source.id,
               key: snapshot.key,
               kind: "changed",
