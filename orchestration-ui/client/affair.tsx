@@ -24,7 +24,10 @@ function hostOpenExternalUrl(): OpenExternalUrl | null {
  */
 function follow(target: AffairTarget, openScreen: ReturnType<typeof openPluginScreenOf>): void {
   if (target.kind === "screen") {
-    openScreen?.({ pluginId: target.link.plugin, screenId: target.link.screen, params: target.link.params });
+    // A screen the host cannot open is toasted by the host, which then throws as well.
+    try {
+      openScreen?.({ pluginId: target.link.plugin, screenId: target.link.screen, params: target.link.params });
+    } catch {}
   } else if (target.kind === "route") {
     // The UI's tsconfig has no DOM library; on the web the global has a location.
     const location = (globalThis as { location?: { assign(url: string): void } }).location;

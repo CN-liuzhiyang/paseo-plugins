@@ -63,12 +63,13 @@ test("the host's navigation: used when it has openPluginScreen, called on itself
   const calls: unknown[] = [];
   const navigation = {
     marker: 7,
-    openPluginScreen(this: { marker: number }, input: unknown) {
-      calls.push([this.marker, input]);
+    openPluginScreen(this: { marker: number }, ...args: unknown[]) {
+      calls.push([this.marker, ...args]);
     },
   };
   openPluginScreenOf(navigation)!({ pluginId: "tracker", screenId: "item", params: { id: "1" } });
-  assert.deepEqual(calls, [[7, { pluginId: "tracker", screenId: "item", params: { id: "1" } }]]);
+  // The host takes (pluginId, screenId, params?) and throws on anything else.
+  assert.deepEqual(calls, [[7, "tracker", "item", { id: "1" }]]);
 });
 
 test("a url is shown with its host, so a label cannot say where it goes", () => {

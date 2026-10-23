@@ -141,13 +141,17 @@ export function urlHost(url: string): string | null {
 
 export type OpenPluginScreen = (input: { pluginId: string; screenId: string; params?: Record<string, string> }) => void;
 
+type HostOpenPluginScreen = (pluginId: string, screenId: string, params?: Record<string, string>) => void;
+
 /**
  * The host's way to open a screen of any plugin, when it has one: `navigation.openPluginScreen`,
  * which hosts that predate it do not offer. Looked up rather than assumed, and called as a method
- * of the navigation object it came from.
+ * of the navigation object it came from, with the host's arguments `(pluginId, screenId, params?)`.
  */
 export function openPluginScreenOf(navigation: unknown): OpenPluginScreen | null {
   const owner = navigation as { openPluginScreen?: unknown } | null | undefined;
   const open = owner?.openPluginScreen;
-  return typeof open === "function" ? (input) => (open as OpenPluginScreen).call(owner, input) : null;
+  return typeof open === "function"
+    ? ({ pluginId, screenId, params }) => (open as HostOpenPluginScreen).call(owner, pluginId, screenId, params)
+    : null;
 }
