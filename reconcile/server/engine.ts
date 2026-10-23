@@ -1785,7 +1785,7 @@ export function createEngine(deps: EngineDeps) {
         if (!c.ask.allowOther) return no("这个问题只能选，不接受自己写的答案");
         raw = input.text.trim();
       } else return no("先选一个答案，或者写一句");
-      const { events, label } = answerEvents(c, raw, at, "page", `page ${c.id} ${round}`, personName(c.ask.person));
+      const { events, label } = answerEvents(c, raw, at, "page", `page\0${c.id}\0${round}`, personName(c.ask.person));
       // A card that has nothing left to ask is over; one with others still open is cut down at the next reconcile (pruneCards).
       for (const card of openCards()) {
         if (card.commitments.some(({ id }) => id === c.id) && card.commitments.every(({ id }) => id === c.id || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: card.id, patch: { status: "answered", closedAt: at } });
