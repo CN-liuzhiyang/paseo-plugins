@@ -136,7 +136,7 @@ test("a settings write that changes nothing leaves the engine running; one that 
     // Asked to reconcile while one is in flight, it says so instead of "done".
     const busy = await e.rpc("reconcile.tick");
     assert.equal(busy.ok, false);
-    assert.match(busy.detail!, /上一轮对账还没结束/);
+    assert.match(busy.detail!, /上一轮检查还没结束/);
     e.change({ tickSeconds: 1800 });
     await settle(100);
     assert.equal(e.started(), 1, "the restart waits for the reconcile in flight");

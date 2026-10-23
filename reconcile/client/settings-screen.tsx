@@ -25,7 +25,7 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
 
   if (settings.status === "loading") {
     return (
-      <SettingsSection title="事务">
+      <SettingsSection title="事项追踪">
         <SettingsCard>
           <SettingsRow label="正在读取设置…" />
         </SettingsCard>
@@ -34,7 +34,7 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
   }
   if (settings.status !== "ready") {
     return (
-      <SettingsSection title="事务">
+      <SettingsSection title="事项追踪">
         <SettingsCard>
           <SettingsRow label="设置读不出来" error={settings.error} />
           <SettingsAction label="重新读取" actionLabel="重试" onPress={() => void settings.reload()} />
@@ -65,7 +65,7 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
         <SettingsCard>
           <SettingsSwitch
             label="真的发问题卡"
-            hint="关着是演练：照样读来源、按规则判断、算出该问谁什么，但不起卡片，只在「事务」里列出打算做的事。第一次接上一套新配置时先演练一轮。"
+            hint="关着是演练：照样读来源、照私有配置判断、算出该问谁什么，但不起卡片，只在「事项追踪」里列出打算做的事。第一次接上一套新配置时先演练一轮。"
             value={values.mode === "live"}
             disabled={settings.saving}
             onValueChange={(live) => void settings.save({ ...values, mode: live ? "live" : "dry-run" }, revision)}
@@ -86,8 +86,8 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
           ))}
           <SettingsInput
             key={`tick-${revision}`}
-            label="多久对账一次（秒）"
-            hint="每次对账只读到期的来源，来源自己的轮询间隔在 sources.json 里。"
+            label="多久检查一次（秒）"
+            hint="每次检查只读到期的来源，来源自己的轮询间隔在 sources.json 里。"
             initialValue={String(values.tickSeconds)}
             onChangeText={(text) => setDraft((d) => ({ ...d, tickSeconds: text }))}
             error={tickError}

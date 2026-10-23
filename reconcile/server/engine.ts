@@ -69,7 +69,9 @@ const CARRIER_RETRY_MS = 5 * 60_000;
 const DAY = 86_400_000;
 /** How a case's health sorts on the page: what is wrong first. */
 /** Why the engine cancelled a rule's commitment; one cancelled for this is opened again when the rule wants it again. */
-export const NOT_WANTED = "规则不再要求";
+export const NOT_WANTED = "不用再问了";
+/** The same reason as journals before 2026-10-23 wrote it. */
+const NOT_WANTED_BEFORE = "规则不再要求";
 /** Why the engine cancelled the commitments of an item a person said to stop following; undone, they open again. */
 export const DROPPED = "你说不再追踪";
 
@@ -758,11 +760,11 @@ export function createEngine(deps: EngineDeps) {
       for (const spec of judged.output.commitments) {
         wanted.add(spec.key);
         const existing = state.commitments[commitmentId(spec.key)];
-        const reopen = existing?.status === "cancelled" && (existing.reason === NOT_WANTED || existing.reason === DROPPED) && existing.origin.by === "rule";
+        const reopen = existing?.status === "cancelled" && (existing.reason === NOT_WANTED || existing.reason === NOT_WANTED_BEFORE || existing.reason === DROPPED) && existing.origin.by === "rule";
         if (!existing || reopen) {
           if (Date.parse(spec.backstop.at) <= nowMs) {
             // Nothing could be asked before it expired; creating it would only record a miss.
-            plan.push({ at: nowIso(nowMs), kind: "skipped", person: spec.owner, summary: `没${existing ? "重开" : "建"}：${spec.title} 的兜底时间 ${spec.backstop.at.slice(5, 16).replace("T", " ")} 已经过了` });
+            plan.push({ at: nowIso(nowMs), kind: "skipped", person: spec.owner, summary: `没${existing ? "重新排" : "排"}：${spec.title} 的兜底时间 ${spec.backstop.at.slice(5, 16).replace("T", " ")} 已经过了` });
             continue;
           }
           const fresh = toCommitment(spec, item.key, rule.name, nowMs);
@@ -778,7 +780,7 @@ export function createEngine(deps: EngineDeps) {
           for (let round = 1; round <= existing.rounds; round++) {
             back.push({ type: "action", action: action(`ask:${existing.id}:${round}`, "ask", existing.id, `重开前问过的这一轮作废：${existing.title}`, "superseded", null, nowMs) });
           }
-          const what = `重开承诺：${spec.title}（规则又要它了；${describeStep(fresh)}）`;
+          const what = `重新排上：${spec.title}（又要问了；${describeStep(fresh)}）`;
           back.push({ type: "action", action: action(`reopen:${existing.id}:${existing.updatedAt}`, "commitment.ensure", existing.id, what, "done", null, nowMs) });
           gated.push({ kind: "reopen", person: spec.owner, what, events: [{ type: "commitment.changed", id: existing.id, patch: { ...reopened, updatedAt: nowIso(nowMs) } }, ...back] });
           diff.reopenedCommitments!.push(spec.key);
@@ -801,7 +803,7 @@ export function createEngine(deps: EngineDeps) {
         gated.push({
           kind: "change",
           person: existing.owner,
-          what: `改承诺：${existing.title}`,
+          what: `改了要问的：${existing.title}`,
           events: [{ type: "commitment.changed", id: existing.id, patch: { ...patch, updatedAt: nowIso(nowMs) } }, ...takenBack],
         });
         diff.changedCommitments!.push(existing.key);
@@ -813,7 +815,7 @@ export function createEngine(deps: EngineDeps) {
           gated.push({
             kind: "cancel",
             person: c.owner,
-            what: `撤承诺：${c.title}（${NOT_WANTED}）`,
+            what: `收回：${c.title}（${NOT_WANTED}）`,
             events: [{ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: NOT_WANTED, updatedAt: nowIso(nowMs) } }],
           });
           diff.droppedCommitments.push(c.key);
@@ -821,7 +823,7 @@ export function createEngine(deps: EngineDeps) {
       }
     }
     for (const c of creations) {
-      const what = `建承诺：${c.title}（${describeStep(c)}）`;
+      const what = `排了：${c.title}（${describeStep(c)}）`;
       gated.push({
         kind: "create",
         person: c.owner,
@@ -842,7 +844,7 @@ export function createEngine(deps: EngineDeps) {
       const total = changes.newCommitments + changes.dropped + changes.changed + changes.reopened;
       if (!firstLoad && total > config.policy.ruleBreakerChanges && !state.rules.released.includes(set.fingerprint)) {
         events.push({ type: "rules.held", fingerprint: set.fingerprint, ...changes });
-        events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `规则改动会一下子${describeChanges(changes)}` });
+        events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `判断方法改动会一下子${describeChanges(changes)}` });
       }
     }
     append(events);
@@ -850,7 +852,7 @@ export function createEngine(deps: EngineDeps) {
     const done: EventBody[] = [];
     for (const g of gated) {
       if (held) {
-        plan.push({ at: nowIso(nowMs), kind: "held", person: g.person, summary: `规则改动挂起，没做：${g.what}` });
+        plan.push({ at: nowIso(nowMs), kind: "held", person: g.person, summary: `判断方法改了先停着，没做：${g.what}` });
         continue;
       }
       done.push(...g.events);
@@ -1193,7 +1195,7 @@ export function createEngine(deps: EngineDeps) {
       if (q.options.length === 1) return [q.question, ...(c?.brief ? ["", c.brief] : [])].join("\n");
       return [q.question, ...q.options.map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`), ...(q.allowOther ? ["- 其他（自己写）"] : [])].join("\n");
     });
-    return [...parts.map((p, i) => (content.questions.length > 1 ? `${i + 1}. ${p}` : p)), ...(asks ? ["在 Paseo「事务」里回答"] : [])].join("\n\n");
+    return [...parts.map((p, i) => (content.questions.length > 1 ? `${i + 1}. ${p}` : p)), ...(asks ? ["在 Paseo「事项追踪」里回答"] : [])].join("\n\n");
   }
 
   /**
@@ -1276,7 +1278,7 @@ export function createEngine(deps: EngineDeps) {
           if (!stopped) await archiveFinished();
         } catch (error) {
           deps.log(`tick failed: ${(error as Error).stack ?? error}`);
-          lastProblems.push(`这次对账出错：${(error as Error).message}`);
+          lastProblems.push(`这次检查出错：${(error as Error).message}`);
         } finally {
           finishReceipts();
           lastTickAt = nowMs;
@@ -1362,7 +1364,7 @@ export function createEngine(deps: EngineDeps) {
       }
       events.push({ type: "card.changed", id: cardId, patch: { status: "answered", closedAt: at } });
       append(events);
-      return [`**已记下**：`, ...lines, "", "接下来怎么跟，由规则在下一次对账时决定，可以在「事务」里看。"].join("\n");
+      return [`**已记下**：`, ...lines, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
     },
 
     /**
@@ -1386,14 +1388,14 @@ export function createEngine(deps: EngineDeps) {
         ask: {
           person: admin.id,
           header: "测试",
-          question: "「事务」测试卡：能看到选项、能选、能在「其他」里写字吗？",
+          question: "「事项追踪」测试卡：能看到选项、能选、能在「其他」里写字吗？",
           options: [
             { id: "ok", label: "都正常", description: "选了这张卡就结束" },
             { id: "odd", label: "看得到，但有地方不对", description: "哪里不对写在「其他」里更好" },
           ],
           allowOther: true,
         },
-        brief: "这是一张测试卡，不对应任何事务。选一个答案，或者在「其他」里写一句话，回答会记进日志；不回答的话一天后自动过期。",
+        brief: "这是一张测试卡，不对应任何事项。选一个答案，或者在「其他」里写一句话，回答会记进日志；不回答的话一天后自动过期。",
         nag: { everyWorkdays: 1, at: "10:00", max: 1 },
         backstop: { at: nowIso(nowMs + 24 * 3_600_000), outcome: "expire" },
         level: "push",
@@ -1407,7 +1409,7 @@ export function createEngine(deps: EngineDeps) {
         reason: null,
       };
       append([{ type: "commitment.created", commitment: c }]);
-      return { ok: true, detail: `给 ${admin.name} 排了一张测试卡，下一次对账发出（不打扰时段和每天的上限照样算）` };
+      return { ok: true, detail: `给 ${admin.name} 排了一张测试卡，下一次检查时发出（不打扰时段和每天的上限照样算）` };
     },
 
     releaseRules(fingerprint: string): boolean {
@@ -1447,7 +1449,7 @@ export function createEngine(deps: EngineDeps) {
       const commitments = Object.values(state.commitments)
         .filter((c) => c.caseId === item.key)
         .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-        .map((c) => ({ id: c.id, title: c.title, status: c.status, step: describeStep(c), answer: c.answer ? (c.answer.text ?? c.answer.label) : null, reason: c.reason }));
+        .map((c) => ({ id: c.id, title: c.title, status: c.status, step: describeStep(c), answer: c.answer ? (c.answer.text ?? c.answer.label) : null, reason: c.reason === NOT_WANTED_BEFORE ? NOT_WANTED : c.reason }));
       return {
         caseId: item.key,
         title: item.title,

@@ -38,7 +38,7 @@ function dateOf(value: string | undefined, tz: string): number | null {
 export function heatOf(item: Pick<Item, "fields" | "lastHumanAt">, inputs: HeatInputs): string[] {
   const { nowMs, tz, policy } = inputs;
   const reasons: string[] = [];
-  if (inputs.open) reasons.push("有没结束的承诺");
+  if (inputs.open) reasons.push("有没问完的问题");
   if (inputs.watched) reasons.push("在关注列表里");
   if (inputs.quiet) return reasons;
   if (item.lastHumanAt && nowMs - Date.parse(item.lastHumanAt) <= policy.recentDays * DAY) reasons.push(`${item.lastHumanAt.slice(5, 10)} 有人改过`);

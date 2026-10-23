@@ -784,7 +784,7 @@ test("a rule change that would create many commitments is held until released", 
       assert.equal(commitments(w).length, 0);
       const held = w.store.state.rules.held!;
       assert.equal(held.newCommitments, 4);
-      assert.equal(plan(w, "held").filter((p) => p.summary.includes("建承诺")).length, 4);
+      assert.equal(plan(w, "held").filter((p) => p.summary.includes("排了：")).length, 4);
       assert.equal(stage(w), "awaiting-release", "assessments still follow the new rules");
       // Nor does it record what it concludes: a wrong rule would leave facts behind that outlive it.
       assert.ok(plan(w, "held").some((p) => p.summary.includes("记下事实 plannedRelease")));
@@ -835,7 +835,7 @@ test("a commitment the rule stopped wanting is opened again when it wants it aga
     const [c] = commitments(w);
     assert.equal(commitments(w).length, 1, "the same commitment, not a new one");
     assert.equal(c!.reason, null);
-    assert.ok(plan(w, "commitment").some((p) => p.summary.startsWith("重开承诺：q gcp-demo:1")), "the plan says so");
+    assert.ok(plan(w, "commitment").some((p) => p.summary.startsWith("重新排上：q gcp-demo:1")), "the plan says so");
     assert.ok(Object.keys(w.store.state.ledger).some((k) => k.startsWith(`reopen:${c!.id}:`)), "and the ledger records it");
     // Its trigger has passed: asked in the same reconcile, as round 1 again.
     assert.equal(w.cards.length, 2);
@@ -871,7 +871,7 @@ test("a rule change that would take many questions back is held, and nothing is 
     assert.equal(held.dropped, 4);
     assert.equal(held.newCommitments, 0);
     assert.ok(commitments(w).every((c) => c.status === "scheduled"), "nothing taken back while held");
-    assert.equal(plan(w, "held").filter((p) => p.summary.startsWith("规则改动挂起，没做：撤承诺")).length, 4);
+    assert.equal(plan(w, "held").filter((p) => p.summary.startsWith("判断方法改了先停着，没做：收回")).length, 4);
     assert.ok(w.store.state.evals > 0);
     // Put back: the held version is gone, nothing happened.
     writeFileSync(path.join(w.configDir, "rules", "mini.mjs"), askingRule());
@@ -966,7 +966,7 @@ test("the engine itself does not create a commitment whose backstop has passed",
       w.items.set("gcp-demo:1", issue(1, { release: "2026-10-21" }));
       await w.run("2026-10-21 10:00");
       assert.equal(commitments(w).length, 0);
-      assert.match(plan(w, "skipped")[0]!.summary, /没建：迟到的 的兜底时间 10-20 10:00 已经过了/);
+      assert.match(plan(w, "skipped")[0]!.summary, /没排：迟到的 的兜底时间 10-20 10:00 已经过了/);
       assert.equal(w.store.state.evals, 0);
     },
   ));

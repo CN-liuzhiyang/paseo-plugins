@@ -58,7 +58,7 @@ test("the entry registers, starts in dry-run, reconciles once, writes status and
     assert.ok(outward.includes("fetch https://flags.example/outer.json"), "the switch file went through the fake");
     assert.ok(outward.some((c) => c.startsWith("exec node cli.js")), "the tracker went through the fake");
     assert.ok(existsSync(path.join(dataDir, "status.json")));
-    assert.match(readFileSync(path.join(dataDir, "plan.md"), "utf8"), /# 事务控制器（test，演练）/);
+    assert.match(readFileSync(path.join(dataDir, "plan.md"), "utf8"), /# 事项追踪（test，演练）/);
   } finally {
     (cleanup as () => void)();
     rmSync(dir, { recursive: true, force: true });

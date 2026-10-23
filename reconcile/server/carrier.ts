@@ -10,7 +10,7 @@ import { cardPrompt, MODEL_ID, PROVIDER_ID } from "./inbox";
 // as needing attention until answered, then the engine archives it.
 
 export const CARD_LABEL = "reconcile-card";
-const TITLE = "事务";
+const TITLE = "事项追踪";
 
 export function createCarrier(deps: {
   paseo: Pick<PaseoApi, "workspaces" | "agents">;
@@ -24,7 +24,11 @@ export function createCarrier(deps: {
     if (known) {
       const handle = deps.paseo.workspaces.ref(known);
       const snapshot = await handle.refresh().catch(() => null);
-      if (snapshot && !snapshot.archivingAt && snapshot.workspaceDirectory && path.resolve(snapshot.workspaceDirectory) === path.resolve(deps.workspaceDir)) return handle;
+      if (snapshot && !snapshot.archivingAt && snapshot.workspaceDirectory && path.resolve(snapshot.workspaceDirectory) === path.resolve(deps.workspaceDir)) {
+        // The same workspace keeps its cards when the name changes (it was 「事务」 before 2026-10-23): renamed, not replaced.
+        if (snapshot.title !== TITLE) await handle.setTitle(TITLE).catch((error: unknown) => deps.log(`renaming workspace ${known} failed: ${(error as Error).message}`));
+        return handle;
+      }
       deps.log(`workspace ${known} is gone or moved; making a new one`);
     }
     mkdirSync(deps.workspaceDir, { recursive: true });

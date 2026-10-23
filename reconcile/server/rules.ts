@@ -280,7 +280,7 @@ export interface Judged {
 export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprint: string, check?: (out: RuleOutput) => string | null): Judged {
   const base = { caseId: kase.id, at: ctx.now, rule: rule.name, rulesFingerprint: fingerprint, stale: false };
   const failed = (error: string): Judged => ({
-    assessment: { ...base, stage: "error", health: "conflict", headline: `规则出错：${rule.name}`, next: { actor: "me", what: "看一眼规则" }, error },
+    assessment: { ...base, stage: "error", health: "conflict", headline: `判断出错：${rule.name}`, next: { actor: "me", what: "看一眼判断文件" }, error },
     output: null,
   });
   let raw: unknown;

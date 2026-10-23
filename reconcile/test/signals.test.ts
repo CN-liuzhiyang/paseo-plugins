@@ -216,7 +216,7 @@ test("heat: each reason, and nothing for an old item nobody touches", () => {
   assert.deepEqual(heatOf({ fields: { Release: "2026-07-10" }, lastHumanAt: "2026-09-01T10:00:00+08:00" }, base), []);
   assert.deepEqual(heatOf({ fields: { Release: "2026-11-04外放" }, lastHumanAt: null }, base), ["Release 11-04 在前后 14 天内"]);
   assert.deepEqual(heatOf({ fields: {}, lastHumanAt: "2026-10-15T10:00:00+08:00" }, base), ["10-15 有人改过"]);
-  assert.deepEqual(heatOf({ fields: {}, lastHumanAt: null }, { ...base, open: true, watched: true, flagChangedAt: "2026-10-20T01:00:00.000Z" }), ["有没结束的承诺", "在关注列表里", "关联的开关 10-20 变过"]);
+  assert.deepEqual(heatOf({ fields: {}, lastHumanAt: null }, { ...base, open: true, watched: true, flagChangedAt: "2026-10-20T01:00:00.000Z" }), ["有没问完的问题", "在关注列表里", "关联的开关 10-20 变过"]);
   assert.equal(listedAt("2026-10-21 14:38", TZ), Date.parse("2026-10-21T14:38:00+08:00"));
   assert.equal(listedAt("not a date", TZ), null);
 });

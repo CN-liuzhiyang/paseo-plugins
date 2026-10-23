@@ -48,7 +48,7 @@ test("a raised card is sent to the person's channel at once: its title, the ques
     assert.equal(w.deliveries.length, 1);
     const [d] = w.deliveries;
     assert.deepEqual([d!.channel, d!.to, d!.title, d!.status], ["im", "p2p:someone", w.cards[0]!.card.title, "succeeded"]);
-    assert.equal(d!.text, "#1 外放了吗？\n- 外放了\n- 还没：过两天再问\n- 其他（自己写）\n\n在 Paseo「事务」里回答");
+    assert.equal(d!.text, "#1 外放了吗？\n- 外放了\n- 还没：过两天再问\n- 其他（自己写）\n\n在 Paseo「事项追踪」里回答");
     assert.match(d!.idempotencyKey, new RegExp(`^test:notify:${w.cards[0]!.card.id}:im:`));
   }));
 

@@ -43,13 +43,13 @@ interface Session {
 const CARD_ID = /\bcard_[0-9a-f]{6,}\b/;
 
 export function cardPrompt(cardId: string): string {
-  return `事务问题卡 ${cardId}`;
+  return `事项追踪问题卡 ${cardId}`;
 }
 
 export function questionRequest(cardId: string, content: CardContent, permissionId: string): ProviderPermissionRequest {
   return {
     id: permissionId,
-    name: "事务",
+    name: "事项追踪",
     kind: "question",
     title: content.title,
     description: "选一个答案；选项都不对就写在「其他」里。收起不算回答，到时候会再问。",
@@ -87,7 +87,7 @@ export function createInboxProvider(deps: InboxDeps, options: { closeGraceMs?: n
   const closeGraceMs = options.closeGraceMs ?? CLOSE_GRACE_MS;
   return {
     id: PROVIDER_ID,
-    label: "事务",
+    label: "事项追踪",
     description: "Question cards from the reconcile controller; no model",
     async connect(request) {
       if (!request.versions.includes(1)) throw new Error("Provider protocol version 1 is required");

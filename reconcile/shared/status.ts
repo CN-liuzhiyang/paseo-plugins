@@ -15,10 +15,10 @@ export interface PlanEntry {
 export const PLAN_LABEL: Record<PlanEntry["kind"], string> = {
   card: "发卡",
   deferred: "先不发",
-  commitment: "承诺",
-  skipped: "没建",
+  commitment: "排上",
+  skipped: "没排",
   note: "记事实",
-  held: "挂起",
+  held: "先停着",
   expire: "到期",
   notice: "提醒",
   said: "对话里说的",
@@ -36,12 +36,12 @@ export interface RulesHeld {
 
 export function describeChanges(c: Pick<RulesHeld, "newCommitments" | "dropped" | "changed" | "reopened">): string {
   const parts = [
-    c.newCommitments > 0 ? `新建 ${c.newCommitments}` : "",
-    c.dropped > 0 ? `撤掉 ${c.dropped}` : "",
+    c.newCommitments > 0 ? `新排 ${c.newCommitments}` : "",
+    c.dropped > 0 ? `收回 ${c.dropped}` : "",
     c.changed > 0 ? `改动 ${c.changed}` : "",
-    c.reopened > 0 ? `重开 ${c.reopened}` : "",
+    c.reopened > 0 ? `重新排上 ${c.reopened}` : "",
   ].filter(Boolean);
-  return `${parts.join("、") || "改动 0"} 条承诺`;
+  return `${parts.join("、") || "改动 0"} 个要问的问题`;
 }
 
 export interface StatusSaid {

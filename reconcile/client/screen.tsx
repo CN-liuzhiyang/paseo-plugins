@@ -108,12 +108,12 @@ function Inbox({ openSettings }: { openSettings(): void }) {
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
         <View style={ui.styles.row}>
-          <Text style={ui.styles.title}>事务</Text>
+          <Text style={ui.styles.title}>事项追踪</Text>
           {/* Whether it asks at all, before anything else: an empty list while rehearsing means nothing. */}
           {status ? <Badge tone={status.mode === "live" ? "success" : "warning"} label={status.mode === "live" ? "发卡中" : "演练（不发卡）"} /> : null}
         </View>
         <View style={ui.styles.row}>
-          <Button icon="RefreshCw" label={busy === "tick" ? "正在对账…" : "现在对账"} disabled={busy !== null || !status} onPress={() => run("tick", () => tick({}))} />
+          <Button icon="RefreshCw" label={busy === "tick" ? "正在检查…" : "现在检查"} disabled={busy !== null || !status} onPress={() => run("tick", () => tick({}))} />
           <Button icon="FlaskConical" label={busy === "test" ? "正在排…" : "发测试卡"} disabled={busy !== null || !status} onPress={() => run("test", () => testCard({}))} />
           <Button icon="Settings" label="设置" onPress={openSettings} />
         </View>
@@ -156,8 +156,8 @@ function Alive({ status }: { status: Status }) {
   const { late, stuck, sources } = troubleOf(status);
   const bad = late || sources.length > 0;
   const tick = status.ticking
-    ? `正在对账（${ago(status.tickStartedAt, nowMs)}开始）${stuck ? "，太久了，控制器可能卡住了" : ""}`
-    : `上次对账 ${ago(status.lastTickAt, nowMs)}${late ? "，超过两个周期没对账，控制器可能卡住了" : ""}`;
+    ? `正在检查（${ago(status.tickStartedAt, nowMs)}开始）${stuck ? "，太久了，控制器可能卡住了" : ""}`
+    : `上次检查 ${ago(status.lastTickAt, nowMs)}${late ? "，超过两个周期没检查，控制器可能卡住了" : ""}`;
   return (
     <View style={[ui.styles.card, { borderColor: bad ? ui.tone("danger") : ui.theme.colors.border }]}>
       <View style={ui.styles.row}>
@@ -190,7 +190,7 @@ const planLine = (p: PlanEntry) => `${clock(p.at)}  [${PLAN_LABEL[p.kind] ?? p.k
 function CaseRow({ kase, cardAgent }: { kase: Case; cardAgent?: string | null }) {
   const ui = useUi();
   const a = kase.assessment;
-  const health = a ? (a.error ? { tone: "danger" as Tone, label: "规则出错" } : (HEALTH[a.health] ?? { tone: "neutral" as Tone, label: a.health })) : { tone: "neutral" as Tone, label: "未判断" };
+  const health = a ? (a.error ? { tone: "danger" as Tone, label: "判断出错" } : (HEALTH[a.health] ?? { tone: "neutral" as Tone, label: a.health })) : { tone: "neutral" as Tone, label: "未判断" };
   const open = kase.commitments.filter((c) => c.status === "scheduled" || c.status === "waiting");
   return (
     <View style={ui.styles.card}>
@@ -263,13 +263,13 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
         <Banner key={p} tone="warning" icon="TriangleAlert" title={p} />
       ))}
       {held ? (
-        <Banner tone="warning" icon="ShieldAlert" title={`规则改动挂起了：它会一下子${describeChanges(held)}`}>
-          <Text style={ui.styles.muted}>现状已经按新规则在算，但承诺一条没动（不建、不撤、不改、不重开），新规则要记的事实也没记，不会因此发卡或收卡。看一下下面计划里「挂起」的几条，确认没问题再放行。</Text>
-          <Button icon="Check" label={busy === "release" ? "正在放行…" : "放行这一版规则"} disabled={busy !== null} onPress={() => onRelease(held.fingerprint)} />
+        <Banner tone="warning" icon="ShieldAlert" title={`判断方法改了，先停着：它会一下子${describeChanges(held)}`}>
+          <Text style={ui.styles.muted}>现状已经按新的判断方法在算，但要问的问题一个没动（不排新的、不收回、不改、不重新排），新判断要记的事实也没记，不会因此发卡或收卡。看一下下面计划里「先停着」的几条，确认没问题再放行。</Text>
+          <Button icon="Check" label={busy === "release" ? "正在放行…" : "放行这一版判断方法"} disabled={busy !== null} onPress={() => onRelease(held.fingerprint)} />
         </Banner>
       ) : null}
       {status.rules.errors.length > 0 ? (
-        <Banner tone="danger" icon="FileWarning" title="有规则文件没加载">
+        <Banner tone="danger" icon="FileWarning" title="有判断方法的文件没加载">
           {status.rules.errors.map((e) => (
             <Text key={e.file} style={ui.styles.small} selectable>
               {e.file}：{e.error}
@@ -314,7 +314,7 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
 
       {alarm ? null : <Alive status={status} />}
 
-      <Fold label={`这一轮对账${status.mode === "live" ? "做了" : "打算做"}的事（${acts.length}）`} initiallyOpen={status.mode !== "live"}>
+      <Fold label={`这一轮检查${status.mode === "live" ? "做了" : "打算做"}的事（${acts.length}）`} initiallyOpen={status.mode !== "live"}>
         {acts.length === 0 ? <Text style={ui.styles.muted}>没有要做的。</Text> : <Block text={acts.map(planLine).join("\n")} />}
         {notes.length > 0 ? (
           <Fold label={`另外记下 ${notes.length} 条事实`}>
@@ -324,7 +324,7 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
       </Fold>
 
       {errors.length > 0 ? (
-        <Section title={`规则判断出错（${errors.length}）`}>
+        <Section title={`判断出错（${errors.length}）`}>
           {errors.map((k) => (
             <CaseRow key={k.caseId} kase={k} />
           ))}
@@ -341,10 +341,10 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
         ))}
       </Fold>
       <Text style={ui.styles.small}>
-        另有 {status.cold.length} 件冷的：没有要问的、最近没人动、日期不在近期、关联的开关也没变，所以不判断、不显示；其中任何一样变了会自动回来。
+        另有 {status.cold.length} 个事项是冷的：没有要问的、最近没人动、日期不在近期、关联的开关也没变，所以不判断、不显示；其中任何一样变了会自动回来。
       </Text>
       <Text style={ui.styles.small}>
-        {status.instanceId ? `实例 ${status.instanceId} · ` : ""}每 {status.tickSeconds} 秒对账一次 · 规则 {status.rules.fingerprint?.slice(0, 12) ?? "—"}（{status.rules.files.join("、") || "没有规则文件"}） · 评测候选 {status.evals} 条 · 今天发卡{" "}
+        {status.instanceId ? `实例 ${status.instanceId} · ` : ""}每 {status.tickSeconds} 秒检查一次 · 判断方法 {status.rules.fingerprint?.slice(0, 12) ?? "—"}（{status.rules.files.join("、") || "没有判断文件"}） · 评测候选 {status.evals} 条 · 今天发卡{" "}
         {Object.entries(status.pushesToday)
           .map(([name, n]) => `${name} ${n}`)
           .join("、")}

@@ -33,15 +33,15 @@ const samePath = (a: string, b: string) => path.resolve(a).toLowerCase() === pat
 
 export function planText(status: EngineStatus): string {
   const lines = [
-    `# 事务控制器（${status.instanceId || "未命名"}，${status.mode === "live" ? "正式" : "演练"}）`,
-    `上次对账 ${status.lastTickAt ?? "还没有"}；来源：${status.sources.map((s) => `${s.id} ${s.state}${s.lastError ? `（${s.lastError}）` : ""}`).join("，") || "无"}`,
+    `# 事项追踪（${status.instanceId || "未命名"}，${status.mode === "live" ? "正式" : "演练"}）`,
+    `上次检查 ${status.lastTickAt ?? "还没有"}；来源：${status.sources.map((s) => `${s.id} ${s.state}${s.lastError ? `（${s.lastError}）` : ""}`).join("，") || "无"}`,
     ...status.problems.map((p) => `⚠ ${p}`),
     "",
-    "## 这次对账打算做的",
+    "## 这次检查打算做的",
     ...(status.plan.length === 0 ? ["（什么都不做）"] : status.plan.map((p) => `- [${PLAN_LABEL[p.kind]}] ${p.summary}`)),
     "",
-    `## 在管的事（热的 ${status.cases.length} 件；冷的 ${status.cold.length} 件不判断、不显示）`,
-    ...status.cases.map((c) => `- ${c.caseId} ${c.assessment ? c.assessment.headline : "（没有规则判断）"}（热：${c.hot.join("；")}）${c.assessment?.notice ? `\n  - ⚠ ${c.assessment.notice}` : ""}${c.commitments.map((k) => `\n  - 承诺「${k.title}」${k.status}：${k.step}${k.answer ? `，回答 ${k.answer}` : ""}`).join("")}`),
+    `## 在追踪的事项（热的 ${status.cases.length} 个；冷的 ${status.cold.length} 个不判断、不显示）`,
+    ...status.cases.map((c) => `- ${c.caseId} ${c.assessment ? c.assessment.headline : "（还没判断）"}（热：${c.hot.join("；")}）${c.assessment?.notice ? `\n  - ⚠ ${c.assessment.notice}` : ""}${c.commitments.map((k) => `\n  - 要问的「${k.title}」${k.status}：${k.step}${k.answer ? `，回答 ${k.answer}` : ""}`).join("")}`),
     "",
     "## 对话里说过的（还在生效的，和 7 天内撤掉的）",
     ...(status.said.length === 0
@@ -254,7 +254,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
 
   server.handle(tickRpc, async () => {
     if (!engine) return { ok: false, detail: problem.detail || "没在运行" };
-    if (engine.busy()) return { ok: false, detail: "上一轮对账还没结束，等它跑完再点" };
+    if (engine.busy()) return { ok: false, detail: "上一轮检查还没结束，等它跑完再点" };
     await engine.tick();
     return { ok: true, detail: "" };
   });
@@ -268,7 +268,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
 
   server.handle(releaseRulesRpc, async ({ fingerprint }) => {
     if (!engine) return { ok: false, detail: "没在运行" };
-    return engine.releaseRules(fingerprint) ? { ok: true, detail: "" } : { ok: false, detail: "没有挂起的这一版规则" };
+    return engine.releaseRules(fingerprint) ? { ok: true, detail: "" } : { ok: false, detail: "没有先停着的这一版判断方法" };
   });
 
   return () => {
