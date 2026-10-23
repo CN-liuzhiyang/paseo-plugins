@@ -20,6 +20,7 @@ import {
   ms,
   phaseTitle,
   type CallState,
+  processGone,
   type ProcessCheck,
   type RunState,
   type RunStatus,
@@ -218,7 +219,7 @@ function processText(run: RunState, proc: ProcessCheck | null): string {
   if (start.pid === null) return "没有记录（写这个文件的运行时版本还不记 pid）";
   const where = `pid ${start.pid}${start.hostname ? ` · ${start.hostname}` : ""}`;
   if (run.end) return where;
-  if (proc) return `${where} · ${proc.alive ? "还在" : "已退出"}`;
+  if (proc) return `${where} · ${proc.alive ? "占位文件有更新" : proc.gone === false ? "占位文件已过期（进程还在，可能是 pid 被复用）" : "已退出"}`;
   return `${where} · 不在这台主机上，查不了`;
 }
 
@@ -262,7 +263,7 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
         <Head title="还没有结局" />
         <Text style={ui.styles.text}>
           {status === "lost"
-            ? proc && !proc.alive
+            ? processGone(proc)
               ? "运行进程已经不在了，不会再写结局。"
               : "很久没有新事件，也没有结局：运行进程可能已经退出。一有新事件这里会自动恢复。"
             : "运行结束时这里给出结果。"}

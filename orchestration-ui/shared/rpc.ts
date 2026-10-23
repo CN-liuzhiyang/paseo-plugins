@@ -19,7 +19,7 @@ export type LogDirInfo = z.output<typeof logDir>;
 const error = z.object({ name: z.string(), message: z.string() }).nullable();
 
 /** The daemon's look at an unfinished run's process; null when it could not look (see server/alive.ts). */
-const processCheck = z.object({ pid: z.number(), alive: z.boolean() }).nullable();
+const processCheck = z.object({ pid: z.number().nullable(), alive: z.boolean(), gone: z.boolean().nullable().optional() }).nullable();
 
 export const runSummary = z.object({
   runId: z.string(),
@@ -35,6 +35,8 @@ export const runSummary = z.object({
   costNote: z.string().nullable(),
   caller: z.string().nullable(),
   host: z.string().nullable(),
+  /** run.start.affair's label: what the run is for, as its caller said. The detail view has the rest. */
+  affairLabel: z.string().nullable(),
   /** For a run without run.end: what it is doing, or was doing when it went quiet. */
   activity: z.string().nullable(),
   stop: z.object({ reason: z.string(), phase: z.string().nullable(), phaseTitle: z.string().nullable() }).nullable(),

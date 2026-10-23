@@ -5,6 +5,8 @@
 // kinds and unknown fields are ignored, as the contract requires; a line that breaks a known
 // kind's shape is kept as a problem rather than guessed at.
 
+import { affairOf, type Affair } from "./affair";
+
 export type Outcome = "done" | "stopped" | "failed" | "timeout";
 /**
  * `running` and `lost` are both "no run.end": which one depends on how long the file has been
@@ -52,6 +54,8 @@ export interface RunStart {
   /** The runtime's process and machine; absent in files written before they were added. */
   pid: number | null;
   hostname: string | null;
+  /** What the run is for, as its caller said (shared/affair.ts); absent in files written before it was added. */
+  affair: Affair | null;
 }
 
 export interface RunEnd {
@@ -348,6 +352,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         host: str(raw.host),
         pid: num(raw.pid),
         hostname: str(raw.hostname),
+        affair: affairOf(raw.affair),
       };
       run.startedAt = ts;
       // Declared phases come first, in declared order, even the ones never entered.
@@ -592,18 +597,30 @@ export function staleAfterMs(run: RunState, baseMs: number): number {
 }
 
 /**
- * Whether the runtime's process still exists, as the daemon found it. Only the daemon on the
- * run's own machine can look; `null` means nobody could, and the quiet-time threshold decides.
+ * Whether the run is alive, as the daemon found it. Only the daemon on the run's own machine can
+ * look; `null` means nobody could, and the quiet-time threshold decides.
+ *
+ * `alive` is the claim's word (shared/liveness.ts): the runtime touches `<runId>.claim` every 30
+ * seconds, and a claim touched in the last two minutes is a run that is alive. The process id only
+ * ever shows death: `gone` is whether the pid is missing on this machine (true: dead whatever the
+ * claim says; false: it exists, which proves nothing, pids are reused; null: not asked). A file
+ * written before claims existed has none, and `gone` is then all there is.
  */
 export interface ProcessCheck {
-  pid: number;
+  pid: number | null;
   alive: boolean;
+  gone?: boolean | null;
+}
+
+/** The runtime's process is known to be gone (not merely a claim gone quiet). */
+export function processGone(proc: ProcessCheck | null): boolean {
+  return proc !== null && !proc.alive && proc.gone !== false;
 }
 
 export function runStatus(run: RunState, now: number, baseMs: number, proc: ProcessCheck | null = null): RunStatus {
   if (run.end) return run.end.outcome;
   if (!run.start) return "starting";
-  // A process that is gone will never write run.end; one that is there is still running, however quiet.
+  // A claim gone quiet or a process that is gone will never write run.end; a claim kept up means running, however quiet.
   if (proc) return proc.alive ? "running" : "lost";
   const last = ms(run.lastEventAt);
   if (last === null) return "lost";

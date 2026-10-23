@@ -3,7 +3,7 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { CARD_KIND, CARD_VERSION, cardItemId, cardKey, cardOf, isOver, urgentChange, type RunCard } from "../shared/card";
 import { applyEvent, createRun, foldEvents, runStatus, type RunState } from "../shared/run";
-import { checkProcess, localProbe, type Probe } from "./alive";
+import { checkLiveness, localProbe, type Probe } from "./alive";
 import { readFrom, readHeadLine, readTailLines } from "./lines";
 
 // Cards in the conversations that started runs. This side watches <logDir>/runs, folds each run
@@ -169,7 +169,7 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
     // Look at the process before reading: one that wrote run.end and exited is then fully read.
     // On the first look run.start is not read yet, so look after (the next recheck settles a race).
     const first = entry.run.start === null;
-    let proc = entry.run.end ? null : checkProcess(entry.run.start, probe);
+    let proc = entry.run.end ? null : await checkLiveness(entry.file, entry.run.start, probe, now());
     while (entry.offset < info.size) {
       const chunk = await readFrom(entry.file, entry.offset, 4 << 20);
       for (const line of chunk.lines) {
@@ -179,7 +179,7 @@ export function createCardFeed({ append, where, now = Date.now, probe = localPro
       entry.offset = chunk.nextOffset;
       if (!chunk.more) break;
     }
-    if (first) proc = entry.run.end ? null : checkProcess(entry.run.start, probe);
+    if (first) proc = entry.run.end ? null : await checkLiveness(entry.file, entry.run.start, probe, now());
     const at = now();
     const status = runStatus(entry.run, at, staleMs, entry.run.end ? null : proc);
     entry.card = cardOf(entry.runId, entry.run, status, at, { proc: entry.run.end ? null : proc });
@@ -313,7 +313,7 @@ export async function readCard(
   const info = await stat(file);
   if (info.size > FOLD_LIMIT) return null;
   const run = createRun();
-  const proc = checkProcess(foldEvents([parse(await readHeadLine(file))]).start, probe);
+  const proc = await checkLiveness(file, foldEvents([parse(await readHeadLine(file))]).start, probe, now());
   let offset = 0;
   while (offset < info.size) {
     const chunk = await readFrom(file, offset, 4 << 20);

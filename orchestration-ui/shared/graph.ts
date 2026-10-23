@@ -14,6 +14,7 @@ import {
   phaseTitle,
   type CallState,
   type PhaseDecl,
+  processGone,
   type ProcessCheck,
   type RunStart,
   type RunState,
@@ -525,9 +526,11 @@ export function hero(
       tone: "warning",
       kicker: "失联",
       title:
-        proc && !proc.alive
-          ? `运行进程不在了（pid ${proc.pid}），不会再有结果`
-          : "不知道它还在不在跑：很久没有新事件，也没有结局",
+        processGone(proc)
+          ? `运行进程不在了（pid ${proc!.pid}），不会再有结果`
+          : proc && !proc.alive
+            ? "占位文件超过 2 分钟没有更新，运行多半已经停了，不会再有结果"
+            : "不知道它还在不在跑：很久没有新事件，也没有结局",
       subtitle: `最后在做：${where.join("、") || "调用之间（脚本自己的代码）"}${quiet}。${agents}`,
       action: agentAction(open.find((call) => call.agentId), "打开那个 agent 看看"),
       select: open[0]?.callId ?? END,

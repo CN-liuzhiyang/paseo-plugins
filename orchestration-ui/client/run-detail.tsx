@@ -5,6 +5,7 @@ import { formatDuration, RUN_STATUS_LABEL } from "../shared/format";
 import { buildGraph, headline, hero, inputLabel, type Hero } from "../shared/graph";
 import { caveatsOf, hasUncountedCodex, ms, runStatus, type RunState, type RunStatus } from "../shared/run";
 import { useNow, useRun, type RunSnapshot } from "./data";
+import { AffairLine } from "./affair";
 import { Drawer, spendText } from "./drawer";
 import { EventsView } from "./events-view";
 import { GraphView } from "./graph-view";
@@ -100,6 +101,7 @@ export function RunDetail({
       {ready ? (
         <>
           <Header run={run} runId={runId} status={status} />
+          {run.start?.affair ? <AffairLine affair={run.start.affair} /> : null}
           {top ? <HeroBar hero={top} status={status} remote={run.start?.host != null} /> : null}
           <Numbers run={run} status={status} graphClock={graph.clock} onSelect={select} />
           <View style={{ gap: 12 }}>

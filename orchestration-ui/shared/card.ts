@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { hero, inputLabel, phaseStrip, callTitle } from "./graph";
-import { costSoFar, openCalls, type ProcessCheck, type RunState, type RunStatus } from "./run";
+import { costSoFar, openCalls, processGone, type ProcessCheck, type RunState, type RunStatus } from "./run";
 
 // The card a run leaves in the conversation that started it: what it is doing, where in the
 // flow, what it cost, whether a person has to act, and at the end how it went. The daemon side
@@ -121,7 +121,7 @@ export function cardOf(
           carrierAgentId: gateCall.agentId,
         }
       : null,
-    lost: status === "lost" ? { pid: proc?.pid ?? null, procGone: proc !== null && !proc.alive } : null,
+    lost: status === "lost" ? { pid: proc?.pid ?? null, procGone: processGone(proc) } : null,
     focus: top.select,
     remote: start.host != null,
     evaluatedAt: new Date(now).toISOString(),

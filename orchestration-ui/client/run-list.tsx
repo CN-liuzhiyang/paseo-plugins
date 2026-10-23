@@ -4,6 +4,7 @@ import { formatTime, formatUsd, RUN_STATUS_LABEL, shortId } from "../shared/form
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import { useNow, useRunList } from "./data";
 import { LOG_DIR_SOURCE, RUN_LOOK, VISIT_LOOK } from "./looks";
+import { AffairTag } from "./affair";
 import { Banner, Block, useUi } from "./ui";
 
 // Every run, sorted by whether it needs you: a gate waiting or a run gone quiet first, then what
@@ -202,6 +203,7 @@ function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId:
       <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
         {run.inputLabel ?? shortId(run.runId)}
       </Text>
+      {run.affairLabel ? <AffairTag label={run.affairLabel} /> : null}
     </View>
   );
   const said = (

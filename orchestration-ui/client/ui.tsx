@@ -15,6 +15,10 @@ export interface Ui {
   theme: Theme;
   compact: boolean;
   navigation: Navigation;
+  /** The host this view is of, for a route to another plugin's screen; null where the host does not say. */
+  hostId: string | null;
+  /** The client has URLs to go to (the web and desktop app), so a route can be followed. */
+  routes: boolean;
   styles: ReturnType<typeof makeStyles>;
   tone(tone: Tone): string;
   /** A tone as a faint wash over the current surface; works on light and dark themes alike. */
@@ -84,10 +88,12 @@ export function UiProvider({
   props,
   children,
 }: {
-  props: Pick<PluginSurfaceProps, "theme" | "layout"> & { navigation?: Navigation };
+  props: Pick<PluginSurfaceProps, "theme" | "layout"> & { navigation?: Navigation; host?: { id: string } };
   children: ReactNode;
 }) {
   const { theme, layout, navigation } = props;
+  const hostId = props.host?.id ?? null;
+  const routes = layout.platform === "web";
   const ui = useMemo<Ui>(() => {
     const c = theme.colors;
     const tones: Record<Tone, string> = {
@@ -101,11 +107,13 @@ export function UiProvider({
       theme,
       compact: layout.compact,
       navigation,
+      hostId,
+      routes,
       styles: makeStyles(theme, layout.compact),
       tone: (tone) => tones[tone],
       tint: (tone, alpha = 0.12) => withAlpha(tones[tone], alpha) ?? c.surface2,
     };
-  }, [theme, layout.compact, navigation]);
+  }, [theme, layout.compact, layout.platform, navigation, hostId]);
   return <UiContext.Provider value={ui}>{children}</UiContext.Provider>;
 }
 

@@ -14,7 +14,7 @@ import {
   type ProcessCheck,
   type RunState,
 } from "../shared/run";
-import { checkProcess, localProbe, type Probe } from "./alive";
+import { checkLiveness, localProbe, type Probe } from "./alive";
 import { readFrom, readHeadLine, readTailLines, type Line } from "./lines";
 
 // Reading <logDir>/runs. A run is folded in full -- the list has to know what it is doing, which
@@ -95,6 +95,7 @@ export function summarize(
     costNote,
     caller: run.start?.caller ?? null,
     host: run.start?.host ?? null,
+    affairLabel: run.start?.affair?.label ?? null,
     activity: activity(run, status, now, { proc, staleMs }),
     stop: end?.stop ? { ...end.stop, phaseTitle: phaseTitle(run, end.stop.phase) } : null,
     error: end?.error ?? null,
@@ -121,6 +122,7 @@ function unreadable(runId: string, size: number, problem: string): RunSummary {
     costNote: null,
     caller: null,
     host: null,
+    affairLabel: null,
     activity: null,
     stop: null,
     error: null,
@@ -139,12 +141,12 @@ function unreadable(runId: string, size: number, problem: string): RunSummary {
  * Callers look before reading the events: a process found gone has already written everything it
  * ever will, so a run.end it wrote just before exiting is in the read that follows.
  */
-async function processOf(file: string, probe: Probe): Promise<ProcessCheck | null> {
+async function processOf(file: string, probe: Probe, now: number): Promise<ProcessCheck | null> {
   const head = await readHeadLine(file);
   if (head === null) return null;
   const start = parseLine({ offset: 0, text: head });
   if (!start.ok) return null;
-  return checkProcess(foldEvents([start.value]).start, probe);
+  return checkLiveness(file, foldEvents([start.value]).start, probe, now);
 }
 
 export function createRunIndex({ now = Date.now, probe = localProbe }: RunIndexOptions = {}) {
@@ -205,7 +207,7 @@ export function createRunIndex({ now = Date.now, probe = localProbe }: RunIndexO
       unfinished.delete(file);
       return ended;
     }
-    const proc = await processOf(file, probe);
+    const proc = await processOf(file, probe, now());
     if (size > FOLD_LIMIT) {
       // Too big to fold for a list row: say what the ends say and leave the detail to the view.
       const head = await readHeadLine(file);
@@ -279,12 +281,12 @@ export async function readRun(
   runsDir: string,
   runId: string,
   offset: number,
-  { check = false, probe = localProbe }: { check?: boolean; probe?: Probe } = {},
+  { check = false, probe = localProbe, now = Date.now }: { check?: boolean; probe?: Probe; now?: () => number } = {},
 ): Promise<Omit<ReadOutput, "staleMs">> {
   const file = path.join(runsDir, `${runId}${SUFFIX}`);
   const empty = { events: [], badLines: [], nextOffset: offset, size: 0, reset: false, more: false, process: null };
   try {
-    const process = check ? await processOf(file, probe) : null;
+    const process = check ? await processOf(file, probe, now()) : null;
     const chunk = await readFrom(file, offset);
     const events: unknown[] = [];
     const badLines: Array<{ offset: number; error: string }> = [];

@@ -26,6 +26,37 @@
 列表页按「需要你处理（人闸在等、失联）/ 运行中 / 最近结束」分组，每行是 flow 名加输入里最能认出它
 的值、阶段色带、和详情页结论条同一句话、花费、开始时间。
 
+## 属于哪件事
+
+起这次运行的一方可以说它是为什么起的（`orch.mjs run --affair`，契约见 `../orchestration/EVENTS.md` 的 `run.start.affair`）：
+一句话 `label`，加上可选的外链 `url` 或指向某个插件某一屏的 `link`。详情页顶上显示"属于：<label>"，列表每行在输入后面
+带一个小标签。这里不认识任何具体的插件，只画它拿到的：
+
+- 有 `link`：宿主有 `navigation.openPluginScreen(pluginId, screenId, params)` 就用它（不重载，手机上也能用）；
+  宿主没有，就退回那个插件屏的路由（`/h/<host>/plugin/<plugin>/surface/<screen>?param.<k>=<v>`，同 Paseo app 的
+  `buildPluginSurfaceRoute`）做整页跳转，链接旁边写明"会重新载入页面"（连接会断开重连，内存状态全丢）。手机端没有路由
+  可跳，没有宿主的接口时有 `url` 就退到 `url`，否则只显示文字。
+- 只有 `url`：用宿主的 `openExternalUrl` 打开（桌面端走系统浏览器），宿主没有再退到 `Linking.openURL`；`url` 的主机名
+  显示在 label 旁边，因为 label 写什么由调用方说了算，去哪儿不该由它说了算。
+- 都没有：只显示文字。
+
+事件文件是磁盘上的数据，`label`、`url` 当不可信文本：label 去掉控制、改变文字方向、零宽和不显示的字符，超过 120 字符截断，
+`url` 只认不带账号密码的 http(s)，`link` 的名字不合白名单就当没有。字符清单在 `../orchestration/fixtures/affair-cases.json`，
+运行时和这里都按它测。
+
+**测试的范围**：跳转往哪儿去、显示哪些字，是 `shared/affair.ts` 里的纯函数，测了（三种情况、手机、宿主有无接口、恶意输入）。
+`client/affair.tsx` 本身没有渲染测试：这里没有能在 node 下渲染 React Native 组件的设施，组件只过了类型检查。另外
+`npm run typecheck` 在这个环境里是红的（装的 `@getpaseo/plugin` 0.12.0 缺 `addScreen`、`openScreen` 等新接口，main 上也一样），
+所以 `props.host`、`layout.platform` 这类新用法没被真正检查过；要在装了 fork 版 SDK 的环境里再跑一遍。
+
+## 运行"活着"怎么判
+
+只看运行时写的占位文件 `<runId>.claim`：最近 2 分钟被碰过就是活着，过期就是失联（`server/alive.ts`
+`checkLiveness`，表在 `shared/liveness.ts`，和 `../orchestration/runtime/state.mjs` 是同一张表，两边都按
+`../orchestration/fixtures/run-state-cases.json` 测）。pid 只用来证明**死了**：持有者那台机器上 pid 不存在，不管占位多新都算
+失联；pid 还在不说明什么（会被复用），占位过期而 pid 还在时显示"占位文件超过 2 分钟没有更新，运行多半已经停了"。没有占位文件的旧
+运行，仍按 pid 和安静时间判。
+
 它不启动运行、不批人闸、不改任何文件；唯一写的东西是发起对话里的那张卡片（在 daemon 内存里，见下）。
 
 ## 发起对话里的卡片
@@ -162,5 +193,7 @@ client/run-card.tsx      时间线里的运行卡片
 client/run-panel.tsx     workspace 的「编排运行」标签页
 client/focus.ts          标签页显示哪个运行、哪个节点（打开它的地方先写，标签页读）
 client/surface.tsx       侧边栏 screen：列表或一个运行，运行 id 在 screen 参数里
+client/affair.tsx        "属于：<label>"（详情页顶上）和列表行上的小标签；去哪儿由 shared/affair.ts 定
+shared/liveness.ts      活着的判法（占位文件），和运行时的 state.mjs 同一张表
 fixtures/           样例运行
 ```

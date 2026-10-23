@@ -9,6 +9,7 @@ import {
   staleAfterMs,
   type CallState,
   type PhaseStatus,
+  processGone,
   type ProcessCheck,
   type RunState,
   type RunStatus,
@@ -174,9 +175,10 @@ export function activity(
   if (!run.start) return "文件已创建，第一条事件还没写完";
   const open = openCalls(run).filter((call) => callStatus(call, status) !== "ok");
   const last = `最后一条事件在 ${formatAgo(run.lastEventAt, now)}（${formatTime(run.lastEventAt, now)}）`;
-  const lost =
-    proc && !proc.alive
-      ? `运行进程（pid ${proc.pid}）已退出，没有写出 run.end。${last}`
+  const lost = processGone(proc)
+    ? `运行进程（pid ${proc!.pid}）已退出，没有写出 run.end。${last}`
+    : proc && !proc.alive
+      ? `占位文件超过 2 分钟没有更新（pid ${proc.pid} 还在，但 pid 可能已被复用），运行多半已经停了，没有写出 run.end。${last}`
       : `${last}，之后没有新事件，也没有 run.end`;
   // A live process that has been quiet past the threshold: running, but say how quiet.
   const lastAt = ms(run.lastEventAt);
