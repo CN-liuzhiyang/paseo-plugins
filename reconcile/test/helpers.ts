@@ -135,6 +135,8 @@ export interface World {
   clock: { now: number };
   cards: Array<{ card: Card; content: CardContent; attempt: number; agentId: string }>;
   archived: string[];
+  /** Times the engine made sure of the cards' workspace. */
+  ensured: number;
   /** files: switch files (by name) that fail to read while the others do. */
   fail: { source: Error | null; carrier: Error | null; files: Set<string>; deliver: Error | null };
   /** What server.deliver was handed, failed tries included. */
@@ -183,7 +185,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations } as World;
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0 } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -238,6 +240,9 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
     },
     async archive(agentId) {
       archived.push(agentId);
+    },
+    async ensure() {
+      world.ensured++;
     },
   };
 

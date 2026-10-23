@@ -130,15 +130,12 @@ const policySchema = z
     ruleBreakerChanges: z.number().int().min(0),
     /** A source that has failed this long is reported as an evaluation candidate. */
     sourceDownHours: z.number().min(1),
+    /** Cards asking the admin to confirm words said in a conversation, at most this many a day; they do not use up pushPerDay. */
+    confirmPerDay: z.number().int().min(0).max(20).default(3),
     /**
      * Which items are judged each reconcile. The rest stay cold -- not judged, not shown, not
      * read again -- until something that matters about them changes.
      */
-    /**
-     * Working directories of conversations that come from a chat app (a Feishu or other chat route): words
-     * said there are not taken as the admin's own, since the host does not say who sent them.
-     */
-    chatCwds: z.array(z.string().min(1)).default([]),
     hot: z
       .object({
         /** A person changed it within this many days. */

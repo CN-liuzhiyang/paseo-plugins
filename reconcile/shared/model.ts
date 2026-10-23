@@ -169,6 +169,10 @@ export interface Card {
   raisedAt: string;
   closedAt: string | null;
   reason: string | null;
+  /** A card asking the admin to confirm words said in a conversation; absent on a card of questions. */
+  kind?: "confirm";
+  /** Cut down from this card (questions came off it): sent and counted already as that one. */
+  cutFrom?: string;
 }
 
 export interface Assessment {

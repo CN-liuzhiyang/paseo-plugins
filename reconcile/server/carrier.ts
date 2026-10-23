@@ -5,12 +5,19 @@ import type { PaseoApi, PaseoWorkspaceHandle } from "@getpaseo/client";
 import type { Carrier } from "./engine";
 import { cardPrompt, MODEL_ID, PROVIDER_ID } from "./inbox";
 
-// Cards live in one workspace of their own, "事务", so the sidebar under it is the list of
+// Cards live in one workspace of their own, "事项追踪", so the sidebar under it is the list of
 // questions waiting for an answer: each carrier agent is titled with its question and shows
 // as needing attention until answered, then the engine archives it.
 
 export const CARD_LABEL = "reconcile-card";
 const TITLE = "事项追踪";
+/** The workspace's name before 2026-10-23: renamed to TITLE. A name a person gave it is theirs. */
+const OLD_TITLES = ["事务"];
+
+const samePath = (a: string, b: string) => {
+  const norm = (p: string) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
+  return norm(a) === norm(b);
+};
 
 export function createCarrier(deps: {
   paseo: Pick<PaseoApi, "workspaces" | "agents">;
@@ -23,10 +30,13 @@ export function createCarrier(deps: {
     const known = deps.workspaceId();
     if (known) {
       const handle = deps.paseo.workspaces.ref(known);
-      const snapshot = await handle.refresh().catch(() => null);
-      if (snapshot && !snapshot.archivingAt && snapshot.workspaceDirectory && path.resolve(snapshot.workspaceDirectory) === path.resolve(deps.workspaceDir)) {
-        // The same workspace keeps its cards when the name changes (it was 「事务」 before 2026-10-23): renamed, not replaced.
-        if (snapshot.title !== TITLE) await handle.setTitle(TITLE).catch((error: unknown) => deps.log(`renaming workspace ${known} failed: ${(error as Error).message}`));
+      // A failure to look is not a workspace gone: it throws, and this card waits for the next try.
+      const snapshot = await handle.refresh();
+      if (snapshot && !snapshot.archivingAt && snapshot.workspaceDirectory && samePath(snapshot.workspaceDirectory, deps.workspaceDir)) {
+        // The same workspace keeps its cards when the name changes: renamed, not replaced.
+        if (OLD_TITLES.includes(snapshot.title ?? "")) {
+          await handle.setTitle(TITLE).catch((error: unknown) => deps.log(`renaming workspace ${known} failed: ${(error as Error).message}`));
+        }
         return handle;
       }
       deps.log(`workspace ${known} is gone or moved; making a new one`);
@@ -52,6 +62,9 @@ export function createCarrier(deps: {
     },
     async archive(agentId) {
       await deps.paseo.agents.ref(agentId).archive();
+    },
+    async ensure() {
+      await workspace();
     },
   };
 }

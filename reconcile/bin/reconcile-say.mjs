@@ -25,8 +25,9 @@ const HELP = `用法：
   --data    插件的数据目录（缺省 $RECONCILE_DATA_DIR，或者 $PASEO_HOME/plugin-data/reconcile）
   --wait    等回执的秒数（缺省 90，0 是不等）
 
-回执原样告诉人。不是本人刚说的（找不到原话、像是贴进来的、在聊天软件的对话里），不会马上生效，
-会先发一张确认卡给 admin。在追踪的事项和编号在数据目录的 status.json、plan.md 里。`;
+回执原样告诉人。要在人说这句话的那一轮里跑。不是本人这一轮刚说的（找不到原话、像是贴进来的、这一轮不是人发消息
+开始的、在聊天软件的对话里），不会马上生效，会先发一张确认卡给 admin。在追踪的事项和编号在数据目录的
+status.json、plan.md 里。`;
 
 function fail(message, code = 2) {
   process.stderr.write(`${message}\n`);
@@ -61,9 +62,11 @@ if (!flags.said) fail("要用 --said 给出人的原话");
 
 const known = cmd === "say" ? ["item", "kind", "said", "until", "person", "what", "expected", "data", "wait"] : ["id", "last", "said", "data", "wait"];
 for (const name of Object.keys(flags)) if (!known.includes(name)) fail(`${cmd} 不认识 --${name}`);
+const waitSeconds = flags.wait === undefined ? 90 : Number(flags.wait);
+if (!Number.isFinite(waitSeconds) || waitSeconds < 0) fail("--wait 要是秒数");
 
 const id = `r_${randomBytes(6).toString("hex")}`;
-const base = { v: 1, id, at: new Date().toISOString(), via: process.env.PASEO_AGENT_ID || null, said: flags.said };
+const base = { v: 1, id, at: new Date().toISOString(), via: process.env.PASEO_AGENT_ID, said: flags.said };
 let request;
 if (cmd === "say") {
   if (!flags.item) fail("要用 --item 给出单号");
@@ -77,6 +80,9 @@ if (cmd === "say") {
   request = { ...base, cmd, target: flags.id ?? "last" };
 }
 
+// The plugin checks the words against the conversation that ran this; outside one there is none.
+if (!request.via) fail("要在 Paseo 的对话里跑（没有 PASEO_AGENT_ID），插件才知道是谁说的");
+
 const home = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
 const data = flags.data || process.env.RECONCILE_DATA_DIR || path.join(home, "plugin-data", "reconcile");
 if (!existsSync(data)) fail(`数据目录不存在：${data}（用 --data 指定）`);
@@ -86,8 +92,6 @@ const file = path.join(dir, `${id}.json`);
 writeFileSync(`${file}.tmp`, JSON.stringify(request, null, 2));
 renameSync(`${file}.tmp`, file);
 
-const waitSeconds = flags.wait === undefined ? 90 : Number(flags.wait);
-if (!Number.isFinite(waitSeconds) || waitSeconds < 0) fail("--wait 要是秒数");
 if (waitSeconds === 0) {
   process.stdout.write(`已交给「事项追踪」（${id}），没等回执；回执会写到 ${path.join(dir, "done", `${id}.json`)}。\n`);
   process.exit(0);

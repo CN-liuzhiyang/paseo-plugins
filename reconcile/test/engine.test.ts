@@ -816,7 +816,7 @@ const flagged = (id: number, flag: string) =>
   issue(id, { fields: { Release: "2026-10-16", Flag: flag }, sourceUpdatedAt: new Date(Date.parse("2026-10-12T10:00:00+08:00") + ++flaggedVersion * 60_000).toISOString() });
 const heldNow = (w: World) => w.store.state.rules.held;
 
-test("a commitment the rule stopped wanting is opened again when it wants it again, and asked again", () =>
+test("a commitment the rule stopped wanting is opened again when it wants it again, and goes on from the rounds asked", () =>
   withWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": askingRule() } } }, async (w) => {
     w.items.set("gcp-demo:1", flagged(1, ""));
     await w.run("2026-10-13 12:00");
@@ -837,10 +837,31 @@ test("a commitment the rule stopped wanting is opened again when it wants it aga
     assert.equal(c!.reason, null);
     assert.ok(plan(w, "commitment").some((p) => p.summary.startsWith("重新排上：q gcp-demo:1")), "the plan says so");
     assert.ok(Object.keys(w.store.state.ledger).some((k) => k.startsWith(`reopen:${c!.id}:`)), "and the ledger records it");
-    // Its trigger has passed: asked in the same reconcile, as round 1 again.
-    assert.equal(w.cards.length, 2);
+    assert.ok(plan(w, "commitment").some((p) => p.summary.includes("接着之前问过的 1 次")));
+    // Asked once before: not asked afresh, but nagged when the next round is due (Monday 10:00).
+    assert.equal(w.cards.length, 1);
     assert.equal(c!.status, "waiting");
     assert.equal(c!.rounds, 1);
+    await w.run("2026-10-19 10:00");
+    assert.equal(w.cards.length, 2);
+    assert.equal(commitments(w)[0]!.rounds, 2);
+  }));
+
+test("a judgment that flips back and forth does not ask a question asked to the end once more", () =>
+  withWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": askingRule() } } }, async (w) => {
+    w.items.set("gcp-demo:1", flagged(1, ""));
+    await w.run("2026-10-20 10:00");
+    assert.equal(w.cards.length, 3, "asked three times, unanswered");
+    assert.equal(commitments(w)[0]!.rounds, 3);
+    w.items.set("gcp-demo:1", flagged(1, "drop"));
+    await w.run("2026-10-20 10:30");
+    assert.equal(commitments(w)[0]!.status, "cancelled");
+    w.items.set("gcp-demo:1", flagged(1, ""));
+    await w.run("2026-10-23 18:00");
+    const [c] = commitments(w);
+    assert.equal(c!.status, "waiting", "open again");
+    assert.equal(c!.rounds, 3);
+    assert.equal(w.cards.length, 3, "and not asked three times more");
   }));
 
 test("a commitment ended otherwise is not opened again", () =>

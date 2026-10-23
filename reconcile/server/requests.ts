@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
@@ -7,12 +7,17 @@ import { z } from "zod";
 // receipt in <data>/requests/done/. The engine is the only one that writes the journal: it reads
 // the requests at the start of a reconcile, and nothing else is trusted about them. Anything on
 // this machine can write a file there, so a request is checked like input from outside: its name,
-// its size, its shape; at most a few per reconcile; once per id, even across a crash.
+// its size, its shape; at most a few per reconcile and per hour; once per id, even across a crash.
 
 export const REQUEST_ID = /^r_[0-9a-f]{12}$/;
 export const ANNOTATION_ID = /^a_[0-9a-f]{12}$/;
 export const MAX_REQUEST_BYTES = 8 * 1024;
 export const REQUESTS_PER_TICK = 10;
+export const REQUESTS_PER_HOUR = 30;
+/** Request names looked at per reconcile, so that a flooded directory costs a bounded read. */
+const NAMES_PER_TICK = 200;
+const STALE_TMP_MS = 3_600_000;
+const RECEIPT_KEEP_MS = 7 * 86_400_000;
 
 const base = {
   v: z.literal(1),
@@ -58,33 +63,54 @@ export const KIND_LABEL: Record<SayRequest["kind"], string> = { drop: "不再追
 export type Incoming = { id: string; request: Request } | { id: string; error: string };
 
 /**
- * The request files waiting, oldest name first, at most `limit`. A name that is not an id, or a
- * file that is a link, too big or not a request, comes back as an error with the reason; the
- * caller writes the receipt and removes it. Anything else in the directory is left alone.
+ * The request files waiting, oldest first (by time written, then name). Ids already handled
+ * (`known`) come back apart and take no slot, so a request whose file could not be removed does
+ * not hold up the others; of the rest at most `limit`. A file that is a link, a directory, too big
+ * or not a request comes back as an error with the reason; the caller writes the receipt and
+ * removes it. A name that is not a request id is left alone.
  */
-export function readRequests(dir: string, limit = REQUESTS_PER_TICK): Incoming[] {
+export function readRequests(dir: string, known: (id: string) => boolean, limit = REQUESTS_PER_TICK): { fresh: Incoming[]; known: string[] } {
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return [];
+    return { fresh: [], known: [] };
   }
-  const out: Incoming[] = [];
-  for (const name of names.filter((n) => n.endsWith(".json")).sort()) {
-    if (out.length >= limit) break;
+  const candidates: Array<{ id: string; file: string; mtimeMs: number; st: ReturnType<typeof lstatSync> | null }> = [];
+  for (const name of names.filter((n) => n.endsWith(".json")).sort().slice(0, NAMES_PER_TICK)) {
     const id = name.slice(0, -".json".length);
     if (!REQUEST_ID.test(id)) continue;
     const file = path.join(dir, name);
+    let st: ReturnType<typeof lstatSync> | null = null;
     try {
-      const st = lstatSync(file);
-      if (!st.isFile()) {
-        out.push({ id, error: "不是普通文件" });
-        continue;
-      }
-      if (st.size > MAX_REQUEST_BYTES) {
-        out.push({ id, error: `太大了（${st.size} 字节，最多 ${MAX_REQUEST_BYTES}）` });
-        continue;
-      }
+      st = lstatSync(file);
+    } catch {
+      // Gone since the listing, or unreadable: reported below as unreadable.
+    }
+    candidates.push({ id, file, mtimeMs: st?.mtimeMs ?? 0, st });
+  }
+  candidates.sort((a, b) => a.mtimeMs - b.mtimeMs || a.id.localeCompare(b.id));
+  const out: Incoming[] = [];
+  const done: string[] = [];
+  for (const { id, file, st } of candidates) {
+    if (known(id)) {
+      done.push(id);
+      continue;
+    }
+    if (out.length >= limit) continue;
+    if (!st) {
+      out.push({ id, error: "读不出来" });
+      continue;
+    }
+    if (!st.isFile()) {
+      out.push({ id, error: "不是普通文件" });
+      continue;
+    }
+    if (st.size > MAX_REQUEST_BYTES) {
+      out.push({ id, error: `太大了（${st.size} 字节，最多 ${MAX_REQUEST_BYTES}）` });
+      continue;
+    }
+    try {
       const parsed = requestSchema.safeParse(JSON.parse(readFileSync(file, "utf8")));
       if (!parsed.success) {
         out.push({ id, error: `格式不对：${parsed.error.issues.map((i) => `${i.path.join(".") || "（整体）"} ${i.message}`).join("；").slice(0, 300)}` });
@@ -99,7 +125,7 @@ export function readRequests(dir: string, limit = REQUESTS_PER_TICK): Incoming[]
       out.push({ id, error: `读不出来：${(error as Error).message.slice(0, 200)}` });
     }
   }
-  return out;
+  return { fresh: out, known: done };
 }
 
 export interface Receipt {
@@ -109,50 +135,138 @@ export interface Receipt {
   annotation: string | null;
 }
 
-/** Writes the receipt the command waits for, then removes the request. */
+/**
+ * Writes the receipt the command waits for, then takes the request away: removed, or, when it
+ * cannot be (a directory under a request's name), moved into rejected/ so that it is not read again.
+ */
 export function finishRequest(dir: string, receipt: Receipt): void {
   const done = path.join(dir, "done");
   mkdirSync(done, { recursive: true });
   const file = path.join(done, `${receipt.id}.json`);
   writeFileSync(`${file}.tmp`, JSON.stringify(receipt, null, 2));
   renameSync(`${file}.tmp`, file);
+  const request = path.join(dir, `${receipt.id}.json`);
   try {
-    unlinkSync(path.join(dir, `${receipt.id}.json`));
-  } catch {
-    // Already gone.
+    unlinkSync(request);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    const rejected = path.join(dir, "rejected");
+    mkdirSync(rejected, { recursive: true });
+    renameSync(request, path.join(rejected, `${receipt.id}.json`));
   }
+}
+
+/** Leftovers: half-written files an hour old (a command killed while writing), and receipts a week old. */
+export function sweepRequests(dir: string, nowMs: number): void {
+  const sweep = (where: string, gone: (name: string, mtimeMs: number) => boolean) => {
+    let names: string[];
+    try {
+      names = readdirSync(where);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      try {
+        const st = lstatSync(path.join(where, name));
+        if (st.isFile() && gone(name, st.mtimeMs)) rmSync(path.join(where, name));
+      } catch {
+        // Raced with the command, or not ours to remove.
+      }
+    }
+  };
+  const staleTmp = (name: string, mtimeMs: number) => name.endsWith(".json.tmp") && nowMs - mtimeMs > STALE_TMP_MS;
+  sweep(dir, staleTmp);
+  sweep(path.join(dir, "done"), (name, mtimeMs) => staleTmp(name, mtimeMs) || (name.endsWith(".json") && nowMs - mtimeMs > RECEIPT_KEEP_MS));
 }
 
 /** The conversation a request came from, as the host shows it. */
 export interface Conversation {
   labels: Record<string, string>;
   cwd: string | null;
-  /** The person's messages in the turn running now, oldest first. */
-  turn: string[];
+  /** The turn the session is running now; null when it is not running one. */
+  turn: { messages: string[]; commands: string[] } | null;
 }
 
 /** A timeline entry as far as the turn matters. */
 export interface TurnEntry {
   type: string;
+  /** A person's message: its text. */
   text?: string;
+  /** A tool call that ran a command: the command as the agent wrote it. */
+  command?: string;
   turnId?: string;
 }
 
 /**
- * The person's messages of the turn running now: those with the turn id of the newest entry, or,
- * when the host gives no turn ids, the run of messages after the last thing the agent said.
+ * The command a timeline tool call ran: a shell call's, or, for a tool the host does not know
+ * (PowerShell on Windows), a string `command` in its input. Undefined when it shows none.
  */
-export function currentTurn(entries: TurnEntry[]): string[] {
-  const last = entries[entries.length - 1];
-  if (last?.turnId) {
-    const ofTurn = entries.filter((e) => e.type === "user_message" && e.turnId === last.turnId && e.text).map((e) => e.text!);
-    if (ofTurn.length > 0) return ofTurn;
+export function commandOf(item: unknown): string | undefined {
+  const it = item as { type?: unknown; detail?: { type?: unknown; command?: unknown; input?: unknown } } | null;
+  if (it?.type !== "tool_call" || !it.detail) return undefined;
+  if (it.detail.type === "shell" && typeof it.detail.command === "string") return it.detail.command;
+  const input = it.detail.input as { command?: unknown } | null | undefined;
+  if (it.detail.type === "unknown" && input && typeof input === "object" && typeof input.command === "string") return input.command;
+  return undefined;
+}
+
+/**
+ * The person's messages and the commands of the turn the session is running now (`turnId`, the
+ * host's active turn). Nothing else counts: a turn woken by a notice or a timer has no message of
+ * the person's, and is not taken to carry words they said in an earlier one.
+ */
+export function currentTurn(entries: TurnEntry[], turnId: string | null): Conversation["turn"] {
+  if (!turnId) return null;
+  const ofTurn = entries.filter((e) => e.turnId === turnId);
+  return {
+    messages: ofTurn.filter((e) => e.type === "user_message" && e.text).map((e) => e.text!),
+    commands: ofTurn.filter((e) => e.command).map((e) => e.command!),
+  };
+}
+
+/** Timeline entries read per page when checking whose words a request carries. */
+export const TIMELINE_PAGE = 200;
+
+/** As much of a host agent handle as reading its conversation takes; `C` is the host's page cursor. */
+export interface ConversationSource<C = unknown> {
+  timeline: { refetch(options: { direction: "tail" | "before"; limit: number; cursor?: C }): Promise<TimelinePage<C>> };
+  refresh(): Promise<unknown>;
+  current(): AgentSnapshot | null;
+}
+interface AgentSnapshot {
+  status: string;
+  activeTurn?: { turnId: string } | null;
+  labels?: Record<string, string>;
+  cwd?: string | null;
+}
+interface TimelinePage<C> {
+  agent?: AgentSnapshot | null;
+  entries: Array<{ item: unknown; turnId?: string }>;
+  hasOlder: boolean;
+  startCursor: C | null;
+}
+
+/**
+ * An agent's conversation as the check needs it. The command runs inside a turn of the session
+ * that ran it: the host's running turn is that one, and no other; a session not running one has
+ * none. A long turn starts before the newest page: older pages are read until its start is in, a
+ * few at most.
+ */
+export async function readConversation<C>(ref: ConversationSource<C>): Promise<Conversation | null> {
+  let page = await ref.timeline.refetch({ direction: "tail", limit: TIMELINE_PAGE });
+  const agent = page.agent ?? ((await ref.refresh()) ? ref.current() : null);
+  if (!agent) return null;
+  const turnId = agent.status === "running" ? (agent.activeTurn?.turnId ?? null) : null;
+  const entries = [...page.entries];
+  for (let more = 0; turnId && entries[0]?.turnId === turnId && page.hasOlder && page.startCursor && more < 3; more++) {
+    page = await ref.timeline.refetch({ direction: "before", cursor: page.startCursor, limit: TIMELINE_PAGE });
+    entries.unshift(...page.entries);
   }
-  let i = entries.length - 1;
-  while (i >= 0 && entries[i]!.type !== "user_message") i--;
-  const out: string[] = [];
-  while (i >= 0 && entries[i]!.type === "user_message") out.unshift(entries[i--]!.text ?? "");
-  return out.filter(Boolean);
+  const turn = entries.map((e) => {
+    const item = e.item as { type?: unknown; text?: unknown } | null;
+    return { type: String(item?.type), text: item?.type === "user_message" && typeof item.text === "string" ? item.text : undefined, command: commandOf(e.item), turnId: e.turnId };
+  });
+  return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(turn, turnId) };
 }
 
 /** Labels of agents that are not a person's own conversation: started by another agent, a flow, or a card. */
@@ -161,24 +275,29 @@ const NOT_A_PERSON = ["paseo.parent-agent-id", "orch-run", "reconcile-card"];
 const MAX_MESSAGE = 200;
 const MIN_COVER = 0.7;
 
+/** Text as a command line carries it, without the quoting and escaping a shell adds. */
+const squash = (text: string) => text.replace(/[\s"'`\\^]/g, "");
+
 /**
  * Whether the words are the person's own, said just now in their own conversation: null when they
- * are, else why not. Only the turn running now counts (an agent may not quote back what was said
- * yesterday); a message that is long, many lines or has a code block reads as pasted, and the
- * words must be most of the message, so that a line picked out of someone else's chat does not
- * pass as the person's.
+ * are, else why not. The session must be running a turn that a message of the person's started,
+ * and that turn must have run this command with these words: so the check is bound to the session
+ * running it, not to whatever id a request names. Only that turn counts (an agent may not quote
+ * back what was said yesterday); a message that is long, many lines or has a code block reads as
+ * pasted, and the words must be most of the message, so that a line picked out of someone else's
+ * chat does not pass as the person's. What cannot be checked is not taken as theirs.
  */
-export function notOwnWords(said: string, conversation: Conversation | null, chatCwds: string[]): string | null {
+export function notOwnWords(said: string, conversation: Conversation | null): string | null {
   if (!conversation) return "找不到说这句话的对话";
-  const label = NOT_A_PERSON.find((l) => l in conversation.labels);
-  if (label) return "这个对话不是人直接在用的（是别的 agent、编排运行或卡片起的）";
-  const norm = (p: string) => (process.platform === "win32" ? path.resolve(p).toLowerCase() : path.resolve(p));
-  const cwd = conversation.cwd ? norm(conversation.cwd) : null;
-  if (cwd && chatCwds.some((c) => cwd === norm(c) || cwd.startsWith(norm(c) + path.sep))) {
-    return "这是聊天软件里的对话，分不清是谁说的";
-  }
+  if (NOT_A_PERSON.some((l) => l in conversation.labels)) return "这个对话不是人直接在用的（是别的 agent、流程或卡片起的）";
+  // A chat channel (or another plugin) starts its conversations with a source label: the host does not say who sent what there.
+  if (conversation.labels.source) return `这是从「${clip(conversation.labels.source, 20)}」进来的对话（聊天软件或别的插件），分不清是谁说的`;
+  const turn = conversation.turn;
+  if (!turn) return "说这句话的对话这会儿没在跑，对不上是哪一轮说的";
+  if (turn.messages.length === 0) return "这一轮不是人发消息开始的（比如被通知或定时叫醒），不算本人说的";
   const words = said.trim();
-  for (const message of conversation.turn) {
+  if (!turn.commands.some((c) => c.includes("reconcile-say") && squash(c).includes(squash(words)))) return "这一轮里找不到带这句原话的 reconcile-say 调用";
+  for (const message of turn.messages) {
     const text = message.trim();
     if (!text.includes(words)) continue;
     if (text.length > MAX_MESSAGE || text.split("\n").length > 3 || text.includes("```")) return "原话所在的消息像是贴进来的一段，不算本人说的";
@@ -188,8 +307,16 @@ export function notOwnWords(said: string, conversation: Conversation | null, cha
   return "这一轮对话里找不到这句原话";
 }
 
-/** Shortens text from outside (a tracker title, a headline) before it goes back to a conversation. */
+/** Shortens text from outside (a tracker title, a headline, words said) to one line before it is shown anywhere. */
 export function clip(text: string, max: number): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * The same, for a place that renders Markdown (a card, plan.md): one line, and the characters
+ * that would make a link, emphasis, code, a heading or a quote shown as they are.
+ */
+export function clipMd(text: string, max: number): string {
+  return clip(text, max).replace(/[\\`*_[\]()<>#|~!]/g, "\\$&");
 }

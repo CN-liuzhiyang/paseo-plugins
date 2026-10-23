@@ -26,7 +26,7 @@ export type EventBody =
   | { type: "annotation.added"; annotation: Annotation }
   | { type: "annotation.revoked"; id: string; said: string; by: string }
   /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
-  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request }
+  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {

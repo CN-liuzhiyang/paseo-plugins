@@ -113,6 +113,8 @@ export interface Status {
   plan: PlanEntry[];
   evals: number;
   pushesToday: Record<string, number>;
+  /** Confirmation cards raised today, per admin; they have their own budget (policy.confirmPerDay). */
+  confirmsToday: Record<string, number>;
   /**
    * What people said in conversations about items: those in force, and those taken back in the
    * last 7 days. A session reads this to find the id to take one back by.

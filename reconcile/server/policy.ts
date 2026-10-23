@@ -40,15 +40,15 @@ export function backstopPassed(c: Commitment, nowMs: number): boolean {
 
 export type Verdict = { send: true } | { send: false; until: number; reason: "quiet" | "budget" };
 
-/** Whether a card may go to this person now, for commitments of these domains. */
-export function mayReach(person: Person, domains: Domain[], cardsToday: number, nowMs: number, calendar: Calendar): Verdict {
+/** Whether a card may go to this person now, for commitments of these domains; `cap` is the day's budget the count is against. */
+export function mayReach(person: Person, domains: Domain[], cardsToday: number, nowMs: number, calendar: Calendar, cap = person.pushPerDay): Verdict {
   let until = nowMs;
   for (const domain of new Set(domains)) {
     const window = person.windows[domain];
     if (window) until = Math.max(until, nextInWindow(nowMs, window, person.tz, calendar));
   }
   if (until > nowMs) return { send: false, until, reason: "quiet" };
-  if (cardsToday >= person.pushPerDay) {
+  if (cardsToday >= cap) {
     const tomorrow = addDays(localParts(nowMs, person.tz).date, 1);
     return { send: false, until: nextMorning(tomorrow, person, domains, calendar), reason: "budget" };
   }
@@ -65,8 +65,17 @@ function nextMorning(date: string, person: Person, domains: Domain[], calendar: 
   return until;
 }
 
-/** Cards raised for a person on their local today; one that never got a carrier did not reach them. */
+/** Cards of questions raised for a person on their local today; one that never got a carrier did not reach them, and one cut down from another is that one. */
 export function cardsToday(cards: Card[], person: Person, nowMs: number): number {
+  return raisedToday(cards.filter((card) => card.kind !== "confirm"), person, nowMs);
+}
+
+/** Confirmation cards raised for a person on their local today: a budget of their own. */
+export function confirmsToday(cards: Card[], person: Person, nowMs: number): number {
+  return raisedToday(cards.filter((card) => card.kind === "confirm"), person, nowMs);
+}
+
+function raisedToday(cards: Card[], person: Person, nowMs: number): number {
   const today = localParts(nowMs, person.tz).date;
-  return cards.filter((card) => card.person === person.id && !(card.status === "closed" && card.agentId === null) && localParts(Date.parse(card.raisedAt), person.tz).date === today).length;
+  return cards.filter((card) => card.person === person.id && !card.cutFrom && !(card.status === "closed" && card.agentId === null) && localParts(Date.parse(card.raisedAt), person.tz).date === today).length;
 }

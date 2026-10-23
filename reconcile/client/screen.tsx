@@ -7,7 +7,7 @@ import { overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "../shared/rp
 import { describeChanges, PLAN_LABEL, troubleOf, type PlanEntry, type Status, type StatusCase } from "../shared/status";
 import { Badge, Banner, Block, Button, Fold, OpenAgent, Section, UiProvider, useUi, type Tone } from "./ui";
 
-// 「事务」: what wants you first -- problems, questions waiting for you (each one opens its card),
+// 「事项追踪」: what wants you first -- problems, questions waiting for you (each one opens its card),
 // what will be asked later -- then one line on whether the controller is alive, the plan of the
 // last reconcile, and the cases nothing is asked about. The alive line moves to the top, red and
 // opened, when the controller has not reconciled for two of its periods (a reconcile still
