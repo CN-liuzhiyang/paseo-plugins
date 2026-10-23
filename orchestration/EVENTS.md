@@ -16,12 +16,74 @@
 - `logDir` 的解析顺序与运行时一致：环境变量 `ORCH_LOG_DIR` → `~/.paseo-orchestration/config.json`
   的 `logDir` → `~/.paseo-orchestration/logs`。
 - 读者可以按字节偏移增量读取；最后一行可能是写了一半的（没有 `\n` 结尾），读者要忽略它，下次再读。
-- 没有 `run.end` 的文件表示运行还没结束，**或者进程死了**。和运行在同一台机器上的读者（`run.start.hostname`
-  等于本机 hostname）直接查 `run.start.pid` 这个进程还在不在；进程不在又没有 `run.end`，就是死了。别的
-  机器上的读者只能用最后一条事件的 `ts` 判断：很久没有新事件、又没有 `run.end`，显示为"失联"，不要显示为
-  "运行中"。pid 会被系统复用，所以"进程在"只说明可能还活着，配合 `ts` 看。
+- 没有 `run.end` 的文件表示运行还没结束，**或者进程死了**。怎么分，见下面"运行还活着吗"。
 - 运行在第一笔花费之前被拒（输入不合 `inputs`、flow 加载失败、源码扫描发现未声明的阶段）时**不产生
-  文件**：运行没有开始。调用方从异常里拿到原因。
+  事件文件**：运行没有开始。调用方从异常里拿到原因。调用方给了 `runId` 时，原因还会写进占位文件的
+  `refused` 字段，见下。
+
+## 占位文件和运行还活着吗
+
+调用方可以给运行指定 `runId`（`orch.mjs run --run-id <id>`，选项 `runId`），格式
+`^[A-Za-z0-9][A-Za-z0-9._-]*$`、最长 128 字符，不以 `.claim` 或 `.jsonl` 结尾（那是运行自己的文件名），
+也不是 Windows 的设备名（`CON`、`NUL`、`COM1`……）。不给就是随机 UUID。**每一次运行**都有一个占位文件
+`<logDir>/runs/<runId>.claim`。
+
+事件文件要到 `run.start` 才出现，而运行器在这之前要加载 flow、扫描源码、读角色、检查人闸的 provider，
+几秒钟。这段时间里另一个进程拿同一个 `runId` 来起，会发现什么都没有，再跑一遍、再付一遍钱。所以运行器
+一开始（加载 flow 之前）就用 `wx`（排他创建，文件系统保证原子）建这个文件：
+
+- 同一个 `runId` 同时有多个进程来起，只有一个建得成，其余报 `RunRefused`，**一分钱不花**，也不碰已有的占位。
+  占位文件已存在、或事件文件已存在（占位被人删了），都拒。
+- 内容是 JSON：`{ pid, hostname, startedAt }`，持有者的进程、机器和占位时间。
+- 持有者每 30 秒碰一次这个文件（`utimes`，只改修改时间）；占位被删了就按原内容重建；连续 3 次碰不动才放弃，
+  往事件流里写一条 `log` warn。运行结束（`run.end` 之后）停止碰，文件**保留**，作为"这个 id 用过了"的记录。
+- 运行在 `run.start` 之前就结束（输入不合、flow 加载失败、`--affair` 不合格式、命令行参数错、找不到 flow
+  名），并且 `runId` 是调用方给的：占位文件留下，多一个字段 `refused`（一行原因，最长 2000 字符），不再被碰。
+  `refused` 是先写临时文件再改名覆盖的，读的人只会读到旧的或新的。**这个 id 就用掉了，包括环境类的拒绝**
+  （`flowsDirs` 没配好、参数写错）：改好以后要换一个 id 才能重来。`runId` 是随机生成的，没人会来查，占位文件
+  直接删掉，和以前一样不留任何文件。
+- 它不是事件文件里的一行：`run.start` 必须是第一行，而占位要早于它。
+- 读占位文件时解析失败（空文件、半截 JSON），说明它正在被写：**稍等再读**，不是结论。
+- 清理日志的人注意：正常结束的运行也留着 `.claim`。同时删掉某个 `runId` 的 `.claim` 和 `.jsonl`，就等于把
+  这个 id 放出来了；要么成对删，要么都不删。
+- **调用方读的 `logDir` 必须和运行器用的是同一个。** 命令行没有 `--log-dir`，运行器按 `ORCH_LOG_DIR`、config.json、
+  默认目录的顺序找。调用方起子进程时显式设 `ORCH_LOG_DIR`，并从同一个值读；在不同进程里各自解析，环境变量
+  不一样就会各看各的。
+
+### 读：一个函数
+
+**不要自己照着下面的表写判断，调 `runtime/state.mjs` 的 `readRunState({ dir, runId, spawnedAt })`。** 它读这两个
+文件，返回 `{ state, safeToRestart, reason, refused, outcome, processAlive, claim, lastEventAt }`。表本身是数据，
+`fixtures/run-state-cases.json`；`state.mjs` 的 `classify` 和 orchestration-ui 里的同名函数都按这张表测，改一行
+两边都得跟着改。
+
+| `state` | 占位文件 | 事件文件 | 意思，和调用方该做什么 |
+|---|---|---|---|
+| `absent` | 没有 | 没有 | 没起来，什么都没发生，没花钱。调用方给了 `spawnedAt` 且距今已过 60 秒（`graceMs`）时 `safeToRestart` 为 true，**这是唯一一种可以自动重起的状态**；没给 `spawnedAt` 就不知道，`safeToRestart` 为 false |
+| `pending` | 没有 | 没有 | 进程刚起（不到 `graceMs`），导入运行时要几百毫秒到几秒。再看一次 |
+| `refused` | 有，内容里有 `refused` | 没有 | 被拒了，`refused` 是原因，没花钱，这个 id 已用掉。不管修改时间多新（写下原因时改过一次），先判这一行 |
+| `starting` | 有，最近 2 分钟内碰过 | 没有 | 运行器在做 `run.start` 之前的检查 |
+| `running` | 有，最近 2 分钟内碰过 | 有，没有 `run.end` | 运行中 |
+| `dead-before-start` | 有，超过 2 分钟没碰 | 没有 | 持有者在 `run.start` 之前停了。没花钱。**不要自动重起**：机器休眠、进程被挂起也会这样，醒来还会接着跑，重起就是同一件事两次运行。交给人判断，要重来换一个 id |
+| `stalled-before-start` | 同上，且持有者的 pid 还在 | 没有 | 同上，而且进程还在（也可能是 pid 被别的进程用了）。更不要重起，交给人 |
+| `lost` | 有，超过 2 分钟没碰（或持有者的 pid 已经不在） | 有，没有 `run.end` | **失联**：多半死了，已经花的钱看事件文件里已经 `call.end` 的调用。别当它在运行，也不要自动重起 |
+| `ended` | 随便 | 有，有 `run.end` | 结束了，结局看 `outcome`；占位文件的新旧已经不重要 |
+| `unreadable` | 有，最近碰过，但读不出来 | 随便 | 正在被写，再看一次；超过 2 分钟还读不出来就按过期算 |
+
+没有占位文件、但有事件文件（占位是后来加的，这是旧文件，或占位被人删了）：有 `run.end` 就是 `ended`；没有的
+只能用老办法，最后一条事件的 `ts` 超过 15 分钟没动、或同一台机器上 `run.start.pid` 已经不在，就是 `lost`，
+否则 `running`。
+
+规则：
+
+- **"活着"只看占位文件的修改时间。** pid 会被系统复用，一个同号的别的进程在，不能说明这次运行在。pid 只用来
+  证明**死了**：在持有者那台机器上（`hostname` 一致），pid 不存在，就是死了，不管占位多新（`processAlive: false`）；
+  pid 存在什么也证明不了（`processAlive: true` 只是说"进程还在，可能是它，可能是复用"）；别的机器上不查
+  （`processAlive: null`）。
+- 2 分钟是 4 个心跳。机器休眠或持有者被卡住超过它，会被读成过期。显示上这个方向是对的（宁可显示失联），
+  **动作上不行**：对 `dead-before-start`、`stalled-before-start`、`lost` 先隔一个心跳（30 秒）再读一次，修改时间还是
+  没变才算数，休眠刚醒来的那一刻不会误判；而且这三种都不自动重起。
+- 占位文件的修改时间是文件系统的时间，不是持有者写进去的时间；共享盘、别的主机上的读者判断不了，只能用事件的 `ts`。
 
 ## 每一行都有的字段
 
@@ -30,7 +92,7 @@
 | `v` | `1` | 契约版本 |
 | `seq` | number | 本次运行内从 0 递增 |
 | `ts` | string | ISO 8601 时间 |
-| `runId` | string | 运行 id（UUID） |
+| `runId` | string | 运行 id。默认是 UUID；调用方可以给定（见"占位文件和运行还活着吗"） |
 | `kind` | string | 事件类型，见下 |
 
 ## 事件类型
@@ -47,6 +109,20 @@
 | `host` | string \| null | `--host`，本机为 null |
 | `pid` | number | 跑这次运行的进程 id |
 | `hostname` | string | 跑这次运行的机器，Node 的 `os.hostname()` |
+| `affair` | `{ label, url?, link? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
+
+`affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
+
+| 字段 | 类型 | 限制 |
+|---|---|---|
+| `label` | string | 必填。1 到 120 个字符（按 Unicode 码点），不含控制字符、换行、改变文字方向的字符、零宽和不显示的字符（零宽空格、软连字符、Hangul 填充符、tag 字符等；连接符 U+200C、U+200D 和 emoji 选择符 U+FE0F 允许），清单在 `fixtures/affair-cases.json` |
+| `url` | string | 可选。绝对的 `http` / `https` 地址，最长 2048，不含空白和控制字符，不带用户名密码 |
+| `link` | `{ plugin, screen, params? }` | 可选，指向 Paseo 插件的一个屏。`plugin`、`screen`：`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；`params`：字符串到字符串，最多 16 个，键同上，值最长 256 个字符、不含控制字符 |
+
+- 不合格式、多出不认识的键，运行在花钱之前就被拒（`RunRefused`），不会被"清理"后接受：记下来的就是调用方写下的。
+- **读的一方把它当不可信文本**：`label`、`url` 会被画到界面上，文件落盘后谁都改得了。读者自己再校验一遍，不要信文件
+  里的内容合乎上面的限制：`url` 只认 `http(s)`，`link` 的 `plugin`、`screen` 不合白名单就当没有。
+- 有 `link` 时界面拼成插件屏的路由让人点回去；只有 `url` 就当外链；都没有只显示文字。两个都有，`link` 优先。
 
 ### `phase.start` / `phase.end`
 
@@ -227,7 +303,7 @@
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`，缺省都是 null。人闸的 `call.start.carrier`
+  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

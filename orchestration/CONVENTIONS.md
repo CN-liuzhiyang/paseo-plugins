@@ -322,6 +322,12 @@ step 声明 `effects`，**必填、没有默认**：
 **flow 名、phase id 用小写加连字符**，phase 的 `title` 是给人看的，写中文；step 和调用的 `title`、
 `summarize` 的返回值同理。
 
+**flow 的文件名就是别人引用它的名字。** 调用方（别的插件、调度器）只给名字：`orch.mjs run triage`
+在 `flows/` 和 config.json 的 `flowsDirs` 里找 `triage.mjs`。所以文件名和 `flow({ name })` 写成同一个，
+改文件名等于改了所有调用方依赖的接口。同名的 flow 出现在两个目录里是错误，不是覆盖。
+输入名 `runId`、`affair` 是运行器的 `--run-id`、`--affair` 占着的，flow 不能用（和 `input`、`timeout`、
+`host`、`cwd` 一样，`flow()` 在 import 时就拒绝）。
+
 ## 角色：`roles/<name>.md`
 
 一个角色一个文件，文件名就是角色名：

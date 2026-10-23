@@ -19,6 +19,10 @@ runtime/
   orch.mjs       命令行：run / check
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
+  claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
+  state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
+  affair.mjs     run.start.affair 的形状和校验
+  resolve.mjs    flow 名字到文件（flows/ 加 config 的 flowsDirs）
   executor.mjs   执行层：唯一跟 Paseo 说话的地方
   paseo-cli.mjs  CLI 调用（Windows 上绕开 cmd.exe）
   gate.mjs       人闸：起一张 Paseo 权限卡片，人批的是回执，判定只看回执文件
@@ -48,7 +52,7 @@ node runtime/smoke.mjs --agent                      # 再加两次真实 haiku �
 
 `run` 打印一个 JSON：`{ ok, outcome, value, runId, events, cost, caveats, durationMs, error, stop }`，
 `events` 是这次运行的事件文件。退出码：0 是 `done`/`stopped`，1 是 `failed`/`timeout`，2 是运行前就被拒
-（参数、输入、检查不过；这时没有事件文件）。
+（参数、输入、检查不过、id 被占；这时没有事件文件）。
 
 从代码里跑（以后飞书、schedule、界面按钮都走这个）：
 
@@ -58,6 +62,66 @@ const result = await runFlow("/abs/path/flows/advisor.mjs", { input: { question,
 ```
 
 `runFlow` 只在运行开始之前抛错（`RunRefused`）；开始之后，失败、超时都在返回值和 `run.end` 里。
+
+## 从别的进程起一次运行（插件、调度器）
+
+别的插件要起一次运行、并把它挂在自己的一件事上，走命令行，不走 `runFlow`：运行器要独占一个进程，
+崩了不能带走调用方。一条命令：
+
+```bash
+node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事项 #123 · 等单独 merge","link":{"plugin":"tracker","screen":"item","params":{"id":"123"}}}'   --cwd D:/work/repo --timeout 2h --question "<问题>"
+```
+
+- `triage` 是 flow 的名字，不是路径：按文件名（不带 `.mjs`）在 `flows/` 和 config.json 的 `flowsDirs` 里找。
+  找不到、或两个目录里有同名的，报错并列出找过的目录和能找到的名字；给路径的老用法不变。
+  `flowsDirs` 和 `rolesDirs` 一样放在本机的 `~/.paseo-orchestration/config.json`（`ORCH_CONFIG` 可改位置）。
+- `--run-id` 是调用方自己的 id：运行的文件就叫这个名字，调用方不用等输出就知道去哪儿找。一个 id 只能用一次。
+- `--affair` 是这次运行属于哪件事，原样记进 `run.start.affair`，界面在运行视图顶上写"属于：<label>"，有
+  `link` 就能点回去（形状和限制见 [EVENTS.md](EVENTS.md)）。运行时不认识具体的插件，`plugin` / `screen`
+  是调用方的插件 id 和那个插件里注册的屏 id。JSON 里有引号，用命令行传不方便时写成文件：`--affair @affair.json`
+  （`--input` 同样）。从代码里起子进程时用参数数组，不经过 shell，就没有引号问题。
+
+### 先写意图，再起进程；重启后按文件判断
+
+起进程和写下"我要起"不是一步。顺序是：
+
+1. 调用方先把意图记在自己的存储里（`runId`、flow、输入、`affair`、起的时间）；
+2. 再起子进程；
+3. 之后——包括调用方自己崩了、重启、插件 reload 之后——调 `runtime/state.mjs` 的
+   `readRunState({ dir: logDir, runId, spawnedAt })`，按返回的 `state` 办。**状态表和"活着"的定义在
+   [EVENTS.md](EVENTS.md) 的"占位文件和运行还活着吗"，表是 `fixtures/run-state-cases.json`**：占位文件最近
+   2 分钟被碰过才算活着，pid 只用来证明死了；被拒的运行在占位文件里留着原因。
+
+两条硬规则：
+
+- **`safeToRestart` 为 true 才能自动重起，它只在"没有占位、没有事件文件、距起进程已过 60 秒"时为 true。**
+  `dead-before-start`（占位过期、没有事件文件）、`stalled-before-start`、`lost` 都不自动重起，交给人：机器休眠或
+  进程被挂起时占位也会过期，醒来原进程还会接着跑。要重来用新的 `runId`。看到这三种时先隔 30 秒再读一次。
+- **被拒的 id 用掉了**，包括 flow 名没配好这类环境问题；修好之后换一个 id（比如在 id 里带轮次）。不要对被拒的
+  运行自动重试。
+
+不要用"事件文件不存在就再起一次"来恢复：事件文件要到 `run.start` 才有，之前的几秒里运行器已经在了。
+占位文件是为这个存在的：同一个 `--run-id` 起两次，第二次一定被拒（退出码 2，一分钟都不花）。
+
+调用方和运行器必须读写**同一个** `logDir`：命令行没有 `--log-dir`，起子进程时显式设 `ORCH_LOG_DIR`，并从同一个值读。
+
+### 起子进程要注意的
+
+- **用哪个 Node。** Paseo 插件宿主进程的 `process.execPath` 是 `Paseo.exe`，它是 Electron，当 Node 用要
+  `ELECTRON_RUN_AS_NODE=1`；不设，起出来的是一个桌面应用的窗口，不是脚本。Windows 上再加 `windowsHide: true`，
+  否则每次闪一个控制台窗口。（`runtime/paseo-cli.mjs` 起 `paseo` 命令行也是这么做的。）
+- **要不要分离。** 想让运行比调用方活得久，用 `detached: true`、`stdio: "ignore"`、`child.unref()`。Windows 上实测：
+  - 调用方优雅退出、插件 reload（只杀自己，不杀进程树）：分离的子进程**活着**；
+  - 用 `taskkill /pid <父> /T /F` 杀进程树（Paseo 的 `--force` 强制停止 daemon 走的是这个）：分离的子进程**一起死**。
+  所以调用方重启之后要预期会遇到"失联"的运行：没有 `run.end`，占位文件不再被碰。已经花的钱看事件文件里
+  已经 `call.end` 的调用，不要靠重跑来"补"。
+  另外，daemon 优雅退出时会关掉它所有的 agent，一个还在等 agent 的 flow 多半会以 `failed` 结束，所以分离
+  带来的"接着读"价值有限，主要是留下记录。
+- **输出去哪儿。** `stdio: "ignore"` 时终端上的 JSON 结果和错误信息都丢了，这没关系：结果在事件文件的 `run.end`，
+  `run.start` 之前的失败（找不到 flow、参数错、`--affair` 不合格式）在占位文件的 `refused` 里。想在调用方
+  的日志里也有一份，给 `stdio` 一个文件描述符即可。
+- **退出码。** 0 是 `done` / `stopped`，1 是 `failed` / `timeout`，2 是运行前就被拒（包括 id 被占）。
+- **取消。** 没有。终止运行器进程只是让运行器消失：agent 是 daemon 管的，不是它的子进程，不会被一起停，仍在花钱；运行视图里能看到它们，要在 Paseo 里停。
 
 ## 数据不在这里
 
