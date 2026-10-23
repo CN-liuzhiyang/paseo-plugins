@@ -395,9 +395,10 @@ test("what only the page shows: the list's group and stage name, and the stages 
     assert.deepEqual(p.cases, [], "the same stage: the judgment is the same");
     assert.equal(p.breaker, null);
     assert.equal(p.empty, false);
-    assert.deepEqual(p.page.rows.map((r) => [r.label, r.fields.map((f) => [f.field, f.inUse, f.candidate])]), [["#1 示例单 1", [["阶段名", "s", "等回答"]]]]);
-    assert.deepEqual(p.page.stages, [{ rule: "mini", changes: ["新加阶段 「结束」（e）", "s 改名：「s」→「等回答」"] }]);
-    assert.match(previewText(p), /## 页面上看到的（不算进熔断）\n列表里的事项（1 个变了，在用 → 候选）：\n- #1 示例单 1\n  阶段名：s → 等回答\n判断方法声明的阶段：\n- mini\n  新加阶段 「结束」（e）\n  s 改名：「s」→「等回答」\n/);
+    // The in-use rule does not name its stage, so the list calls it by its place in the line ("第 1 步"), not by its id.
+    assert.deepEqual(p.page.rows.map((r) => [r.label, r.fields.map((f) => [f.field, f.inUse, f.candidate])]), [["#1 示例单 1", [["阶段名", "第 1 步", "等回答"]]]]);
+    assert.deepEqual(p.page.stages, [{ rule: "mini", changes: ["新加阶段 「结束」（e）", "s 改名：「第 1 步」→「等回答」"] }]);
+    assert.match(previewText(p), /## 页面上看到的（不算进熔断）\n列表里的事项（1 个变了，在用 → 候选）：\n- #1 示例单 1\n  阶段名：第 1 步 → 等回答\n判断方法声明的阶段：\n- mini\n  新加阶段 「结束」（e）\n  s 改名：「第 1 步」→「等回答」\n/);
     // A different stage is the judgment's, with the names each side gives it.
     put(candidate, "rules/mini.mjs", rule().replace('stages: ["s"]', 'stages: ["s", { id: "t", label: "下一步" }]').replace('stage: "s"', 'stage: "t"'));
     const moved = await look(w, candidate);

@@ -404,7 +404,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   const names = (caseId: string): [(id: string) => string, (id: string) => string] =>
     [0, 1].map((i) => (id: string) => {
       const meta = ruleFor(i, caseId)?.stageMeta?.find((s) => s.id === id);
-      return meta && meta.label !== id ? `${meta.label}（${id}）` : id;
+      return meta?.named && meta.label !== id ? `${meta.label}（${id}）` : id;
     }) as [(id: string) => string, (id: string) => string];
   const headlineOf = (a: Look | null, b: Look | null) => (a && b && a.headline === b.headline ? a.headline : null);
   const nowEvents = (i: number) => sides[i]!.store.events.slice(0, marks[i]![0]);
