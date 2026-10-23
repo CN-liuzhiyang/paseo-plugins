@@ -14,6 +14,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { format } from "node:util";
@@ -21,7 +22,9 @@ import { loadFlow, describeFlow, scanSource, DEFAULT_GRANTS } from "./flow.mjs";
 import { isStep, validate, assertBuilderSchema } from "./step.mjs";
 import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
-import { EventLog } from "./events.mjs";
+import { EventLog, eventsFile } from "./events.mjs";
+import { affairProblems } from "./affair.mjs";
+import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest } from "./gate.mjs";
 import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
@@ -142,18 +145,80 @@ function checkKeys(where, object, allowed) {
  * flow whose source has a problem found without running it. Everything after
  * that resolves, with the outcome in the result and in run.end.
  *
+ * The run takes its id first (claim.mjs), before anything slow: with `runId`
+ * the caller's own id, otherwise a fresh one. An id that is already claimed, or
+ * already has events, is refused and nothing is spent. `affair` is what the run
+ * is for, recorded as run.start.affair (affair.mjs).
+ *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
- *           agentProbeDelays?: number[] }} [options]
+ *           agentProbeDelays?: number[], runId?: string, affair?: object | null,
+ *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
  *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "taken"]);
 
+  // --- The id, before anything slow ---------------------------------------
+  // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
+  // inputs) takes it with takeRunId and hands it in.
+  const taken = options.taken ?? takeRunId(options);
+  try {
+    return await runClaimed(target, options, taken);
+  } catch (error) {
+    settleRefusal(taken, error);
+    throw error;
+  } finally {
+    taken.claim.stop();
+  }
+}
+
+/**
+ * Take the run's id: the caller's `runId`, or a fresh one. Every run holds a
+ * claim, a caller-given id or not: one way to tell a run is alive (a claim
+ * touched lately), instead of two. Throws RunRefused when the id is malformed,
+ * already has events, or is already claimed.
+ *
+ * @param {{ runId?: string, logDir?: string }} [options]
+ */
+export function takeRunId({ runId, logDir } = {}) {
+  if (runId !== undefined) {
+    const problem = runIdProblem(runId);
+    if (problem) throw new RunRefused(`--run-id: ${problem}`);
+  }
+  const id = runId ?? randomUUID();
+  const dir = logDir ?? configuredLogDir();
+  // Checked before the claim so that a refusal here leaves nothing behind: the id was never taken.
+  if (existsSync(eventsFile(dir, id))) throw new RunRefused(`run id ${id} already has events; a run id is used once`);
+  let claim;
+  try {
+    claim = claimRun({ dir, runId: id });
+  } catch (error) {
+    if (error instanceof ClaimTaken) throw new RunRefused(error.message);
+    throw error;
+  }
+  return { runId: id, dir, claim, callerGiven: runId !== undefined };
+}
+
+/**
+ * A run that ends before run.start. A caller who gave the id may look for the
+ * reason later, not holding this process, so it stays with the claim; a
+ * generated id is nobody's to look up, so no file is left.
+ */
+export function settleRefusal({ runId, dir, claim, callerGiven }, error) {
+  if (existsSync(eventsFile(dir, runId))) return;
+  if (callerGiven) claim.refuse(`${error?.name ?? "Error"}: ${error?.message ?? error}`);
+  else claim.discard();
+}
+
+async function runClaimed(target, options, { runId, dir, claim }) {
   // --- Before anything is spent -----------------------------------------
+  const affair = options.affair ?? null;
+  const badAffair = affairProblems(affair);
+  if (badAffair.length > 0) throw new RunRefused("--affair does not fit", badAffair);
   let loaded;
   try {
     loaded = await loadFlow(target);
@@ -235,9 +300,10 @@ export async function runFlow(target, options = {}) {
   const gatePollMs = options.gatePollMs ?? 10_000;
   const agentProbeDelays = options.agentProbeDelays ?? AGENT_PROBE_DELAYS;
 
-  const runId = randomUUID();
-  const dir = options.logDir ?? configuredLogDir();
   const log = new EventLog({ dir, runId });
+  // A heartbeat that cannot touch the claim makes this run look dead to a reader that goes by it.
+  claim.onError = (error) => log.emit("log", { level: "warn", message: `the run's claim could not be touched, so readers will take the run for dead: ${error.message}` });
+  // (claim.mjs ignores a handler that throws, as log.emit does when the disk is the problem.)
   const runDir = path.join(dir, "runs", runId);
 
   // --- Run state ----------------------------------------------------------
@@ -596,7 +662,7 @@ export async function runFlow(target, options = {}) {
   const startedAt = Date.now();
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname() });
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair });
 
   let outcome;
   let value = null;

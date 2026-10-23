@@ -13,6 +13,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { affairProblems } from "./affair.mjs";
 
 export const EVENTS_VERSION = 1;
 
@@ -136,6 +137,10 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, isNullableString(event.host), "host is not string | null");
         need(event, Number.isInteger(event.pid) && event.pid > 0, "pid is not a positive integer");
         need(event, isString(event.hostname) && event.hostname.length > 0, "hostname is not a string");
+        {
+          const affair = "affair" in event ? affairProblems(event.affair) : [];
+          added(event, "affair", affair.length === 0, `affair is not null or { label, url?, link? }: ${affair.join("; ")}`);
+        }
         break;
       }
       case "phase.start":

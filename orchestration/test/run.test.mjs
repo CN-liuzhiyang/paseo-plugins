@@ -45,6 +45,9 @@ function eventsOf(result) {
   return events;
 }
 
+/** What a log directory holds under runs/: a refused run leaves no file there (the directory itself may exist). */
+const filesIn = async (dir) => (existsSync(path.join(dir, "runs")) ? readdir(path.join(dir, "runs")) : []);
+
 const kinds = (events) =>
   events
     .filter((e) => e.kind !== "call.agent")
@@ -177,7 +180,7 @@ test("input is checked before run.start: a refused run leaves no events file", a
   await assert.rejects(runFlow(advisor, { roster, logDir: dir, executor: fakeExecutor(), input: { question: "q", role: "fast", extra: 1 } }), /not declared/);
   await assert.rejects(runFlow(committee, { roster, logDir: dir, executor: fakeExecutor(), input: { ...COMMITTEE_INPUT, rounds: "3" } }), /expected a number/);
   await assert.rejects(runFlow(committee, { roster, logDir: dir, executor: fakeExecutor(), input: { ...COMMITTEE_INPUT, committee: "big" } }), /not one of default, cheap/);
-  assert.equal(existsSync(path.join(dir, "runs")), false);
+  assert.deepEqual(await filesIn(dir), []);
 });
 
 // --- Primitives -------------------------------------------------------
@@ -1132,7 +1135,7 @@ test("a flow file with an undeclared phase is refused before run.start", async (
       `  run: (_, $) => $.phase("debtae", async () => 1) });\n`,
   );
   await assert.rejects(runFlow(file, { roster, logDir: dir, executor: fakeExecutor() }), /\$\.phase\("debtae"\) is not declared/);
-  assert.equal(existsSync(path.join(dir, "runs")), false);
+  assert.deepEqual(await filesIn(dir), []);
 
   const checked = await checkFlow(file, { roster });
   assert.equal(checked.ok, false);
@@ -1147,7 +1150,7 @@ test("a flow file with an undeclared phase is refused before run.start", async (
       `export default flow({ name: "broken", description: "d", phases: [], inputs: {}, grants: [], run: async () => s });\n`,
   );
   await assert.rejects(runFlow(broken, { roster, logDir: dir, executor: fakeExecutor() }), (e) => e instanceof RunRefused && /effects is required/.test(e.message));
-  assert.equal(existsSync(path.join(dir, "runs")), false);
+  assert.deepEqual(await filesIn(dir), []);
 });
 
 test("gate-smoke: one gate over made-up content, said in one line", async () => {
@@ -1230,7 +1233,7 @@ test("a run on another host needs a directory there, and cannot gate yet", async
 
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
-    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h" },
+    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null },
     { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [] },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);
@@ -1281,6 +1284,6 @@ test("nothing is left in the log directory but runs/", async () => {
   const entries = await readdir(logDir);
   assert.deepEqual(entries, ["runs"]);
   const files = await readdir(path.join(logDir, "runs"));
-  assert.ok(files.every((f) => f.endsWith(".jsonl") || !f.includes(".")), files.join(", "));
+  assert.ok(files.every((f) => f.endsWith(".jsonl") || f.endsWith(".claim") || !f.includes(".")), files.join(", "));
   assert.ok((await readFile(path.join(logDir, "runs", files.find((f) => f.endsWith(".jsonl"))), "utf8")).endsWith("\n"));
 });

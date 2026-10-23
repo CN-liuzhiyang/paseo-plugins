@@ -1,0 +1,151 @@
+{
+ "_about": "Characters a label may not contain and may contain. runtime/affair.mjs refuses a label with an unsafe one; orchestration-ui/shared/affair.ts removes them. Both are tested against this list.",
+ "unsafe": [
+  {
+   "code": 7,
+   "as_text": "\u0007"
+  },
+  {
+   "code": 10,
+   "as_text": "\n"
+  },
+  {
+   "code": 133,
+   "as_text": "\u0085"
+  },
+  {
+   "code": 8232,
+   "as_text": "\u2028"
+  },
+  {
+   "code": 8233,
+   "as_text": "\u2029"
+  },
+  {
+   "code": 1564,
+   "as_text": "\u061c"
+  },
+  {
+   "code": 8203,
+   "as_text": "\u200b"
+  },
+  {
+   "code": 8206,
+   "as_text": "\u200e"
+  },
+  {
+   "code": 8207,
+   "as_text": "\u200f"
+  },
+  {
+   "code": 8288,
+   "as_text": "\u2060"
+  },
+  {
+   "code": 8234,
+   "as_text": "\u202a"
+  },
+  {
+   "code": 8235,
+   "as_text": "\u202b"
+  },
+  {
+   "code": 8236,
+   "as_text": "\u202c"
+  },
+  {
+   "code": 8237,
+   "as_text": "\u202d"
+  },
+  {
+   "code": 8238,
+   "as_text": "\u202e"
+  },
+  {
+   "code": 8294,
+   "as_text": "\u2066"
+  },
+  {
+   "code": 8295,
+   "as_text": "\u2067"
+  },
+  {
+   "code": 8296,
+   "as_text": "\u2068"
+  },
+  {
+   "code": 8297,
+   "as_text": "\u2069"
+  },
+  {
+   "code": 173,
+   "as_text": "\u00ad"
+  },
+  {
+   "code": 847,
+   "as_text": "\u034f"
+  },
+  {
+   "code": 6158,
+   "as_text": "\u180e"
+  },
+  {
+   "code": 10240,
+   "as_text": "\u2800"
+  },
+  {
+   "code": 4447,
+   "as_text": "\u115f"
+  },
+  {
+   "code": 4448,
+   "as_text": "\u1160"
+  },
+  {
+   "code": 12644,
+   "as_text": "\u3164"
+  },
+  {
+   "code": 65279,
+   "as_text": "\ufeff"
+  },
+  {
+   "code": 65440,
+   "as_text": "\uffa0"
+  },
+  {
+   "code": 917569,
+   "as_text": "\udb40\udc41"
+  },
+  {
+   "code": 917504,
+   "as_text": "\udb40\udc00"
+  },
+  {
+   "code": 917631,
+   "as_text": "\udb40\udc7f"
+  }
+ ],
+ "ok": [
+  {
+   "code": 8204,
+   "as_text": "\u200c"
+  },
+  {
+   "code": 8205,
+   "as_text": "\u200d"
+  },
+  {
+   "code": 65039,
+   "as_text": "\ufe0f"
+  },
+  {
+   "code": 160,
+   "as_text": "\u00a0"
+  },
+  {
+   "code": 20013,
+   "as_text": "\u4e2d"
+  }
+ ]
+}

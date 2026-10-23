@@ -6,9 +6,13 @@
 //   {
 //     "paseoInstallDir": "C:\\Users\\me\\AppData\\Local\\Programs\\Paseo",
 //     "rolesDirs": ["D:\\private\\roles"],
+//     "flowsDirs": ["D:\\private\\flows"],
 //     "logDir": "D:\\private\\logs",
 //     "hosts": { "build-box": "ssh://me@build-box", "home": "https://app.paseo.sh/#offer=..." }
 //   }
+//
+// `flowsDirs` is where `orch.mjs run <name>` looks for a flow by its name (the
+// file name without .mjs), after the shipped flows/. A name found twice is an error.
 //
 // `hosts` names the daemons `orch.mjs run --host <name>` can reach. A pairing
 // URL is a credential -- whoever holds it can drive that daemon -- so it lives
@@ -29,6 +33,7 @@ export const CONFIG_HOME = path.join(os.homedir(), ".paseo-orchestration");
 const KEYS = {
   paseoInstallDir: (v) => typeof v === "string" && v.length > 0,
   rolesDirs: (v) => Array.isArray(v) && v.every((d) => typeof d === "string" && d.length > 0),
+  flowsDirs: (v) => Array.isArray(v) && v.every((d) => typeof d === "string" && d.length > 0),
   logDir: (v) => typeof v === "string" && v.length > 0,
   hosts: (v) =>
     v !== null && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((e) => typeof e === "string" && e.length > 0),
@@ -57,7 +62,7 @@ export function parseConfig(source, where) {
 
 let cached;
 
-/** @returns {{ paseoInstallDir?: string, rolesDirs?: string[], logDir?: string }} */
+/** @returns {{ paseoInstallDir?: string, rolesDirs?: string[], flowsDirs?: string[], logDir?: string }} */
 export function loadConfig() {
   if (cached) return cached;
   const file = process.env.ORCH_CONFIG ?? path.join(CONFIG_HOME, "config.json");

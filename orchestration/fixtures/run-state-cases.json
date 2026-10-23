@@ -1,0 +1,384 @@
+{
+ "_about": "The run-state table (orchestration/EVENTS.md) as data. runtime/state.mjs classify() and orchestration-ui/shared/liveness.ts classify() are both tested against it; change a row here and both must agree. ageMs: how long ago the claim was touched; liveWithinMs is 120000; graceMs 60000; legacyQuietMs 900000.",
+ "cases": [
+  {
+   "name": "ended: run.end written, claim fresh",
+   "claim": {
+    "ageMs": 1000
+   },
+   "events": "ended",
+   "expect": {
+    "state": "ended",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "ended: run.end written, claim long stale",
+   "claim": {
+    "ageMs": 9000000
+   },
+   "events": "ended",
+   "expect": {
+    "state": "ended",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "ended: run.end written, no claim (old file)",
+   "claim": null,
+   "events": "ended",
+   "expect": {
+    "state": "ended",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "ended: run.end written even though the pid is gone",
+   "claim": {
+    "ageMs": 1000
+   },
+   "events": "ended",
+   "pid": "gone",
+   "expect": {
+    "state": "ended",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "nothing, process started 5s ago",
+   "claim": null,
+   "events": "none",
+   "spawnedAgoMs": 5000,
+   "expect": {
+    "state": "pending",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "nothing, process started 59.999s ago",
+   "claim": null,
+   "events": "none",
+   "spawnedAgoMs": 59999,
+   "expect": {
+    "state": "pending",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "nothing, process started 60s ago: safe to start again",
+   "claim": null,
+   "events": "none",
+   "spawnedAgoMs": 60000,
+   "expect": {
+    "state": "absent",
+    "safeToRestart": true
+   }
+  },
+  {
+   "name": "nothing, process started 10 min ago: safe to start again",
+   "claim": null,
+   "events": "none",
+   "spawnedAgoMs": 600000,
+   "expect": {
+    "state": "absent",
+    "safeToRestart": true
+   }
+  },
+  {
+   "name": "nothing, caller does not say when it started: absent, not safe",
+   "claim": null,
+   "events": "none",
+   "expect": {
+    "state": "absent",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "refused: claim touched just now",
+   "claim": {
+    "ageMs": 10,
+    "refused": true
+   },
+   "events": "none",
+   "expect": {
+    "state": "refused",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "refused: claim old",
+   "claim": {
+    "ageMs": 9000000,
+    "refused": true
+   },
+   "events": "none",
+   "expect": {
+    "state": "refused",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "refused: pid gone changes nothing",
+   "claim": {
+    "ageMs": 10,
+    "refused": true
+   },
+   "events": "none",
+   "pid": "gone",
+   "expect": {
+    "state": "refused",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "starting: claim fresh, no events",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "none",
+   "expect": {
+    "state": "starting",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "starting: claim exactly at the limit is still fresh",
+   "claim": {
+    "ageMs": 120000
+   },
+   "events": "none",
+   "expect": {
+    "state": "starting",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "dead-before-start: claim 1ms past the limit",
+   "claim": {
+    "ageMs": 120001
+   },
+   "events": "none",
+   "expect": {
+    "state": "dead-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "dead-before-start: claim old, holder on another machine",
+   "claim": {
+    "ageMs": 600000
+   },
+   "events": "none",
+   "pid": "unknown",
+   "expect": {
+    "state": "dead-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "dead-before-start: claim old, pid gone",
+   "claim": {
+    "ageMs": 600000
+   },
+   "events": "none",
+   "pid": "gone",
+   "expect": {
+    "state": "dead-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "dead-before-start: claim fresh but pid gone is proof of death",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "none",
+   "pid": "gone",
+   "expect": {
+    "state": "dead-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "stalled-before-start: claim old, pid still there (maybe reused): not dead, not restartable",
+   "claim": {
+    "ageMs": 600000
+   },
+   "events": "none",
+   "pid": "alive",
+   "expect": {
+    "state": "stalled-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "starting: claim fresh and pid alive",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "none",
+   "pid": "alive",
+   "expect": {
+    "state": "starting",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "unreadable: fresh and cannot be parsed yet",
+   "claim": {
+    "ageMs": 50,
+    "unreadable": true
+   },
+   "events": "none",
+   "expect": {
+    "state": "unreadable",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "unreadable: stale and cannot be parsed falls through to dead-before-start",
+   "claim": {
+    "ageMs": 600000,
+    "unreadable": true
+   },
+   "events": "none",
+   "expect": {
+    "state": "dead-before-start",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "unreadable: fresh, unparseable, events open: still unreadable",
+   "claim": {
+    "ageMs": 50,
+    "unreadable": true
+   },
+   "events": "open",
+   "expect": {
+    "state": "unreadable",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "running: claim fresh, run.start written",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "open",
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "running: claim at the limit",
+   "claim": {
+    "ageMs": 120000
+   },
+   "events": "open",
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "running: claim fresh and pid alive",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "open",
+   "pid": "alive",
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "lost: claim 1ms past the limit",
+   "claim": {
+    "ageMs": 120001
+   },
+   "events": "open",
+   "expect": {
+    "state": "lost",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "lost: claim old, pid still there: pid never proves alive",
+   "claim": {
+    "ageMs": 600000
+   },
+   "events": "open",
+   "pid": "alive",
+   "expect": {
+    "state": "lost",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "lost: claim fresh but pid gone",
+   "claim": {
+    "ageMs": 5000
+   },
+   "events": "open",
+   "pid": "gone",
+   "expect": {
+    "state": "lost",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "legacy: events open, quiet 1 min",
+   "claim": null,
+   "events": "open",
+   "quietMs": 60000,
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "legacy: events open, quiet 15 min exactly",
+   "claim": null,
+   "events": "open",
+   "quietMs": 900000,
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "legacy: events open, quiet 15 min and 1ms",
+   "claim": null,
+   "events": "open",
+   "quietMs": 900001,
+   "expect": {
+    "state": "lost",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "legacy: events open, quiet but pid gone",
+   "claim": null,
+   "events": "open",
+   "quietMs": 1000,
+   "pid": "gone",
+   "expect": {
+    "state": "lost",
+    "safeToRestart": false
+   }
+  },
+  {
+   "name": "legacy: events open, quiet and pid alive: quiet decides",
+   "claim": null,
+   "events": "open",
+   "quietMs": 1000,
+   "pid": "alive",
+   "expect": {
+    "state": "running",
+    "safeToRestart": false
+   }
+  }
+ ]
+}

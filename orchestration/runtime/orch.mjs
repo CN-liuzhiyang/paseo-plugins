@@ -1,8 +1,9 @@
 // The command line over run.mjs and flow.mjs.
 //
-//   node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
+//   node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
 //                                        [--host ssh://user@box --cwd /path/on/box]
-//   node runtime/orch.mjs check <flow.mjs>
+//                                        [--run-id <id>] [--affair <json | @file>]
+//   node runtime/orch.mjs check <flow.mjs | name>
 //
 // `run` prints one JSON object, { ok, outcome, value, runId, events, cost,
 // caveats, durationMs } plus error / stop when there is one. The events file
@@ -15,6 +16,13 @@
 // a list of text or numbers by repeating the flag. Groups and other lists go
 // through --input. Flags win over --input, key by key.
 //
+// A bare name (`advisor`) is a flow looked up by file name in the shipped flows/
+// and the `flowsDirs` of config.json (resolve.mjs); anything else is a path.
+//
+// --run-id gives the run its id (the caller's own, so it can find the run's
+// files); a taken id is refused before anything is spent. --affair is the
+// affair the run belongs to, recorded in run.start.affair (affair.mjs).
+//
 // --host runs every agent of the run on another daemon (any form `paseo
 // --host` takes); --cwd is then required, a directory on that host. The
 // runner and its events stay on this machine.
@@ -24,12 +32,14 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadFlow, checkFlow } from "./flow.mjs";
-import { runFlow, jsonSafe } from "./run.mjs";
+import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
+import { resolveTarget } from "./resolve.mjs";
 
 const USAGE = [
   "Usage:",
-  "  node runtime/orch.mjs run <flow.mjs> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
-  "  node runtime/orch.mjs check <flow.mjs>",
+  "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
+  "                                              [--run-id <id>] [--affair <json | @file>]",
+  "  node runtime/orch.mjs check <flow.mjs | name>",
 ].join("\n");
 
 const kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
@@ -70,16 +80,20 @@ function inputOptions(schema) {
   return { options, convert };
 }
 
-async function readInput(raw) {
-  if (raw === undefined) return {};
+/** A flag's JSON value, inline or `@file`. */
+async function readJson(flag, raw) {
   const text = raw.startsWith("@") ? await readFile(raw.slice(1), "utf8") : raw;
   const unmarked = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-  let value;
   try {
-    value = JSON.parse(unmarked);
+    return JSON.parse(unmarked);
   } catch (error) {
-    throw new UsageError(`--input: not valid JSON (${error.message})`);
+    throw new UsageError(`--${flag}: not valid JSON (${error.message})`);
   }
+}
+
+async function readInput(raw) {
+  if (raw === undefined) return {};
+  const value = await readJson("input", raw);
   if (value === null || typeof value !== "object" || Array.isArray(value)) throw new UsageError("--input must be a JSON object");
   return value;
 }
@@ -90,7 +104,7 @@ async function readInput(raw) {
  */
 export async function parseRunArgs(f, argv) {
   const { options, convert } = inputOptions(f.inputs);
-  const all = { ...options, input: { type: "string" }, timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" } };
+  const all = { ...options, input: { type: "string" }, timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" } };
   // parseArgs refuses a value that starts with "-" as ambiguous, and a question
   // written as a Markdown list does. A value-taking flag always takes the next
   // argument, so join them before parseArgs sees them.
@@ -117,18 +131,51 @@ export async function parseRunArgs(f, argv) {
   }
   const input = await readInput(parsed.values.input);
   for (const [flag, raw] of Object.entries(parsed.values)) {
-    if (["input", "timeout", "host", "cwd"].includes(flag)) continue;
+    if (["input", "timeout", "host", "cwd", "run-id", "affair"].includes(flag)) continue;
     const [name, value] = convert[flag](raw);
     input[name] = value;
   }
-  return { input, timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null };
+  // The affair's own shape is checked by the runner, which refuses before run.start.
+  const given = {};
+  if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
+  if (parsed.values.affair !== undefined) given.affair = await readJson("affair", parsed.values.affair);
+  return { input, timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
 }
 
-async function run(target, argv) {
-  const { flow: f } = await loadFlow(target);
-  const { input, timeout, host, cwd } = await parseRunArgs(f, argv);
-  // The path, not the loaded value: the runner records it and scans its source.
-  return runFlow(target, { input, timeout, ...(host ? { host } : {}), ...(cwd ? { cwd } : {}) });
+/** The value of `--run-id` in argv, before the flow is read: the id is claimed first, so a failure after it is on record. */
+function peekRunId(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === "--run-id") return argv[i + 1];
+    if (argv[i].startsWith("--run-id=")) return argv[i].slice("--run-id=".length);
+  }
+  return undefined;
+}
+
+async function run(name, argv) {
+  // A caller-given id is taken before the flow is looked up and read, so that whatever
+  // goes wrong from here (no such flow, a bad flag, a malformed --affair) is written to the claim
+  // for a caller that started this process detached and cannot see its stderr.
+  const requested = peekRunId(argv);
+  const taken = requested !== undefined ? takeRunId({ runId: requested }) : undefined;
+  try {
+    const target = resolveTarget(name);
+    const { flow: f } = await loadFlow(target);
+    const { input, timeout, host, cwd, runId, affair } = await parseRunArgs(f, argv);
+    if (taken && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
+    // The path, not the loaded value: the runner records it and scans its source.
+    return await runFlow(target, {
+      input,
+      timeout,
+      ...(host ? { host } : {}),
+      ...(cwd ? { cwd } : {}),
+      ...(taken ? { taken } : runId !== undefined ? { runId } : {}),
+      ...(affair !== undefined ? { affair } : {}),
+    });
+  } catch (error) {
+    // runFlow settles its own refusals; this is for what failed before it was called (settling twice is harmless: the claim is already stopped).
+    if (taken) settleRefusal(taken, error);
+    throw error;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -143,7 +190,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   try {
     if (command === "check") {
       if (rest.length > 0) throw new UsageError(`check takes only the flow path, got ${rest.join(" ")}`);
-      const result = await checkFlow(target);
+      const result = await checkFlow(resolveTarget(target));
       print(result);
       process.exit(result.ok ? 0 : 2);
     }
