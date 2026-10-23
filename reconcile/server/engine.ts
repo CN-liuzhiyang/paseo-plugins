@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import type { Config, Person } from "./config";
 import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, SourceHealth } from "../shared/model";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
@@ -6,7 +7,7 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type RuleSet } from "./rules";
-import { clip, clipMd, finishRequest, KIND_LABEL, notOwnWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
+import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
 import type { Store } from "./store";
@@ -357,8 +358,10 @@ export function createEngine(deps: EngineDeps) {
     request?: Request;
     /** The words as sent, when the card shows them shortened. */
     original?: string;
-    /** Taken as the person's own: the turn and words that vouched for it. */
+    /** Taken as the person's own: the message of theirs that vouched for it, and the item it names as written (or ""). */
     vouch?: string;
+    /** Not taken as the person's own: why, for the journal only. The receipt does not say, so that it does not teach a way round. */
+    why?: string;
   }
 
   /** Receipts to write once this reconcile has judged, so that they can say what the words did. */
@@ -443,11 +446,19 @@ export function createEngine(deps: EngineDeps) {
     // Not run in a Paseo conversation: there is nobody whose words these could be, and nobody to ask about them.
     if (!r.via) return reject("命令不是在 Paseo 的对话里跑的（没有 PASEO_AGENT_ID）", caseId);
     const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
-    let notOwn = deps.conversation ? notOwnWords(r, conversation) : "这个 Paseo 没给插件查对话的接口";
-    // One sentence of the person's vouches for one request: a second on the same words in the same turn waits for a card.
-    const vouch = conversation?.turn ? vouchKey(r.via, conversation.turn.id, r.said) : undefined;
-    if (!notOwn && Object.values(state.requests).some((q) => q.vouch === vouch)) notOwn = "这句原话这一轮里已经用过一次了，一句话只算一条";
-    if (notOwn) return propose(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, notOwn, admin, nowMs);
+    const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null) : { why: "这个 Paseo 没给插件查对话的接口", message: null };
+    let why = checked.why;
+    let vouch: string | undefined;
+    // One message of the person's lets one request through, however it is reworded; a message that
+    // names several items as written lets one through for each of them.
+    if (!why && checked.message && conversation?.turn) {
+      const message = vouchKey(r.via, conversation.turn.id, checked.message.step, checked.message.text);
+      const item = r.cmd === "say" && mentions(checked.message.text, r.item) ? caseId : "";
+      const used = Object.values(state.requests).flatMap((q) => (q.vouch?.startsWith(`${message}\u0001`) ? [q.vouch.slice(message.length + 1)] : []));
+      if (used.length > 0 && (item === "" || used.includes("") || used.includes(item))) why = "人的这条消息这一轮里已经放行过一条请求了（写明了几个单号的，每个单号一条）";
+      vouch = `${message}\u0001${item}`;
+    }
+    if (why) return propose(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, why, admin, nowMs);
     return { ...applySaid(r, caseId, target, admin.id, "own-words", nowMs), vouch };
   }
 
@@ -496,9 +507,9 @@ export function createEngine(deps: EngineDeps) {
     const tag = asked.cmd === "say" ? asked.kind : "undo";
     const prefix = `confirm:${caseId}:${tag}:`;
     const recent = Object.values(state.commitments).some((c) => c.key.startsWith(prefix) && nowMs - Date.parse(c.createdAt) < DAY);
-    if (recent) return { outcome: "rejected", detail: `没收下：24 小时内已经就同一件事问过 ${admin.name} 一次（${why}）`, annotation: null, caseId, events: [] };
+    if (recent) return { outcome: "rejected", detail: `没收下：24 小时内已经就同一件事问过 ${admin.name} 一次`, annotation: null, caseId, events: [], why };
     const waiting = Object.values(state.commitments).filter((c) => isConfirm(c) && isOpen(c.status)).length;
-    if (waiting >= MAX_OPEN_CONFIRMS) return { outcome: "rejected", detail: `没收下：已经有 ${waiting} 句话在等 ${admin.name} 确认，先处理完那些（${why}）`, annotation: null, caseId, events: [] };
+    if (waiting >= MAX_OPEN_CONFIRMS) return { outcome: "rejected", detail: `没收下：已经有 ${waiting} 句话在等 ${admin.name} 确认，先处理完那些`, annotation: null, caseId, events: [], why };
     // What the card shows is what a yes applies: one line, as long as the card shows it. The words
     // as sent stay in the journal with the request.
     const r: Request = { ...asked, said: clip(asked.said, 200) };
@@ -546,8 +557,8 @@ export function createEngine(deps: EngineDeps) {
       updatedAt: nowIso(nowMs),
       reason: null,
     };
-    const detail = `先不生效：「${what}」要等 ${admin.name} 确认（${why}）。已经排了一张确认卡给 ${admin.name}，点了「照办」才生效。`;
-    return { outcome: "proposed", detail, annotation: null, caseId, events: [{ type: "commitment.created", commitment }], request: r, ...(r.said !== asked.said ? { original: asked.said } : {}) };
+    const detail = `先不生效：「${what}」已改成确认卡，等 ${admin.name} 在卡上确认。`;
+    return { outcome: "proposed", detail, annotation: null, caseId, events: [{ type: "commitment.created", commitment }], request: r, why, ...(r.said !== asked.said ? { original: asked.said } : {}) };
   }
 
   /** Confirmation cards answered or gone: yes applies the request as said, anything else drops it. */
@@ -600,7 +611,7 @@ export function createEngine(deps: EngineDeps) {
       const before = new Map(Object.values(state.commitments).filter((c) => handled.caseId && c.caseId === handled.caseId).map((c) => [c.id, c.status] as const));
       append([
         ...handled.events,
-        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}) },
+        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}), ...(handled.why ? { why: handled.why } : {}) },
       ]);
       plan.push({ at: nowIso(nowMs), kind: "said", person: null, summary: handled.detail.split("\n")[0]! });
       const undoOf = "request" in incoming && incoming.request.cmd === "undo" && handled.outcome === "applied" ? (state.annotations[handled.annotation!]?.kind ?? null) : null;

@@ -1,0 +1,50 @@
+// The arguments of bin/reconcile-say.mjs, read one way for both sides: the command reads them to
+// know what to send, and the plugin reads a command line from a conversation to know what that
+// command sent. A line the command would refuse or only print its usage for sent nothing. No
+// dependencies: the command runs on bare Node.
+
+const KNOWN = {
+  say: ["item", "kind", "said", "until", "person", "what", "expected", "data", "wait"],
+  undo: ["id", "last", "said", "data", "wait"],
+};
+
+/**
+ * The arguments after the program. Returns the request they send (without its id, time and
+ * conversation), the command's own --data and --wait; or `help` when it only prints its usage; or
+ * the error it stops with (`usage`: printed with the usage).
+ */
+export function parseSayArgs(argv) {
+  const [cmd, ...rest] = argv;
+  if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") return { help: true };
+  const flags = {};
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i];
+    if (!arg.startsWith("--")) return { error: `看不懂的参数：${arg}`, usage: true };
+    const name = arg.slice(2);
+    if (name === "last" || name === "help") {
+      flags[name] = true;
+      continue;
+    }
+    const value = rest[++i];
+    if (value === undefined) return { error: `--${name} 后面要有值` };
+    flags[name] = value;
+  }
+  if (flags.help) return { help: true };
+  if (cmd !== "say" && cmd !== "undo") return { error: `没有 ${cmd} 这个子命令`, usage: true };
+  if (!flags.said) return { error: "要用 --said 给出人的原话" };
+  for (const name of Object.keys(flags)) if (!KNOWN[cmd].includes(name)) return { error: `${cmd} 不认识 --${name}` };
+  const wait = flags.wait === undefined ? 90 : Number(flags.wait);
+  if (!Number.isFinite(wait) || wait < 0) return { error: "--wait 要是秒数" };
+  const data = flags.data ?? null;
+  if (cmd === "say") {
+    if (!flags.item) return { error: "要用 --item 给出单号" };
+    if (!["drop", "hold", "wrong"].includes(flags.kind)) return { error: "--kind 只能是 drop、hold、wrong" };
+    if (flags.kind === "hold" && !/^\d{4}-\d{2}-\d{2}$/.test(flags.until ?? "")) return { error: "hold 要用 --until YYYY-MM-DD 说到哪天" };
+    const request = { cmd, kind: flags.kind, item: flags.item, said: flags.said };
+    for (const name of ["until", "person", "what", "expected"]) if (flags[name] !== undefined) request[name] = flags[name];
+    return { request, data, wait };
+  }
+  if (!flags.id === !flags.last) return { error: "undo 要 --id <a_…> 或者 --last，二选一" };
+  if (flags.id && !/^a_[0-9a-f]{12}$/.test(flags.id)) return { error: `${flags.id} 不是一条的编号（像 a_0123456789ab）` };
+  return { request: { cmd, target: flags.id ?? "last", said: flags.said }, data, wait };
+}

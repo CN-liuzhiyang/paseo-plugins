@@ -26,7 +26,7 @@ export type EventBody =
   | { type: "annotation.added"; annotation: Annotation }
   | { type: "annotation.revoked"; id: string; said: string; by: string }
   /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
-  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string }
+  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string; why?: string }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
@@ -56,8 +56,12 @@ export interface State {
   workspaceId: string | null;
   evals: number;
   annotations: Record<string, Annotation>;
-  /** vouch: for words taken as the person's own, the turn and words that vouched for them (once per turn). */
-  requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string }>;
+  /**
+   * vouch: for words taken as the person's own, the message of theirs that vouched for them and the
+   * item it names (one request a message, or one an item it names). why: for words not taken as
+   * theirs, why not; only here, the receipt does not say.
+   */
+  requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string }>;
 }
 
 export function emptyState(): State {
@@ -145,7 +149,7 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     }
     case "request.handled":
-      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}), ...(event.vouch ? { vouch: event.vouch } : {}) };
+      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}), ...(event.vouch ? { vouch: event.vouch } : {}), ...(event.why ? { why: event.why } : {}) };
       return;
     case "workspace":
       state.workspaceId = event.workspaceId;

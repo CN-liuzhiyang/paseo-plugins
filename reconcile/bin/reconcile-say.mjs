@@ -2,12 +2,14 @@
 // reconcile-say: hands what a person just said about an item to 事项追踪 (the reconcile plugin).
 // It writes one request file into the plugin's data directory and waits for the receipt; the
 // plugin checks the words against the conversation it was run from (PASEO_AGENT_ID) and does the
-// rest. No dependencies: any session with Node can run it.
+// rest. No dependencies: any session with Node can run it (its arguments are read by
+// server/say-args.mjs, the same reading the plugin applies to the command lines it checks).
 
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parseSayArgs } from "../server/say-args.mjs";
 
 const HELP = `用法：
   reconcile-say say --item <单号> --kind <drop|hold|wrong> --said "<人说的原话>" [选项]
@@ -34,57 +36,22 @@ function fail(message, code = 2) {
   process.exit(code);
 }
 
-function parse(argv) {
-  const [cmd, ...rest] = argv;
-  const flags = {};
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i];
-    if (!arg.startsWith("--")) fail(`看不懂的参数：${arg}\n\n${HELP}`);
-    const name = arg.slice(2);
-    if (name === "last" || name === "help") {
-      flags[name] = true;
-      continue;
-    }
-    const value = rest[++i];
-    if (value === undefined) fail(`--${name} 后面要有值`);
-    flags[name] = value;
-  }
-  return { cmd, flags };
-}
-
-const { cmd, flags } = parse(process.argv.slice(2));
-if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h" || flags.help) {
+// The same reading of the arguments the plugin applies to the command lines it checks.
+const args = parseSayArgs(process.argv.slice(2));
+if ("help" in args) {
   process.stdout.write(`${HELP}\n`);
   process.exit(0);
 }
-if (cmd !== "say" && cmd !== "undo") fail(`没有 ${cmd} 这个子命令\n\n${HELP}`);
-if (!flags.said) fail("要用 --said 给出人的原话");
-
-const known = cmd === "say" ? ["item", "kind", "said", "until", "person", "what", "expected", "data", "wait"] : ["id", "last", "said", "data", "wait"];
-for (const name of Object.keys(flags)) if (!known.includes(name)) fail(`${cmd} 不认识 --${name}`);
-const waitSeconds = flags.wait === undefined ? 90 : Number(flags.wait);
-if (!Number.isFinite(waitSeconds) || waitSeconds < 0) fail("--wait 要是秒数");
-
+if ("error" in args) fail(args.usage ? `${args.error}\n\n${HELP}` : args.error);
+const waitSeconds = args.wait;
 const id = `r_${randomBytes(6).toString("hex")}`;
-const base = { v: 1, id, at: new Date().toISOString(), via: process.env.PASEO_AGENT_ID, said: flags.said };
-let request;
-if (cmd === "say") {
-  if (!flags.item) fail("要用 --item 给出单号");
-  if (!["drop", "hold", "wrong"].includes(flags.kind)) fail("--kind 只能是 drop、hold、wrong");
-  if (flags.kind === "hold" && !/^\d{4}-\d{2}-\d{2}$/.test(flags.until ?? "")) fail("hold 要用 --until YYYY-MM-DD 说到哪天");
-  request = { ...base, cmd, kind: flags.kind, item: flags.item };
-  for (const name of ["until", "person", "what", "expected"]) if (flags[name] !== undefined) request[name] = flags[name];
-} else {
-  if (!flags.id === !flags.last) fail("undo 要 --id <a_…> 或者 --last，二选一");
-  if (flags.id && !/^a_[0-9a-f]{12}$/.test(flags.id)) fail(`${flags.id} 不是一条的编号（像 a_0123456789ab）`);
-  request = { ...base, cmd, target: flags.id ?? "last" };
-}
+const request = { v: 1, id, at: new Date().toISOString(), via: process.env.PASEO_AGENT_ID, ...args.request };
 
 // The plugin checks the words against the conversation that ran this; outside one there is none.
 if (!request.via) fail("要在 Paseo 的对话里跑（没有 PASEO_AGENT_ID），插件才知道是谁说的");
 
 const home = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
-const data = flags.data || process.env.RECONCILE_DATA_DIR || path.join(home, "plugin-data", "reconcile");
+const data = args.data || process.env.RECONCILE_DATA_DIR || path.join(home, "plugin-data", "reconcile");
 if (!existsSync(data)) fail(`数据目录不存在：${data}（用 --data 指定）`);
 const dir = path.join(data, "requests");
 mkdirSync(dir, { recursive: true });
