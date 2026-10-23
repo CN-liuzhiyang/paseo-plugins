@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { Assessment, Commitment, Item, Note, Observation } from "../shared/model";
 import { normalizeStages, type StageMeta, type StageSpec } from "../shared/graph";
@@ -160,7 +159,7 @@ export interface RuleSet {
   rules: LoadedRule[];
   /** Files that do not load; fallback: the last copy of it that did (saved when that version first loaded, ISO) runs instead. */
   errors: Array<{ file: string; error: string; fallback?: string }>;
-  /** Copies saved by this load (file, the text's sha256, the source its rule judges); sha256 null: a copy taken away. */
+  /** Copies saved by this load (file, the text's sha256, the source its rule judges). */
   kept: Array<{ file: string; sha256: string | null; source?: string }>;
   /** Copies that could not be saved: a file that breaks later has nothing to go on with. */
   keepErrors: Array<{ file: string; error: string }>;
@@ -227,11 +226,13 @@ const moduleSchema = z.object({
   assess: z.custom<RuleModule["assess"]>((v) => typeof v === "function", "assess must be a function"),
 });
 
-async function loadOne(dir: string, file: string, text: string, loaded: LoadedRule[]): Promise<LoadedRule | { error: string }> {
+async function loadOne(file: string, text: string, loaded: LoadedRule[]): Promise<LoadedRule | { error: string }> {
   const problem = scanRule(text);
   if (problem) return { error: problem };
   try {
-    const url = `${pathToFileURL(path.join(dir, file)).href}?v=${createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+    // What runs is the text read -- scanned and, for a copy, checked -- not the file read again: a
+    // file changed on disk after it was read does not run. (A rule imports nothing: scanRule.)
+    const url = `data:text/javascript;base64,${Buffer.from(text, "utf8").toString("base64")}`;
     const parsed = moduleSchema.safeParse((await dynamicImport(url)).default);
     if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
     const m = parsed.data;
@@ -259,6 +260,16 @@ function kept(dir: string, file: string): { text: string; at: string } | { error
   }
 }
 
+/** The rule files a copy is kept of. */
+export function keptFiles(dir: string): string[] {
+  return existsSync(dir) ? readdirSync(dir).filter((f) => f.endsWith(".mjs")) : [];
+}
+
+/** Takes a copy away. */
+export function dropKept(dir: string, file: string): void {
+  rmSync(path.join(dir, file), { force: true });
+}
+
 /** Saves a copy; false when the same text was there already. */
 function keep(to: KeepRules, file: string, text: string): boolean {
   const there = kept(to.dir, file);
@@ -279,7 +290,7 @@ export async function loadRules(dir: string, keepRules: KeepRules | null = null)
   const keepErrors: RuleSet["keepErrors"] = [];
   const running: Array<{ file: string; text: string }> = [];
   for (const { file, text } of files) {
-    const loaded = await loadOne(dir, file, text, rules);
+    const loaded = await loadOne(file, text, rules);
     if (!("error" in loaded)) {
       rules.push(loaded);
       running.push({ file, text });
@@ -297,9 +308,10 @@ export async function loadRules(dir: string, keepRules: KeepRules | null = null)
     let why = "";
     const copy = keepRules ? kept(keepRules.dir, file) : null;
     if (copy && "error" in copy) why = `；副本读不了：${copy.error}`;
+    else if (copy && keepRules!.known && keepRules!.known[file] === undefined) why = "；副本还没有记下哈希（刚换成核对副本的版本，要等这个文件再加载成功一次才记），没用它";
     else if (copy && keepRules!.known && keepRules!.known[file] !== sha256(copy.text)) why = "；副本和控制器存下时记的不一样，没用它";
     else if (copy && copy.text !== text) {
-      const instead = await loadOne(keepRules!.dir, file, copy.text, rules);
+      const instead = await loadOne(file, copy.text, rules);
       if (!("error" in instead)) {
         rules.push(instead);
         running.push({ file, text: copy.text });
@@ -311,19 +323,6 @@ export async function loadRules(dir: string, keepRules: KeepRules | null = null)
     // Nothing of it runs; its text still counts, so that fixing it is a change.
     running.push({ file, text });
     errors.push({ file, error: `${loaded.error}${why}` });
-  }
-  // A copy of a file no longer there is taken away: a rule taken out of use stays out, and a new
-  // file of that name that breaks does not bring the old one back.
-  if (keepRules?.write) {
-    try {
-      for (const f of existsSync(keepRules.dir) ? readdirSync(keepRules.dir).filter((f) => f.endsWith(".mjs")) : []) {
-        if (files.some((x) => x.file === f)) continue;
-        rmSync(path.join(keepRules.dir, f), { force: true });
-        keptNow.push({ file: f, sha256: null });
-      }
-    } catch (error) {
-      keepErrors.push({ file: "", error: (error as Error).message });
-    }
   }
   const hash = createHash("sha256");
   for (const { file, text } of running) hash.update(`${file}\0${text}\0`);

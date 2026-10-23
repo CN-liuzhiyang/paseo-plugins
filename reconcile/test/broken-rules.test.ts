@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import path from "node:path";
 import { test } from "node:test";
 import type { EngineStatus } from "../server/engine";
@@ -153,6 +154,7 @@ test("a copy that cannot be saved is on the page at once", () =>
     await w.run("2026-10-13 12:15");
     assert.equal(headline(w), "第二版");
     assert.match(problem(w, "副本存不下来（mini.mjs") ?? "", /^判断方法的副本存不下来（mini\.mjs：.+）：mini\.mjs 以后加载不上时没有可接着用的$/);
+    assert.match(problem(w, "旧副本") ?? "", /^判断方法的旧副本清不掉（.+）：拿掉了的规则，副本还留着$/);
   }));
 
 test("a rule file taken away takes its copy with it: a new file of that name that breaks does not bring the old one back", () =>
@@ -161,18 +163,20 @@ test("a rule file taken away takes its copy with it: a new file of that name tha
     await w.run("2026-10-13 12:15");
     assert.ok(existsSync(copy(w)));
     rmSync(path.join(w.configDir, "rules", "mini.mjs"));
-    await w.run("2026-10-13 12:30");
-    assert.equal(existsSync(copy(w)), false);
+    await w.run("2026-10-13 12:40", 5);
+    assert.ok(existsSync(copy(w)), "not at once: it may come back");
+    await w.run("2026-10-13 13:00", 5);
+    assert.equal(existsSync(copy(w)), false, "gone half an hour: taken away");
     assert.equal(w.store.state.rules.kept?.["mini.mjs"], undefined);
     assert.ok(w.store.state.rules.kept?.["other.mjs"]);
     write(w, BROKEN);
-    await w.run("2026-10-13 12:45");
+    await w.run("2026-10-13 13:15");
     assert.equal(status(w).cases.length, 0, "the old rule does not come back");
     assert.match(problem(w, "mini.mjs") ?? "", /1 个事项停止判断/);
     // The count is of the items each file judged: other.mjs judged none.
     writeFileSync(path.join(w.configDir, "rules", "other.mjs"), BROKEN.replace('name: "mini"', 'name: "other"'));
     rmSync(copy(w, "other.mjs"));
-    await w.run("2026-10-13 13:00");
+    await w.run("2026-10-13 13:30");
     assert.match(problem(w, "other.mjs") ?? "", /0 个事项停止判断/);
     assert.match(problem(w, "mini.mjs") ?? "", /1 个事项停止判断/);
   }));
@@ -224,4 +228,53 @@ test("a rules directory with nothing in it is said on the page, goes to the admi
     assert.equal(problem(w, "判断方法目录"), undefined);
     assert.equal(broken(w)[0]!.status, "cancelled");
     assert.match(w.deliveries.find((d) => d.title === "判断方法目录又有文件了")?.text ?? "", /^判断方法目录里又有文件了/);
+  }));
+
+test("a rule file gone for a moment and back broken goes on as its copy", () =>
+  withWorld(async (w) => {
+    rmSync(path.join(w.configDir, "rules", "mini.mjs"));
+    await w.run("2026-10-13 12:20", 5);
+    // Back, then gone again: the half hour counts from when it went the second time.
+    write(w, rule("第一版"));
+    await w.run("2026-10-13 12:25", 5);
+    rmSync(path.join(w.configDir, "rules", "mini.mjs"));
+    await w.run("2026-10-13 12:45", 5);
+    assert.ok(existsSync(copy(w)));
+    write(w, BROKEN);
+    await w.run("2026-10-13 12:50", 5);
+    assert.equal(headline(w), "第一版");
+    assert.match(problem(w, "mini.mjs") ?? "", /先接着用 10-13 10:00 换上的那一版/);
+  }));
+
+test("a copy with no sha256 recorded yet is said so, not as one that differs", () =>
+  withWorld(async (w) => {
+    w.store.append([{ type: "rules.kept", file: "mini.mjs", sha256: null }]);
+    write(w, BROKEN);
+    await w.run("2026-10-13 12:15");
+    assert.equal(status(w).cases.length, 0);
+    assert.match(problem(w, "mini.mjs") ?? "", /；副本还没有记下哈希（刚换成核对副本的版本，要等这个文件再加载成功一次才记），没用它$/);
+  }));
+
+test("what runs of a copy is the text that was checked: a copy swapped after it was read does not run", () =>
+  withWorld(async (w) => {
+    const planted = rule("放进来的").replace("assess(kase, ctx) {", "assess(kase, ctx) { globalThis.__plantedCopy = (globalThis.__plantedCopy ?? 0) + 1;");
+    const read = fs.readFileSync;
+    let swapped = 0;
+    fs.readFileSync = ((...args: Parameters<typeof read>) => {
+      const out = read(...args);
+      if (typeof args[0] === "string" && path.resolve(args[0]) === path.resolve(copy(w)) && swapped++ === 0) writeFileSync(copy(w), planted);
+      return out;
+    }) as typeof read;
+    syncBuiltinESMExports();
+    try {
+      write(w, BROKEN);
+      await w.run("2026-10-13 12:15");
+    } finally {
+      fs.readFileSync = read;
+      syncBuiltinESMExports();
+    }
+    assert.equal(swapped > 0, true, "the copy was read");
+    assert.equal(readFileSync(copy(w), "utf8"), planted, "and swapped on disk");
+    assert.equal((globalThis as { __plantedCopy?: number }).__plantedCopy, undefined, "the planted code did not run");
+    assert.equal(headline(w), "第一版");
   }));

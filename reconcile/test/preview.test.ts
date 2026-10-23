@@ -275,6 +275,9 @@ test("the command: diff prints the preview and how to apply it; apply with anoth
     assert.equal(bad.status, 2);
     assert.match(bad.stderr, /^插件设置读不懂/);
     assert.doesNotMatch(bad.stderr, /\n\s+at /, "no stack");
+    // Both directories given: the settings are not needed, and not read.
+    const given = spawnSync(process.execPath, [BIN, "diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now], { encoding: "utf8", env: { ...process.env, PASEO_HOME: home } });
+    assert.equal(given.status, 0, given.stderr);
     const apply = run("apply", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now, "--expect", "p_0000000000");
     assert.equal(apply.status, 1);
     assert.match(apply.stdout, /差异变了.*没拷/);
@@ -417,3 +420,17 @@ test("what the preview cannot see is said: items cold on both sides, the hour, t
     },
     { items: [issue(1, { fields: { Release: "2026-10-16" } }), issue(9, { title: "【总单】示例功能", release: "2026-10-23", status: "开发中" })] },
   ));
+
+test("a file that differs only in its line endings is not a change, and is not copied", () =>
+  withWorld(async (w, candidate) => {
+    put(candidate, "rules/mini.mjs", rule().replace(/\n/g, "\r\n"));
+    put(candidate, "policy.json", JSON.stringify({ ...TEST_POLICY, ruleBreakerChanges: 5 }));
+    const p = await look(w, candidate);
+    assert.deepEqual([p.changedFiles, p.eolOnly], [["policy.json"], ["rules/mini.mjs"]]);
+    assert.match(previewText(p), /候选里和在用不同的文件：policy\.json\n只差行尾（CRLF \/ LF），不算改动，apply 不拷：rules\/mini\.mjs\n/);
+    const done = await applyCandidate({ configDir: w.configDir, candidateDir: candidate, dataDir: w.dataDir, nowMs: w.clock.now, expect: p.id });
+    assert.deepEqual(done.applied, ["policy.json"]);
+    assert.equal(readFileSync(path.join(w.configDir, "rules", "mini.mjs"), "utf8"), rule());
+    put(candidate, "policy.json", readFileSync(path.join(w.configDir, "policy.json"), "utf8"));
+    assert.match(previewText(await look(w, candidate)), /^.*\n候选里的文件和在用的只差行尾。\n只差行尾/);
+  }));

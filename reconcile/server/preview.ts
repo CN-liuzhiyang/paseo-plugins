@@ -95,8 +95,10 @@ export interface Preview {
   now: string;
   until: string;
   workdays: number;
-  /** The candidate's files that differ from the config in use. */
+  /** The candidate's files that differ from the config in use (line endings aside). */
   changedFiles: string[];
+  /** Files that differ only in their line endings (CRLF, LF): not a change, and not copied. */
+  eolOnly: string[];
   inUse: { fingerprint: string | null; errors: Array<{ file: string; error: string; fallback?: string }> };
   candidate: { fingerprint: string | null; errors: Array<{ file: string; error: string; fallback?: string }> };
   /** The rules change would be held on the controller until someone lets it through. */
@@ -323,7 +325,12 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   const parts = partsIn(candidateDir);
   const inUseFiles = partFiles(configDir, parts);
   const candidateFiles = partFiles(candidateDir, parts);
-  const changedFiles = [...new Set([...inUseFiles.keys(), ...candidateFiles.keys()])].filter((f) => inUseFiles.get(f) !== candidateFiles.get(f)).sort();
+  // A checkout, an export or an editor may turn LF into CRLF (or back): JSON and the rules' code
+  // read the same either way, so a file that differs only so is not a change.
+  const eol = (text: string | undefined) => text?.replace(/\r\n/g, "\n");
+  const differ = [...new Set([...inUseFiles.keys(), ...candidateFiles.keys()])].filter((f) => inUseFiles.get(f) !== candidateFiles.get(f)).sort();
+  const changedFiles = differ.filter((f) => eol(inUseFiles.get(f)) !== eol(candidateFiles.get(f)));
+  const eolOnly = differ.filter((f) => !changedFiles.includes(f));
 
   const { state } = readState(dataDir);
   const tz = inUseConfig.policy.tz;
@@ -612,6 +619,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     until: iso(until, tz),
     workdays,
     changedFiles,
+    eolOnly,
     inUse: { fingerprint: statusNow[0]!.rules.fingerprint, errors: statusNow[0]!.rules.errors.map(local) },
     candidate: { fingerprint: statusNow[1]!.rules.fingerprint, errors: statusNow[1]!.rules.errors.map(local) },
     breaker,
@@ -644,7 +652,8 @@ const clip = (text: string, n: number) => {
 export function previewText(p: Preview): string {
   const lines: string[] = [];
   lines.push(`改动预览 ${p.id}（现在 ${p.now.slice(5, 16).replace("T", " ")}，往后推演到 ${p.until.slice(5, 10)}，${p.workdays} 个工作日）`);
-  lines.push(p.changedFiles.length > 0 ? `候选里和在用不同的文件：${p.changedFiles.join("、")}` : "候选里的文件和在用的一模一样。");
+  lines.push(p.changedFiles.length > 0 ? `候选里和在用不同的文件：${p.changedFiles.join("、")}` : p.eolOnly.length > 0 ? "候选里的文件和在用的只差行尾。" : "候选里的文件和在用的一模一样。");
+  if (p.eolOnly.length > 0) lines.push(`只差行尾（CRLF / LF），不算改动，apply 不拷：${p.eolOnly.join("、")}`);
   for (const e of p.inUse.errors) lines.push(`⚠ 在用的判断方法 ${e.file} 现在就加载不上，${e.fallback ? `daemon 接着用 ${e.fallback.slice(5, 16).replace("T", " ")} 换上的那一版` : "它管的事项 daemon 现在都不判断"}：${e.error}`);
   for (const e of p.candidate.errors) lines.push(`⚠ 候选的判断方法 ${e.file} 加载不上，不能拷过去（拷过去 daemon 也只会接着用上一版）：${e.error}`);
   if (p.breaker) {

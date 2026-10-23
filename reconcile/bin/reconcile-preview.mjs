@@ -56,11 +56,14 @@ for (let i = 0; i < rest.length; i++) {
 // The plugin's settings, for where its config and data are.
 const home = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
 const settingsFile = path.join(home, "plugin-settings", "reconcile", "reconcile.json");
+// Read only for what was not given: with --config (and --data, but for copy) it is not needed.
 let settings = {};
-try {
-  settings = existsSync(settingsFile) ? (JSON.parse(readFileSync(settingsFile, "utf8")).values ?? {}) : {};
-} catch (error) {
-  fail(`插件设置读不懂（${settingsFile}）：${error.message}；用 --config、--data 直接给出目录`);
+if (!flags.config || (cmd !== "copy" && !flags.data)) {
+  try {
+    settings = existsSync(settingsFile) ? (JSON.parse(readFileSync(settingsFile, "utf8")).values ?? {}) : {};
+  } catch (error) {
+    fail(`插件设置读不懂（${settingsFile}）：${error.message}；用 --config、--data 直接给出目录`);
+  }
 }
 const configDir = flags.config || settings.configDir;
 if (!configDir) fail(`不知道在用的配置目录：用 --config 给出（${settingsFile} 里也没有 configDir）`);

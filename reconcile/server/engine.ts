@@ -8,7 +8,7 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
+import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
@@ -719,6 +719,39 @@ export function createEngine(deps: EngineDeps) {
     return { set: ruleset, changed: state.rules.fingerprint !== ruleset.fingerprint };
   }
 
+  /** When each kept copy's file was first seen gone, in memory (a restart counts again). */
+  const gone = new Map<string, number>();
+  let sweepError: string | null = null;
+
+  /**
+   * A copy whose file has been gone for RULES_BROKEN_MS is taken away, so that a rule taken out of
+   * use stays out and a new file of that name that breaks does not bring the old one back. Not at
+   * once: a file deleted and written again (an editor's save, a branch switched and back) is the
+   * same rule, and its copy is what it goes on as if it comes back broken.
+   */
+  function sweepKept(files: string[], nowMs: number): void {
+    const keep = deps.rulesKeep;
+    if (!keep?.write) return;
+    try {
+      for (const file of keptFiles(keep.dir)) {
+        if (files.includes(file)) {
+          gone.delete(file);
+          continue;
+        }
+        const since = gone.get(file) ?? nowMs;
+        gone.set(file, since);
+        if (nowMs - since < RULES_BROKEN_MS) continue;
+        dropKept(keep.dir, file);
+        gone.delete(file);
+        append([{ type: "rules.kept", file, sha256: null }]);
+      }
+      sweepError = null;
+    } catch (error) {
+      if (sweepError === null) deps.log(`taking away old copies of rules failed: ${(error as Error).message}`);
+      sweepError = (error as Error).message;
+    }
+  }
+
   /** Rule files that do not load, in the journal: since when, and what runs instead. */
   function noteBroken(set: RuleSet, nowMs: number): void {
     const broken = state.rules.broken ?? {};
@@ -863,6 +896,7 @@ export function createEngine(deps: EngineDeps) {
 
   async function judgeAll(nowMs: number, plan: PlanEntry[]): Promise<void> {
     const { set, changed } = await currentRules();
+    sweepKept(set.files, nowMs);
     noteBroken(set, nowMs);
     const firstLoad = state.rules.fingerprint === null;
     const vocabulary = vocabularyOf(state.items, state.recent);
@@ -1913,7 +1947,8 @@ export function createEngine(deps: EngineDeps) {
         ...(deps.notices ?? []),
         ...lastProblems,
         ...Object.entries(state.rules.broken ?? {}).map(([file, b]) => (file ? `${brokenText(file)}：${clip(b.error, 200)}` : brokenText(file))),
-        ...(ruleset?.keepErrors ?? []).map((e) => `判断方法的副本存不下来（${e.file || "清理旧副本"}：${clip(e.error, 160)}）：${e.file ? `${e.file} 以后加载不上时没有可接着用的` : "旧副本没清掉"}`),
+        ...(ruleset?.keepErrors ?? []).map((e) => `判断方法的副本存不下来（${e.file}：${clip(e.error, 160)}）：${e.file} 以后加载不上时没有可接着用的`),
+        ...(sweepError ? [`判断方法的旧副本清不掉（${clip(sweepError, 160)}）：拿掉了的规则，副本还留着`] : []),
         ...notifyProblems(),
         ...Object.values(state.items)
           .filter((i) => (i.incomplete?.length ?? 0) > 0 && heat(i.key).length > 0)
