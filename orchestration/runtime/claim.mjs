@@ -23,6 +23,7 @@
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { LIVE_WITHIN_MS } from "./liveness.mjs";
 
 /** What a caller-given run id looks like; orchestration-ui reads the same shape. */
 export const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -34,8 +35,8 @@ const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i;
 
 /** How often the holder touches its claim. */
 export const HEARTBEAT_MS = 30_000;
-/** A claim touched within this long ago belongs to a run that is alive (four heartbeats). */
-export const LIVE_WITHIN_MS = 120_000;
+/** A claim touched within this long ago belongs to a run that is alive (four heartbeats): liveness.mjs says how long. */
+export { LIVE_WITHIN_MS };
 /** The holder gives up after this many heartbeats in a row that could not touch the claim. */
 const HEARTBEAT_FAILURES = 3;
 

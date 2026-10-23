@@ -52,7 +52,8 @@
 ## 运行"活着"怎么判
 
 只看运行时写的占位文件 `<runId>.claim`：最近 2 分钟被碰过就是活着，过期就是失联（`server/alive.ts`
-`checkLiveness`，表在 `shared/liveness.ts`，和 `../orchestration/runtime/state.mjs` 是同一张表，两边都按
+`checkLiveness`，表在 `shared/liveness.mjs`，那是运行时 `../orchestration/runtime/liveness.mjs` 的拷贝，由
+`npm run sync:liveness`（在 orchestration/ 里）复制，别手改；测试比对文字相同，并逐行按
 `../orchestration/fixtures/run-state-cases.json` 测）。pid 只用来证明**死了**：持有者那台机器上 pid 不存在，不管占位多新都算
 失联；pid 还在不说明什么（会被复用），占位过期而 pid 还在时显示"占位文件超过 2 分钟没有更新，运行多半已经停了"。没有占位文件的旧
 运行，仍按 pid 和安静时间判。
@@ -194,6 +195,6 @@ client/run-panel.tsx     workspace 的「流程」标签页
 client/focus.ts          标签页显示哪个运行、哪个节点（打开它的地方先写，标签页读）
 client/surface.tsx       侧边栏 screen：列表或一个运行，运行 id 在 screen 参数里
 client/affair.tsx        "属于：<label>"（详情页顶上）和列表行上的小标签；去哪儿由 shared/affair.ts 定
-shared/liveness.ts      活着的判法（占位文件），和运行时的 state.mjs 同一张表
+shared/liveness.mjs     活着的判法（占位文件）：运行时 liveness.mjs 的拷贝，别手改
 fixtures/           样例运行
 ```

@@ -22,6 +22,8 @@ runtime/
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
   claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
+  liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
+                 没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
   affair.mjs     run.start.affair 的形状和校验
   resolve.mjs    flow 名字到文件（flows/ 加 config 的 flowsDirs）

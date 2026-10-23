@@ -1,5 +1,5 @@
 {
- "_about": "The run-state table (orchestration/EVENTS.md) as data. runtime/state.mjs classify() and orchestration-ui/shared/liveness.ts classify() are both tested against it; change a row here and both must agree. ageMs: how long ago the claim was touched; liveWithinMs is 120000; graceMs 60000; legacyQuietMs 900000.",
+ "_about": "The run-state table (orchestration/EVENTS.md) as data. runtime/liveness.mjs classify() is tested against it, and so is every copy of that file a plugin carries (orchestration-ui/shared/liveness.mjs, reconcile/shared/liveness.mjs); change a row here and all must agree. ageMs: how long ago the claim was touched; liveWithinMs is 120000; graceMs 60000; legacyQuietMs 900000.",
  "cases": [
   {
    "name": "ended: run.end written, claim fresh",

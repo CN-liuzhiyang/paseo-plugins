@@ -1,6 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import os from "node:os";
-import { classify } from "../shared/liveness";
+import { classify } from "../shared/liveness.mjs";
 import type { ProcessCheck } from "../shared/run";
 
 // Is the runtime process of an unfinished run still there? Only answerable on the machine that
@@ -20,7 +20,7 @@ export const localProbe: Probe = {
 
 /**
  * Whether the run that wrote `eventsFile` is alive, for a run that has written run.start and not
- * run.end. The word is the claim's (`<runId>.claim` beside the events, shared/liveness.ts): touched
+ * run.end. The word is the claim's (`<runId>.claim` beside the events, shared/liveness.mjs): touched
  * within two minutes is alive. The pid is asked as well, but only to show death: it is gone on this
  * machine and the run is dead whatever the claim says; present, it proves nothing. A file without a
  * claim (written before claims existed) is answered by the pid alone, as it always was.

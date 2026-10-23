@@ -6,6 +6,7 @@
 // kind's shape is kept as a problem rather than guessed at.
 
 import { affairOf, type Affair } from "./affair";
+import { parseDuration, staleAfterMs as sharedStaleAfterMs } from "./liveness.mjs";
 
 export type Outcome = "done" | "stopped" | "failed" | "timeout";
 /**
@@ -556,51 +557,33 @@ export function ms(iso: string | null): number | null {
   return Number.isNaN(value) ? null : value;
 }
 
-/**
- * Durations as the runtime writes them in `timeout`. The contract does not fix a format, so this
- * accepts what people write ("90s", "30m", "1h30m", "500ms", "2d") and a bare number of
- * milliseconds; anything else is `null` and the caller falls back to its default.
- */
-export function parseDuration(text: string | null): number | null {
-  if (text === null) return null;
-  const trimmed = text.trim();
-  if (/^\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-  const unit: Record<string, number> = { ms: 1, s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 };
-  const parts = [...trimmed.matchAll(/(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)/g)];
-  if (parts.length === 0 || parts.map((part) => part[0]).join("") !== trimmed.replace(/\s+/g, "")) return null;
-  return parts.reduce((sum, part) => sum + Number(part[1]) * unit[part[2]], 0);
-}
+// The duration format, the grace on a call's timeout and the formula for how long a run that is alive may be quiet
+// are the runtime's (liveness.mjs, copied here by `npm run sync:liveness` in orchestration/): one rule for every
+// reader of the run files.
+export { parseDuration, STALE_GRACE_MS } from "./liveness.mjs";
 
 export function openCalls(run: RunState): CallState[] {
   return run.callOrder.map((id) => run.calls.get(id)!).filter((call) => call.startedAt !== null && call.end === null);
 }
 
-/** Grace on top of an open call's own timeout: the runtime needs a moment to write call.end. */
-export const STALE_GRACE_MS = 2 * 60_000;
-
 /**
- * How long a run without run.end may stay quiet before it reads as lost. A run that is waiting
- * on a call is quiet for as long as that call may legitimately take, so an open call with a
- * readable timeout raises the bar to that timeout; otherwise the configured base applies.
+ * How long a run without run.end may stay quiet before it reads as lost (or, alive, as quiet for long). A run that is
+ * waiting on a call is quiet for as long as that call may legitimately take, so an open call with a readable timeout
+ * raises the bar to that timeout; otherwise the configured base applies.
  */
 export function staleAfterMs(run: RunState, baseMs: number): number {
-  let limit = baseMs;
-  for (const call of openCalls(run)) {
-    const timeout = parseDuration(call.ask?.timeout ?? call.gate?.timeout ?? null);
-    const started = ms(call.startedAt);
-    const last = ms(run.lastEventAt);
-    if (timeout === null || started === null || last === null) continue;
-    // Measured from the last event, like the base: the call may time out this far after it began.
-    limit = Math.max(limit, started + timeout + STALE_GRACE_MS - last);
-  }
-  return limit;
+  return sharedStaleAfterMs({
+    baseMs,
+    lastEventAtMs: ms(run.lastEventAt),
+    openCalls: openCalls(run).map((call) => ({ startedAtMs: ms(call.startedAt), timeoutMs: parseDuration(call.ask?.timeout ?? call.gate?.timeout ?? null) })),
+  });
 }
 
 /**
  * Whether the run is alive, as the daemon found it. Only the daemon on the run's own machine can
  * look; `null` means nobody could, and the quiet-time threshold decides.
  *
- * `alive` is the claim's word (shared/liveness.ts): the runtime touches `<runId>.claim` every 30
+ * `alive` is the claim's word (shared/liveness.mjs): the runtime touches `<runId>.claim` every 30
  * seconds, and a claim touched in the last two minutes is a run that is alive. The process id only
  * ever shows death: `gone` is whether the pid is missing on this machine (true: dead whatever the
  * claim says; false: it exists, which proves nothing, pids are reused; null: not asked). A file

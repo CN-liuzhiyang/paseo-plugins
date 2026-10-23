@@ -56,8 +56,9 @@
 
 **不要自己照着下面的表写判断，调 `runtime/state.mjs` 的 `readRunState({ dir, runId, spawnedAt })`。** 它读这两个
 文件，返回 `{ state, safeToRestart, reason, refused, outcome, processAlive, claim, lastEventAt }`。表本身是数据，
-`fixtures/run-state-cases.json`；`state.mjs` 的 `classify` 和 orchestration-ui 里的同名函数都按这张表测，改一行
-两边都得跟着改。
+`fixtures/run-state-cases.json`；判断本身是 `runtime/liveness.mjs` 的 `classify`（一个没有 import 的单文件），`state.mjs` 用它，
+装在别处的插件带它的一份拷贝（`npm run sync:liveness` 复制，头部标着"由运行时复制，别手改"），每份拷贝的测试都逐行按这张表测、
+并比对文字和运行时那份相同——改规则只改 `liveness.mjs`，再跑一次复制。
 
 | `state` | 占位文件 | 事件文件 | 意思，和调用方该做什么 |
 |---|---|---|---|

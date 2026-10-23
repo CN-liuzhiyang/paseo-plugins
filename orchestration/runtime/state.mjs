@@ -1,7 +1,7 @@
 // What state a run is in, read from its two files: the one way a caller (a plugin that started the
 // run, a UI) answers "is it alive, did it start, can I start it again". EVENTS.md's table is this file
-// in prose; fixtures/run-state-cases.json is the same table as data, and both this module and
-// orchestration-ui's port of `classify` are tested against it.
+// in prose; fixtures/run-state-cases.json is the same table as data. The table itself is liveness.mjs's
+// `classify`, tested against it here and in every plugin that carries a copy of that file.
 //
 //   const { state, safeToRestart, reason } = readRunState({ dir: logDir, runId, spawnedAt });
 //
@@ -15,13 +15,13 @@
 
 import { closeSync, fstatSync, openSync, readFileSync, readSync, statSync } from "node:fs";
 import os from "node:os";
-import { claimFile, LIVE_WITHIN_MS } from "./claim.mjs";
+import { claimFile } from "./claim.mjs";
 import { eventsFile } from "./events.mjs";
+import { classify, LEGACY_QUIET_MS, pidFact, START_GRACE_MS } from "./liveness.mjs";
 
-/** A file with events and no claim (written before claims existed) is lost after this long quiet. */
-export const LEGACY_QUIET_MS = 15 * 60_000;
-/** After starting a process, how long before "no claim and no events" means it did not start. */
-export const START_GRACE_MS = 60_000;
+// The table itself (`classify`), the pid fact and the constants live in liveness.mjs, a file with no imports that
+// plugins carry a copy of. They are re-exported here, where callers have always found them.
+export { classify, LEGACY_QUIET_MS, START_GRACE_MS };
 
 /**
  * The states, and what each asks of the caller.
@@ -52,48 +52,6 @@ export const RUN_STATES = [
   "ended",
   "unreadable",
 ];
-
-/**
- * The table. Pure: everything it needs is passed in, so the same function is the test of the table.
- *
- * @param {{
- *   claim: null | { ageMs: number, refused?: boolean, unreadable?: boolean },
- *   events: "none" | "open" | "ended",
- *   pid?: "alive" | "gone" | "unknown",
- *   quietMs?: number,
- *   spawnedAgoMs?: number | null,
- *   graceMs?: number,
- *   legacyQuietMs?: number,
- *   liveWithinMs?: number,
- * }} facts
- * @returns {{ state: string, safeToRestart: boolean }}
- */
-export function classify(facts) {
-  const { claim, events, pid = "unknown", quietMs = 0, spawnedAgoMs = null, graceMs = START_GRACE_MS, legacyQuietMs = LEGACY_QUIET_MS, liveWithinMs = LIVE_WITHIN_MS } = facts;
-  const answer = (state, safeToRestart = false) => ({ state, safeToRestart });
-
-  if (events === "ended") return answer("ended");
-
-  if (claim === null) {
-    // Before claims existed: the old rule, quiet time, with a gone pid as proof of death.
-    if (events === "open") return pid === "gone" || quietMs > legacyQuietMs ? answer("lost") : answer("running");
-    if (spawnedAgoMs === null) return answer("absent");
-    return spawnedAgoMs < graceMs ? answer("pending") : answer("absent", true);
-  }
-
-  // A refusal is the first thing to look at: writing it touched the file, so it looks fresh.
-  if (claim.refused) return answer("refused");
-
-  const fresh = claim.ageMs <= liveWithinMs;
-  if (claim.unreadable && fresh) return answer("unreadable");
-  // A pid that is gone on the holder's machine is proof of death however fresh the claim.
-  const alive = fresh && pid !== "gone";
-  if (events === "none") {
-    if (alive) return answer("starting");
-    return pid === "alive" ? answer("stalled-before-start") : answer("dead-before-start");
-  }
-  return alive ? answer("running") : answer("lost");
-}
 
 const PROSE = {
   pending: "the process was started a moment ago; look again",
@@ -166,20 +124,6 @@ function readClaim(file) {
 }
 
 const localProbe = { hostname: os.hostname(), kill: (pid, signal) => process.kill(pid, signal) };
-
-/** Whether the holder's pid exists, on the holder's machine only; "unknown" anywhere else. */
-function pidFact(body, probe) {
-  if (!body || !Number.isInteger(body.pid) || typeof body.hostname !== "string") return "unknown";
-  if (body.hostname.toLowerCase() !== probe.hostname.toLowerCase()) return "unknown";
-  try {
-    probe.kill(body.pid, 0);
-    return "alive";
-  } catch (error) {
-    if (error.code === "EPERM") return "alive";
-    if (error.code === "ESRCH") return "gone";
-    return "unknown";
-  }
-}
 
 /**
  * Read a run's state from `<dir>/runs/<runId>.claim` and `.jsonl`. Look again after a heartbeat

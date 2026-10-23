@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
-import { classify, LIVE_WITHIN_MS, type LivenessFacts, type RunState } from "../shared/liveness";
+import { classify, LIVE_WITHIN_MS, type LivenessFacts, type RunState } from "../shared/liveness.mjs";
 import type { Probe } from "./alive";
 import { createRunIndex } from "./runs";
 
@@ -15,6 +15,18 @@ const TABLE = JSON.parse(
 
 const scratch = mkdtemp(path.join(os.tmpdir(), "orchestration-ui-liveness-"));
 after(async () => rm(await scratch, { recursive: true, force: true }));
+
+// What keeps this plugin's copy the runtime's: the same words, and every row of the runtime's table.
+test("shared/liveness.mjs and its types are the runtime's files with the header on, word for word", () => {
+  const text = (...parts: string[]) => readFileSync(path.join(import.meta.dirname, ...parts), "utf8").replaceAll(String.fromCharCode(13, 10), String.fromCharCode(10));
+  for (const name of ["liveness.mjs", "liveness.d.mts"]) {
+    const source = text("..", "..", "orchestration", "runtime", name);
+    const copy = text("..", "shared", name);
+    assert.ok(copy.startsWith("// 由运行时复制，别手改"), `${name} says it is a copy`);
+    // The header is one line and a blank one.
+    assert.equal(copy.slice(copy.indexOf(String.fromCharCode(10, 10)) + 2), source, `${name} differs from the runtime's: run npm run sync:liveness in orchestration/`);
+  }
+});
 
 test("the table: every row of the runtime's fixtures/run-state-cases.json", () => {
   assert.ok(TABLE.cases.length >= 30);
