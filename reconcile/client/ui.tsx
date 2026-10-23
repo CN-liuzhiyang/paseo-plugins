@@ -1,7 +1,9 @@
+import * as pluginClient from "@getpaseo/plugin/client";
 import type { PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { createContext, useContext, useMemo, useState, type ReactNode } from "react";
-import { Platform, Pressable, Text, View, type TextStyle, type ViewStyle } from "react-native";
+import { Linking, Platform, Pressable, Text, View, type TextStyle, type ViewStyle } from "react-native";
+import { go, jumpOf } from "./jump";
 
 // The few building blocks the screen needs, trimmed from orchestration-ui/client/ui.tsx. Every
 // color comes from the host theme.
@@ -15,6 +17,9 @@ export interface Ui {
   theme: Theme;
   compact: boolean;
   navigation: Navigation;
+  /** The host this screen is on, and whether it has URLs to go to (the web and desktop app). */
+  hostId: string | null;
+  routes: boolean;
   styles: ReturnType<typeof makeStyles>;
   tone(tone: Tone): string;
 }
@@ -60,8 +65,10 @@ function makeStyles(theme: Theme, compact: boolean) {
   };
 }
 
-export function UiProvider({ props, children }: { props: Pick<PluginSurfaceProps, "theme" | "layout"> & { navigation?: Navigation }; children: ReactNode }) {
+export function UiProvider({ props, children }: { props: Pick<PluginSurfaceProps, "theme" | "layout"> & { navigation?: Navigation; host?: { id: string } }; children: ReactNode }) {
   const { theme, layout, navigation } = props;
+  const hostId = props.host?.id ?? null;
+  const routes = layout.platform === "web";
   const ui = useMemo<Ui>(() => {
     const c = theme.colors;
     const tones: Record<Tone, string> = {
@@ -71,8 +78,8 @@ export function UiProvider({ props, children }: { props: Pick<PluginSurfaceProps
       warning: c.statusWarning,
       danger: c.statusDanger,
     };
-    return { theme, compact: layout.compact, navigation, styles: makeStyles(theme, layout.compact), tone: (tone) => tones[tone] };
-  }, [theme, layout.compact, navigation]);
+    return { theme, compact: layout.compact, navigation, hostId, routes, styles: makeStyles(theme, layout.compact), tone: (tone) => tones[tone] };
+  }, [theme, layout.compact, navigation, hostId, routes]);
   return <UiContext.Provider value={ui}>{children}</UiContext.Provider>;
 }
 
@@ -184,4 +191,40 @@ export function Section({ title, trailing, children }: { title: string; trailing
       {children}
     </View>
   );
+}
+
+// ---- going to a screen of another plugin, and to an outside address ----------------------------
+
+export { openPluginScreenOf, pluginScreenRoute, type OpenPluginScreen } from "./jump";
+
+/**
+ * A button that opens another plugin's screen: by the host's own way when it has one, else (web and
+ * desktop) by the route, which loads the page again, and says so beside it; else only says it cannot.
+ */
+export function ScreenLink({ plugin, screen, params = {}, label, primary = false }: { plugin: string; screen: string; params?: Record<string, string>; label: string; primary?: boolean }) {
+  const ui = useUi();
+  const jump = jumpOf({ navigation: ui.navigation, hostId: ui.hostId, routes: ui.routes, plugin, screen, params });
+  if (jump.how === "none") return <Text style={ui.styles.small}>{label}：这个版本的 Paseo 不能从这里跳过去。</Text>;
+  return (
+    <View style={ui.styles.row}>
+      {/* The UI's tsconfig has no DOM library; on the web the global has a location. */}
+      <Button icon="ArrowUpRight" label={label} primary={primary} onPress={() => go(jump, { plugin, screen, params }, (url) => (globalThis as { location?: { assign(url: string): void } }).location?.assign(url))} />
+      {jump.how === "route" ? <Text style={ui.styles.small}>（会重新载入页面）</Text> : null}
+    </View>
+  );
+}
+
+/** Opens an outside address by the host's own opener (the desktop app's browser), else `Linking`. */
+export function openExternal(url: string): void {
+  const open = (pluginClient as { openExternalUrl?: unknown }).openExternalUrl;
+  void (typeof open === "function" ? (open as (u: string) => Promise<void>)(url) : Linking.openURL(url)).catch(() => {});
+}
+
+/** A colour with an alpha, for a tint behind text: `#rrggbb` and `#rgb` are understood, anything else is returned as it is. */
+export function tint(color: string, alpha: number): string {
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(color);
+  if (!m) return color;
+  const hex = m[1]!.length === 3 ? m[1]!.split("").map((c) => c + c).join("") : m[1]!;
+  const n = parseInt(hex, 16);
+  return `rgba(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255}, ${alpha})`;
 }

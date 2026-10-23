@@ -3,22 +3,24 @@ import { useRpc, type PluginScreenProps } from "@getpaseo/plugin/client";
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
+import { HOME_SCREEN } from "../shared/graph";
 import { overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "../shared/rpc";
-import { describeChanges, PLAN_LABEL, troubleOf, type PlanEntry, type Status, type StatusCase } from "../shared/status";
+import { describeChanges, PLAN_LABEL, troubleOf, type PlanEntry, type Status } from "../shared/status";
 import { Badge, Banner, Block, Button, Fold, OpenAgent, Section, UiProvider, useUi, type Tone } from "./ui";
+import { ItemPage } from "./item";
+import { GroupedList } from "./list";
 
-// 「事项追踪」: what wants you first -- problems, questions waiting for you (each one opens its card),
-// what will be asked later -- then one line on whether the controller is alive, the plan of the
-// last reconcile, and the cases nothing is asked about. The alive line moves to the top, red and
-// opened, when the controller has not reconciled for two of its periods (a reconcile still
-// running is not that) or a source is in trouble. Cases come most urgent first: the engine sorts
-// them by rule error, question waiting, then health.
+// 「事项追踪」: the items in groups by who has to act (list.tsx), and the page of one item (item.tsx):
+// opened from a row, or by a `case` parameter another screen passes. Besides the list, problems
+// first, then one line on whether the controller is alive, what people said in conversations, and the
+// plan of the last reconcile. The alive line moves to the top, red and opened, when the controller
+// has not reconciled for two of its periods (a reconcile still running is not that) or a source is in
+// trouble.
 
-export const SCREEN_ID = "inbox";
+export const SCREEN_ID = HOME_SCREEN.screen;
 const POLL_MS = 5_000;
 
 type Overview = RpcOutput<typeof overviewRpc>;
-type Case = StatusCase;
 
 function useOverview(): { data: Overview | null; error: string | null; refresh(): void } {
   const overview = useRpc(overviewRpc);
@@ -54,15 +56,6 @@ const ago = (isoText: string | null, nowMs: number) => {
 };
 const clock = (isoText: string) => isoText.slice(5, 16).replace("T", " ");
 
-const HEALTH: Record<string, { tone: Tone; label: string }> = {
-  "on-track": { tone: "neutral", label: "在走" },
-  waiting: { tone: "accent", label: "在等" },
-  stalled: { tone: "warning", label: "停住了" },
-  blocked: { tone: "danger", label: "卡住" },
-  conflict: { tone: "danger", label: "对不上" },
-  done: { tone: "success", label: "结束" },
-};
-
 const SOURCE: Record<string, { tone: Tone; label: string }> = {
   ok: { tone: "success", label: "正常" },
   degraded: { tone: "warning", label: "在重试" },
@@ -73,14 +66,17 @@ const SOURCE: Record<string, { tone: Tone; label: string }> = {
 export function InboxScreen(props: PluginScreenProps & { openSettings(): void }) {
   return (
     <UiProvider props={props}>
-      <Inbox openSettings={props.openSettings} />
+      <Inbox openSettings={props.openSettings} caseParam={props.params?.case ?? null} />
     </UiProvider>
   );
 }
 
-function Inbox({ openSettings }: { openSettings(): void }) {
+function Inbox({ openSettings, caseParam }: { openSettings(): void; caseParam: string | null }) {
   const ui = useUi();
   const { data, error, refresh } = useOverview();
+  // The item whose page is open: the one a link names (another screen passes `case`), else one picked here.
+  const [picked, setPicked] = useState<string | null>(caseParam);
+  useEffect(() => setPicked(caseParam), [caseParam]);
   const tick = useRpc(tickRpc);
   const release = useRpc(releaseRulesRpc);
   const testCard = useRpc(testCardRpc);
@@ -104,6 +100,13 @@ function Inbox({ openSettings }: { openSettings(): void }) {
     );
   };
 
+  if (picked) {
+    return (
+      <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
+        <ItemPage caseId={picked} onBack={() => setPicked(null)} openCase={setPicked} onChanged={refresh} />
+      </ScrollView>
+    );
+  }
   return (
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
@@ -144,7 +147,7 @@ function Inbox({ openSettings }: { openSettings(): void }) {
           <Text style={ui.styles.muted}>在插件设置里填 configDir 和 home；改了设置会自动重启控制器。</Text>
         </Banner>
       ) : (
-        <Body status={status} busy={busy} onRelease={(fingerprint) => run("release", () => release({ fingerprint }))} />
+        <Body status={status} busy={busy} onOpen={setPicked} onRelease={(fingerprint) => run("release", () => release({ fingerprint }))} />
       )}
     </ScrollView>
   );
@@ -187,68 +190,13 @@ function Alive({ status }: { status: Status }) {
 
 const planLine = (p: PlanEntry) => `${clock(p.at)}  [${PLAN_LABEL[p.kind] ?? p.kind}] ${p.summary}`;
 
-function CaseRow({ kase, cardAgent }: { kase: Case; cardAgent?: string | null }) {
-  const ui = useUi();
-  const a = kase.assessment;
-  const health = a ? (a.error ? { tone: "danger" as Tone, label: "判断出错" } : (HEALTH[a.health] ?? { tone: "neutral" as Tone, label: a.health })) : { tone: "neutral" as Tone, label: "未判断" };
-  const open = kase.commitments.filter((c) => c.status === "scheduled" || c.status === "waiting");
-  return (
-    <View style={ui.styles.card}>
-      <View style={ui.styles.row}>
-        <Badge tone={health.tone} label={health.label} />
-        {a?.stale ? <Badge tone="warning" label="数据可能过时" /> : null}
-        <Text style={[ui.styles.strong, { flexShrink: 1 }]} selectable>
-          {kase.title}
-        </Text>
-      </View>
-      <Text style={ui.styles.text} selectable>
-        {a?.error ? a.error : (a?.headline ?? kase.status)}
-      </Text>
-      {a?.notice ? (
-        <Text style={ui.styles.small} selectable>
-          ⚠ {a.notice}
-        </Text>
-      ) : null}
-      {open.map((c) => (
-        <Text key={c.id} style={ui.styles.small}>
-          · {c.title}：{c.step}
-        </Text>
-      ))}
-      <View style={ui.styles.row}>
-        {cardAgent ? <OpenAgent agentId={cardAgent} label="打开问题卡回答" primary /> : null}
-        {kase.url ? (
-          <Text style={ui.styles.small} selectable>
-            {kase.url}
-          </Text>
-        ) : null}
-      </View>
-      {kase.hot.length > 0 || kase.commitments.some((c) => c.answer || (c.status !== "scheduled" && c.status !== "waiting")) ? (
-        <Fold label="详情">
-          {kase.hot.length > 0 ? <Text style={ui.styles.small}>为什么在看：{kase.hot.join("；")}</Text> : null}
-          {kase.commitments.map((c) => (
-            <Text key={c.id} style={ui.styles.small} selectable>
-              {c.title}：{c.status}
-              {c.answer ? `，回答「${c.answer}」` : ""}
-              {c.reason ? `（${c.reason}）` : ""}
-            </Text>
-          ))}
-        </Fold>
-      ) : null}
-    </View>
-  );
-}
-
-function Body({ status, busy, onRelease }: { status: Status; busy: string | null; onRelease(fingerprint: string): void }) {
+function Body({ status, busy, onOpen, onRelease }: { status: Status; busy: string | null; onOpen(caseId: string): void; onRelease(fingerprint: string): void }) {
   const ui = useUi();
   const raised = status.cards.filter((c) => c.agentId);
-  const cardOf = (caseId: string) => raised.find((c) => c.caseIds.includes(caseId))?.agentId ?? null;
-  const waitingOnMe = status.cases.filter((k) => k.commitments.some((c) => c.status === "waiting"));
-  // Cards not about any case: the test card.
+  // Cards not about any case: the test card. They are asking you something, so they sit with what wants you.
   const loose = raised.filter((c) => c.caseIds.length === 0);
-  const scheduled = status.cases.filter((k) => k.open && !waitingOnMe.includes(k));
-  const quiet = status.cases.filter((k) => !k.open && k.assessment?.health !== "done" && !k.assessment?.error);
-  const errors = status.cases.filter((k) => !k.open && k.assessment?.error);
-  const finished = status.cases.filter((k) => !k.open && k.assessment?.health === "done");
+  const rows = status.cases.flatMap((k) => (k.row ? [k.row] : []));
+  const unread = status.cases.length - rows.length;
   const held = status.rules.held;
   const said = status.said ?? [];
   const { late, sources } = troubleOf(status);
@@ -278,22 +226,27 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
         </Banner>
       ) : null}
 
-      <Section title={`要你回答（${waitingOnMe.length + loose.length}）`}>
-        {loose.map((card) => (
-          <View key={card.id} style={ui.styles.card}>
-            <Text style={ui.styles.strong}>{card.title}</Text>
-            <Text style={ui.styles.small}>
-              {clock(card.raisedAt)} 发给 {card.person}
-            </Text>
-            <OpenAgent agentId={card.agentId!} label="打开问题卡回答" primary />
-          </View>
-        ))}
-        {waitingOnMe.length + loose.length === 0 ? <Text style={ui.styles.muted}>现在没有要你回答的。</Text> : waitingOnMe.map((k) => <CaseRow key={k.caseId} kase={k} cardAgent={cardOf(k.caseId)} />)}
-      </Section>
-
-      <Section title={`到时候会问（${scheduled.length}）`}>
-        {scheduled.length === 0 ? <Text style={ui.styles.muted}>没有排着的。</Text> : scheduled.map((k) => <CaseRow key={k.caseId} kase={k} />)}
-      </Section>
+      <GroupedList
+        rows={rows}
+        onOpen={onOpen}
+        extra={{
+          me:
+            loose.length > 0
+              ? loose.map((card) => (
+                  <View key={card.id} style={[ui.styles.row, { padding: 12, borderBottomWidth: 1, borderBottomColor: ui.theme.colors.border }]}>
+                    <View style={{ flex: 1, minWidth: 0 }}>
+                      <Text style={ui.styles.strong}>{card.title}</Text>
+                      <Text style={ui.styles.small}>
+                        {clock(card.raisedAt)} 发给 {card.person}
+                      </Text>
+                    </View>
+                    <OpenAgent agentId={card.agentId!} label="打开问题卡回答" primary />
+                  </View>
+                ))
+              : undefined,
+        }}
+      />
+      {unread > 0 ? <Text style={ui.styles.small}>另有 {unread} 个事项这一刻读不出来，下一轮检查后会出现。</Text> : null}
 
       {said.length > 0 ? (
         <Section title={`对话里说过的（${said.filter((a) => a.inForce).length} 条在生效）`}>
@@ -323,23 +276,6 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
         ) : null}
       </Fold>
 
-      {errors.length > 0 ? (
-        <Section title={`判断出错（${errors.length}）`}>
-          {errors.map((k) => (
-            <CaseRow key={k.caseId} kase={k} />
-          ))}
-        </Section>
-      ) : null}
-      <Fold label={`在看着、还不用问（${quiet.length}）`}>
-        {quiet.map((k) => (
-          <CaseRow key={k.caseId} kase={k} />
-        ))}
-      </Fold>
-      <Fold label={`结束了（${finished.length}）`}>
-        {finished.map((k) => (
-          <CaseRow key={k.caseId} kase={k} />
-        ))}
-      </Fold>
       <Text style={ui.styles.small}>
         另有 {status.cold.length} 个事项是冷的：没有要问的、最近没人动、日期不在近期、关联的开关也没变，所以不判断、不显示；其中任何一样变了会自动回来。
       </Text>
