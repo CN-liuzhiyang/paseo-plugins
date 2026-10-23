@@ -232,8 +232,8 @@ export function createGraph(deps: GraphDeps) {
 
   /**
    * Of the runs of an item, the ones that count for what it is now: the newest of each stage (a run that
-   * failed and was run again is the second one), and no break of a stage the item has left (a failure or
-   * a run that went silent there is history, the item went on). A run with no stage is of the current one.
+   * failed and was run again is the second one), and no break of a stage the item has left (a failure, a run
+   * that went silent or one that cannot be read there is history, the item went on). A run with no stage is of the current one.
    */
   function decidingRuns(runs: RunView[], stage: string | undefined): RunView[] {
     const newest = new Map<string, RunView>();
@@ -242,7 +242,7 @@ export function createGraph(deps: GraphDeps) {
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }
-    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow") || (r.stage ?? stage) === stage);
+    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {
@@ -404,6 +404,7 @@ export function createGraph(deps: GraphDeps) {
       });
     }
     if (a?.notice) marks.push({ kind: "notice", line: clip(a.notice, 300), since: null, until: null });
+    for (const r of f.deciding) if (r.situation === "unreadable") marks.push({ kind: "unread", line: `流程「${r.flow}」的记录里有 ${r.unreadLines} 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 ${r.runId} 看`, since: null, until: null });
     if (hold) marks.push({ kind: "held", line: `${personName(hold.by)} ${clockText(hold.at)} 说「${clip(hold.said, 60)}」${hold.until ? ` · ${hold.until} 前不问` : ""} · 说一句就撤`, since: hold.at, until: hold.until });
     const wrong = f.said.find((s) => s.kind === "wrong");
     if (wrong) marks.push({ kind: "wrong", line: `${personName(wrong.by)} ${clockText(wrong.at)} 说这个判断错了：「${clip(wrong.said, 60)}」`, since: wrong.at, until: null });
@@ -511,7 +512,7 @@ export function createGraph(deps: GraphDeps) {
 
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
-      { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: null as string | null },
+      { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
       ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : null }] : []),
     ]);
     const history: HistoryLine[] = [

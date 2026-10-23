@@ -88,6 +88,7 @@ export const runView = (situation: RunView["situation"], over: Partial<RunView> 
   startedAt: "2026-10-13T09:30:00+08:00",
   endedAt: null,
   situation,
+  unreadLines: 0,
   outcome: null,
   step: { index: 2, total: 3, title: "阶段 draft" },
   steps: ["ok", "run", "todo"],

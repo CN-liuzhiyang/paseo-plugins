@@ -125,6 +125,34 @@ test("the page's history lists the runs started for the item: when one began and
     },
   ));
 
+// ---- N6R-02 -----------------------------------------------------------------------------------------------
+
+test("a run whose record could not be read whole is not a break and does not pin the item: the page says it cannot tell", () =>
+  withRuns(
+    {
+      1: [runView("unreadable", { runId: "r-big", stage: "review", flow: "示例流程", startedAt: "2026-10-12T09:50:00+08:00", unreadLines: 2, quiet: { ms: 9e8, limitMs: 9e5 } })],
+      2: [runView("done", { runId: "r-ok", stage: "review", flow: "示例流程", startedAt: "2026-10-13T09:50:00+08:00", endedAt: "2026-10-13T09:58:00+08:00", unreadLines: 1, quiet: null })],
+      3: [runView("unreadable", { runId: "r-left", stage: "draft", flow: "示例流程", startedAt: "2026-10-12T09:50:00+08:00", unreadLines: 1, quiet: { ms: 9e8, limitMs: 9e5 } })],
+    },
+    { 1: { Phase: "review", Ball: "them" }, 2: { Phase: "review", Ball: "them" }, 3: { Phase: "review", Ball: "them" } },
+    async (w) => {
+      // the item stands where its own judgment puts it: nothing about a run that cannot be read puts it among what is for you
+      assert.deepEqual([rowOf(w, 1).situation, rowOf(w, 1).group], ["them", "them"]);
+      const v = view(w, 1);
+      assert.match(v.hero.kicker, /别人/);
+      const mark = v.marks.find((m) => m.kind === "unread");
+      assert.match(mark?.line ?? "", /流程「示例流程」的记录里有 2 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 r-big 看/);
+      assert.match(v.history.find((h) => h.kind === "run")!.detail ?? "", /2 行太长、没读，看不出它后来怎么样/);
+      assert.equal(v.runs[0]!.unreadLines, 2);
+      // one that is over is not marked on the page (nothing is in doubt but what it cost), and its start line says so
+      assert.equal(view(w, 2).marks.find((m) => m.kind === "unread"), undefined);
+      assert.match(view(w, 2).history.find((h) => h.kind === "run")!.detail ?? "", /1 行太长、没读，花费可能少算了/);
+      // one of a stage the item has left is history, as a break there is: the page does not keep warning about it
+      assert.equal(view(w, 3).marks.find((m) => m.kind === "unread"), undefined);
+      assert.match(view(w, 3).history.find((h) => h.kind === "run")!.detail ?? "", /1 行太长/, "but its line in the history says it");
+    },
+  ));
+
 // ---- N6-03 ------------------------------------------------------------------------------------------------
 
 test("a clock that starts when tracking began says 'at least': the wait of an item first seen waiting, the length of one first seen over", () =>

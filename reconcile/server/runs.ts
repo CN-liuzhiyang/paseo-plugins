@@ -27,8 +27,11 @@ import { agentIdOf, cleanText, hasUnsafe } from "./untrusted";
 const SCAN_EVERY_MS = 3_000;
 /** The first line of a run, `run.start`, is read within this much; a file whose first line is longer is not ours. */
 const HEAD_BYTES = 256 * 1024;
-/** A line longer than this is skipped, whatever it says. */
+/** A line longer than this is not read: only its head is looked at (see passOver). */
 const MAX_LINE = 4 << 20;
+/** How much of the head of such a line is looked at: the runtime's fixed keys come first, a runId is at most 128 characters. */
+const HEAD_OF_LINE = 1024;
+const END_HEAD = /^\{"v":\d+,"seq":\d+,"ts":"([^"\\]{1,40})","runId":"[^"\\]{1,128}","kind":"run\.end","outcome":"(done|stopped|failed|timeout)"/;
 /** Runs that have not been written to for this long are not read: a page shows what is recent. */
 const RECENT_MS = 60 * 86_400_000;
 /** What one run may cost in memory, however many events its file has. */
@@ -95,6 +98,8 @@ interface RunRec {
   phaseState: Map<string, "run" | "ok" | "bad">;
   calls: Map<string, CallRec>;
   lastAt: number;
+  /** Lines too long to read that were not known by their head: what they said is missing from everything above. */
+  unread: number;
   end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null } | null;
 }
 
@@ -224,8 +229,11 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
 
   let situation: RunView["situation"];
   if (ended) situation = run.end!.outcome === "done" || run.end!.outcome === "stopped" ? "done" : "fail";
-  else if (verdict === "lost") situation = "lost";
   else if (verdict === "refused") situation = "fail";
+  // Something it wrote is missing here (a line too long to read): a quiet claim may be a run that is over, an open gate
+  // may be one that was answered. Not told as a break or as waiting for you; told as it is.
+  else if (run.unread > 0) situation = "unreadable";
+  else if (verdict === "lost") situation = "lost";
   else if (gate) situation = "me";
   else situation = quietMs > limitMs ? "slow" : "doing";
 
@@ -265,6 +273,7 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     startedAt: iso(run.startedAt, deps.tz),
     endedAt: end ? iso(end.at, deps.tz) : null,
     situation,
+    unreadLines: run.unread,
     outcome,
     step,
     steps,
@@ -338,8 +347,27 @@ export function createRunReader(deps: RunsDeps): RunReader {
       phaseState: new Map(),
       calls: new Map(),
       lastAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
+      unread: 0,
       end: null,
     };
+  }
+
+  /**
+   * A line too long to be read whole is still not passed over unseen: its head says what it is, in the shape the runtime
+   * writes (runtime/events.mjs: v, seq, ts, runId, kind, then the event's own fields, `outcome` first in run.end).
+   * A run.end is known by that, and the run is over however big its `value` is. Any other is counted, and what the
+   * run says about itself is then not all there: the view says so (`unreadable`) instead of reading the gap as an end,
+   * a break or a stop.
+   */
+  function passOver(run: RunRec, head: Buffer) {
+    const m = END_HEAD.exec(head.toString("utf8", 0, HEAD_OF_LINE));
+    if (!m) {
+      run.unread += 1;
+      return;
+    }
+    const at = Date.parse(m[1]!);
+    run.lastAt = Math.max(run.lastAt, Number.isFinite(at) ? at : 0);
+    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null };
   }
 
   function readNew(file: string, rec: FileRec) {
@@ -383,8 +411,9 @@ export function createRunReader(deps: RunsDeps): RunReader {
         }
         const cut = buffer.lastIndexOf(0x0a);
         if (cut < 0) {
-          // No end of line in a whole piece: a line too long to be one of the runtime's, whose rest is passed over. Less than a piece: still being written.
+          // No end of line in a whole piece: a line too long to be read, whose rest is passed over after its head is looked at. Less than a piece: still being written.
           if (want < MAX_LINE) break;
+          if (rec.run) passOver(rec.run, buffer);
           rec.skipping = true;
           rec.offset += want;
           continue;

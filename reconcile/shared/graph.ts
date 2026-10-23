@@ -183,7 +183,7 @@ export interface AskView {
 }
 
 export interface Mark {
-  kind: "stale" | "held" | "weak" | "wrong" | "notice";
+  kind: "stale" | "held" | "weak" | "wrong" | "notice" | "unread";
   line: string;
   since: string | null;
   until: string | null;
@@ -218,8 +218,13 @@ export interface RunView {
   startedAt: string;
   /** When it ended; null while it has not. */
   endedAt: string | null;
-  /** How alive it is: the runtime's own reading (readRunState), mapped. */
-  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused";
+  /**
+   * How alive it is: the runtime's own reading (readRunState), mapped. "unreadable": a line of its record was too
+   * long to read and nothing said what it was, so whether it went on, is stuck or is over is not known.
+   */
+  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused" | "unreadable";
+  /** Lines of its record too long to read whose head did not say what they were (0 for a record read whole). */
+  unreadLines: number;
   outcome: string | null;
   step: { index: number; total: number | null; title: string } | null;
   steps: Array<"ok" | "run" | "wait" | "bad" | "slow" | "lost" | "skip" | "todo">;
@@ -450,11 +455,17 @@ export function durationText(ms: number): string {
 /** "10-23 15:11" from an ISO instant that carries its own offset (the plugin writes them in the instance's zone). */
 export const clockText = (iso: string): string => iso.slice(5, 16).replace("T", " ");
 
+// One pass, so that what an escape protects is read as the character it stands for and not as a mark: `\#` is a
+// "#", and the "#" it makes is not the start of a heading. An escape is a backslash before ASCII punctuation (the
+// CommonMark rule; requests.ts `clipMd` writes them for words from outside). In order of the alternatives:
+// an escape, a link, a heading mark and a quote mark at the start of a line, emphasis and code marks.
+const MARKS = /\\([!-/:-@[-`{-~])|\[([^\]]*)\]\([^)]*\)|^#{1,6}\s*|^(?:>[ \t]?)+|\*\*|__|`/gm;
+// What is left of a link's own words: the marks inside a line, not the ones that belong to the start of one.
+const INLINE_MARKS = /\\([!-/:-@[-`{-~])|\*\*|__|`/g;
+
 /** The text of a Markdown brief without its marks, for places that show plain text. */
 export function plainMd(text: string): string {
   return text
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/^#{1,6}\s*/gm, "")
-    .replace(/(\*\*|__|`)/g, "")
+    .replace(MARKS, (_mark, escaped?: string, linked?: string) => escaped ?? (linked === undefined ? "" : linked.replace(INLINE_MARKS, (_m, e?: string) => e ?? "")))
     .trim();
 }

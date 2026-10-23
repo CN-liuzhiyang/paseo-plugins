@@ -183,6 +183,60 @@ test("a line too long to be one of the runtime's is passed over, and the file go
   }
 });
 
+/** One line as the runtime writes it (runtime/events.mjs): `v`, `seq`, `ts`, `runId`, `kind`, then the event's own fields. */
+const written = (seq: number, ts: string, runId: string, kind: string, fields: Record<string, unknown>) => `${JSON.stringify({ v: 1, seq, ts, runId, kind, ...fields })}\n`;
+const END = { value: "y".repeat(5 << 20), summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [] };
+
+test("a run.end too long to read is still the end of the run: over, with the outcome it names, not a break", () => {
+  const f = fixture();
+  try {
+    const outcomes = [["done", "done"], ["failed", "fail"], ["stopped", "done"], ["timeout", "fail"]] as const;
+    outcomes.forEach(([outcome], i) => {
+      const id = `end-${outcome}`;
+      // a claim that went quiet 40 minutes ago: for a run with no end, the runtime's table says it is lost
+      f.run(id, [start(ago(60 * MIN), AFFAIR(`tracker:${i}`)), phaseStart(ago(59 * MIN), "collect")], { claimAgeMs: 40 * MIN });
+      appendFileSync(path.join(f.dir, `${id}.jsonl`), written(9, ago(30 * MIN), id, "run.end", { outcome, ...END }));
+    });
+    outcomes.forEach(([outcome, situation], i) => {
+      const run = f.reader.forCase(`tracker:${i}`)[0]!;
+      assert.equal(run.situation, situation, outcome);
+      assert.equal(run.unreadLines, 0, `${outcome}: the line was known by its head, nothing is missing`);
+      assert.equal(run.endedAt, "2026-10-23T19:30:00+08:00", `${outcome}: when it ended is the line's own ts`);
+      assert.equal(run.quiet, null);
+    });
+  } finally {
+    f.close();
+  }
+});
+
+test("a line too long to read that is not known as run.end makes the run unreadable: not lost, not waiting for you, not over", () => {
+  const f = fixture();
+  try {
+    const big = "y".repeat(5 << 20);
+    // a quiet claim and an open gate: read whole, the first is a run that was lost and the second one waiting for approval
+    const quiet = { claimAgeMs: 40 * MIN };
+    const gate = [start(ago(60 * MIN), AFFAIR("tracker:1")), callStart(ago(50 * MIN), "g", "gate", { carrier: "provider", summary: "批准" })];
+    f.run("a", gate, quiet);
+    appendFileSync(path.join(f.dir, "a.jsonl"), written(5, ago(45 * MIN), "a", "call.end", { callId: "g", ok: true, durationMs: 1, output: big, error: null, agentId: null, cost: null }));
+    // the head of another says run.end only inside what the line carries, which anyone can write there: not the end
+    f.run("b", [start(ago(60 * MIN), AFFAIR("tracker:2"))], quiet);
+    appendFileSync(path.join(f.dir, "b.jsonl"), written(5, ago(45 * MIN), "b", "call.end", { callId: "x", ok: true, output: { kind: "run.end", outcome: "done", filler: big } }));
+    // an outcome the runtime does not write is not an end either
+    f.run("c", [start(ago(60 * MIN), AFFAIR("tracker:3"))], quiet);
+    appendFileSync(path.join(f.dir, "c.jsonl"), written(5, ago(45 * MIN), "c", "run.end", { outcome: "weird", ...END }));
+    for (const caseId of ["tracker:1", "tracker:2", "tracker:3"]) {
+      const run = f.reader.forCase(caseId)[0]!;
+      assert.deepEqual([run.situation, run.unreadLines, run.endedAt, run.error], ["unreadable", 1, null, null], caseId);
+    }
+    // what is read after the line is read as before, and a run.end of ordinary size that comes later ends it
+    f.append("a", [{ kind: "run.end", ts: ago(MIN), outcome: "done", value: null, summary: "好了", stop: null, error: null, durationMs: 1, cost: null, caveats: [] }]);
+    const ended = readerFor(f.dir).forCase("tracker:1")[0]!;
+    assert.deepEqual([ended.situation, ended.unreadLines, ended.outcome], ["done", 1, "好了"], "over; and it says that a line of its record was not read");
+  } finally {
+    f.close();
+  }
+});
+
 test("whether a file is this plugin's is told by its first line, which has to end within the head: a longer one is not a run of ours", () => {
   const f = fixture();
   try {

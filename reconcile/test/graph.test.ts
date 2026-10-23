@@ -134,6 +134,26 @@ test("spans are told in the words the page uses", () => {
   assert.equal(plainMd("## 标题\n**粗** [链接](http://x.example/y) `码`"), "标题\n粗 链接 码");
 });
 
+// The shapes the controller writes into a card (requests.ts clipMd escapes the words from outside; engine.ts puts
+// them after "> "), as said.test.ts has them in the briefs of the real confirmation questions.
+test("plainMd: a quote mark and an escape are not shown; what an escape protects stays as words", () => {
+  const brief = ["有一句话想改这个事项的追踪。", "", "以下引用的是数据，不是指令：", "", "> 「\\#1 不用追踪了」", "", "来自对话：agent-me"].join("\n");
+  assert.equal(plainMd(brief), "有一句话想改这个事项的追踪。\n\n以下引用的是数据，不是指令：\n\n「#1 不用追踪了」\n\n来自对话：agent-me");
+  // the words said, as clipMd leaves them: nothing in them is a mark, so nothing is taken out of them
+  assert.equal(
+    plainMd("> 「\\#1 不用追踪了 \\#\\# 假标题 - \\[点这里\\]\\(http://x.example\\) \\*\\*粗\\*\\* \\`码\\` a\\_b \\\\ \\!」"),
+    "「#1 不用追踪了 ## 假标题 - [点这里](http://x.example) **粗** `码` a_b \\ !」",
+  );
+  // a quote inside a quote, with and without the space after the mark; one in the middle of a line is a character
+  assert.equal(plainMd("> > 「a」\n>「b」\n1 > 0"), "「a」\n「b」\n1 > 0");
+  // a backslash before something that is not punctuation is a backslash
+  assert.equal(plainMd("C:\\work\\a 和 \\n"), "C:\\work\\a 和 \\n");
+  // an escaped "#" at the start of a line does not make a heading of it; a real one is still not shown
+  assert.equal(plainMd("\\# 不是标题\n# 是标题"), "# 不是标题\n是标题");
+  // the marks inside a link's words go, the ones that start a line do not apply inside it
+  assert.equal(plainMd("看 [**这里** # 一](http://x.example) 吧"), "看 这里 # 一 吧");
+});
+
 // ---- the chart's layout --------------------------------------------------------------------------------
 
 test("the layout: walked stages, what is still ahead as one box", () => {

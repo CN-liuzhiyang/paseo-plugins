@@ -89,7 +89,7 @@ function Hero({ view }: { view: GraphView }) {
       </View>
       {view.marks.map((m) => {
         // Something that looks wrong (stale data, the rule's own notice) is shown loud; what a person said is shown quiet.
-        const loud = m.kind === "stale" || m.kind === "notice";
+        const loud = m.kind === "stale" || m.kind === "notice" || m.kind === "unread";
         return (
           <View key={m.kind + m.line} style={{ borderRadius: 8, borderWidth: 1, borderColor: loud ? tint(ui.tone("warning"), 0.6) : ui.theme.colors.border, backgroundColor: ui.theme.colors.surface1, paddingHorizontal: 10, paddingVertical: 6 }}>
             <Text style={[ui.styles.small, { color: loud ? ui.tone("warning") : ui.theme.colors.foregroundMuted }]} selectable>
