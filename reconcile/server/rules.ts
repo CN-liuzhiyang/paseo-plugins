@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -142,10 +142,29 @@ export interface LoadedRule {
 }
 
 export interface RuleSet {
+  /** Of the rules that run: the directory's files, one that does not load replaced by the copy of it that runs instead. */
   fingerprint: string;
+  /** Of the directory as it is: when it changes, the rules are loaded again. */
+  dirFingerprint: string;
   files: string[];
   rules: LoadedRule[];
-  errors: Array<{ file: string; error: string }>;
+  /** Files that do not load; fallback: the last copy of it that did (saved then, ISO) runs instead. */
+  errors: Array<{ file: string; error: string; fallback?: string }>;
+}
+
+/**
+ * Where the last copy of each rule file that loaded is kept, and whether this load may save there
+ * (the controller does; a preview only reads it). A file that stops loading -- a syntax error, a
+ * wrong shape, a forbidden call -- then goes on as that copy instead of its items going unjudged.
+ */
+/** The directory under the data directory the copies are kept in. */
+export const RULES_KEPT = "rules-last-good";
+
+export interface KeepRules {
+  dir: string;
+  write: boolean;
+  /** The clock a copy's saving time is read from (its file's modified time); the wall clock if absent. */
+  now?: () => number;
 }
 
 // Kept out of the bundler's sight: the host compiles this plugin to CommonJS, and a literal
@@ -173,35 +192,71 @@ const moduleSchema = z.object({
   assess: z.custom<RuleModule["assess"]>((v) => typeof v === "function", "assess must be a function"),
 });
 
-export async function loadRules(dir: string): Promise<RuleSet> {
-  const { fingerprint, files } = fingerprintOf(dir);
+async function loadOne(dir: string, file: string, text: string, loaded: LoadedRule[]): Promise<LoadedRule | { error: string }> {
+  const problem = scanRule(text);
+  if (problem) return { error: problem };
+  try {
+    const url = `${pathToFileURL(path.join(dir, file)).href}?v=${createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
+    const parsed = moduleSchema.safeParse((await dynamicImport(url)).default);
+    if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
+    const m = parsed.data;
+    if (loaded.some((r) => r.name === m.name)) return { error: `a rule named "${m.name}" is already loaded` };
+    return { file, name: m.name, source: m.applies.source, stages: m.stages, params: m.params, assess: m.assess };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
+}
+
+/** The kept copy of a rule file, and when it was saved. */
+function kept(dir: string, file: string): { text: string; at: string } | null {
+  const full = path.join(dir, file);
+  if (!existsSync(full)) return null;
+  return { text: readFileSync(full, "utf8"), at: new Date(statSync(full).mtimeMs).toISOString() };
+}
+
+function keep(to: KeepRules, file: string, text: string): void {
+  if (kept(to.dir, file)?.text === text) return;
+  mkdirSync(to.dir, { recursive: true });
+  const tmp = path.join(to.dir, `.${file}.tmp`);
+  writeFileSync(tmp, text);
+  if (to.now) utimesSync(tmp, new Date(to.now()), new Date(to.now()));
+  renameSync(tmp, path.join(to.dir, file));
+}
+
+export async function loadRules(dir: string, keepRules: KeepRules | null = null): Promise<RuleSet> {
+  const { fingerprint: dirFingerprint, files } = fingerprintOf(dir);
   const rules: LoadedRule[] = [];
   const errors: RuleSet["errors"] = [];
+  const running: Array<{ file: string; text: string }> = [];
   for (const { file, text } of files) {
-    const problem = scanRule(text);
-    if (problem) {
-      errors.push({ file, error: problem });
+    const loaded = await loadOne(dir, file, text, rules);
+    if (!("error" in loaded)) {
+      rules.push(loaded);
+      running.push({ file, text });
+      if (keepRules?.write) {
+        try {
+          keep(keepRules, file, text);
+        } catch {
+          // Not kept: the next file that breaks has no copy to go on with, which is how it was.
+        }
+      }
       continue;
     }
-    try {
-      const url = `${pathToFileURL(path.join(dir, file)).href}?v=${createHash("sha256").update(text).digest("hex").slice(0, 12)}`;
-      const loaded = (await dynamicImport(url)).default;
-      const parsed = moduleSchema.safeParse(loaded);
-      if (!parsed.success) {
-        errors.push({ file, error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
-        continue;
-      }
-      const m = parsed.data;
-      if (rules.some((r) => r.name === m.name)) {
-        errors.push({ file, error: `a rule named "${m.name}" is already loaded` });
-        continue;
-      }
-      rules.push({ file, name: m.name, source: m.applies.source, stages: m.stages, params: m.params, assess: m.assess });
-    } catch (error) {
-      errors.push({ file, error: (error as Error).message });
+    const copy = keepRules ? kept(keepRules.dir, file) : null;
+    const instead = copy && copy.text !== text ? await loadOne(keepRules!.dir, file, copy.text, rules) : null;
+    if (instead && !("error" in instead)) {
+      rules.push(instead);
+      running.push({ file, text: copy!.text });
+      errors.push({ file, error: loaded.error, fallback: copy!.at });
+      continue;
     }
+    // Nothing of it runs; its text still counts, so that fixing it is a change.
+    running.push({ file, text });
+    errors.push({ file, error: loaded.error });
   }
-  return { fingerprint, files: files.map((f) => f.file), rules, errors };
+  const hash = createHash("sha256");
+  for (const { file, text } of running) hash.update(`${file}\0${text}\0`);
+  return { fingerprint: hash.digest("hex").slice(0, 16), dirFingerprint, files: files.map((f) => f.file), rules, errors };
 }
 
 function deepFreeze<T>(value: T): T {

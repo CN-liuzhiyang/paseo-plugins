@@ -9,6 +9,7 @@ import { settingsDefinition, type Settings } from "./shared/settings";
 import { createCarrier } from "./server/carrier";
 import { ConfigError, loadConfig } from "./server/config";
 import { createEngine, type Deliver, type Engine, type EngineStatus } from "./server/engine";
+import { RULES_KEPT } from "./server/rules";
 import { exec } from "./server/exec";
 import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
@@ -184,6 +185,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         deliver,
         requestsDir,
         conversation,
+        rulesKeep: { dir: path.join(dataDir, RULES_KEPT), write: true },
         now: Date.now,
         log,
         writeStatus: (status) => {

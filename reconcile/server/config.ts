@@ -187,12 +187,18 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, file: string): T {
   return result.data;
 }
 
-export function loadConfig(dir: string): Config {
+/**
+ * The config in dir. With `over`, a directory laid out the same way, each part it has (persons.json,
+ * policy.json, calendar/, rules/) is read from it instead: a candidate change, previewed before it
+ * is copied into dir.
+ */
+export function loadConfig(dir: string, over?: string): Config {
   if (!dir) throw new ConfigError("no config directory set (plugin settings: configDir)");
   if (!existsSync(dir)) throw new ConfigError(`config directory does not exist: ${dir}`);
-  const personsFile = path.join(dir, "persons.json");
+  const pick = (name: string) => (over && existsSync(path.join(over, name)) ? path.join(over, name) : path.join(dir, name));
+  const personsFile = pick("persons.json");
   const sourcesFile = path.join(dir, "sources.json");
-  const policyFile = path.join(dir, "policy.json");
+  const policyFile = pick("policy.json");
   const rawPersons = parse(z.record(z.string().regex(/^[a-z0-9][a-z0-9:_-]*$/), personSchema), readJson(personsFile), personsFile);
   const persons: Record<string, Person> = {};
   for (const [id, person] of Object.entries(rawPersons)) {
@@ -208,7 +214,7 @@ export function loadConfig(dir: string): Config {
   }
   const policy = parse(policySchema, readJson(policyFile), policyFile);
 
-  const calendarDir = path.join(dir, "calendar");
+  const calendarDir = pick("calendar");
   const years: Record<string, CalendarYear> = {};
   if (existsSync(calendarDir)) {
     for (const file of readdirSync(calendarDir).filter((f) => /^\d{4}\.json$/.test(f))) {
@@ -227,6 +233,6 @@ export function loadConfig(dir: string): Config {
     policy,
     calendar: createCalendar(years),
     calendarYears: Object.keys(years).sort(),
-    rulesDir: path.join(dir, "rules"),
+    rulesDir: pick("rules"),
   };
 }

@@ -100,7 +100,8 @@ export interface Status {
   rules: {
     fingerprint: string | null;
     files: string[];
-    errors: Array<{ file: string; error: string }>;
+    /** fallback: the file does not load, and the copy of it that last did (saved then) runs instead. */
+    errors: Array<{ file: string; error: string; fallback?: string }>;
     held: RulesHeld | null;
   };
   calendarYears: string[];

@@ -53,6 +53,84 @@ const isAlive = (pid: number) => {
   }
 };
 
+const JOURNAL_FILE = /^\d{4}-\d{2}\.jsonl$/;
+
+/**
+ * The state a data directory holds, read without taking it: its snapshot and journal folded, as
+ * the store opens them. Nothing is written, no LOCK is looked at, so it reads the directory of a
+ * running controller too (a line it is writing just then is skipped like a torn one).
+ */
+export function readState(dir: string): { state: State; skipped: number; snapshotIgnored: string | null } {
+  const state = emptyState();
+  let skipped = 0;
+  let snapshotIgnored: string | null = null;
+  const snapshotPath = path.join(dir, "snapshot.json");
+  if (existsSync(snapshotPath)) {
+    try {
+      Object.assign(state, JSON.parse(readFileSync(snapshotPath, "utf8")) as State);
+    } catch (error) {
+      // A torn snapshot (power lost after the rename) is not needed: the journal has everything.
+      snapshotIgnored = (error as Error).message;
+      Object.assign(state, emptyState());
+    }
+  }
+  const journalDir = path.join(dir, "journal");
+  const files = existsSync(journalDir) ? readdirSync(journalDir).filter((f) => JOURNAL_FILE.test(f)).sort() : [];
+  for (const file of files) {
+    const text = readFileSync(path.join(journalDir, file), "utf8");
+    for (const line of text.split("\n")) {
+      if (line.trim() === "") continue;
+      let event: JournalEvent;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        skipped++;
+        continue;
+      }
+      if (event.seq > state.seq) apply(state, event);
+    }
+  }
+  return { state, skipped, snapshotIgnored };
+}
+
+/**
+ * A store that keeps its journal in memory, over a copy of a state: for an engine that only
+ * rehearses (the preview's), whose events go nowhere but `events`.
+ */
+export function memoryStore(from: State, now: () => number): Store & { readonly events: JournalEvent[] } {
+  const state = structuredClone(from);
+  const events: JournalEvent[] = [];
+  let closed = false;
+  return {
+    state,
+    dir: "(memory)",
+    events,
+    skipped: 0,
+    snapshotIgnored: null,
+    get closed() {
+      return closed;
+    },
+    append(bodies) {
+      if (closed) throw new StoreClosedError("the memory journal is closed");
+      const at = new Date(now()).toISOString();
+      const added = bodies.map((body, i) => ({ v: 1, seq: state.seq + 1 + i, at, ...body }) as JournalEvent);
+      for (const event of added) {
+        apply(state, event);
+        events.push(event);
+      }
+      return added;
+    },
+    snapshot() {},
+    touch() {},
+    abandon() {
+      closed = true;
+    },
+    close() {
+      closed = true;
+    },
+  };
+}
+
 /** Data directories open in this process: a second store on one would write the same journal. */
 const openHere = new Set<string>();
 
@@ -109,34 +187,9 @@ export function openStore(options: StoreOptions): Store {
   };
   touch();
 
-  const state = emptyState();
-  let skipped = 0;
-  let snapshotIgnored: string | null = null;
+  const { state, skipped, snapshotIgnored } = readState(dir);
   const snapshotPath = path.join(dir, "snapshot.json");
-  if (existsSync(snapshotPath)) {
-    try {
-      Object.assign(state, JSON.parse(readFileSync(snapshotPath, "utf8")) as State);
-    } catch (error) {
-      // A torn snapshot (power lost after the rename) is not needed: the journal has everything.
-      snapshotIgnored = (error as Error).message;
-      Object.assign(state, emptyState());
-    }
-  }
-  const files = readdirSync(journalDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort();
-  for (const file of files) {
-    const text = readFileSync(path.join(journalDir, file), "utf8");
-    for (const line of text.split("\n")) {
-      if (line.trim() === "") continue;
-      let event: JournalEvent;
-      try {
-        event = JSON.parse(line);
-      } catch {
-        skipped++;
-        continue;
-      }
-      if (event.seq > state.seq) apply(state, event);
-    }
-  }
+  const files = readdirSync(journalDir).filter((f) => JOURNAL_FILE.test(f)).sort();
   const last = files[files.length - 1];
   if (last) {
     const text = readFileSync(path.join(journalDir, last), "utf8");

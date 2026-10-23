@@ -6,7 +6,7 @@ import { describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type RuleSet } from "./rules";
+import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
@@ -54,6 +54,8 @@ export interface EngineDeps {
   deliver?: Deliver | null;
   /** Where conversations leave what a person said (bin/reconcile-say.mjs); absent, nothing is read. */
   requestsDir?: string | null;
+  /** Where the last copy of each rule file that loaded is kept, to go on with when it stops loading (rules.ts). */
+  rulesKeep?: KeepRules | null;
   /** The conversation of an agent, to check that words are the person's own; absent on a host without server.paseo. */
   conversation?: ((agentId: string) => Promise<Conversation | null>) | null;
   now(): number;
@@ -69,6 +71,8 @@ const MAX_NOTIFY_TRIES = 3;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const commitmentId = (key: string) => `c_${hash(key).slice(0, 16)}`;
 const CARRIER_RETRY_MS = 5 * 60_000;
+/** A rule file that has not loaded for this long is told to the admin on a card. */
+export const RULES_BROKEN_MS = 30 * 60_000;
 /** Words waiting for the admin's yes at most at once; more are refused until those are answered. */
 const MAX_OPEN_CONFIRMS = 6;
 const DAY = 86_400_000;
@@ -700,15 +704,138 @@ export function createEngine(deps: EngineDeps) {
 
   async function currentRules(): Promise<{ set: RuleSet; changed: boolean }> {
     const { fingerprint } = fingerprintOf(config.rulesDir);
-    if (!ruleset || ruleset.fingerprint !== fingerprint) {
-      ruleset = await loadRules(config.rulesDir);
+    if (!ruleset || ruleset.dirFingerprint !== fingerprint) {
+      ruleset = await loadRules(config.rulesDir, deps.rulesKeep ?? null);
       for (const e of ruleset.errors) deps.log(`rule ${e.file}: ${e.error}`);
     }
     return { set: ruleset, changed: state.rules.fingerprint !== ruleset.fingerprint };
   }
 
+  /** Rule files that do not load, in the journal: since when, and what runs instead. */
+  function noteBroken(set: RuleSet, nowMs: number): void {
+    const broken = state.rules.broken ?? {};
+    const events: EventBody[] = [];
+    for (const e of set.errors) {
+      const was = broken[e.file];
+      const error = e.error.slice(0, 500);
+      const fallback = e.fallback ?? null;
+      if (was && was.error === error && was.fallback === fallback) continue;
+      events.push({ type: "rules.broken", file: e.file, error, fallback, since: was?.since ?? nowIso(nowMs) });
+    }
+    for (const file of Object.keys(broken)) if (!set.errors.some((e) => e.file === file)) events.push({ type: "rules.mended", file });
+    append(events);
+  }
+
+  /** Items judged before that no rule judges now. */
+  const unjudged = () => Object.values(state.items).filter((i) => state.assessments[i.key] && !(ruleset?.rules ?? []).some((r) => r.source === i.source)).length;
+  const clockOf = (isoText: string) => nowIso(Date.parse(isoText)).slice(5, 16).replace("T", " ");
+
+  /** The rule file a broken-rules card is about (its key ends in a time, which has colons). */
+  const brokenFile = (c: Commitment) => c.title.replace(/^判断方法 /, "").replace(/ 加载不上$/, "");
+
+  /** What a broken rule file means, said once: what runs instead, or how much stopped. */
+  function brokenText(file: string): string {
+    const b = state.rules.broken?.[file];
+    if (!b) return "";
+    return `判断方法 ${file} 从 ${clockOf(b.since)} 起加载不上，${b.fallback ? `先接着用 ${clockOf(b.fallback)} 那一版判断，新改的没有生效` : `${unjudged()} 个事项停止判断`}`;
+  }
+
+  /**
+   * A rule file broken for RULES_BROKEN_MS goes to the admin on a card to acknowledge, as a source
+   * that cannot be read does; when it loads again (or is taken away), the card goes, and an admin
+   * who was told is told it is over, on their channels, when they may be reached.
+   */
+  function brokenRules(nowMs: number, plan: PlanEntry[]): void {
+    const admin = Object.values(config.persons).find((p) => p.admin);
+    const events: EventBody[] = [];
+    const ongoing = new Set<string>();
+    for (const [file, b] of Object.entries(state.rules.broken ?? {})) {
+      const key = `rules-broken:${file}:${b.since}`;
+      ongoing.add(key);
+      if (nowMs - Date.parse(b.since) < RULES_BROKEN_MS || !admin || state.commitments[commitmentId(key)]) continue;
+      const said = brokenText(file);
+      const source = ruleset?.rules.find((r) => r.file === file)?.source;
+      events.push({
+        type: "commitment.created",
+        commitment: {
+          id: commitmentId(key),
+          key,
+          title: `判断方法 ${file} 加载不上`,
+          domain: config.sources.find((s) => s.id === source)?.domain ?? config.sources[0]?.domain ?? "work",
+          owner: admin.id,
+          caseId: null,
+          trigger: { at: nowIso(nowMs) },
+          ask: { person: admin.id, header: `${file} 加载不上`.slice(0, 40), question: said, options: [{ id: "ack", label: "知道了", description: "" }], allowOther: true },
+          brief: [
+            `判断方法的文件 **${file}** 从 ${clockOf(b.since)} 起一直加载不上，超过 ${RULES_BROKEN_MS / 60_000} 分钟了。${b.fallback ? `在用的还是 ${clockOf(b.fallback)} 那一版，改了的部分没有生效。` : "它管的事项都不再判断，要问的问题也不会新排。"}改好了会自动接上，这张卡不用回。`,
+            "",
+            "加载时的错误：",
+            "",
+            "```",
+            b.error,
+            "```",
+            "",
+            "常见原因：语法错、导出的格式和插件要的不一样、用了不允许的写法（Date.now、import 之类）。改之前可以先用 reconcile-preview 预览。",
+          ].join("\n"),
+          nag: { everyWorkdays: 1, at: "10:00", max: 1 },
+          backstop: { at: nowIso(nowMs + 7 * DAY), outcome: "expire" },
+          level: "push",
+          origin: { by: "controller", who: "rules-broken" },
+          status: "scheduled",
+          rounds: 0,
+          lastAskedAt: null,
+          answer: null,
+          createdAt: nowIso(nowMs),
+          updatedAt: nowIso(nowMs),
+          reason: null,
+        },
+      });
+      plan.push({ at: nowIso(nowMs), kind: "notice", person: admin.id, summary: `告诉 ${admin.name}：${said}` });
+    }
+    for (const c of Object.values(state.commitments)) {
+      if (c.origin.by !== "controller" || c.origin.who !== "rules-broken" || ongoing.has(c.key)) continue;
+      if (isOpen(c.status)) events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: "恢复了", updatedAt: nowIso(nowMs) } });
+      const told = c.rounds > 0 || c.status === "done";
+      const key = `recovered:${c.id}`;
+      if (!told || state.ledger[key]) continue;
+      const summary = `告诉 ${admin?.name ?? c.owner}：判断方法 ${brokenFile(c)} 恢复了`;
+      events.push({ type: "action", action: action(key, "notify", c.id, summary, "planned", null, nowMs) });
+      plan.push({ at: nowIso(nowMs), kind: "notice", person: c.owner, summary });
+    }
+    append(events);
+  }
+
+  /** "It is over", for each broken-rules card that was asked: sent once the admin may be reached. */
+  async function tellRecovered(nowMs: number, plan: PlanEntry[]): Promise<void> {
+    for (const a of Object.values(state.ledger)) {
+      if (!a.key.startsWith("recovered:") || a.status !== "planned") continue;
+      const c = state.commitments[a.subject];
+      const person = c ? config.persons[c.owner] : undefined;
+      if (!c || !person) {
+        append([{ type: "action", action: { ...a, status: "superseded", reason: "没有这个人的配置", at: nowIso(nowMs) } }]);
+        continue;
+      }
+      if (!mayReach(person, [c.domain], 0, nowMs, calendar).send || deps.mode === "dry-run" || stopped) continue;
+      const file = brokenFile(c);
+      const loads = (ruleset?.files ?? []).includes(file);
+      const title = `判断方法 ${file} 恢复了`;
+      const text = loads ? `${file} 又能加载了，事项照常判断。之前那张「加载不上」的卡已经收起。` : `${file} 已经从判断方法里拿掉了，不再报错。之前那张「加载不上」的卡已经收起。`;
+      const failed: string[] = [];
+      for (const target of deps.deliver ? person.notify : []) {
+        try {
+          await deps.deliver!(target.channel, { to: target.to, idempotencyKey: `${deps.instanceId}:${a.key}:${target.channel}:${target.to}`, title, text, status: "succeeded" });
+        } catch (error) {
+          failed.push(`${labelOf(target)}：${(error as Error).message}`.slice(0, 200));
+        }
+      }
+      append([{ type: "action", action: { ...a, status: failed.length > 0 ? "failed" : "done", reason: failed.length > 0 ? failed.join("；") : null, at: nowIso(nowMs) } }]);
+      plan.push({ at: nowIso(nowMs), kind: "notice", person: person.id, summary: `${title}${person.notify.length > 0 && deps.deliver ? `（发 ${person.notify.map(labelOf).join("、")}）` : ""}` });
+    }
+  }
+
   async function judgeAll(nowMs: number, plan: PlanEntry[]): Promise<void> {
     const { set, changed } = await currentRules();
+    noteBroken(set, nowMs);
     const firstLoad = state.rules.fingerprint === null;
     const vocabulary = vocabularyOf(state.items, state.recent);
     lastHeat = new Map();
@@ -1056,6 +1183,8 @@ export function createEngine(deps: EngineDeps) {
 
   async function askDue(nowMs: number, plan: PlanEntry[]): Promise<void> {
     outages(nowMs, plan);
+    brokenRules(nowMs, plan);
+    await tellRecovered(nowMs, plan);
     // Backstops first: an expired commitment is not asked again.
     const expiring: EventBody[] = [];
     for (const c of Object.values(state.commitments)) {
@@ -1646,6 +1775,7 @@ export function createEngine(deps: EngineDeps) {
       problems: [
         ...(deps.notices ?? []),
         ...lastProblems,
+        ...Object.entries(state.rules.broken ?? {}).map(([file, b]) => `${brokenText(file)}：${clip(b.error, 200)}`),
         ...notifyProblems(),
         ...Object.values(state.items)
           .filter((i) => (i.incomplete?.length ?? 0) > 0 && heat(i.key).length > 0)

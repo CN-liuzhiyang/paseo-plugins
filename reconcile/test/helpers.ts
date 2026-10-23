@@ -260,6 +260,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
       tickSeconds: 60,
       requestsDir,
       conversation: async (agentId) => conversations.get(agentId) ?? null,
+      rulesKeep: { dir: path.join(dataDir, "rules-last-good"), write: true, now: () => clock.now },
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),

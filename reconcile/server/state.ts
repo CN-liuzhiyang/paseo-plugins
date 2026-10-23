@@ -21,6 +21,9 @@ export type EventBody =
   // dropped / changed / reopened: absent in journals from before the breaker counted them.
   | { type: "rules.held"; fingerprint: string; newCommitments: number; dropped?: number; changed?: number; reopened?: number }
   | { type: "rules.released"; fingerprint: string }
+  /** A rule file that does not load: since when (kept while it stays broken), and the copy that runs instead (null: none). */
+  | { type: "rules.broken"; file: string; error: string; fallback: string | null; since: string }
+  | { type: "rules.mended"; file: string }
   | { type: "workspace"; workspaceId: string }
   | { type: "eval.candidate"; kind: EvalKind; subject: string; detail: string }
   | { type: "annotation.added"; annotation: Annotation }
@@ -52,7 +55,8 @@ export interface State {
   assessments: Record<string, Assessment>;
   ledger: Record<string, Action>;
   sources: Record<string, { cursor: unknown; health: SourceHealth }>;
-  rules: { fingerprint: string | null; held: RulesHeld | null; released: string[] };
+  /** broken: absent in states from before it was kept. */
+  rules: { fingerprint: string | null; held: RulesHeld | null; released: string[]; broken?: Record<string, RuleBroken> };
   workspaceId: string | null;
   evals: number;
   annotations: Record<string, Annotation>;
@@ -62,6 +66,13 @@ export interface State {
    * theirs, why not; only here, the receipt does not say.
    */
   requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string }>;
+}
+
+export interface RuleBroken {
+  error: string;
+  /** When the copy that runs instead was saved; null: nothing of the file runs. */
+  fallback: string | null;
+  since: string;
 }
 
 export function emptyState(): State {
@@ -75,7 +86,7 @@ export function emptyState(): State {
     assessments: {},
     ledger: {},
     sources: {},
-    rules: { fingerprint: null, held: null, released: [] },
+    rules: { fingerprint: null, held: null, released: [], broken: {} },
     workspaceId: null,
     evals: 0,
     annotations: {},
@@ -139,6 +150,12 @@ export function apply(state: State, event: JournalEvent): void {
     case "rules.released":
       state.rules.released.push(event.fingerprint);
       if (state.rules.held?.fingerprint === event.fingerprint) state.rules.held = null;
+      return;
+    case "rules.broken":
+      (state.rules.broken ??= {})[event.file] = { error: event.error, fallback: event.fallback, since: event.since };
+      return;
+    case "rules.mended":
+      if (state.rules.broken) delete state.rules.broken[event.file];
       return;
     case "annotation.added":
       state.annotations[event.annotation.id] = event.annotation;
