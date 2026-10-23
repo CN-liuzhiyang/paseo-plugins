@@ -112,7 +112,17 @@ export default {
     notYetMax: 5,
     rolloutEveryWorkdays: 3,
   },
-  stages: ["open", "no-release-date", "awaiting-merge", "awaiting-release", "rolling-out", "finished", "dropped"],
+  stages: [
+    // What the page of an item draws: names, the usual way through, a detour (side), the ends. It changes no
+    // judgment: assess() below says which of these an item is in. A bare string is a stage with that name.
+    { id: "open", label: "开发中", next: ["awaiting-release", "awaiting-merge", "no-release-date"], done: "单子关闭，或状态到可以外放" },
+    { id: "no-release-date", label: "没有外放日期", end: true, endKind: "other" },
+    { id: "awaiting-merge", label: "等单独 merge", side: true, when: "没赶上封版", next: ["awaiting-release"], done: "提交单独进了 publish" },
+    { id: "awaiting-release", label: "等外放", next: ["rolling-out", "finished"], done: "外网版本里有它" },
+    { id: "rolling-out", label: "灰度中", next: ["finished"], done: "各地区到 100%，或撤掉" },
+    { id: "finished", label: "结束", end: true, endKind: "done" },
+    { id: "dropped", label: "不再追踪", end: true, endKind: "dropped" },
+  ],
 
   assess(kase, ctx) {
     const p = ctx.params;

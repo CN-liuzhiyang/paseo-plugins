@@ -4,6 +4,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
 import type { Assessment, Commitment, Item, Note, Observation } from "../shared/model";
+import { normalizeStages, type StageMeta, type StageSpec } from "../shared/graph";
 import { flagOf, linksOf, type FlagLink, type Vocabulary } from "./links";
 import { addWorkdays, iso, workdaysBetween, zoned, type Calendar } from "./time";
 
@@ -79,6 +80,12 @@ const output = z
     wake: z.array(wake).optional(),
     /** A statement for the owner when something looks wrong; not a question, nothing to answer. */
     notice: z.string().min(1).max(300).optional(),
+    /**
+     * When the item got to this stage by what the rule can see (the day a commit landed, the day
+     * it was done), when that is not now: the flow chart then tells when it happened apart from
+     * when it was found out. An instant, ISO.
+     */
+    since: z.string().min(1).optional(),
   })
   .strict();
 
@@ -128,7 +135,7 @@ interface RuleModule {
   description: string;
   applies: { source: string };
   params: Record<string, unknown>;
-  stages: string[];
+  stages: Array<string | StageSpec>;
   assess(kase: Case, ctx: RuleContext): unknown;
 }
 
@@ -136,7 +143,10 @@ export interface LoadedRule {
   file: string;
   name: string;
   source: string;
+  /** The ids of the stages it declares. */
   stages: string[];
+  /** What it says about them for the flow chart (labels, the usual route, detours, ends); absent on a rule made by hand in a test. */
+  stageMeta?: StageMeta[];
   params: Record<string, unknown>;
   assess: RuleModule["assess"];
 }
@@ -183,12 +193,26 @@ export function fingerprintOf(dir: string): { fingerprint: string; files: Array<
   return { fingerprint: hash.digest("hex").slice(0, 16), files };
 }
 
+/** A stage with its metadata (shared/graph.ts StageSpec); a bare id is also a stage. */
+const stageSpec = z
+  .object({
+    id: z.string().min(1),
+    label: z.string().min(1).optional(),
+    next: z.array(z.string().min(1)).optional(),
+    side: z.boolean().optional(),
+    when: z.string().min(1).optional(),
+    end: z.boolean().optional(),
+    endKind: z.enum(["done", "dropped", "other"]).optional(),
+    done: z.string().min(1).optional(),
+  })
+  .strict();
+
 const moduleSchema = z.object({
   name: z.string().regex(/^[a-z0-9-]+$/),
   description: z.string(),
   applies: z.object({ source: z.string().min(1) }).strict(),
   params: z.record(z.string(), z.unknown()),
-  stages: z.array(z.string().min(1)).min(1),
+  stages: z.array(z.union([z.string().min(1), stageSpec])).min(1),
   assess: z.custom<RuleModule["assess"]>((v) => typeof v === "function", "assess must be a function"),
 });
 
@@ -200,8 +224,14 @@ async function loadOne(dir: string, file: string, text: string, loaded: LoadedRu
     const parsed = moduleSchema.safeParse((await dynamicImport(url)).default);
     if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
     const m = parsed.data;
+    let stageMeta: StageMeta[];
+    try {
+      stageMeta = normalizeStages(m.stages);
+    } catch (error) {
+      return { error: `stages: ${(error as Error).message}` };
+    }
     if (loaded.some((r) => r.name === m.name)) return { error: `a rule named "${m.name}" is already loaded` };
-    return { file, name: m.name, source: m.applies.source, stages: m.stages, params: m.params, assess: m.assess };
+    return { file, name: m.name, source: m.applies.source, stages: stageMeta.map((s) => s.id), stageMeta, params: m.params, assess: m.assess };
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -356,7 +386,7 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
   const wrong = check?.(out);
   if (wrong) return failed(`${rule.file}: ${wrong}`);
   return {
-    assessment: { ...base, stage: out.stage, health: out.health, headline: out.headline, next: out.next, notice: out.notice ?? null, error: null },
+    assessment: { ...base, stage: out.stage, health: out.health, headline: out.headline, next: out.next, notice: out.notice ?? null, ...(out.since && !Number.isNaN(Date.parse(out.since)) ? { since: out.since } : {}), error: null },
     output: out,
   };
 }

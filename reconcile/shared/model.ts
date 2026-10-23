@@ -186,6 +186,8 @@ export interface Assessment {
   next: { actor: "me" | "them" | "system" | "nobody"; what: string };
   /** Something that looks wrong, told as a statement (not a question); null when nothing does. */
   notice?: string | null;
+  /** When it got to this stage by what the rule could see, when that was earlier than this judgment. */
+  since?: string;
   stale: boolean;
   error: string | null;
 }
