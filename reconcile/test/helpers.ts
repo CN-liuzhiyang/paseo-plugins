@@ -35,7 +35,7 @@ export const TEST_RULE_PARAMS = { graceWorkdays: 0, readyStatuses: ["merged"], r
 
 export const TEST_POLICY = {
   tz: TZ,
-  ruleBreakerNewCommitments: 3,
+  ruleBreakerChanges: 3,
   sourceDownHours: 6,
   hot: { recentDays: 14, dateWindowDays: 14, dateFields: ["Release"] },
   coldTitles: ["【总单】", "长期维护"],

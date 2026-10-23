@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Config, Person } from "./config";
 import type { Action, Assessment, Card, Commitment, Item, Observation, SourceHealth } from "../shared/model";
-import type { PlanEntry, Status } from "../shared/status";
+import { describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
@@ -63,7 +63,19 @@ const commitmentId = (key: string) => `c_${hash(key).slice(0, 16)}`;
 const CARRIER_RETRY_MS = 5 * 60_000;
 const DAY = 86_400_000;
 /** How a case's health sorts on the page: what is wrong first. */
-const SEVERITY: Record<string, number> = { conflict: 2, blocked: 3, stalled: 4, waiting: 5, "on-track": 6, done: 7 };
+/** Why the engine cancelled a rule's commitment; one cancelled for this is opened again when the rule wants it again. */
+export const NOT_WANTED = "规则不再要求";
+
+/** One change a rules change makes this round, kept apart so that the breaker can hold it. */
+interface Gated {
+  events: EventBody[];
+  kind: "create" | "cancel" | "change" | "reopen" | "fact";
+  person: string | null;
+  /** What it does, for the plan: done, or held. */
+  what: string;
+}
+
+const SEVERITY: Record<string, number> ={ conflict: 2, blocked: 3, stalled: 4, waiting: 5, "on-track": 6, done: 7 };
 
 export function createEngine(deps: EngineDeps) {
   const { store, config } = deps;
@@ -400,8 +412,11 @@ export function createEngine(deps: EngineDeps) {
       fresh: (id: string) => fresh(id, nowMs),
     };
     const events: EventBody[] = [];
+    // What a held rules change may not do: change commitments and record facts. A change that
+    // turns out to be wrong then leaves nothing behind but its judgments.
+    const gated: Gated[] = [];
     const staleList = staleNow(nowMs);
-    const diff: RulesDiff = { changed: [], newCommitments: [], droppedCommitments: [] };
+    const diff: RulesDiff = { changed: [], newCommitments: [], droppedCommitments: [], changedCommitments: [], reopenedCommitments: [] };
     const creations: Commitment[] = [];
     for (const item of Object.values(state.items)) {
       const rule = set.rules.find((r) => r.source === item.source);
@@ -431,28 +446,53 @@ export function createEngine(deps: EngineDeps) {
       for (const fact of judged.output.facts) {
         const note = state.notes[item.key]?.[fact.field];
         if (note?.value === fact.value) continue;
-        events.push({ type: "note.set", note: { key: item.key, field: fact.field, value: fact.value, kind: "fact", basis: "source-derived", by: rule.name, at: nowIso(nowMs), evidence: fact.evidence } });
-        plan.push({ at: nowIso(nowMs), kind: "note", person: null, summary: `${item.key} 记下事实 ${fact.field} = ${fact.value}（${fact.evidence}）` });
+        gated.push({
+          kind: "fact",
+          person: null,
+          what: `${item.key} 记下事实 ${fact.field} = ${fact.value}（${fact.evidence}）`,
+          events: [{ type: "note.set", note: { key: item.key, field: fact.field, value: fact.value, kind: "fact", basis: "source-derived", by: rule.name, rules: set.fingerprint, at: nowIso(nowMs), evidence: fact.evidence } }],
+        });
       }
       // A wake is a note on the other case; it makes that case hot from the next round on.
       for (const w of judged.output.wake ?? []) {
         if (w.caseId === item.key || !state.items[w.caseId]) continue;
         const field = `woken.${item.key}`;
         if (state.notes[w.caseId]?.[field]?.value === w.reason) continue;
-        events.push({ type: "note.set", note: { key: w.caseId, field, value: w.reason, kind: "fact", basis: "source-derived", by: rule.name, at: nowIso(nowMs), evidence: `${item.key} 叫醒` } });
-        plan.push({ at: nowIso(nowMs), kind: "note", person: null, summary: `${item.key} 叫醒 ${w.caseId}：${w.reason}` });
+        gated.push({
+          kind: "fact",
+          person: null,
+          what: `${item.key} 叫醒 ${w.caseId}：${w.reason}`,
+          events: [{ type: "note.set", note: { key: w.caseId, field, value: w.reason, kind: "fact", basis: "source-derived", by: rule.name, rules: set.fingerprint, at: nowIso(nowMs), evidence: `${item.key} 叫醒` } }],
+        });
       }
       const wanted = new Set<string>();
       for (const spec of judged.output.commitments) {
         wanted.add(spec.key);
         const existing = state.commitments[commitmentId(spec.key)];
-        if (!existing) {
+        const reopen = existing?.status === "cancelled" && existing.reason === NOT_WANTED && existing.origin.by === "rule";
+        if (!existing || reopen) {
           if (Date.parse(spec.backstop.at) <= nowMs) {
             // Nothing could be asked before it expired; creating it would only record a miss.
-            plan.push({ at: nowIso(nowMs), kind: "skipped", person: spec.owner, summary: `没建：${spec.title} 的兜底时间 ${spec.backstop.at.slice(5, 16).replace("T", " ")} 已经过了` });
+            plan.push({ at: nowIso(nowMs), kind: "skipped", person: spec.owner, summary: `没${existing ? "重开" : "建"}：${spec.title} 的兜底时间 ${spec.backstop.at.slice(5, 16).replace("T", " ")} 已经过了` });
             continue;
           }
-          if (!creations.some((c) => c.key === spec.key)) creations.push(toCommitment(spec, item.key, rule.name, nowMs));
+          const fresh = toCommitment(spec, item.key, rule.name, nowMs);
+          if (!existing) {
+            if (!creations.some((c) => c.key === spec.key)) creations.push(fresh);
+            continue;
+          }
+          if (diff.reopenedCommitments!.includes(spec.key)) continue;
+          // Wanted again after the rule had stopped wanting it: opened again as if new, under the
+          // same id, so that its card and answers stay one thread. Rounds asked before go.
+          const { id: _id, key: _key, createdAt: _createdAt, ...reopened } = fresh;
+          const back: EventBody[] = [];
+          for (let round = 1; round <= existing.rounds; round++) {
+            back.push({ type: "action", action: action(`ask:${existing.id}:${round}`, "ask", existing.id, `重开前问过的这一轮作废：${existing.title}`, "superseded", null, nowMs) });
+          }
+          const what = `重开承诺：${spec.title}（规则又要它了；${describeStep(fresh)}）`;
+          back.push({ type: "action", action: action(`reopen:${existing.id}:${existing.updatedAt}`, "commitment.ensure", existing.id, what, "done", null, nowMs) });
+          gated.push({ kind: "reopen", person: spec.owner, what, events: [{ type: "commitment.changed", id: existing.id, patch: { ...reopened, updatedAt: nowIso(nowMs) } }, ...back] });
+          diff.reopenedCommitments!.push(spec.key);
           continue;
         }
         if (existing.status !== "scheduled" && existing.status !== "waiting") continue;
@@ -469,38 +509,65 @@ export function createEngine(deps: EngineDeps) {
             takenBack.push({ type: "action", action: action(`ask:${existing.id}:${round}`, "ask", existing.id, `收回：${existing.title}（触发时间改到 ${patch.trigger.at.slice(5, 16).replace("T", " ")}）`, "superseded", null, nowMs) });
           }
         }
-        events.push({ type: "commitment.changed", id: existing.id, patch: { ...patch, updatedAt: nowIso(nowMs) } }, ...takenBack);
+        gated.push({
+          kind: "change",
+          person: existing.owner,
+          what: `改承诺：${existing.title}`,
+          events: [{ type: "commitment.changed", id: existing.id, patch: { ...patch, updatedAt: nowIso(nowMs) } }, ...takenBack],
+        });
+        diff.changedCommitments!.push(existing.key);
       }
       for (const c of Object.values(state.commitments)) {
         if (c.caseId !== item.key || c.origin.by !== "rule" || c.origin.who !== rule.name || wanted.has(c.key)) continue;
         // Asked or not: when what it asked about is now known, the question goes (and its card closes).
         if (c.status === "scheduled" || c.status === "waiting") {
-          events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: "规则不再要求", updatedAt: nowIso(nowMs) } });
+          gated.push({
+            kind: "cancel",
+            person: c.owner,
+            what: `撤承诺：${c.title}（${NOT_WANTED}）`,
+            events: [{ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: NOT_WANTED, updatedAt: nowIso(nowMs) } }],
+          });
           diff.droppedCommitments.push(c.key);
         }
       }
     }
+    for (const c of creations) {
+      const what = `建承诺：${c.title}（${describeStep(c)}）`;
+      gated.push({
+        kind: "create",
+        person: c.owner,
+        what,
+        events: [
+          { type: "commitment.created", commitment: c },
+          { type: "action", action: action(`ensure:${c.key}`, "commitment.ensure", c.id, what, "done", null, nowMs) },
+        ],
+      });
+    }
     diff.newCommitments = creations.map((c) => c.key);
     if (changed) {
       events.push(firstLoad ? { type: "rules.loaded", fingerprint: set.fingerprint, files: set.files } : { type: "rules.changed", from: state.rules.fingerprint, to: set.fingerprint, diff });
-      if (!firstLoad && creations.length > config.policy.ruleBreakerNewCommitments && !state.rules.released.includes(set.fingerprint)) {
-        events.push({ type: "rules.held", fingerprint: set.fingerprint, newCommitments: creations.length });
-        events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `规则改动会新建 ${creations.length} 条承诺` });
+      // The breaker counts every change to commitments the new rules make at once: a wrong
+      // condition takes questions back as easily as it adds them.
+      const count = (kind: Gated["kind"]) => gated.filter((g) => g.kind === kind).length;
+      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen") };
+      const total = changes.newCommitments + changes.dropped + changes.changed + changes.reopened;
+      if (!firstLoad && total > config.policy.ruleBreakerChanges && !state.rules.released.includes(set.fingerprint)) {
+        events.push({ type: "rules.held", fingerprint: set.fingerprint, ...changes });
+        events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `规则改动会一下子${describeChanges(changes)}` });
       }
     }
     append(events);
     const held = state.rules.held?.fingerprint === set.fingerprint;
-    const created: EventBody[] = [];
-    for (const c of creations) {
+    const done: EventBody[] = [];
+    for (const g of gated) {
       if (held) {
-        plan.push({ at: nowIso(nowMs), kind: "held", person: c.owner, summary: `规则改动挂起，没建：${c.title}` });
+        plan.push({ at: nowIso(nowMs), kind: "held", person: g.person, summary: `规则改动挂起，没做：${g.what}` });
         continue;
       }
-      created.push({ type: "commitment.created", commitment: c });
-      created.push({ type: "action", action: action(`ensure:${c.key}`, "commitment.ensure", c.id, `建承诺：${c.title}（${describeStep(c)}）`, "done", null, nowMs) });
-      plan.push({ at: nowIso(nowMs), kind: "commitment", person: c.owner, summary: `建承诺：${c.title}（${describeStep(c)}）` });
+      done.push(...g.events);
+      plan.push({ at: nowIso(nowMs), kind: g.kind === "fact" ? "note" : "commitment", person: g.person, summary: g.what });
     }
-    append(created);
+    append(done);
   }
 
   const action = (key: string, kind: Action["kind"], subject: string, summary: string, status: Action["status"], reason: string | null, nowMs: number): Action => ({

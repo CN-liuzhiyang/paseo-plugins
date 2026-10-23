@@ -80,6 +80,8 @@ export interface Note {
   kind: "fact" | "opinion";
   basis: "source-derived" | "human" | "agent";
   by: string;
+  /** For a fact a rule wrote: the fingerprint of the rules that wrote it. */
+  rules?: string;
   at: string;
   evidence: string | null;
 }

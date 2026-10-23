@@ -4,7 +4,7 @@ import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "../shared/rpc";
-import { PLAN_LABEL, troubleOf, type PlanEntry, type Status, type StatusCase } from "../shared/status";
+import { describeChanges, PLAN_LABEL, troubleOf, type PlanEntry, type Status, type StatusCase } from "../shared/status";
 import { Badge, Banner, Block, Button, Fold, OpenAgent, Section, UiProvider, useUi, type Tone } from "./ui";
 
 // 「事务」: what wants you first -- problems, questions waiting for you (each one opens its card),
@@ -262,8 +262,8 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
         <Banner key={p} tone="warning" icon="TriangleAlert" title={p} />
       ))}
       {held ? (
-        <Banner tone="warning" icon="ShieldAlert" title={`规则改动挂起了：它会一下子新建 ${held.newCommitments} 条承诺`}>
-          <Text style={ui.styles.muted}>判断已经按新规则在算，只是没建这些承诺、也不会因此发卡。看一下下面的计划，确认没问题再放行。</Text>
+        <Banner tone="warning" icon="ShieldAlert" title={`规则改动挂起了：它会一下子${describeChanges(held)}`}>
+          <Text style={ui.styles.muted}>现状已经按新规则在算，但承诺一条没动（不建、不撤、不改、不重开），新规则要记的事实也没记，不会因此发卡或收卡。看一下下面计划里「挂起」的几条，确认没问题再放行。</Text>
           <Button icon="Check" label={busy === "release" ? "正在放行…" : "放行这一版规则"} disabled={busy !== null} onPress={() => onRelease(held.fingerprint)} />
         </Banner>
       ) : null}

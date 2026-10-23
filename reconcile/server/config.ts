@@ -127,7 +127,7 @@ const policySchema = z
     /** The instance's own zone: for calendar days, source windows and the status line. */
     tz: z.string().min(1),
     /** A rules change that would newly create more commitments than this is held for a person. */
-    ruleBreakerNewCommitments: z.number().int().min(0),
+    ruleBreakerChanges: z.number().int().min(0),
     /** A source that has failed this long is reported as an evaluation candidate. */
     sourceDownHours: z.number().min(1),
     /**

@@ -1,4 +1,5 @@
 import type { Action, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, SourceHealth } from "../shared/model";
+import type { RulesHeld } from "../shared/status";
 
 // Every change to the controller's state is one event in the journal; the state is the fold of
 // them. The reducer is the only code that changes state, so replaying the journal rebuilds it.
@@ -16,7 +17,8 @@ export type EventBody =
   | { type: "source.state"; id: string; cursor?: unknown; health: SourceHealth }
   | { type: "rules.loaded"; fingerprint: string; files: string[] }
   | { type: "rules.changed"; from: string | null; to: string; diff: RulesDiff }
-  | { type: "rules.held"; fingerprint: string; newCommitments: number }
+  // dropped / changed / reopened: absent in journals from before the breaker counted them.
+  | { type: "rules.held"; fingerprint: string; newCommitments: number; dropped?: number; changed?: number; reopened?: number }
   | { type: "rules.released"; fingerprint: string }
   | { type: "workspace"; workspaceId: string }
   | { type: "eval.candidate"; kind: EvalKind; subject: string; detail: string }
@@ -26,6 +28,8 @@ export interface RulesDiff {
   changed: Array<{ caseId: string; before: string | null; after: string }>;
   newCommitments: string[];
   droppedCommitments: string[];
+  changedCommitments?: string[];
+  reopenedCommitments?: string[];
 }
 
 export type JournalEvent = EventBody & { v: 1; seq: number; at: string };
@@ -43,7 +47,7 @@ export interface State {
   assessments: Record<string, Assessment>;
   ledger: Record<string, Action>;
   sources: Record<string, { cursor: unknown; health: SourceHealth }>;
-  rules: { fingerprint: string | null; held: { fingerprint: string; newCommitments: number; at: string } | null; released: string[] };
+  rules: { fingerprint: string | null; held: RulesHeld | null; released: string[] };
   workspaceId: string | null;
   evals: number;
 }
@@ -112,9 +116,11 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     case "rules.changed":
       state.rules.fingerprint = event.to;
+      // The held version is gone (put back, or changed again): nothing is held for it any more.
+      if (state.rules.held && state.rules.held.fingerprint !== event.to) state.rules.held = null;
       return;
     case "rules.held":
-      state.rules.held = { fingerprint: event.fingerprint, newCommitments: event.newCommitments, at: event.at };
+      state.rules.held = { fingerprint: event.fingerprint, newCommitments: event.newCommitments, dropped: event.dropped ?? 0, changed: event.changed ?? 0, reopened: event.reopened ?? 0, at: event.at };
       return;
     case "rules.released":
       state.rules.released.push(event.fingerprint);

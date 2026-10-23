@@ -15,13 +15,33 @@ export interface PlanEntry {
 export const PLAN_LABEL: Record<PlanEntry["kind"], string> = {
   card: "发卡",
   deferred: "先不发",
-  commitment: "建承诺",
+  commitment: "承诺",
   skipped: "没建",
   note: "记事实",
   held: "挂起",
   expire: "到期",
   notice: "提醒",
 };
+
+/** A rules change the breaker held: how many commitments it would create, cancel, change and open again at once. */
+export interface RulesHeld {
+  fingerprint: string;
+  newCommitments: number;
+  dropped: number;
+  changed: number;
+  reopened: number;
+  at: string;
+}
+
+export function describeChanges(c: Pick<RulesHeld, "newCommitments" | "dropped" | "changed" | "reopened">): string {
+  const parts = [
+    c.newCommitments > 0 ? `新建 ${c.newCommitments}` : "",
+    c.dropped > 0 ? `撤掉 ${c.dropped}` : "",
+    c.changed > 0 ? `改动 ${c.changed}` : "",
+    c.reopened > 0 ? `重开 ${c.reopened}` : "",
+  ].filter(Boolean);
+  return `${parts.join("、") || "改动 0"} 条承诺`;
+}
 
 export interface StatusCase {
   caseId: string;
@@ -64,7 +84,7 @@ export interface Status {
     fingerprint: string | null;
     files: string[];
     errors: Array<{ file: string; error: string }>;
-    held: { fingerprint: string; newCommitments: number; at: string } | null;
+    held: RulesHeld | null;
   };
   calendarYears: string[];
   problems: string[];

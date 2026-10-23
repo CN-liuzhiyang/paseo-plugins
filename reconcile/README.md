@@ -101,7 +101,7 @@ sources.json       [ { id, kind: "gcp", command, gateway: { path, tool, target }
                                    repos: [ { name, pattern, branches: [ { name, url, copied? } ] } ] } },
                      { id, kind: "flags", files: [ { id, url, labels } ], sections, itemKind?, activeHours,
                        everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain } ]
-policy.json        { tz, ruleBreakerNewCommitments, sourceDownHours,
+policy.json        { tz, ruleBreakerChanges, sourceDownHours,
                      hot?: { recentDays, dateWindowDays, dateFields }, coldTitles? }
 calendar/<年>.json { holidays: [日期], workdays: [调休上班的日期] }
 rules/*.mjs        规则；examples/release-followup.mjs 是一份可以照抄的
@@ -128,8 +128,12 @@ svn 说「那个分支在那个版本还不存在」不算读不到。连续 3 �
   演练也会落盘：日志、快照、`status.json`、`plan.md`，承诺照样会到期。
 - **home 守卫**：只有设置里的 `home` 和 daemon 的 `PASEO_HOME` 一致、并且宿主提供了 `server.paseo`（fork 的扩展点），
   才会真的发卡；否则自动降成演练，并在状态里说明原因。开发 daemon 读到同一份设置不会重复发卡。
-- **规则改动的熔断**：规则文件一改（指纹变了），如果新规则会一下子新建超过 `ruleBreakerNewCommitments` 条承诺，
-  这一版规则挂起：判断照新规则算，承诺不建、卡不发，等你在「事务」页面上放行。
+- **规则改动的熔断**：规则文件一改（指纹变了），如果新规则会一下子新建、撤掉、改动、重开的承诺合计超过
+  `ruleBreakerChanges` 条，这一版规则挂起：现状照新规则算，但承诺一条不动，规则要记的事实（含叫醒）也不记，
+  所以不会因此发卡、收卡，错的规则也留不下事实；等你在「事务」页面上放行。规则文件改回去（或者再改成别的），
+  挂起的那一版就作废。规则写的事实带上写它的规则指纹（`Note.rules`）。
+- **规则又要回来的承诺会重开**：规则不再要求而撤掉的承诺，规则后来又要它时，用同一个 id 重开（像新建一样从头问，
+  之前问过的轮次作废），计划和账本里记一条「重开承诺」。答过的、到了兜底的不重开。
 - **一个数据目录只能有一个进程**：`LOCK` 文件里记着 pid，持有它的进程每次对账都碰一下它；pid 还活着、而且最近碰过，
   才算被占着（崩溃后 pid 可能被别的进程用了）。被占着时每分钟再试一次。同一个进程里同一个目录只能开一次。改设置时先等这一轮对账跑完（最多 30 秒），
   再关日志、重开；接连几次设置写入按先后排队，一次换完再换下一次；内容没变的设置写入不重启。一轮对账跑得比
