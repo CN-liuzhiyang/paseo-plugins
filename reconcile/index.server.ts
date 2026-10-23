@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
+import { HOME_SCREEN } from "./shared/graph";
+import { answerRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createCarrier } from "./server/carrier";
@@ -13,6 +14,7 @@ import { RULES_KEPT } from "./server/rules";
 import { exec } from "./server/exec";
 import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
+import { createRunReader, resolveRunsDir } from "./server/runs";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
 import { createGcpSource } from "./server/sources/gcp";
 import { createSvnReader } from "./server/sources/svn";
@@ -172,6 +174,19 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       const requestsDir = path.join(dataDir, "requests");
       mkdirSync(requestsDir, { recursive: true });
       const conversation = paseo ? (agentId: string) => readConversation(paseo.agents.ref(agentId)) : null;
+      // Flows started for an item show on its page: read from the runtime's event files, never written.
+      const runsDir = resolveRunsDir();
+      const runReader = runsDir ? createRunReader({ runsDir, tz: config.policy.tz, now: Date.now, affair: HOME_SCREEN, view: { plugin: "orchestration-ui", screen: "runs" } }) : null;
+      const runs = runReader
+        ? (caseId: string) => {
+            try {
+              return runReader.forCase(caseId);
+            } catch (error) {
+              log(`reading the runs of ${caseId} failed: ${(error as Error).message}`);
+              return [];
+            }
+          }
+        : null;
       engine = createEngine({
         store,
         config,
@@ -186,6 +201,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         requestsDir,
         conversation,
         rulesKeep: { dir: path.join(dataDir, RULES_KEPT), write: true },
+        runs,
         now: Date.now,
         log,
         writeStatus: (status) => {
@@ -256,6 +272,20 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
     if (!engine) return { ok: false, detail: problem.detail || "没在运行" };
     const result = engine.testCard();
     if (result.ok) await engine.tick();
+    return result;
+  });
+
+  server.handle(graphRpc, async ({ case: caseId }) => {
+    if (!engine) return { ok: false, detail: problem.detail || "没在运行", graph: null };
+    const graph = engine.graph(caseId);
+    return graph ? { ok: true, detail: "", graph: graph as unknown as Record<string, unknown> } : { ok: false, detail: "没有这个事项", graph: null };
+  });
+
+  server.handle(answerRpc, async ({ commitmentId, round, option, text }) => {
+    if (!engine) return { ok: false, already: false, detail: problem.detail || "控制器现在没在运行，这次回答没有记下" };
+    const result = engine.answerQuestion(commitmentId, round, { ...(option !== undefined ? { option } : {}), ...(text !== undefined ? { text } : {}) });
+    // The card for it closes, or is cut down to what is still asked, in a reconcile of its own: not waited for here.
+    if (result.ok && !engine.busy()) void engine.tick().catch((error: unknown) => log(`reconcile after an answer failed: ${(error as Error).message}`));
     return result;
   });
 

@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Config, Person } from "./config";
+import type { RunView } from "../shared/graph";
 import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, SourceHealth } from "../shared/model";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
+import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { fingerprintOf, judge, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
@@ -58,6 +60,8 @@ export interface EngineDeps {
   rulesKeep?: KeepRules | null;
   /** The conversation of an agent, to check that words are the person's own; absent on a host without server.paseo. */
   conversation?: ((agentId: string) => Promise<Conversation | null>) | null;
+  /** The runs of flows started for an item (server/runs.ts); absent, an item has none. */
+  runs?: ((caseId: string) => RunView[]) | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
@@ -1509,30 +1513,55 @@ export function createEngine(deps: EngineDeps) {
       if (answer.kind === "answers") raw = answer.answers[headers.get(id)!];
       else if (card.commitments.length === 1) raw = answer.text;
       if (raw === undefined || raw.trim() === "") continue;
-      const option = c.ask.options.find((o) => o.label === raw);
-      const recorded = { option: option?.id ?? null, label: option?.label ?? "其他", text: option ? null : raw, at, via: answer.kind === "answers" ? answer.via : "typed" };
-      events.push({ type: "commitment.changed", id, patch: { status: "done", answer: recorded, reason: null, updatedAt: at } });
-      events.push({
-        type: "obs",
-        obs: {
-          id: hash(`${card.id}\0${id}`).slice(0, 16),
-          at,
-          seenAt: at,
-          source: "ask",
-          key: c.caseId ?? c.id,
-          kind: "answer",
-          trust: "human",
-          actor: { name: personName(card.person), machine: false },
-          changes: [],
-          text: `${c.ask.question} → ${option ? option.label : raw}`,
-        },
-      });
-      lines.push(`- ${headers.get(id)}：${option ? option.label : `「${raw}」`}`);
+      const { events: made, label } = answerEvents(c, raw, at, answer.kind === "answers" ? answer.via : "typed", `${card.id}\0${id}`, personName(card.person));
+      events.push(...made);
+      lines.push(`- ${headers.get(id)}：${label}`);
     }
     return { events, lines };
   }
 
+  /**
+   * One question's answer as events: the option whose label it is, else the words as typed. The one
+   * place an answer is recorded, for the card's form and for the item's page alike.
+   */
+  function answerEvents(c: Commitment, raw: string, at: string, via: string, obsKey: string, who: string): { events: EventBody[]; label: string } {
+    const option = c.ask.options.find((o) => o.label === raw);
+    const recorded = { option: option?.id ?? null, label: option?.label ?? "其他", text: option ? null : raw, at, via };
+    const events: EventBody[] = [
+      { type: "commitment.changed", id: c.id, patch: { status: "done", answer: recorded, reason: null, updatedAt: at } },
+      { type: "obs", obs: { id: hash(obsKey).slice(0, 16), at, seenAt: at, source: "ask", key: c.caseId ?? c.id, kind: "answer", trust: "human", actor: { name: who, machine: false }, changes: [], text: `${c.ask.question} → ${option ? option.label : raw}` } },
+    ];
+    return { events, label: option ? option.label : `「${raw}」` };
+  }
+
+  const answeredWhere = (via: string) => (via === "page" ? "在事项页上" : "在问题卡上");
+  /** What the card's form asked that was answered already (on the page, or another card), for telling the person their answer came second. */
+  function answeredAlready(card: Card, answer: Exclude<CardAnswer, { kind: "closed" | "dismissed" }>): string[] {
+    const headers = headersOf(card.commitments.map(({ id }) => id));
+    const out: string[] = [];
+    for (const { id } of card.commitments) {
+      const c = state.commitments[id];
+      if (c?.status !== "done" || !c.answer) continue;
+      if (answer.kind === "answers" ? answer.answers[headers.get(id)!] === undefined : card.commitments.length !== 1) continue;
+      out.push(`- ${headers.get(id)}：已经答过了：${c.answer.text ?? c.answer.label}（${answeredWhere(c.answer.via)} ${c.answer.at.slice(5, 16).replace("T", " ")}），这次的没有改`);
+    }
+    return out;
+  }
+
   // ---- public -----------------------------------------------------------------------------
+
+  // The flow chart of an item and the list's rows (graph.ts); read-only.
+  const graphBook: Graph = createGraph({
+    store,
+    config,
+    now: deps.now,
+    mode: deps.mode,
+    rules: () => ruleset,
+    reads: (caseId) => lastReads.get(caseId),
+    step: (c) => nextStep(afterHolds(c), tz, calendar),
+    inForce: (caseId) => (["drop", "hold", "wrong"] as const).flatMap((kind) => inForce(caseId, kind, deps.now())),
+    runs: deps.runs ?? undefined,
+  });
 
   return {
     /** After a start: cards whose carriers died with the previous process get new ones. */
@@ -1617,14 +1646,18 @@ export function createEngine(deps: EngineDeps) {
         const after = openCards().find((c) => cutFrom(c).includes(cardId));
         if (after) {
           const { events, lines } = answersOn(card, new Set(after.commitments.map(({ id }) => id)), answer, at);
-          if (lines.length === 0) return "这张卡已经换成了一张去掉一些问题的新卡，这次的回答里没有新卡上还在问的，没有记下。";
+          const dup = answeredAlready(card, answer);
+          if (lines.length === 0) return dup.length > 0 ? ["**已经答过了**，这次的没有记下：", ...dup].join("\n") : "这张卡已经换成了一张去掉一些问题的新卡，这次的回答里没有新卡上还在问的，没有记下。";
           const done = new Set(events.flatMap((e) => (e.type === "commitment.changed" ? [e.id] : [])));
           if (after.commitments.every(({ id }) => done.has(id) || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: after.id, patch: { status: "answered", closedAt: at } });
           append(events);
-          return ["**已记下**（这张卡换成了新卡，只记新卡上还在问的）：", ...lines, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
+          return ["**已记下**（这张卡换成了新卡，只记新卡上还在问的）：", ...lines, ...dup, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
         }
       }
-      if (!card || (card.status !== "pending" && card.status !== "raised")) return "这张卡已经结束了，这次的回答没有记下。";
+      if (!card || (card.status !== "pending" && card.status !== "raised")) {
+        const dup = card && answer.kind !== "closed" && answer.kind !== "dismissed" ? answeredAlready(card, answer) : [];
+        return dup.length > 0 ? ["**已经答过了**，这次的没有记下：", ...dup].join("\n") : "这张卡已经结束了，这次的回答没有记下。";
+      }
       if (answer.kind === "closed") {
         append([{ type: "card.changed", id: cardId, patch: { status: "closed", reason: "卡片被关掉了，没有回答", closedAt: at, archived: true } }]);
         return "";
@@ -1634,6 +1667,12 @@ export function createEngine(deps: EngineDeps) {
         return "**已收起**，没有记任何回答。到下次追问的时间会再问。";
       }
       const { events, lines } = answersOn(card, null, answer, at);
+      const dup = answeredAlready(card, answer);
+      if (lines.length === 0 && dup.length > 0) {
+        // Everything this form answers was answered already: the card has nothing left to ask of it.
+        if (card.commitments.every(({ id }) => !isOpen(state.commitments[id]?.status))) append([{ type: "card.changed", id: cardId, patch: { status: "answered", closedAt: at } }]);
+        return ["**已经答过了**，这次的没有记下：", ...dup].join("\n");
+      }
       if (lines.length === 0) {
         if (answer.kind === "typed") {
           append([{ type: "card.changed", id: cardId, patch: { status: "closed", reason: "在对话里打了字，没法对应到具体问题", closedAt: at } }]);
@@ -1644,7 +1683,7 @@ export function createEngine(deps: EngineDeps) {
       }
       events.push({ type: "card.changed", id: cardId, patch: { status: "answered", closedAt: at } });
       append(events);
-      return [`**已记下**：`, ...lines, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
+      return [`**已记下**：`, ...lines, ...dup, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
     },
 
     /**
@@ -1690,6 +1729,45 @@ export function createEngine(deps: EngineDeps) {
       };
       append([{ type: "commitment.created", commitment: c }]);
       return { ok: true, detail: `给 ${admin.name} 排了一张测试卡，下一次检查时发出（不打扰时段和每天的上限照样算）` };
+    },
+
+    /** The page of one item (server/graph.ts); null for a key that is not an item. */
+    graph(caseId: string) {
+      return graphBook.view(caseId);
+    },
+
+    /**
+     * A person answers a question on the item's page. The same answer as the card's form gives
+     * (answerEvents), the first of the two to arrive counts, and the one that comes second is told
+     * it was answered. Only a question that has been asked and not answered; `round` is the ask the
+     * page showed, so a page that has fallen behind a new ask answers nothing.
+     */
+    answerQuestion(commitmentId: string, round: number, input: { option?: string; text?: string }): { ok: boolean; already: boolean; detail: string } {
+      const c = state.commitments[commitmentId];
+      const nowMs = deps.now();
+      const at = nowIso(nowMs);
+      const no = (detail: string) => ({ ok: false, already: false, detail });
+      if (!c) return no("这个问题已经不在了，没有记下");
+      if (c.status === "done" && c.answer) return { ok: false, already: true, detail: `已经答过了：${c.answer.text ?? c.answer.label}（${answeredWhere(c.answer.via)} ${c.answer.at.slice(5, 16).replace("T", " ")}），这次的没有记下` };
+      if (c.status === "expired" || c.status === "cancelled") return no(`这个问题已经${c.status === "expired" ? "过期" : "收回"}了，没有记下`);
+      if (c.status !== "waiting") return no("这个问题还没有问到，到时候再答");
+      if (c.rounds !== round) return no(`这个问题已经又问了一轮（第 ${c.rounds} 次），页面上的是旧的，刷新后再答`);
+      let raw: string;
+      if (input.option !== undefined) {
+        const option = c.ask.options.find((o) => o.id === input.option);
+        if (!option) return no("没有这个选项（问题可能改过了），刷新后再答");
+        raw = option.label;
+      } else if (input.text !== undefined && input.text.trim() !== "") {
+        if (!c.ask.allowOther) return no("这个问题只能选，不接受自己写的答案");
+        raw = input.text.trim();
+      } else return no("先选一个答案，或者写一句");
+      const { events, label } = answerEvents(c, raw, at, "page", `page ${c.id} ${round}`, personName(c.ask.person));
+      // A card that has nothing left to ask is over; one with others still open is cut down at the next reconcile (pruneCards).
+      for (const card of openCards()) {
+        if (card.commitments.some(({ id }) => id === c.id) && card.commitments.every(({ id }) => id === c.id || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: card.id, patch: { status: "answered", closedAt: at } });
+      }
+      append(events);
+      return { ok: true, already: false, detail: `已记下：${label}。接下来怎么追踪，下一次检查时决定` };
     },
 
     releaseRules(fingerprint: string): boolean {
@@ -1741,6 +1819,7 @@ export function createEngine(deps: EngineDeps) {
         commitments,
         open: commitments.some((c) => c.status === "scheduled" || c.status === "waiting"),
         hot: heat(item.key),
+        row: graphBook.row(item.key),
       };
     });
     // Most urgent first: a rule error, then what is wrong, then what waits, then what is fine.

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config";
 import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine } from "../server/engine";
+import type { RunView } from "../shared/graph";
 import type { Card, Item } from "../shared/model";
 import type { PollInput, Source } from "../server/sources/source";
 import type { Conversation, Receipt } from "../server/requests";
@@ -163,7 +164,7 @@ export interface World {
   close(): void;
 }
 
-export async function makeWorld(options: { start: string; mode?: "live" | "dry-run"; config?: Parameters<typeof writeConfig>[1]; deliver?: boolean } ): Promise<World> {
+export async function makeWorld(options: { start: string; mode?: "live" | "dry-run"; config?: Parameters<typeof writeConfig>[1]; deliver?: boolean; runs?: (caseId: string) => RunView[] }): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
   const dataDir = path.join(dir, "data");
@@ -261,6 +262,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
       requestsDir,
       conversation: async (agentId) => conversations.get(agentId) ?? null,
       rulesKeep: { dir: path.join(dataDir, "rules-last-good"), write: true, now: () => clock.now },
+      runs: options.runs ?? null,
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),

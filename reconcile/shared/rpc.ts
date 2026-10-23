@@ -27,6 +27,28 @@ export const testCardRpc = defineRpc({
   output: z.object({ ok: z.boolean(), detail: z.string() }),
 });
 
+// The page of one item: its stages, who has the ball, what is asked (shared/graph.ts GraphView).
+// Typed on the client from the server's own type, like the status.
+export const graphRpc = defineRpc({
+  name: "reconcile.graph",
+  input: z.object({ case: z.string().min(1).max(200) }),
+  output: z.object({ ok: z.boolean(), detail: z.string(), graph: z.record(z.string(), z.unknown()).nullable() }),
+});
+
+// A question answered on the item's page. It is the same answer as on the question card, and
+// whichever arrives first counts: `already` says the other got there first (detail tells what and
+// where). `round` is the ask the page showed; one answers an option by its id, or writes words.
+export const answerRpc = defineRpc({
+  name: "reconcile.answer",
+  input: z.object({
+    commitmentId: z.string().min(1).max(100),
+    round: z.number().int().min(0),
+    option: z.string().min(1).max(100).optional(),
+    text: z.string().max(2000).optional(),
+  }),
+  output: z.object({ ok: z.boolean(), already: z.boolean(), detail: z.string() }),
+});
+
 export const releaseRulesRpc = defineRpc({
   name: "reconcile.rules.release",
   input: z.object({ fingerprint: z.string() }),

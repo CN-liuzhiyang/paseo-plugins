@@ -1,3 +1,4 @@
+import type { ListRow } from "./graph";
 import type { Assessment, Commitment, SourceHealth } from "./model";
 
 // What the controller reports each reconcile: status.json on disk, the overview RPC, the screen.
@@ -72,6 +73,8 @@ export interface StatusCase {
   open: boolean;
   /** Why it is judged and shown (hot); see server/heat.ts. */
   hot: string[];
+  /** What the list shows of it (shared/graph.ts); null when the item is unknown to the book. */
+  row: ListRow | null;
 }
 
 /**
