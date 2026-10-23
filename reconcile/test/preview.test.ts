@@ -178,7 +178,7 @@ test("against what the rules in use do now: a question the candidate keeps, or d
 
 test("a candidate that does not load is said so, and is not copied", () =>
   withWorld(async (w, candidate) => {
-    put(candidate, "rules/mini.mjs", rule().replace('stages: ["s"]', 'stages: [{ id: "s" }]'));
+    put(candidate, "rules/mini.mjs", rule().replace('stages: ["s"]', "stages: [{ id: 7 }]"));
     const p = await look(w, candidate);
     assert.equal(p.candidate.errors[0]!.file, "mini.mjs");
     assert.equal(p.candidate.errors[0]!.fallback, undefined, "the candidate has no copy to go on with");

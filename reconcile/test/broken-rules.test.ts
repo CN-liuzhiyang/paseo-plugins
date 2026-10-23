@@ -14,8 +14,8 @@ const rule = (headline: string) => `export default { name: "mini", description: 
   assess(kase, ctx) {
     return { stage: "s", health: "waiting", headline: "${headline}", next: { actor: "me", what: "x" }, facts: [], commitments: [] };
   } };`;
-// The shape the plugin does not take: stages as objects.
-const BROKEN = rule("新写的").replace('stages: ["s"]', 'stages: [{ id: "s" }]');
+// A shape the plugin does not take: a stage whose id is not a string.
+const BROKEN = rule("新写的").replace('stages: ["s"]', "stages: [{ id: 7 }]");
 
 const ADMIN = { owner: { name: "测试用户", admin: true, tz: TZ, quiet: { work: "workdays 09:30-20:00" }, pushPerDay: 8, notify: [{ channel: "im", to: "p2p:someone", label: "IM" }] } };
 
