@@ -13,7 +13,7 @@ import { createRunIndex, readRun } from "./server/runs";
 const DEFAULTS: Settings = { logDir: "", staleMinutes: 15, cards: true };
 
 const NO_TIMELINE =
-  "这个 Paseo 没有给插件 server 提供 server.paseo（目前只有 fork 版有），插件没法往对话里贴卡片。列表和运行视图照常可用。";
+  "这个 Paseo 没有给插件 server 提供 server.paseo（目前只有 fork 版有），插件没法往对话里贴卡片。列表和流程视图照常可用。";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(settingsDefinition);
@@ -61,7 +61,7 @@ export default function contribute(server: PluginServerContext) {
     } else {
       running?.stop();
       running = null;
-      cards = { state: "off", detail: "设置里关掉了：新的运行不再往发起对话里贴卡片。" };
+      cards = { state: "off", detail: "设置里关掉了：新的流程不再往发起对话里贴卡片。" };
     }
   };
   void applySettings();
@@ -104,7 +104,7 @@ export default function contribute(server: PluginServerContext) {
       return { state: "ok" as const, detail: "", card: await readCard(resolved.info.runsDir, runId, staleMs) };
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") return { state: "missing" as const, detail: `找不到运行 ${runId}`, card: null };
+      if (code === "ENOENT") return { state: "missing" as const, detail: `找不到流程 ${runId}`, card: null };
       return { state: "unreadable" as const, detail: String(error), card: null };
     }
   });

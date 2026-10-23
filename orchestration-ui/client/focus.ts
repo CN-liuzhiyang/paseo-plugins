@@ -1,4 +1,4 @@
-// Which run a workspace's 编排运行 tab shows, and which node in it. A panel is opened without
+// Which run a workspace's 流程 tab shows, and which node in it. A panel is opened without
 // params, so whoever opens it (a card, the sidebar screen) writes here first and the panel reads
 // it; the panel writes back as the person picks, so leaving the tab and coming back -- or the
 // host unmounting and remounting it -- lands on the same run and node. One store per plugin

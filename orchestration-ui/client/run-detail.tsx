@@ -87,12 +87,12 @@ export function RunDetail({
       <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="返回运行列表"
+          accessibilityLabel="返回流程列表"
           onPress={onBack}
           style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" }}
         >
           <Icon name="ArrowLeft" size={16} color={ui.theme.colors.foregroundMuted} />
-          <Text style={ui.styles.muted}>全部运行</Text>
+          <Text style={ui.styles.muted}>全部流程</Text>
         </Pressable>
         {action}
       </View>
@@ -141,12 +141,12 @@ export function RunDetail({
             )}
           </View>
           <Text style={ui.styles.small}>
-            {!snap.polling ? "运行已结束，不再刷新。" : status === "lost" ? "每 5 秒看一次有没有新事件。" : "正在跟踪新事件，自动刷新。"}
+            {!snap.polling ? "流程已结束，不再刷新。" : status === "lost" ? "每 5 秒看一次有没有新事件。" : "正在跟踪新事件，自动刷新。"}
           </Text>
         </>
       ) : snap.loaded && snap.state === "ok" ? (
         <Banner tone="neutral" icon="Hourglass" title="文件是空的">
-          <Text style={ui.styles.text}>运行刚创建了文件，第一条事件还没写完。这里会自动刷新。</Text>
+          <Text style={ui.styles.text}>流程刚创建了文件，第一条事件还没写完。这里会自动刷新。</Text>
         </Banner>
       ) : null}
     </ScrollView>
@@ -187,7 +187,7 @@ function Notices({ snap }: { snap: RunSnapshot }) {
         </Banner>
       ) : null}
       {snap.loaded && snap.state !== null && snap.state !== "ok" ? (
-        <Banner tone="danger" icon="TriangleAlert" title={snap.state === "missing" ? "找不到这次运行的文件" : "读不了这次运行"}>
+        <Banner tone="danger" icon="TriangleAlert" title={snap.state === "missing" ? "找不到这次流程的文件" : "读不了这次流程"}>
           <Text style={ui.styles.text} selectable>
             {snap.detail}
           </Text>

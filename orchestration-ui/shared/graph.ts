@@ -588,7 +588,7 @@ export function hero(
   return {
     tone: "danger",
     kicker,
-    title: end?.error ? `${end.error.name}：${end.error.message}` : status === "timeout" ? "超出了运行的总时限" : "运行失败",
+    title: end?.error ? `${end.error.name}：${end.error.message}` : status === "timeout" ? "超出了流程的总时限" : "流程失败",
     subtitle: end?.summary ?? null,
     action: null,
     select: END,

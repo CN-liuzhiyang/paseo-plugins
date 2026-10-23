@@ -107,11 +107,11 @@ function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string
   const now = useNow(live);
   const workspaceId = useAgent(agentId, (agent) => agent.workspaceId);
   const tone = ui.tone(card.tone);
-  const name = [card.flow ?? "编排运行", card.label].filter(Boolean).join(" · ");
+  const name = [card.flow ?? "流程", card.label].filter(Boolean).join(" · ");
   const open = (select: string) => openRun({ runId: card.runId, workspaceId, select });
   return (
     <View
-      accessibilityLabel={`编排运行 ${name}：${card.kicker}，${card.title}`}
+      accessibilityLabel={`流程 ${name}：${card.kicker}，${card.title}`}
       style={{
         borderWidth: 1,
         borderColor: card.gate ? tone : c.border,
@@ -146,11 +146,11 @@ function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string
       ) : null}
       <View style={[ui.styles.row, { gap: 8 }]}>
         {card.gate ? <Button icon="ShieldCheck" label="去审批" primary onPress={() => open(card.gate!.callId)} /> : null}
-        <Button icon="Workflow" label="打开运行" primary={!card.gate} onPress={() => open(card.focus)} />
+        <Button icon="Workflow" label="打开流程" primary={!card.gate} onPress={() => open(card.focus)} />
       </View>
       {failed && live ? (
         <Text style={ui.styles.small}>
-          编排运行插件没有响应（{failed}），上面是 {formatTime(card.evaluatedAt, now)} 时的状态。
+          流程插件没有响应（{failed}），上面是 {formatTime(card.evaluatedAt, now)} 时的状态。
         </Text>
       ) : null}
     </View>

@@ -158,7 +158,7 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
   if (!start) return <Empty />;
   return (
     <View style={{ gap: 16 }}>
-      <Head title="这次运行">
+      <Head title="这次流程">
         <Meta text={[start.flow.name, start.flow.description].filter(Boolean).join(" · ")} />
       </Head>
       <Sec label="输入">
@@ -167,7 +167,7 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
         </Box>
       </Sec>
       {caveats.length > 0 ? (
-        <Sec label={`没被机械强制的约束（${caveats.length}，整次运行只说这一遍）`}>
+        <Sec label={`没被机械强制的约束（${caveats.length}，整次流程只说这一遍）`}>
           <Text style={ui.styles.small}>这些只写在 prompt 里、或靠 agent 自觉，运行时没法保证。图上带盾牌标记的节点受它们影响。</Text>
           {caveats.map((text) => (
             <Box key={text} tone="warning">
@@ -179,7 +179,7 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
         </Sec>
       ) : null}
       <Logs run={run} now={now} />
-      <Fold label="运行详情（证据）">
+      <Fold label="流程详情（证据）">
         <View style={[ui.styles.card, { gap: 6 }]}>
           <Fact label="开始">{formatTime(run.startedAt, now)}</Fact>
           <Fact label="发起方">
@@ -200,7 +200,7 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
           </Fact>
           {start.cwd ? <Fact label="工作目录">{start.cwd}</Fact> : null}
           {start.source ? <Fact label="flow 文件">{start.source}</Fact> : null}
-          <Fact label="运行 id">
+          <Fact label="流程 id">
             <View style={ui.styles.row}>
               <Text style={ui.styles.mono} selectable>
                 {run.runId ?? runId}
@@ -266,7 +266,7 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
             ? processGone(proc)
               ? "运行进程已经不在了，不会再写结局。"
               : "很久没有新事件，也没有结局：运行进程可能已经退出。一有新事件这里会自动恢复。"
-            : "运行结束时这里给出结果。"}
+            : "流程结束时这里给出结果。"}
         </Text>
         <Box>
           <Text style={ui.styles.muted}>{activity(run, status, now, { proc, staleMs })}</Text>
@@ -457,7 +457,7 @@ function Interrupted({ status, agent }: { status: RunStatus; agent: boolean }) {
   return (
     <Box tone="warning">
       <Text style={ui.styles.text}>
-        运行{status === "lost" ? "失联" : "结束"}前没写下这个调用的结束记录，不知道结果。
+        流程{status === "lost" ? "失联" : "结束"}前没写下这个调用的结束记录，不知道结果。
         {agent ? "那个 agent 没被停掉，可能还在跑。" : ""}
       </Text>
     </Box>
@@ -542,7 +542,7 @@ function AskBody({
         />
         {!enforced && ask.fence ? (
           <Pressable accessibilityRole="button" onPress={() => onSelect(START)}>
-            <Text style={[ui.styles.small, { color: ui.tone("warning") }]}>⚠ 这一步的约束没有被机械强制；整次运行的说明在「输入」里 ›</Text>
+            <Text style={[ui.styles.small, { color: ui.tone("warning") }]}>⚠ 这一步的约束没有被机械强制；整次流程的说明在「输入」里 ›</Text>
           </Pressable>
         ) : null}
       </Sec>

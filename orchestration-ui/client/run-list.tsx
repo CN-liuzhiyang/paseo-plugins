@@ -40,7 +40,7 @@ export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(run
   return (
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <View style={{ gap: 4 }}>
-        <Text style={ui.styles.title}>编排运行</Text>
+        <Text style={ui.styles.title}>流程</Text>
         {data?.logDir ? <Where host={host} info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
       </View>
       {error ? (
@@ -51,16 +51,16 @@ export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(run
         </Banner>
       ) : null}
       {!data ? (
-        error ? null : <Text style={ui.styles.muted}>正在读取运行记录……</Text>
+        error ? null : <Text style={ui.styles.muted}>正在读取流程记录……</Text>
       ) : data.state === "config" ? (
-        <Banner tone="danger" icon="TriangleAlert" title="不知道运行记录在哪">
+        <Banner tone="danger" icon="TriangleAlert" title="不知道流程记录在哪">
           <Text style={ui.styles.text} selectable>
             {data.detail}
           </Text>
           <Text style={ui.styles.muted}>修好这个文件，或者在插件设置里直接填 logDir。</Text>
         </Banner>
       ) : data.state === "unreadable" ? (
-        <Banner tone="danger" icon="TriangleAlert" title="运行记录的目录读不了">
+        <Banner tone="danger" icon="TriangleAlert" title="流程记录的目录读不了">
           <Text style={ui.styles.text} selectable>
             {data.detail}
           </Text>
@@ -126,10 +126,10 @@ function Where({ host, info, total, shown, onSettings }: { host: string; info: L
 function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean }) {
   const ui = useUi();
   return (
-    <Banner tone="neutral" icon="Inbox" title="还没有运行记录">
+    <Banner tone="neutral" icon="Inbox" title="还没有流程记录">
       <Text style={ui.styles.text}>
         {missing
-          ? `目录 ${info?.runsDir ?? "runs"} 还不存在：还没有哪次运行在这里写过事件，或者 logDir 指错了地方。`
+          ? `目录 ${info?.runsDir ?? "runs"} 还不存在：还没有哪次流程在这里写过事件，或者 logDir 指错了地方。`
           : `目录 ${info?.runsDir ?? "runs"} 是空的。`}
       </Text>
       <Text style={ui.styles.text}>
@@ -137,7 +137,7 @@ function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean })
       </Text>
       <Block text={LAUNCH} />
       <Text style={ui.styles.muted}>
-        只有按运行事件契约（orchestration/EVENTS.md）写事件的运行时才会出现在这里；logDir 下按天写的审计日志不是运行记录。
+        只有按运行事件契约（orchestration/EVENTS.md）写事件的运行时才会出现在这里；logDir 下按天写的审计日志不是流程记录。
         flow 在另一台机器、或用另一个 logDir 跑的，要在插件设置里把位置指过去。
       </Text>
     </Banner>
@@ -198,7 +198,7 @@ function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId:
   const label = (
     <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1 }}>
       <Text style={[ui.styles.strong, { flexShrink: 0 }]} numberOfLines={1}>
-        {run.flowName ?? "（不是运行记录）"}
+        {run.flowName ?? "（不是流程记录）"}
       </Text>
       <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
         {run.inputLabel ?? shortId(run.runId)}
@@ -214,7 +214,7 @@ function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId:
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`打开运行 ${run.flowName ?? run.runId}，${RUN_STATUS_LABEL[run.status]}`}
+      accessibilityLabel={`打开流程 ${run.flowName ?? run.runId}，${RUN_STATUS_LABEL[run.status]}`}
       onPress={() => onOpen(run.runId)}
       style={({ pressed }) => ({
         flexDirection: ui.compact ? "column" : "row",

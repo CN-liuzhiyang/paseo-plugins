@@ -9,7 +9,7 @@ import { RUN_LOOK } from "./looks";
 import { RunDetail } from "./run-detail";
 import { Banner, Button, UiProvider, useUi } from "./ui";
 
-// The workspace's 编排运行 tab. A run started by an agent puts that agent and every agent it asks
+// The workspace's 流程 tab. A run started by an agent puts that agent and every agent it asks
 // into the same workspace, so the run sits here as a tab beside them: to an agent and back is one
 // tab switch each way. On top, the runs started from this workspace; below, the one picked --
 // the same view as the sidebar screen.
@@ -88,19 +88,19 @@ function Panel({ workspaceId, focus, openAll }: { workspaceId: string; focus: Fo
     return (
       <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
         {probes}
-        {error ? <Banner tone="danger" icon="TriangleAlert" title="读不到运行列表"><Text style={ui.styles.text}>{error}</Text></Banner> : null}
+        {error ? <Banner tone="danger" icon="TriangleAlert" title="读不到流程列表"><Text style={ui.styles.text}>{error}</Text></Banner> : null}
         {data && data.state !== "ok" ? (
-          <Banner tone="warning" icon="FolderX" title="不知道运行记录在哪"><Text style={ui.styles.text}>{data.detail}</Text></Banner>
+          <Banner tone="warning" icon="FolderX" title="不知道流程记录在哪"><Text style={ui.styles.text}>{data.detail}</Text></Banner>
         ) : null}
         {!data && !error ? <Text style={ui.styles.muted}>正在读取……</Text> : null}
         {data?.state === "ok" ? (
-          <Banner tone="neutral" icon="Workflow" title="这个 workspace 里还没有编排运行">
+          <Banner tone="neutral" icon="Workflow" title="这个 workspace 里还没有流程">
             <Text style={ui.styles.text}>
-              在这里的 agent 里跑 flow（orch.mjs run …），它的运行就会出现在这个标签里，发起它的对话里也会有一张卡片。终端里跑的运行没有发起对话，只在全部运行里。
+              在这里的 agent 里跑 flow（orch.mjs run …），它就会出现在这个标签里，发起它的对话里也会有一张卡片。终端里跑的流程没有发起对话，只在全部流程里。
             </Text>
           </Banner>
         ) : null}
-        <Button icon="List" label="打开全部运行" onPress={openAll} />
+        <Button icon="List" label="打开全部流程" onPress={openAll} />
       </ScrollView>
     );
   }

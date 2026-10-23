@@ -24,10 +24,10 @@ export default function contribute(client: PluginClientContext) {
   };
   const Screen = (props: PluginScreenProps) => <RunsSurface {...props} actions={actions} />;
   const cleanups = [
-    client.addScreen({ id: SCREEN_ID, title: "编排运行", Component: Screen }),
+    client.addScreen({ id: SCREEN_ID, title: "流程", Component: Screen }),
     client.addSidebarHeaderItem({
       id: "runs",
-      title: "编排运行",
+      title: "流程",
       Component: ({ currentScreen, openScreen }: PluginSidebarItemProps) => (
         <SidebarRow icon="Workflow" active={currentScreen?.screenId === SCREEN_ID} onPress={() => openScreen({ screenId: SCREEN_ID })} />
       ),
@@ -35,17 +35,17 @@ export default function contribute(client: PluginClientContext) {
     client.addWorkspacePanel({
       id: PANEL_ID,
       context: "workspace",
-      title: "编排运行",
+      title: "流程",
       icon: "Workflow",
       locations: ["workspace"],
       Component: makeRunsPanel({ focus, openAll }),
     }),
-    client.addSettingsScreen({ id: "orchestration-ui", title: "编排运行", icon: "Workflow", Component: OrchestrationSettings }),
+    client.addSettingsScreen({ id: "orchestration-ui", title: "流程", icon: "Workflow", Component: OrchestrationSettings }),
     client.addCommandCenterItem({
       id: "open-runs",
-      title: "打开编排运行",
+      title: "打开流程",
       icon: "Workflow",
-      keywords: ["orchestration", "flow", "run", "编排", "运行"],
+      keywords: ["orchestration", "flow", "run", "流程", "编排", "运行"],
       context: "global",
       onSelect({ openScreen }) {
         openScreen({ screenId: SCREEN_ID });

@@ -1,13 +1,13 @@
-# orchestration-ui：编排运行
+# orchestration-ui：流程
 
 只读地查看编排运行时（[`../orchestration/`](../orchestration/)）每次运行干了什么。运行出现在三个地方：
 
 - **发起它的对话里的卡片**：从 Paseo agent 里跑的 flow，会在那个 agent 的对话里放一张卡片，跟着运行原地更新：
   flow 和输入、一句话（在做什么 / 等你审批什么 / 结论）、阶段色带、用时、花费；人闸在等时卡片变黄，多一个
-  「去审批」。点「打开运行」进下面的标签页。
-- **workspace 里的「编排运行」标签页**：发起的 agent 和它派出的 agent 都在同一个 workspace 里，运行也作为
+  「去审批」。点「打开流程」进下面的标签页。
+- **workspace 里的「流程」标签页**：发起的 agent 和它派出的 agent 都在同一个 workspace 里，运行也作为
   一个标签放在那里，去某个 agent 的对话、再回来，各点一次标签。顶上是这个 workspace 发起过的运行。
-- **侧边栏「编排运行」**：全部运行的索引。终端里跑的（没有发起对话）、别的机器上的，只在这里。
+- **侧边栏「流程」**：全部运行的索引。终端里跑的（没有发起对话）、别的机器上的，只在这里。
 
 详情页分四层，每层回答一个问题：
 
@@ -131,8 +131,8 @@ paseo plugin install /absolute/path/to/paseo-plugins/orchestration-ui
 ```
 
 要求 Paseo 0.11 及以上（screen 参数），发起对话里的卡片另外要 `server.paseo`（见上）。daemon 的
-`pluginsEnabled` 要开着。装完 `paseo plugin ls` 里应是 `running`，侧边栏出现「编排运行」，workspace 的
-新标签里有「编排运行」，Command Center 里有「打开编排运行」，设置 → 插件下有它的设置页。
+`pluginsEnabled` 要开着。装完 `paseo plugin ls` 里应是 `running`，侧边栏出现「流程」，workspace 的
+新标签里有「流程」，Command Center 里有「打开流程」，设置 → 插件下有它的设置页。
 
 ## 开发
 
@@ -190,7 +190,7 @@ client/value.tsx         按 schema 渲染结构化输出，长文本、长列�
 client/fold.ts           折叠规则
 client/resize.tsx        可拖宽的抽屉；client/sizes.ts 是它的宽度上下限
 client/run-card.tsx      时间线里的运行卡片
-client/run-panel.tsx     workspace 的「编排运行」标签页
+client/run-panel.tsx     workspace 的「流程」标签页
 client/focus.ts          标签页显示哪个运行、哪个节点（打开它的地方先写，标签页读）
 client/surface.tsx       侧边栏 screen：列表或一个运行，运行 id 在 screen 参数里
 client/affair.tsx        "属于：<label>"（详情页顶上）和列表行上的小标签；去哪儿由 shared/affair.ts 定

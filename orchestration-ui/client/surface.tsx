@@ -10,7 +10,7 @@ export const SCREEN_ID = "runs";
 export interface SurfaceActions {
   openSettings(): void;
   openScreen(input: PluginOpenScreenInput): void;
-  /** Opens the run in a workspace's 编排运行 tab. */
+  /** Opens the run in a workspace's 流程 tab. */
   openInWorkspace(workspaceId: string, runId: string, select: string | null): void;
   paseo: PaseoApi;
 }
