@@ -672,7 +672,7 @@ export default {
     const question = removed.length > 0 ? `${short} 的 \`${key}\` 从外网开关文件里删掉了，是全量后清理，还是撤掉了？` : `${short} 外放了，但外网开关文件里一直没有 \`${key}\`：灰度开了吗？`;
     const k = `rollout:${id}:${n}`;
     if (!byKey(k) && Date.parse(backstopAt) <= Date.parse(ctx.now)) {
-      return out("dropped", "done", removed.length > 0 ? `\`${key}\` 早就从外网开关里删了，太久了，不问了` : `已外放，外网开关里一直没有 \`${key}\`，太久了，不问了`, nobody);
+      return out("dropped", "done", removed.length > 0 ? `\`${key}\` 早就从外网开关里删了，太久了，不问了` : `${outWord}，外网开关里一直没有 \`${key}\`，太久了，不问了`, nobody);
     }
     commitments.push({
       key: k,
@@ -692,7 +692,7 @@ export default {
         allowOther: true,
       },
       brief: [
-        removed.length > 0 ? `外网开关文件里之前有 \`${key}\`（最高 ${Math.max(...removed.map((x) => x.peak))}%），现在没了。删掉可能是全量后清理，也可能是撤掉了，文件本身分不出来。` : `已外放（${signals.join("；")}），但外网开关文件里没有 \`${key}\`。`,
+        removed.length > 0 ? `外网开关文件里之前有 \`${key}\`（最高 ${Math.max(...removed.map((x) => x.peak))}%），现在没了。删掉可能是全量后清理，也可能是撤掉了，文件本身分不出来。` : `${outWord}（${signals.join("；")}），但外网开关文件里没有 \`${key}\`。`,
         "",
         ...known,
         `- 外网开关：${show(outer)}${inner.length ? `；内网：${show(inner)}` : ""}`,
@@ -706,7 +706,7 @@ export default {
     return out(
       "rolling-out",
       "waiting",
-      asked ? `灰度判不准，问你了，还没回答（开关：${show(outer)}）` : removed.length > 0 ? `\`${key}\` 从外网开关里删了，${trigger.slice(5, 16).replace("T", " ")} 问你` : `已外放，外网开关里还没有 \`${key}\`，${trigger.slice(5, 16).replace("T", " ")} 还没有就问你`,
+      asked ? `灰度判不准，问你了，还没回答（开关：${show(outer)}）` : removed.length > 0 ? `\`${key}\` 从外网开关里删了，${trigger.slice(5, 16).replace("T", " ")} 问你` : `${outWord}，外网开关里还没有 \`${key}\`，${trigger.slice(5, 16).replace("T", " ")} 还没有就问你`,
       { actor: asked ? "me" : "system", what: asked ? "回答灰度情况" : "等开关文件" },
       commitments,
     );

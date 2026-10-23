@@ -162,12 +162,14 @@ export type ActionStatus = "planned" | "done" | "failed" | "in-doubt" | "suppres
 
 export interface Action {
   key: string;
-  kind: "ask" | "note.set" | "commitment.ensure" | "commitment.cancel" | "card.close";
+  kind: "ask" | "note.set" | "commitment.ensure" | "commitment.cancel" | "card.close" | "notify";
   subject: string;
   summary: string;
   status: ActionStatus;
   reason: string | null;
   at: string;
+  /** For a notify: how many times it was tried. */
+  tries?: number;
 }
 
 export interface SourceHealth {

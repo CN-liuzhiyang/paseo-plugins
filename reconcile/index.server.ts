@@ -8,7 +8,7 @@ import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createCarrier } from "./server/carrier";
 import { ConfigError, loadConfig } from "./server/config";
-import { createEngine, type Engine, type EngineStatus } from "./server/engine";
+import { createEngine, type Deliver, type Engine, type EngineStatus } from "./server/engine";
 import { exec } from "./server/exec";
 import { createInboxProvider } from "./server/inbox";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
@@ -55,6 +55,9 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
   const settings = server.registerSettings(settingsDefinition);
   // COMPAT(server.paseo): a fork-only extension point; without it the controller only rehearses.
   const paseo = (server as PluginServerContext & { readonly paseo?: PaseoApi }).paseo;
+  // COMPAT(server.deliver): a fork-only extension point; without it cards stay in Paseo alone.
+  const host = server as PluginServerContext & { deliver?: Deliver };
+  const deliver: Deliver | null = typeof host.deliver === "function" ? (channelId, message) => host.deliver!(channelId, message) : null;
 
   let engine: Engine | null = null;
   let store: Store | null = null;
@@ -165,6 +168,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         home,
         tickSeconds: values.tickSeconds,
         notices: why ? [why] : [],
+        deliver,
         now: Date.now,
         log,
         writeStatus: (status) => {

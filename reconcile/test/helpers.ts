@@ -135,7 +135,9 @@ export interface World {
   cards: Array<{ card: Card; content: CardContent; attempt: number; agentId: string }>;
   archived: string[];
   /** files: switch files (by name) that fail to read while the others do. */
-  fail: { source: Error | null; carrier: Error | null; files: Set<string> };
+  fail: { source: Error | null; carrier: Error | null; files: Set<string>; deliver: Error | null };
+  /** What server.deliver was handed, failed tries included. */
+  deliveries: Array<{ channel: string; to: string; idempotencyKey: string; title: string; text: string; status: string; ok: boolean }>;
   polls: number;
   /** While set, the tracker source's poll waits for it: a reconcile that runs long. */
   hold: Promise<void> | null;
@@ -152,7 +154,7 @@ export interface World {
   close(): void;
 }
 
-export async function makeWorld(options: { start: string; mode?: "live" | "dry-run"; config?: Parameters<typeof writeConfig>[1] } ): Promise<World> {
+export async function makeWorld(options: { start: string; mode?: "live" | "dry-run"; config?: Parameters<typeof writeConfig>[1]; deliver?: boolean } ): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
   const dataDir = path.join(dir, "data");
@@ -164,12 +166,13 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const clock = { now: at(options.start) };
   const cards: World["cards"] = [];
   const archived: string[] = [];
-  const fail: World["fail"] = { source: null, carrier: null, files: new Set() };
+  const fail: World["fail"] = { source: null, carrier: null, files: new Set(), deliver: null };
+  const deliveries: World["deliveries"] = [];
   const logs: string[] = [];
   const statuses: unknown[] = [];
   let agents = 0;
 
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, polls: 0, hold: null, logs, statuses } as World;
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -241,6 +244,13 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),
+      deliver:
+        options.deliver === false
+          ? null
+          : async (channel, message) => {
+              deliveries.push({ channel, ...message, ok: !fail.deliver });
+              if (fail.deliver) throw fail.deliver;
+            },
     });
     await world.engine.recover();
   };

@@ -46,10 +46,17 @@ export interface EngineDeps {
   tickSeconds: number;
   /** Shown at the top of every status, such as why a live setting only rehearses. */
   notices?: string[];
+  /** The host's server.deliver; absent on a host without it. */
+  deliver?: Deliver | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
 }
+
+export type Deliver = (channelId: string, message: { to: string; idempotencyKey: string; title: string; text: string; status: "succeeded" | "failed" }) => Promise<void>;
+
+/** A card's message to one of its person's channels is tried this many times, once per reconcile. */
+const MAX_NOTIFY_TRIES = 3;
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const commitmentId = (key: string) => `c_${hash(key).slice(0, 16)}`;
@@ -663,6 +670,9 @@ export function createEngine(deps: EngineDeps) {
       await startCarrier(card, nowMs);
     }
 
+    // Messages to channels that failed: tried again, once per reconcile, while the card is up.
+    if (deps.mode === "live") for (const card of openCards()) if (card.status === "raised" && card.agentId) await notify(card, nowMs);
+
     const ignored: EventBody[] = [];
     const byPerson = new Map<string, Due[]>();
     for (const c of Object.values(state.commitments)) {
@@ -736,7 +746,10 @@ export function createEngine(deps: EngineDeps) {
         reason: null,
       };
       plan.push({ at: nowIso(nowMs), kind: "card", person: personId, summary: `发问题卡给 ${person.name}：「${card.title}」（${all.length} 个问题${carried.length > 0 ? `，含 ${carried.length} 个上一张卡上没答的` : ""}）` });
-      if (deps.mode === "dry-run") continue;
+      if (deps.mode === "dry-run") {
+        for (const target of person.notify) plan.push({ at: nowIso(nowMs), kind: "card", person: personId, summary: `会发 ${labelOf(target)}：${card.title}` });
+        continue;
+      }
       if (!deps.carrier) {
         lastProblems.push("这个 Paseo 没有给插件提供 server.paseo，发不了卡片");
         continue;
@@ -776,6 +789,8 @@ export function createEngine(deps: EngineDeps) {
         ...dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody),
         ...replaces.map((old) => ({ type: "card.changed", id: old.id, patch: { status: "closed", reason: `并进了新卡 ${card.id}`, closedAt: nowIso(nowMs) } }) as EventBody),
       ]);
+      // Up: the same moment, to the person's channels. A failure there does not take the card back.
+      await notify(card, nowMs);
     } catch (error) {
       const message = (error as Error).message;
       deps.log(`card ${card.id}: could not start its carrier: ${message}`);
@@ -797,6 +812,48 @@ export function createEngine(deps: EngineDeps) {
       });
       append(events);
       lastProblems.push(`发不了卡片：${message}`);
+    }
+  }
+
+  const labelOf = (target: { channel: string; label?: string }) => target.label ?? target.channel;
+  const notifyKey = (card: Card, target: { channel: string; to: string }) => `notify:${card.id}:${target.channel}:${target.to}`;
+
+  /** What a card says on a channel where it cannot be answered: statements in full, questions with their options. */
+  function notifyText(card: Card): string {
+    const content = contentOf(card);
+    const asks = content.questions.some((q) => q.options.length > 1);
+    const parts = content.questions.map((q) => {
+      const c = state.commitments[q.commitmentId];
+      // A question with one option is a statement to acknowledge: all of it, the brief included.
+      if (q.options.length === 1) return [q.question, ...(c?.brief ? ["", c.brief] : [])].join("\n");
+      return [q.question, ...q.options.map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`), ...(q.allowOther ? ["- 其他（自己写）"] : [])].join("\n");
+    });
+    return [...parts.map((p, i) => (content.questions.length > 1 ? `${i + 1}. ${p}` : p)), ...(asks ? ["在 Paseo「事务」里回答"] : [])].join("\n\n");
+  }
+
+  /**
+   * Sends a raised card to each channel its person has, once per card: a carrier raised again for
+   * the same card (a restart) does not send again, a new card does. Up to MAX_NOTIFY_TRIES tries,
+   * one per reconcile; each try is in the ledger, and the channel gets a key stable per card.
+   */
+  async function notify(card: Card, nowMs: number): Promise<void> {
+    const person = config.persons[card.person];
+    if (!person || !deps.deliver || stopped) return;
+    for (const target of person.notify) {
+      const key = notifyKey(card, target);
+      const before = state.ledger[key];
+      if (before?.status === "done") continue;
+      const tries = (before?.tries ?? 0) + 1;
+      if (tries > MAX_NOTIFY_TRIES) continue;
+      const summary = `发 ${labelOf(target)}：${card.title}`;
+      try {
+        await deps.deliver(target.channel, { to: target.to, idempotencyKey: `${deps.instanceId}:${key}`, title: card.title, text: notifyText(card), status: "succeeded" });
+        append([{ type: "action", action: { ...action(key, "notify", card.id, summary, "done", null, nowMs), tries } }]);
+      } catch (error) {
+        const message = (error as Error).message;
+        deps.log(`card ${card.id}: sending to ${target.channel} failed (${tries}): ${message}`);
+        append([{ type: "action", action: { ...action(key, "notify", card.id, summary, "failed", message.slice(0, 300), nowMs), tries } }]);
+      }
     }
   }
 
@@ -995,6 +1052,21 @@ export function createEngine(deps: EngineDeps) {
     status,
   };
 
+  /** Channels a card should have gone to and did not, for the open cards; and a host that cannot send at all. */
+  function notifyProblems(): string[] {
+    const out: string[] = [];
+    const wanted = Object.values(config.persons).flatMap((p) => p.notify.map(labelOf));
+    if (wanted.length > 0 && !deps.deliver) out.push(`这个 daemon 不支持投递，${[...new Set(wanted)].join("、")} 收不到`);
+    for (const card of openCards()) {
+      for (const target of config.persons[card.person]?.notify ?? []) {
+        const a = state.ledger[notifyKey(card, target)];
+        if (a?.status !== "failed") continue;
+        out.push(`${labelOf(target)} 没发出去：${a.reason ?? "不知道原因"}${(a.tries ?? 0) >= MAX_NOTIFY_TRIES ? `（试了 ${a.tries} 次，不再试）` : ""}`);
+      }
+    }
+    return out;
+  }
+
   function status(): Status {
     const nowMs = deps.now();
     const openCommitments = Object.values(state.commitments).filter((c) => c.status === "scheduled" || c.status === "waiting");
@@ -1054,6 +1126,7 @@ export function createEngine(deps: EngineDeps) {
       problems: [
         ...(deps.notices ?? []),
         ...lastProblems,
+        ...notifyProblems(),
         ...Object.values(state.items)
           .filter((i) => (i.incomplete?.length ?? 0) > 0 && heat(i.key).length > 0)
           .map((i) => `${i.key} 有提交一直读不到，按读到的判断（不据此提醒）：${i.incomplete!.join("；").slice(0, 200)}`),

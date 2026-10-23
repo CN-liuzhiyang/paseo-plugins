@@ -247,6 +247,14 @@ test("a follower is out but does not ask about the rollout: the lead follows the
     assert.equal(w.cards.length, 0);
   }));
 
+test("out only by inference, and the key not in the outer file yet: the headline says the release is inferred", () =>
+  withWorld({ start: "2026-10-21 10:00" }, async (w) => {
+    w.innerFlags.set("feature_x", { enabled: true, grey: 100 });
+    w.items.set("gcp-demo:1", keyed({ release: "2026-10-22", revisions: [{ id: "R-101", repo: "demo", branch: "release", at: "2026-10-12T10:00:00+08:00", author: "甲", summary: "add feature_x", added: [["feature_x", 'if switches.on("feature_x") then']] }] }));
+    await w.run("2026-10-22 10:00");
+    assert.match(headline(w, 1), /^推断已外放，外网开关里还没有 `feature_x`，\d\d-\d\d \d\d:\d\d 还没有就问你$/);
+  }));
+
 test("a follower ends when its lead ends, and says whose end it followed", () =>
   withWorld({ start: "2026-10-23 10:00" }, async (w) => {
     w.innerFlags.set("feature_x", { enabled: true, grey: 100, checker: ["CheckFeatureX", 2] });

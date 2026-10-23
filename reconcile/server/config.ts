@@ -26,6 +26,11 @@ const personSchema = z
     tz: z.string().min(1),
     quiet: z.object({ work: windowText, personal: windowText, family: windowText }).partial().strict(),
     pushPerDay: z.number().int().min(0).max(100),
+    /**
+     * Where a card for this person is also sent when it is raised: a channel some plugin registers
+     * (server.deliver), an address that channel understands, and what to call it on the page.
+     */
+    notify: z.array(z.object({ channel: z.string().min(1), to: z.string().min(1), label: z.string().min(1).optional() }).strict()).default([]),
   })
   .strict();
 

@@ -64,6 +64,12 @@ merge」阶段，它的提交出现在发布分支上就往下走。只有 key �
   选择题（选项 + 「其他」），并推到手机上。选项、在「其他」里写字、直接在对话里打字都算回答；收起不算，到下次
   追问时间会再问。答完的卡会被归档。人在侧边栏里归档一张没答的卡，90 秒后算「关掉了」；Paseo 退出时会先关掉所有 agent，
   这种关掉不算，重启后同一张卡会再起一个载体（不打扰时段里先不起，到能打扰时再起，也不重复占每天的额度）。
+- **同时投递**：人的配置里有 `notify`（渠道 id 和地址，渠道由别的插件注册，比如某个 IM 插件），卡起来的同一刻经宿主的
+  `server.deliver` 给每个渠道发一条：标题是卡的标题；只有「知道了」的陈述发全文，问题发问题和选项，最后一行写
+  「在 Paseo「事务」里回答」（渠道里不能回答）。每张卡只发一次：重启后给同一张卡再起载体不再发，并成新卡才发新的；
+  发给渠道的 `idempotencyKey` 也按卡取。卡不起就不发，所以不打扰时段和每天的上限照样管着。发失败不挡卡，页面上写明
+  原因，之后每轮对账再试，一共最多 3 次。宿主没有 `server.deliver` 时卡照常起，页面上写明渠道收不到。演练时计划里
+  列出「会发 <渠道>：<标题>」，不真发。
 - **日志**：所有判断和动作按事件追加进 `<dataDir>/journal/YYYY-MM.jsonl`，定期写快照；重启时重放。每次对账写
   `status.json` 和 `plan.md`（这一轮打算做什么、在管的事）。
 
@@ -83,7 +89,8 @@ merge」阶段，它的提交出现在发布分支上就往下走。只有 key �
 私有配置目录（不进这个仓库）：
 
 ```
-persons.json       { "<id>": { name, admin, tz, quiet: { work?, personal?, family? }, pushPerDay } }
+persons.json       { "<id>": { name, admin, tz, quiet: { work?, personal?, family? }, pushPerDay,
+                                notify?: [ { channel, to, label? } ] } }
 sources.json       [ { id, kind: "gcp", command, gateway: { path, tool, target }, gcpHost, projectId,
                        lookbackDays, watch, activeHours,
                        everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain,
@@ -163,6 +170,6 @@ Paseo 打包时按目录分边界：`client/`、`index.client.tsx` 不能碰 `se
 ## 还没有
 
 - 只有规则产生的承诺（人手登记、agent 登记还没有）；规则只能问人，不能起 flow 或 agent。
-- 卡片只在 Paseo 里；投递到 IM 渠道等 fork 的 `server.deliver`。
+- 渠道里只能看，不能回答；回答还在 Paseo 里。
 - 「知道了」类的提醒卡和要回答的问题卡共用每天的推送额度。
 - 规则改动后「先演练、出 diff、等人确认再生效」现在只在新建承诺超过阈值时触发。
