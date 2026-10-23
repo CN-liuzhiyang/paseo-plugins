@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import fs, { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -79,6 +80,10 @@ test("a copy changed in nothing, or only in a comment, shows no difference; its 
     put(candidate, "policy.json", JSON.stringify(TEST_POLICY, null, 4));
     assert.notEqual((await look(w, candidate)).id, spaced.id, "a file the rules fingerprint does not cover too");
     assert.match(previewText(comment), /没有差异：现在和往后这几个工作日/);
+    // A directory named like a rule is not one, on either side.
+    mkdirSync(path.join(candidate, "rules", "dir.mjs"));
+    mkdirSync(path.join(w.configDir, "rules", "dir.mjs"));
+    assert.equal((await look(w, candidate)).empty, true);
   }));
 
 test("a change that is the same now and differs later shows when it differs (the review's grace 1 and 3)", () => {
@@ -96,7 +101,7 @@ test("a change that is the same now and differs later shows when it differs (the
       assert.equal(later.from, "10-21 00:00", "a workday after the release day");
       // The notice goes out a workday after the release day in use, three with the candidate.
       assert.deepEqual(p.later.asks.map((a) => [a.title, a.round, a.inUse, a.candidate]), [["#1 外放提醒", 1, "10-21 10:00", "10-23 10:00"]]);
-      assert.match(previewText(p), /事项后来变得不一样：\n- #1 示例单 1：从 10-21 00:00 起/);
+      assert.match(previewText(p), /事项的判断后来变得不一样（在用 → 候选）：\n- #1 示例单 1（从 10-21 00:00 起）.*\n  提醒：.*已过 \d 个工作日.* → 无\n/);
     },
     { rules: { "release-followup.mjs": exampleRule(params) }, start: "2026-10-19 10:00", run: "2026-10-20 12:00", items: [issue(1, { release: "2026-10-20", closed: true, status: "关闭" })] },
   ).then(() => undefined);
@@ -199,7 +204,7 @@ test("rules in use that do not load are previewed as the controller runs them: o
     // What differs: the rules in use, broken, are told to the admin half an hour on.
     assert.deepEqual(p.later.asks.map((a) => [a.inUse, a.candidate]), [["10-13 12:30", null]]);
     assert.match(p.later.asks[0]!.title, /^判断方法 mini\.mjs 加载不上$/);
-    assert.match(previewText(p), /⚠ 在用的判断方法 mini\.mjs 现在就加载不上，daemon 接着用 10-13 10:00 存下的那一版/);
+    assert.match(previewText(p), /⚠ 在用的判断方法 mini\.mjs 现在就加载不上，daemon 接着用 10-13 10:00 换上的那一版/);
   }));
 
 test("apply copies what changed only when the preview is the one looked at, and deletes nothing", () =>
@@ -253,16 +258,161 @@ test("the command: diff prints the preview and how to apply it; apply with anoth
     const now = new Date(w.clock.now).toISOString();
     const run = (...args: string[]) => spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8", env: { ...process.env, PASEO_HOME: path.join(w.dir, "no-home") } });
     assert.equal(run("--help").status, 0);
-    const diff = run("diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now);
+    const diff = run("diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now, "--days", "8");
     assert.equal(diff.status, 0, diff.stderr);
     const id = /^改动预览 (p_[0-9a-f]{10})/.exec(diff.stdout)?.[1];
     assert.ok(id, diff.stdout);
-    assert.match(diff.stdout, new RegExp(`要拷回去：reconcile-preview apply --config .+ --candidate .+ --expect ${id}`));
-    const json = JSON.parse(run("diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now, "--json").stdout) as Preview;
+    // Everything that went into the id is in the line to copy.
+    assert.match(diff.stdout, new RegExp(`要拷回去：reconcile-preview apply --config .+ --data .+ --days 8 --now ${now.replace(/[.]/g, "[.]")} --candidate .+ --expect ${id}`));
+    const json = JSON.parse(run("diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now, "--days", "8", "--json").stdout) as Preview;
     assert.equal(json.id, id);
+    const short = run("apply", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--days", "3", "--expect", id);
+    assert.equal(short.status, 2);
+    assert.match(short.stderr, /至少要往后推演 7 个工作日（这次是 3）/);
+    const home = path.join(w.dir, "bad-home");
+    put(home, "plugin-settings/reconcile/reconcile.json", "{");
+    const bad = spawnSync(process.execPath, [BIN, "diff", "--candidate", candidate], { encoding: "utf8", env: { ...process.env, PASEO_HOME: home } });
+    assert.equal(bad.status, 2);
+    assert.match(bad.stderr, /^插件设置读不懂/);
+    assert.doesNotMatch(bad.stderr, /\n\s+at /, "no stack");
     const apply = run("apply", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--now", now, "--expect", "p_0000000000");
     assert.equal(apply.status, 1);
     assert.match(apply.stdout, /差异变了.*没拷/);
     assert.equal(run("diff", "--candidate", candidate).status, 2, "no config to compare with");
     assert.equal(run("diff", "--config", w.configDir, "--data", w.dataDir, "--candidate", candidate, "--said", "x").status, 2);
   }));
+
+/** Runs body with fs.readFileSync calling spy after each read of file (its count so far). */
+async function onRead(file: string, spy: (count: number) => void, body: () => Promise<void>) {
+  const read = fs.readFileSync;
+  let count = 0;
+  fs.readFileSync = ((...args: Parameters<typeof read>) => {
+    const out = read(...args);
+    if (typeof args[0] === "string" && path.resolve(args[0]) === path.resolve(file)) spy(++count);
+    return out;
+  }) as typeof read;
+  syncBuiltinESMExports();
+  try {
+    await body();
+  } finally {
+    fs.readFileSync = read;
+    syncBuiltinESMExports();
+  }
+}
+
+test("apply copies the candidate as it read it: a candidate or config in use changed while it is previewed stops it", () =>
+  withWorld(async (w, candidate) => {
+    put(candidate, "rules/mini.mjs", rule(true, "换了说法"));
+    const options = { configDir: w.configDir, candidateDir: candidate, dataDir: w.dataDir, nowMs: w.clock.now };
+    const p = await look(w, candidate);
+    const copies = () => readdirSync(os.tmpdir()).filter((f) => f.startsWith("reconcile-apply-"));
+    const left = copies();
+    const file = path.join(candidate, "rules", "mini.mjs");
+    const inUse = path.join(w.configDir, "rules", "mini.mjs");
+    // Changed right after it was read: what is previewed is the copy read, and nothing is copied.
+    await onRead(file, (n) => n === 1 && writeFileSync(file, rule(true, "没看过的")), () =>
+      assert.rejects(applyCandidate({ ...options, expect: p.id }), /预览的这几秒里，候选或者在用的文件变了，没拷/),
+    );
+    assert.equal(readFileSync(inUse, "utf8"), rule());
+    // The config in use changed as the candidate is read again, before writing.
+    put(candidate, "rules/mini.mjs", rule(true, "换了说法"));
+    await onRead(file, (n) => n === 2 && writeFileSync(path.join(w.configDir, "policy.json"), JSON.stringify({ ...TEST_POLICY, ruleBreakerChanges: 9 })), () =>
+      assert.rejects(applyCandidate({ ...options, expect: p.id }), /变了，没拷/),
+    );
+    assert.equal(readFileSync(inUse, "utf8"), rule());
+    writeFileSync(path.join(w.configDir, "policy.json"), JSON.stringify(TEST_POLICY));
+    const again = await look(w, candidate);
+    assert.deepEqual((await applyCandidate({ ...options, expect: again.id })).applied, ["rules/mini.mjs"]);
+    assert.equal(readFileSync(inUse, "utf8"), rule(true, "换了说法"));
+    assert.deepEqual(copies(), left, "its own copy is gone");
+  }));
+
+test("a candidate that is, or holds, a link is refused, wherever it leads", () =>
+  withWorld(async (w, candidate) => {
+    rmSync(path.join(candidate, "rules"), { recursive: true });
+    symlinkSync(path.join(w.configDir, "rules"), path.join(candidate, "rules"), "junction");
+    await assert.rejects(look(w, candidate), /候选里的 rules 是个链接/);
+    const whole = path.join(w.dir, "whole");
+    symlinkSync(w.configDir, whole, "junction");
+    await assert.rejects(look(w, whole), /外面/);
+    assert.throws(() => copyConfig(w.configDir, path.join(whole, "rules", "x")), /外面/);
+  }));
+
+test("the id holds how far on it looked, and an ask due before now; apply looks on at least seven workdays", () =>
+  withWorld(
+    async (w, candidate) => {
+      put(candidate, "persons.json", JSON.stringify(person("workdays 09:30-17:00")));
+      w.clock.now = at("2026-10-16 18:19");
+      const before = await look(w, candidate);
+      assert.deepEqual(before.later.asks.filter((a) => a.round === 1).map((a) => a.inUse), ["10-16 18:20"]);
+      w.clock.now = at("2026-10-16 18:21");
+      const after = await look(w, candidate);
+      assert.deepEqual(after.later.asks.filter((a) => a.round === 1).map((a) => a.inUse), ["现在（本该 10-16 18:20）"]);
+      assert.equal(after.id, before.id, "an ask moment passed between them: the same");
+      assert.notEqual((await look(w, candidate, { workdays: 8 })).id, after.id, "looked on further: another id");
+      const short = await look(w, candidate, { workdays: 3 });
+      await assert.rejects(
+        applyCandidate({ configDir: w.configDir, candidateDir: candidate, dataDir: w.dataDir, nowMs: w.clock.now, workdays: 3, expect: short.id }),
+        /至少要往后推演 7 个工作日（这次是 3）/,
+      );
+    },
+    { run: "2026-10-16 18:00" },
+  ));
+
+test("apply writes all or none: a file that cannot be replaced puts back the ones that were", () =>
+  withWorld(async (w, candidate) => {
+    put(candidate, "policy.json", JSON.stringify({ ...TEST_POLICY, ruleBreakerChanges: 5 }));
+    put(candidate, "rules/mini.mjs", `// x\n${rule()}`);
+    const p = await look(w, candidate);
+    const config = tree(w.configDir).map((l) => l.split(" ").slice(0, 2).join(" "));
+    const policy = readFileSync(path.join(w.configDir, "policy.json"), "utf8");
+    const locked = path.join(w.configDir, "rules", "mini.mjs");
+    chmodSync(locked, 0o444);
+    try {
+      await assert.rejects(
+        applyCandidate({ configDir: w.configDir, candidateDir: candidate, dataDir: w.dataDir, nowMs: w.clock.now, expect: p.id }),
+        (error: Error) => error instanceof PreviewError && /^拷的时候出错，没拷（.+）：已经换上的 policy\.json 改回了原样$/.test(error.message),
+      );
+    } finally {
+      chmodSync(locked, 0o644);
+    }
+    assert.equal(readFileSync(path.join(w.configDir, "policy.json"), "utf8"), policy);
+    assert.deepEqual(tree(w.configDir).map((l) => l.split(" ").slice(0, 2).join(" ")), config, "nothing left behind");
+  }));
+
+test("a judgment that differs in one field says which, before and after, in words", () =>
+  withWorld(async (w, candidate) => {
+    put(candidate, "rules/mini.mjs", rule().replace('actor: "me"', 'actor: "them"'));
+    const p = await look(w, candidate);
+    assert.deepEqual(p.cases.map((c) => c.fields), [[{ field: "在等谁", inUse: "你", candidate: "别人" }]]);
+    assert.match(previewText(p), /事项的判断（1 个变了，在用 → 候选）：\n- #1 示例单 1：等着问\n  在等谁：你 → 别人\n/);
+  }));
+
+test("what only the page shows: the list's group and stage name, and the stages declared; not the breaker's", () =>
+  withWorld(async (w, candidate) => {
+    put(candidate, "rules/mini.mjs", rule().replace('stages: ["s"]', 'stages: [{ id: "s", label: "等回答" }, { id: "e", label: "结束", end: true, endKind: "dropped" }]'));
+    const p = await look(w, candidate);
+    assert.deepEqual(p.cases, [], "the same stage: the judgment is the same");
+    assert.equal(p.breaker, null);
+    assert.equal(p.empty, false);
+    assert.deepEqual(p.page.rows.map((r) => [r.label, r.fields.map((f) => [f.field, f.inUse, f.candidate])]), [["#1 示例单 1", [["阶段名", "s", "等回答"]]]]);
+    assert.deepEqual(p.page.stages, [{ rule: "mini", changes: ["新加阶段 「结束」（e）", "s 改名：「s」→「等回答」"] }]);
+    assert.match(previewText(p), /## 页面上看到的（不算进熔断）\n列表里的事项（1 个变了，在用 → 候选）：\n- #1 示例单 1\n  阶段名：s → 等回答\n判断方法声明的阶段：\n- mini\n  新加阶段 「结束」（e）\n  s 改名：「s」→「等回答」\n/);
+    // A different stage is the judgment's, with the names each side gives it.
+    put(candidate, "rules/mini.mjs", rule().replace('stages: ["s"]', 'stages: ["s", { id: "t", label: "下一步" }]').replace('stage: "s"', 'stage: "t"'));
+    const moved = await look(w, candidate);
+    assert.deepEqual(moved.cases.map((c) => c.fields.find((f) => f.field === "阶段")), [{ field: "阶段", inUse: "s", candidate: "下一步（t）" }]);
+  }));
+
+test("what the preview cannot see is said: items cold on both sides, the hour, the daemon's memory, the candidate's code", () =>
+  withWorld(
+    async (w, candidate) => {
+      put(candidate, "rules/mini.mjs", `// a note\n${rule()}`);
+      const p = await look(w, candidate);
+      assert.equal(p.empty, true);
+      assert.equal(p.coldBoth, 1);
+      assert.match(previewText(p), /没有差异：.*都一样。（1 个事项两边都是冷的，没判断）/);
+      for (const said of [/按整点取样/, /不是 daemon 内存里的：.*要 reload 才生效/, /会把候选的判断方法当代码执行/, /现在有 1 个事项两边都是冷的/]) assert.ok(p.caveats.some((c) => said.test(c)), String(said));
+    },
+    { items: [issue(1, { fields: { Release: "2026-10-16" } }), issue(9, { title: "【总单】示例功能", release: "2026-10-23", status: "开发中" })] },
+  ));

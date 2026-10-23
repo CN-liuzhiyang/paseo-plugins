@@ -24,6 +24,8 @@ export type EventBody =
   /** A rule file that does not load: since when (kept while it stays broken), and the copy that runs instead (null: none). */
   | { type: "rules.broken"; file: string; error: string; fallback: string | null; since: string }
   | { type: "rules.mended"; file: string }
+  /** The controller saved a copy of a rule file (its sha256, and the source its rule judges); sha256 null: the copy is gone. */
+  | { type: "rules.kept"; file: string; sha256: string | null; source?: string }
   | { type: "workspace"; workspaceId: string }
   | { type: "eval.candidate"; kind: EvalKind; subject: string; detail: string }
   | { type: "annotation.added"; annotation: Annotation }
@@ -56,7 +58,8 @@ export interface State {
   ledger: Record<string, Action>;
   sources: Record<string, { cursor: unknown; health: SourceHealth }>;
   /** broken: absent in states from before it was kept. */
-  rules: { fingerprint: string | null; held: RulesHeld | null; released: string[]; broken?: Record<string, RuleBroken> };
+  /** broken, kept: absent in states from before they were kept. A broken file "" is a rules directory with no file in it. */
+  rules: { fingerprint: string | null; held: RulesHeld | null; released: string[]; broken?: Record<string, RuleBroken>; kept?: Record<string, { sha256: string; source?: string }> };
   workspaceId: string | null;
   evals: number;
   annotations: Record<string, Annotation>;
@@ -156,6 +159,10 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     case "rules.mended":
       if (state.rules.broken) delete state.rules.broken[event.file];
+      return;
+    case "rules.kept":
+      if (event.sha256 === null) delete (state.rules.kept ??= {})[event.file];
+      else (state.rules.kept ??= {})[event.file] = { sha256: event.sha256, ...(event.source ? { source: event.source } : {}) };
       return;
     case "annotation.added":
       state.annotations[event.annotation.id] = event.annotation;

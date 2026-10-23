@@ -16,12 +16,13 @@ const HELP = `用法：
   reconcile-preview diff --candidate <目录>
       预览候选和在用的差异：现在，和往后几个工作日（不改任何在用的东西）
   reconcile-preview apply --candidate <目录> --expect <编号>
-      再预览一次，差异还是 diff 给的那个编号，才把候选里改了的文件拷回在用的配置目录
+      把候选读一份再预览一次，差异还是 diff 给的那个编号、预览期间候选和在用的都没变，
+      才把这份里改了的文件拷回在用的配置目录（要么全拷上，要么一个不动）
 
 选项：
   --config  在用的配置目录（缺省读插件设置里的 configDir）
   --data    插件的数据目录（缺省读插件设置里的 dataDir，或 $PASEO_HOME/plugin-data/reconcile）
-  --days    往后推演几个工作日（缺省 7）
+  --days    往后推演几个工作日，0 到 30（缺省 7；apply 至少 7，要和 diff 用的一样）
   --now     从哪个时刻算起（ISO 时间，缺省现在）
   --json    输出 JSON（给 agent 读）`;
 
@@ -55,7 +56,12 @@ for (let i = 0; i < rest.length; i++) {
 // The plugin's settings, for where its config and data are.
 const home = process.env.PASEO_HOME || path.join(os.homedir(), ".paseo");
 const settingsFile = path.join(home, "plugin-settings", "reconcile", "reconcile.json");
-const settings = existsSync(settingsFile) ? (JSON.parse(readFileSync(settingsFile, "utf8")).values ?? {}) : {};
+let settings = {};
+try {
+  settings = existsSync(settingsFile) ? (JSON.parse(readFileSync(settingsFile, "utf8")).values ?? {}) : {};
+} catch (error) {
+  fail(`插件设置读不懂（${settingsFile}）：${error.message}；用 --config、--data 直接给出目录`);
+}
 const configDir = flags.config || settings.configDir;
 if (!configDir) fail(`不知道在用的配置目录：用 --config 给出（${settingsFile} 里也没有 configDir）`);
 const dataDir = flags.data || settings.dataDir || path.join(home, "plugin-data", "reconcile");
@@ -85,7 +91,8 @@ try {
   const options = { configDir, candidateDir: flags.candidate, dataDir, nowMs, workdays };
   if (cmd === "diff") {
     const p = await preview(options);
-    const where = [flags.config && `--config ${flags.config}`, flags.data && `--data ${flags.data}`].filter(Boolean).map((f) => `${f} `).join("");
+    // Everything that went into the id, so that the line copied gives the same one.
+    const where = ["config", "data", "days", "now"].filter((f) => flags[f] !== undefined).map((f) => `--${f} ${flags[f]} `).join("");
     process.stdout.write(flags.json ? `${JSON.stringify(p, null, 2)}\n` : `${previewText(p)}\n要拷回去：reconcile-preview apply ${where}--candidate ${flags.candidate} --expect ${p.id}\n`);
     process.exit(0);
   }
@@ -96,7 +103,9 @@ try {
     process.exit(p.id === flags.expect ? 0 : 1);
   }
   if (p.id !== flags.expect) {
-    process.stdout.write(`差异变了（现在是 ${p.id}，不是 ${flags.expect}：数据、在用的配置或者候选变了，或者过了一天），没拷。新的预览：\n\n${previewText(p)}`);
+    process.stdout.write(
+      `差异变了（现在是 ${p.id}，不是 ${flags.expect}），没拷。可能是：数据、在用的配置或者候选变了；--days、--now 和 diff 时不一样；中间过了一个要问、追问的时刻，或者过了一天。新的预览：\n\n${previewText(p)}`,
+    );
     process.exit(1);
   }
   if (applied.length === 0) {

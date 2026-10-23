@@ -709,8 +709,12 @@ export function createEngine(deps: EngineDeps) {
   async function currentRules(): Promise<{ set: RuleSet; changed: boolean }> {
     const { fingerprint } = fingerprintOf(config.rulesDir);
     if (!ruleset || ruleset.dirFingerprint !== fingerprint) {
-      ruleset = await loadRules(config.rulesDir, deps.rulesKeep ?? null);
+      // A copy is trusted only as the sha256 recorded when it was saved here.
+      const known = Object.fromEntries(Object.entries(state.rules.kept ?? {}).map(([file, k]) => [file, k.sha256]));
+      ruleset = await loadRules(config.rulesDir, deps.rulesKeep ? { ...deps.rulesKeep, known } : null);
       for (const e of ruleset.errors) deps.log(`rule ${e.file}: ${e.error}`);
+      for (const e of ruleset.keepErrors) deps.log(`keeping a copy of rule ${e.file || "(the copies)"} failed: ${e.error}`);
+      append(ruleset.kept.map((k) => ({ type: "rules.kept" as const, file: k.file, sha256: k.sha256, ...(k.source ? { source: k.source } : {}) })));
     }
     return { set: ruleset, changed: state.rules.fingerprint !== ruleset.fingerprint };
   }
@@ -719,29 +723,41 @@ export function createEngine(deps: EngineDeps) {
   function noteBroken(set: RuleSet, nowMs: number): void {
     const broken = state.rules.broken ?? {};
     const events: EventBody[] = [];
-    for (const e of set.errors) {
+    // A rules directory with no file left in it (cleared, a branch switched) while items were being
+    // judged: told like a file that does not load, though nothing of it can go on.
+    const errors = set.files.length === 0 && unjudged("") > 0 ? [{ file: "", error: "判断方法目录里一个文件都没有" }] : set.errors;
+    for (const e of errors) {
       const was = broken[e.file];
       const error = e.error.slice(0, 500);
       const fallback = e.fallback ?? null;
       if (was && was.error === error && was.fallback === fallback) continue;
       events.push({ type: "rules.broken", file: e.file, error, fallback, since: was?.since ?? nowIso(nowMs) });
     }
-    for (const file of Object.keys(broken)) if (!set.errors.some((e) => e.file === file)) events.push({ type: "rules.mended", file });
+    for (const file of Object.keys(broken)) if (!errors.some((e) => e.file === file)) events.push({ type: "rules.mended", file });
     append(events);
   }
 
-  /** Items judged before that no rule judges now. */
-  const unjudged = () => Object.values(state.items).filter((i) => state.assessments[i.key] && !(ruleset?.rules ?? []).some((r) => r.source === i.source)).length;
+  /**
+   * Items judged before that no rule judges now: of the source a rule file judged when it last
+   * loaded, or of any source when that is not known (or file is "": the whole directory).
+   */
+  const unjudged = (file: string) => {
+    const source = file ? state.rules.kept?.[file]?.source : undefined;
+    return Object.values(state.items).filter((i) => state.assessments[i.key] && (!source || i.source === source) && !(ruleset?.rules ?? []).some((r) => r.source === i.source)).length;
+  };
   const clockOf = (isoText: string) => nowIso(Date.parse(isoText)).slice(5, 16).replace("T", " ");
 
-  /** The rule file a broken-rules card is about (its key ends in a time, which has colons). */
-  const brokenFile = (c: Commitment) => c.title.replace(/^判断方法 /, "").replace(/ 加载不上$/, "");
+  const EMPTY_TITLE = "判断方法目录是空的";
+  const brokenTitle = (file: string) => (file ? `判断方法 ${file} 加载不上` : EMPTY_TITLE);
+  /** The rule file a broken-rules card is about (its key ends in a time, which has colons); "" for the directory. */
+  const brokenFile = (c: Commitment) => (c.title === EMPTY_TITLE ? "" : c.title.replace(/^判断方法 /, "").replace(/ 加载不上$/, ""));
 
   /** What a broken rule file means, said once: what runs instead, or how much stopped. */
   function brokenText(file: string): string {
     const b = state.rules.broken?.[file];
     if (!b) return "";
-    return `判断方法 ${file} 从 ${clockOf(b.since)} 起加载不上，${b.fallback ? `先接着用 ${clockOf(b.fallback)} 那一版判断，新改的没有生效` : `${unjudged()} 个事项停止判断`}`;
+    if (!file) return `判断方法目录从 ${clockOf(b.since)} 起一个文件都没有，${unjudged("")} 个事项停止判断`;
+    return `判断方法 ${file} 从 ${clockOf(b.since)} 起加载不上，${b.fallback ? `先接着用 ${clockOf(b.fallback)} 换上的那一版判断，新改的没有生效` : `${unjudged(file)} 个事项停止判断`}`;
   }
 
   /**
@@ -764,14 +780,16 @@ export function createEngine(deps: EngineDeps) {
         commitment: {
           id: commitmentId(key),
           key,
-          title: `判断方法 ${file} 加载不上`,
+          title: brokenTitle(file),
           domain: config.sources.find((s) => s.id === source)?.domain ?? config.sources[0]?.domain ?? "work",
           owner: admin.id,
           caseId: null,
           trigger: { at: nowIso(nowMs) },
-          ask: { person: admin.id, header: `${file} 加载不上`.slice(0, 40), question: said, options: [{ id: "ack", label: "知道了", description: "" }], allowOther: true },
+          ask: { person: admin.id, header: (file ? `${file} 加载不上` : EMPTY_TITLE).slice(0, 40), question: said, options: [{ id: "ack", label: "知道了", description: "" }], allowOther: true },
           brief: [
-            `判断方法的文件 **${file}** 从 ${clockOf(b.since)} 起一直加载不上，超过 ${RULES_BROKEN_MS / 60_000} 分钟了。${b.fallback ? `在用的还是 ${clockOf(b.fallback)} 那一版，改了的部分没有生效。` : "它管的事项都不再判断，要问的问题也不会新排。"}改好了会自动接上，这张卡不用回。`,
+            file
+              ? `判断方法的文件 **${file}** 从 ${clockOf(b.since)} 起一直加载不上，超过 ${RULES_BROKEN_MS / 60_000} 分钟了。${b.fallback ? `在用的还是 ${clockOf(b.fallback)} 换上的那一版，改了的部分没有生效。` : "它管的事项都不再判断，要问的问题也不会新排。"}改好了会自动接上，这张卡不用回。`
+              : `判断方法的目录从 ${clockOf(b.since)} 起一个文件都没有，超过 ${RULES_BROKEN_MS / 60_000} 分钟了：所有事项都不再判断（已经排上的问题照问）。可能是目录被清空、切了分支；文件放回去会自动接上，这张卡不用回。`,
             "",
             "加载时的错误：",
             "",
@@ -802,12 +820,14 @@ export function createEngine(deps: EngineDeps) {
       const told = c.rounds > 0 || c.status === "done";
       const key = `recovered:${c.id}`;
       if (!told || state.ledger[key]) continue;
-      const summary = `告诉 ${admin?.name ?? c.owner}：判断方法 ${brokenFile(c)} 恢复了`;
+      const summary = `告诉 ${admin?.name ?? c.owner}：${recoveredTitle(brokenFile(c))}`;
       events.push({ type: "action", action: action(key, "notify", c.id, summary, "planned", null, nowMs) });
       plan.push({ at: nowIso(nowMs), kind: "notice", person: c.owner, summary });
     }
     append(events);
   }
+
+  const recoveredTitle = (file: string) => (file ? `判断方法 ${file} 恢复了` : "判断方法目录又有文件了");
 
   /** "It is over", for each broken-rules card that was asked: sent once the admin may be reached. */
   async function tellRecovered(nowMs: number, plan: PlanEntry[]): Promise<void> {
@@ -822,8 +842,12 @@ export function createEngine(deps: EngineDeps) {
       if (!mayReach(person, [c.domain], 0, nowMs, calendar).send || deps.mode === "dry-run" || stopped) continue;
       const file = brokenFile(c);
       const loads = (ruleset?.files ?? []).includes(file);
-      const title = `判断方法 ${file} 恢复了`;
-      const text = loads ? `${file} 又能加载了，事项照常判断。之前那张「加载不上」的卡已经收起。` : `${file} 已经从判断方法里拿掉了，不再报错。之前那张「加载不上」的卡已经收起。`;
+      const title = recoveredTitle(file);
+      const text = !file
+        ? "判断方法目录里又有文件了，事项照常判断。之前那张「目录是空的」的卡已经收起。"
+        : loads
+          ? `${file} 又能加载了，事项照常判断。之前那张「加载不上」的卡已经收起。`
+          : `${file} 已经从判断方法里拿掉了，不再报错。之前那张「加载不上」的卡已经收起。`;
       const failed: string[] = [];
       for (const target of deps.deliver ? person.notify : []) {
         try {
@@ -1854,7 +1878,8 @@ export function createEngine(deps: EngineDeps) {
       problems: [
         ...(deps.notices ?? []),
         ...lastProblems,
-        ...Object.entries(state.rules.broken ?? {}).map(([file, b]) => `${brokenText(file)}：${clip(b.error, 200)}`),
+        ...Object.entries(state.rules.broken ?? {}).map(([file, b]) => (file ? `${brokenText(file)}：${clip(b.error, 200)}` : brokenText(file))),
+        ...(ruleset?.keepErrors ?? []).map((e) => `判断方法的副本存不下来（${e.file || "清理旧副本"}：${clip(e.error, 160)}）：${e.file ? `${e.file} 以后加载不上时没有可接着用的` : "旧副本没清掉"}`),
         ...notifyProblems(),
         ...Object.values(state.items)
           .filter((i) => (i.incomplete?.length ?? 0) > 0 && heat(i.key).length > 0)

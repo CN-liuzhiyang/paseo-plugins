@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { z } from "zod";
@@ -158,24 +158,34 @@ export interface RuleSet {
   dirFingerprint: string;
   files: string[];
   rules: LoadedRule[];
-  /** Files that do not load; fallback: the last copy of it that did (saved then, ISO) runs instead. */
+  /** Files that do not load; fallback: the last copy of it that did (saved when that version first loaded, ISO) runs instead. */
   errors: Array<{ file: string; error: string; fallback?: string }>;
+  /** Copies saved by this load (file, the text's sha256, the source its rule judges); sha256 null: a copy taken away. */
+  kept: Array<{ file: string; sha256: string | null; source?: string }>;
+  /** Copies that could not be saved: a file that breaks later has nothing to go on with. */
+  keepErrors: Array<{ file: string; error: string }>;
 }
+
+/** The directory under the data directory the copies are kept in. */
+export const RULES_KEPT = "rules-last-good";
 
 /**
  * Where the last copy of each rule file that loaded is kept, and whether this load may save there
  * (the controller does; a preview only reads it). A file that stops loading -- a syntax error, a
  * wrong shape, a forbidden call -- then goes on as that copy instead of its items going unjudged.
+ * A copy is code that runs: one is used only if its sha256 is the one recorded when the controller
+ * saved it (`known`), so that a file put there by anything else is not.
  */
-/** The directory under the data directory the copies are kept in. */
-export const RULES_KEPT = "rules-last-good";
-
 export interface KeepRules {
   dir: string;
   write: boolean;
   /** The clock a copy's saving time is read from (its file's modified time); the wall clock if absent. */
   now?: () => number;
+  /** The sha256 recorded for each copy saved, and only a copy that has it is used; absent: not checked (a caller with no record of its own). */
+  known?: Record<string, string>;
 }
+
+export const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 // Kept out of the bundler's sight: the host compiles this plugin to CommonJS, and a literal
 // import() there would be rewritten into a require that cannot load an .mjs file.
@@ -184,7 +194,8 @@ const dynamicImport = new Function("url", "return import(url)") as (url: string)
 export function fingerprintOf(dir: string): { fingerprint: string; files: Array<{ file: string; text: string }> } {
   const files = existsSync(dir)
     ? readdirSync(dir)
-        .filter((f) => f.endsWith(".mjs"))
+        // A directory named like a rule is not one.
+        .filter((f) => f.endsWith(".mjs") && statSync(path.join(dir, f)).isFile())
         .sort()
         .map((f) => ({ file: f, text: readFileSync(path.join(dir, f), "utf8") }))
     : [];
@@ -237,26 +248,35 @@ async function loadOne(dir: string, file: string, text: string, loaded: LoadedRu
   }
 }
 
-/** The kept copy of a rule file, and when it was saved. */
-function kept(dir: string, file: string): { text: string; at: string } | null {
+/** The kept copy of a rule file and when it was saved; null when there is none; error when it cannot be read. */
+function kept(dir: string, file: string): { text: string; at: string } | { error: string } | null {
   const full = path.join(dir, file);
-  if (!existsSync(full)) return null;
-  return { text: readFileSync(full, "utf8"), at: new Date(statSync(full).mtimeMs).toISOString() };
+  try {
+    if (!existsSync(full)) return null;
+    return { text: readFileSync(full, "utf8"), at: new Date(statSync(full).mtimeMs).toISOString() };
+  } catch (error) {
+    return { error: (error as Error).message };
+  }
 }
 
-function keep(to: KeepRules, file: string, text: string): void {
-  if (kept(to.dir, file)?.text === text) return;
+/** Saves a copy; false when the same text was there already. */
+function keep(to: KeepRules, file: string, text: string): boolean {
+  const there = kept(to.dir, file);
+  if (there && "text" in there && there.text === text) return false;
   mkdirSync(to.dir, { recursive: true });
   const tmp = path.join(to.dir, `.${file}.tmp`);
   writeFileSync(tmp, text);
   if (to.now) utimesSync(tmp, new Date(to.now()), new Date(to.now()));
   renameSync(tmp, path.join(to.dir, file));
+  return true;
 }
 
 export async function loadRules(dir: string, keepRules: KeepRules | null = null): Promise<RuleSet> {
   const { fingerprint: dirFingerprint, files } = fingerprintOf(dir);
   const rules: LoadedRule[] = [];
   const errors: RuleSet["errors"] = [];
+  const keptNow: RuleSet["kept"] = [];
+  const keepErrors: RuleSet["keepErrors"] = [];
   const running: Array<{ file: string; text: string }> = [];
   for (const { file, text } of files) {
     const loaded = await loadOne(dir, file, text, rules);
@@ -265,28 +285,49 @@ export async function loadRules(dir: string, keepRules: KeepRules | null = null)
       running.push({ file, text });
       if (keepRules?.write) {
         try {
-          keep(keepRules, file, text);
-        } catch {
-          // Not kept: the next file that breaks has no copy to go on with, which is how it was.
+          const sum = sha256(text);
+          if (keep(keepRules, file, text) || keepRules.known?.[file] !== sum) keptNow.push({ file, sha256: sum, source: loaded.source });
+        } catch (error) {
+          keepErrors.push({ file, error: (error as Error).message });
         }
       }
       continue;
     }
+    // Why no copy runs instead, when one does not: said with the file's own error.
+    let why = "";
     const copy = keepRules ? kept(keepRules.dir, file) : null;
-    const instead = copy && copy.text !== text ? await loadOne(keepRules!.dir, file, copy.text, rules) : null;
-    if (instead && !("error" in instead)) {
-      rules.push(instead);
-      running.push({ file, text: copy!.text });
-      errors.push({ file, error: loaded.error, fallback: copy!.at });
-      continue;
+    if (copy && "error" in copy) why = `；副本读不了：${copy.error}`;
+    else if (copy && keepRules!.known && keepRules!.known[file] !== sha256(copy.text)) why = "；副本和控制器存下时记的不一样，没用它";
+    else if (copy && copy.text !== text) {
+      const instead = await loadOne(keepRules!.dir, file, copy.text, rules);
+      if (!("error" in instead)) {
+        rules.push(instead);
+        running.push({ file, text: copy.text });
+        errors.push({ file, error: loaded.error, fallback: copy.at });
+        continue;
+      }
+      why = `；副本也加载不上：${instead.error}`;
     }
     // Nothing of it runs; its text still counts, so that fixing it is a change.
     running.push({ file, text });
-    errors.push({ file, error: loaded.error });
+    errors.push({ file, error: `${loaded.error}${why}` });
+  }
+  // A copy of a file no longer there is taken away: a rule taken out of use stays out, and a new
+  // file of that name that breaks does not bring the old one back.
+  if (keepRules?.write) {
+    try {
+      for (const f of existsSync(keepRules.dir) ? readdirSync(keepRules.dir).filter((f) => f.endsWith(".mjs")) : []) {
+        if (files.some((x) => x.file === f)) continue;
+        rmSync(path.join(keepRules.dir, f), { force: true });
+        keptNow.push({ file: f, sha256: null });
+      }
+    } catch (error) {
+      keepErrors.push({ file: "", error: (error as Error).message });
+    }
   }
   const hash = createHash("sha256");
   for (const { file, text } of running) hash.update(`${file}\0${text}\0`);
-  return { fingerprint: hash.digest("hex").slice(0, 16), dirFingerprint, files: files.map((f) => f.file), rules, errors };
+  return { fingerprint: hash.digest("hex").slice(0, 16), dirFingerprint, files: files.map((f) => f.file), rules, errors, kept: keptNow, keepErrors };
 }
 
 function deepFreeze<T>(value: T): T {
