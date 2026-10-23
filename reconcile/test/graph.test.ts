@@ -90,6 +90,30 @@ test("the loader takes string stages as before and object stages with their meta
   }
 });
 
+test("a stage declaration that is wrong goes the way of any rule that stops loading: the last copy that loaded goes on, and the error is told with it", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-stages-keep-"));
+  const kept = path.join(dir, "kept");
+  const rules = path.join(dir, "rules");
+  mkdirSync(rules);
+  const rule = (stages: string) => `export default { name: "r", description: "x", applies: { source: "s" }, params: {}, stages: ${stages}, assess() { return null; } };`;
+  try {
+    writeFileSync(path.join(rules, "r.mjs"), rule('[{ id: "one", label: "第一" }, "two"]'));
+    const first = await loadRules(rules, { dir: kept, write: true });
+    assert.deepEqual([first.rules.length, first.errors.length], [1, 0]);
+    // twice the same id: the schema takes it, the declaration does not
+    writeFileSync(path.join(rules, "r.mjs"), rule('["one", "one"]'));
+    const second = await loadRules(rules, { dir: kept, write: true });
+    assert.deepEqual(second.rules.map((r) => r.stageMeta!.map((m) => m.label)), [["第一", "two"]], "what runs is the copy that loaded, with its names");
+    assert.match(second.errors[0]!.error, /^stages: stage "one" is declared twice/);
+    assert.ok(second.errors[0]!.fallback, "and the error says a copy is running instead");
+    // no copy to go on with: the rule is not loaded at all
+    const none = await loadRules(rules, null);
+    assert.deepEqual([none.rules.length, none.errors.length, none.errors[0]!.fallback], [0, 1, undefined]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ---- text ------------------------------------------------------------------------------------------
 
 test("spans are told in the words the page uses", () => {
