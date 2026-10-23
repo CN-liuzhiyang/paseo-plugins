@@ -200,7 +200,7 @@ export function createGraph(deps: GraphDeps) {
   /**
    * How long the item took, from its first stay to its end: the moment it got to its last stage, or `endAt`
    * (when a person stopped it). `atLeast`: it was already under way when tracking began, so it took at least
-   * that long; `ms` null with `atLeast`: it was already over then, and how long it took is not known.
+   * that long; `ms` null with `atLeast`: it was already over when first seen, and how long it took is not known.
    */
   function tookOf(real: Visit[], endAt: string | null): { ms: number | null; atLeast: boolean } {
     const first = real[0];
@@ -208,7 +208,8 @@ export function createGraph(deps: GraphDeps) {
     if (!first || !last) return { ms: null, atLeast: false };
     const early = first.before && first.fromKind !== "happened";
     const end = endAt ?? last.from;
-    if (early && real.length === 1 && endAt === null) return { ms: null, atLeast: true };
+    // One stay and it is the end: it was over when it was first seen. Nothing says where it began, whether or not the rule says when it ended.
+    if (real.length === 1 && endAt === null) return { ms: null, atLeast: true };
     if (!end || !first.from) return { ms: null, atLeast: early };
     return { ms: Math.max(0, Date.parse(end) - Date.parse(first.from)), atLeast: early };
   }

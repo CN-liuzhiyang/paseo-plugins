@@ -132,6 +132,7 @@ test("a clock that starts when tracking began says 'at least': the wait of an it
     set(w, 1, { Phase: "ship", Ball: "them" }); // first seen far along, waiting for somebody
     set(w, 2, { Phase: "finished", Health: "done" }); // first seen already over
     set(w, 3, { Phase: "ship", Ball: "them", Since: "2026-10-13T08:00:00+08:00" }); // the rule knows when it got there
+    set(w, 6, { Phase: "finished", Health: "done", Since: "2026-10-13T09:59:30+08:00" }); // first seen over, and the rule says it ended as it was seen
     await w.run("2026-10-13 10:30");
     set(w, 4, { Phase: "draft" });
     await w.run("2026-10-13 12:00");
@@ -155,6 +156,10 @@ test("a clock that starts when tracking began says 'at least': the wait of an it
     const over = rowOf(w, 2);
     assert.deepEqual([over.waiting.ended, over.waiting.ms, over.waiting.atLeast], [true, null, true], "how long it took is not known, and is not made up");
     assert.deepEqual([view(w, 2).facts[2]!.value, view(w, 2).hero.kicker], ["追踪前就结束了", "结束了 · 开始追踪时就已经结束了"]);
+
+    const sameMoment = rowOf(w, 6);
+    assert.deepEqual([sameMoment.waiting.ended, sameMoment.waiting.ms], [true, null], "a single stay that is the end says nothing of how long it took, even when the rule says when it ended: not 'used 0'");
+    assert.equal(view(w, 6).facts[2]!.value, "追踪前就结束了");
 
     assert.equal(rowOf(w, 3).waiting.atLeast, false, "the rule said when: that is measured");
     assert.doesNotMatch(view(w, 3).facts[2]!.value, /至少/);
