@@ -409,6 +409,30 @@ export function createEngine(deps: EngineDeps) {
     return latest === backstopMs ? c : { ...c, backstop: { ...c.backstop, at: nowIso(latest) } };
   }
 
+  /**
+   * A question asked, then held, so taken off its card (pruneCards): when the hold ends it is asked
+   * again, the same round. Holds set since it was last asked (at the same moment too: words are taken
+   * in before anything is asked, so a hold in force then would have kept it back), for whom it asks;
+   * the one ending last.
+   * One still on an open card was not taken off (a hold undone before the card was cut).
+   */
+  function againOf(c: Commitment): { atMs: number; hold: string } | null {
+    if (!c.caseId || c.origin.by === "controller" || c.status !== "waiting" || !c.lastAskedAt) return null;
+    const asked = Date.parse(c.lastAskedAt);
+    let found: { atMs: number; hold: string } | null = null;
+    for (const a of Object.values(state.annotations)) {
+      if (a.caseId !== c.caseId || a.kind !== "hold" || (a.person && a.person !== c.ask.person) || Date.parse(a.at) < asked) continue;
+      if (!found || holdEnd(a) > found.atMs) found = { atMs: holdEnd(a), hold: a.id };
+    }
+    if (!found || openCards().some((card) => card.commitments.some(({ id }) => id === c.id))) return null;
+    return found;
+  }
+
+  /** What a commitment wants next, after the holds on it. */
+  const stepOf = (c: Commitment) => nextStep(afterHolds(c), tz, calendar, againOf(c)?.atMs ?? null);
+  /** The ledger's key for one ask: a round asked again after a hold is its own. */
+  const askKey = (d: Due) => `ask:${d.commitment.id}:${d.round}${d.after ? `:after:${d.after}` : ""}`;
+
   /** The followed item a person means by "#123", "123" or its full key. */
   function resolveItem(text: string): { caseId: string } | { error: string } {
     const t = text.trim().replace(/^#/, "");
@@ -628,20 +652,26 @@ export function createEngine(deps: EngineDeps) {
   }
 
   /** What the words did to their item by the end of this reconcile, for the receipt. */
-  function effectsOf(caseId: string, before: Map<string, Commitment["status"]>, undoOf: Annotation["kind"] | null): string[] {
+  function effectsOf(caseId: string, before: Map<string, Commitment["status"]>, undoOf: Annotation["kind"] | null, annotation: string | null = null): string[] {
     const now = Object.values(state.commitments).filter((c) => c.caseId === caseId && c.origin.by === "rule");
     const closed = now.filter((c) => isOpen(before.get(c.id)) && !isOpen(c.status)).length;
     const opened = now.filter((c) => !isOpen(before.get(c.id)) && isOpen(c.status));
     // Back with its rounds asked to the end (they count across a reopen): not asked again, only waiting for its backstop.
-    const spent = opened.filter((c) => nextStep(afterHolds(c), tz, calendar)?.what === "exhausted");
+    const spent = opened.filter((c) => stepOf(c)?.what === "exhausted");
     const lines: string[] = [];
     if (closed > 0) lines.push(`效果：收回了 ${closed} 个要问你的问题，已经发出的卡上也去掉了（卡上没别的问题就整张收起）。`);
     if (opened.length > spent.length) lines.push(`效果：重新排上了 ${opened.length - spent.length} 个要问你的问题。`);
     for (const c of spent) {
       lines.push(`「${c.ask.header}」之前已经问过 ${c.rounds} 次，不会再问，到 ${nowIso(Date.parse(afterHolds(c).backstop.at)).slice(5, 16).replace("T", " ")} 记成没人答。`);
     }
-    // A hold taken back: what was held is asked at its own next time, not at once.
-    if (undoOf === "hold") for (const c of now.filter((c) => isOpen(c.status))) lines.push(`接下来：「${c.ask.header}」${describeStep(c)}。`);
+    // A hold taken back: what was held is asked at its own next time; one it took off its card goes
+    // back up at once, the same round (asked in this reconcile already, or as soon as it may be).
+    if (undoOf === "hold") {
+      for (const c of now.filter((c) => isOpen(c.status))) {
+        const back = annotation && state.ledger[`ask:${c.id}:${c.rounds}:after:${annotation}`];
+        lines.push(`接下来：「${c.ask.header}」${back ? "放回卡上了（先别问之前问过的那次，不另算追问）；" : ""}${describeStep(c)}。`);
+      }
+    }
     const left = undoOf === "drop" ? now.filter((c) => c.status === "cancelled" && c.reason === DROPPED).length : 0;
     if (left > 0) lines.push(`有 ${left} 个之前收回的问题这次没重新排上（最后期限已经过了，或者现在的判断不需要它），见「事项追踪」页上的计划。`);
     if (deps.mode === "dry-run") lines.push("现在是演练：这句话已经记下、照样生效，只是不发卡也不收卡。");
@@ -655,7 +685,7 @@ export function createEngine(deps: EngineDeps) {
     const dir = deps.requestsDir;
     if (!dir) return;
     for (const { receipt, caseId, before, undoOf } of receipts) {
-      const text = caseId && receipt.outcome === "applied" ? [receipt.text, ...effectsOf(caseId, before, undoOf ?? null)].join("\n") : receipt.text;
+      const text = caseId && receipt.outcome === "applied" ? [receipt.text, ...effectsOf(caseId, before, undoOf ?? null, receipt.annotation ?? null)].join("\n") : receipt.text;
       try {
         finishRequest(dir, { ...receipt, text });
       } catch (error) {
@@ -1118,10 +1148,11 @@ export function createEngine(deps: EngineDeps) {
   });
 
   function describeStep(c: Commitment): string {
-    const step = nextStep(afterHolds(c), tz, calendar);
+    const step = stepOf(c);
     if (!step) return c.status;
     const when = nowIso(step.atMs).slice(5, 16).replace("T", " ");
     if (step.what === "ask") return `${when} 问 ${personName(c.owner)}`;
+    if (step.what === "again") return `${when} 再问一次（先别问之前问过的那次，不另算追问）`;
     if (step.what === "nag") return `${when} 第 ${step.round} 次问`;
     if (step.what === "exhausted") return `问满了 ${c.nag.max} 次，${when} 到兜底`;
     return `${when} 到兜底`;
@@ -1279,7 +1310,8 @@ export function createEngine(deps: EngineDeps) {
     const byPerson = new Map<string, Due[]>();
     for (const raw of Object.values(state.commitments)) {
       const c = afterHolds(raw);
-      const step = nextStep(c, tz, calendar);
+      const again = againOf(raw);
+      const step = nextStep(c, tz, calendar, again?.atMs ?? null);
       // The controller's own statements ask nothing: one left unanswered is no candidate.
       if (step?.what === "exhausted" && c.status === "waiting" && c.lastAskedAt && c.origin.by !== "controller") {
         const key = `eval:nag-ignored:${c.id}`;
@@ -1288,9 +1320,10 @@ export function createEngine(deps: EngineDeps) {
           ignored.push({ type: "action", action: action(key, "note.set", c.id, "记评测候选：问了没人答", "done", null, nowMs) });
         }
       }
-      const due = dueNow(c, nowMs, tz, calendar);
-      if (!due) continue;
-      if (state.ledger[`ask:${c.id}:${due.round}`]?.status === "done") continue;
+      const found = dueNow(c, nowMs, tz, calendar, again?.atMs ?? null);
+      if (!found) continue;
+      const due: Due = found.why === "again" ? { ...found, after: again!.hold } : found;
+      if (state.ledger[askKey(due)]?.status === "done") continue;
       const hold = holdOver(c, nowMs);
       if (hold) {
         plan.push({ at: nowIso(nowMs), kind: "deferred", person: c.ask.person, summary: `${personName(hold.by)}说过先别问到 ${hold.until}（「${clip(hold.said, 40)}」），先不问：${c.ask.header}` });
@@ -1352,7 +1385,7 @@ export function createEngine(deps: EngineDeps) {
     const cards = Object.values(state.cards);
     const cap = confirm ? config.policy.confirmPerDay : person.pushPerDay;
     const verdict = mayReach(person, dues.map((d) => d.commitment.domain), confirm ? confirmsToday(cards, person, nowMs) : cardsToday(cards, person, nowMs), nowMs, calendar, cap);
-    const titles = dues.map((d) => `${d.commitment.ask.header}${d.why === "nag" ? `（第 ${d.round} 次）` : ""}`).join("、");
+    const titles = dues.map((d) => `${d.commitment.ask.header}${d.why === "nag" ? `（第 ${d.round} 次）` : d.why === "again" ? "（先别问的时间过了，再问一次）" : ""}`).join("、");
     if (!verdict.send) {
       const why = verdict.reason === "quiet" ? "不打扰时段" : confirm ? `今天的确认卡发满了（每天 ${cap} 张）` : "今天的推送用完了";
       plan.push({ at: nowIso(nowMs), kind: "deferred", person: personId, summary: `${why}，延到 ${nowIso(verdict.until).slice(5, 16).replace("T", " ")} 再问 ${person.name}：${titles}` });
@@ -1444,7 +1477,7 @@ export function createEngine(deps: EngineDeps) {
     const before = dues.map((d) => ({ status: d.commitment.status, rounds: d.commitment.rounds, lastAskedAt: d.commitment.lastAskedAt }));
     const intents: EventBody[] = [{ type: "card.created", card }];
     for (const d of dues) {
-      intents.push({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "planned", null, nowMs) });
+      intents.push({ type: "action", action: action(askKey(d), "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "planned", null, nowMs) });
       intents.push({ type: "commitment.changed", id: d.commitment.id, patch: { status: "waiting", rounds: d.round, lastAskedAt: nowIso(nowMs), updatedAt: nowIso(nowMs) } });
     }
     append(intents);
@@ -1467,12 +1500,12 @@ export function createEngine(deps: EngineDeps) {
       const now = state.cards[card.id];
       if ((now && now.status !== "pending" && now.status !== "raised") || card.commitments.every(({ id }) => !isOpen(state.commitments[id]?.status))) {
         await deps.carrier!.archive(agentId).catch((error: unknown) => deps.log(`archiving ${agentId} of an answered card failed: ${(error as Error).message}`));
-        append(dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody));
+        append(dues.map((d) => ({ type: "action", action: action(askKey(d), "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody));
         return;
       }
       append([
         { type: "card.changed", id: card.id, patch: { status: "raised", agentId, attempts: attempt } },
-        ...dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody),
+        ...dues.map((d) => ({ type: "action", action: action(askKey(d), "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody),
         ...replaces.map((old) => ({ type: "card.changed", id: old.id, patch: { status: "closed", reason: `并进了新卡 ${card.id}`, closedAt: nowIso(nowMs) } }) as EventBody),
       ]);
       // Up: the same moment, to the person's channels. A failure there does not take the card back.
@@ -1490,7 +1523,7 @@ export function createEngine(deps: EngineDeps) {
           ? [{ type: "card.changed", id: card.id, patch: { status: "pending", agentId: null, attempts: attempt, reason: `起不了卡片：${message}` } }]
           : [{ type: "card.changed", id: card.id, patch: { status: "closed", attempts: attempt, reason: `起不了卡片：${message}`, closedAt: nowIso(nowMs) } }];
       dues.forEach((d, i) => {
-        events.push({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "failed", message, nowMs) });
+        events.push({ type: "action", action: action(askKey(d), "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "failed", message, nowMs) });
         // Back to how it was, so the next try asks the same round: only a question still waiting, not one that was answered meanwhile.
         if (state.commitments[d.commitment.id]?.status !== "waiting") return;
         const was = before[i];
@@ -1630,7 +1663,7 @@ export function createEngine(deps: EngineDeps) {
     mode: deps.mode,
     rules: () => ruleset,
     reads: (caseId) => lastReads.get(caseId),
-    step: (c) => nextStep(afterHolds(c), tz, calendar),
+    step: stepOf,
     inForce: (caseId) => (["drop", "hold", "wrong"] as const).flatMap((kind) => inForce(caseId, kind, deps.now())),
     runs: deps.runs ?? undefined,
     isConfirm,

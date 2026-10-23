@@ -8,29 +8,38 @@ import { addDays, addWorkdays, localParts, nextInWindow, zoned, type Calendar } 
 export interface Due {
   commitment: Commitment;
   round: number;
-  /** Why now: the first ask, or a nag after no answer. */
-  why: "first" | "nag";
+  /** Why now: the first ask, a nag after no answer, or the same round again after a hold took it off its card. */
+  why: "first" | "nag" | "again";
+  /** Asked again: the hold it was asked again after, so that the ledger tells this ask from the first. */
+  after?: string;
 }
 
-/** When a commitment next wants something, and what. Null when it wants nothing more. */
-export function nextStep(c: Commitment, tz: string, calendar: Calendar): { atMs: number; what: "ask" | "nag" | "backstop" | "exhausted"; round: number } | null {
+/**
+ * When a commitment next wants something, and what. Null when it wants nothing more.
+ * `again`: when the hold that took this question off its card, after it was asked, ends. The same
+ * round is asked again then -- the question was on a card the person was told not to mind, so it
+ * does not count as a nag, and a question asked its last round is not lost to the hold.
+ */
+export function nextStep(c: Commitment, tz: string, calendar: Calendar, again: number | null = null): { atMs: number; what: "ask" | "nag" | "again" | "backstop" | "exhausted"; round: number } | null {
   if (c.status !== "scheduled" && c.status !== "waiting") return null;
   const backstop = Date.parse(c.backstop.at);
   if (c.status === "scheduled") {
     if (!("at" in c.trigger)) return { atMs: backstop, what: "backstop", round: 0 };
     return { atMs: Math.min(Date.parse(c.trigger.at), backstop), what: Date.parse(c.trigger.at) <= backstop ? "ask" : "backstop", round: 1 };
   }
+  if (again !== null && c.lastAskedAt && again < backstop) return { atMs: again, what: "again", round: c.rounds };
   if (c.rounds >= c.nag.max || !c.lastAskedAt) return { atMs: backstop, what: c.rounds >= c.nag.max ? "exhausted" : "backstop", round: c.rounds };
   const nag = addWorkdays(Date.parse(c.lastAskedAt), c.nag.everyWorkdays, c.nag.at, tz, calendar);
   return nag < backstop ? { atMs: nag, what: "nag", round: c.rounds + 1 } : { atMs: backstop, what: "backstop", round: c.rounds };
 }
 
-export function dueNow(c: Commitment, nowMs: number, tz: string, calendar: Calendar): Due | null {
+export function dueNow(c: Commitment, nowMs: number, tz: string, calendar: Calendar, again: number | null = null): Due | null {
   if (c.level === "silent") return null;
-  const step = nextStep(c, tz, calendar);
+  const step = nextStep(c, tz, calendar, again);
   if (!step || step.atMs > nowMs) return null;
   if (step.what === "ask") return { commitment: c, round: 1, why: "first" };
   if (step.what === "nag") return { commitment: c, round: step.round, why: "nag" };
+  if (step.what === "again") return { commitment: c, round: step.round, why: "again" };
   return null;
 }
 

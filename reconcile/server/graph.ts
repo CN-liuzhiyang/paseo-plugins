@@ -306,8 +306,9 @@ export function createGraph(deps: GraphDeps) {
       allowOther: c.ask.allowOther,
       confirm: deps.isConfirm(c),
       askedAt: c.lastAskedAt,
-      nextAskAt: next ? stamp(next.what === "nag" ? Math.max(next.atMs, holdMs) : next.atMs) : null,
-      nextAskWhat: next && next.what !== "ask" ? next.what : null,
+      nextAskAt: next ? stamp(next.what === "nag" || next.what === "again" ? Math.max(next.atMs, holdMs) : next.atMs) : null,
+      // Asked again after a hold is, to the person, asked again.
+      nextAskWhat: next && next.what !== "ask" ? (next.what === "again" ? "nag" : next.what) : null,
       maxRounds: c.nag.max,
       cardAgentId: card?.agentId ?? null,
     };
@@ -351,6 +352,7 @@ export function createGraph(deps: GraphDeps) {
       const held = hold?.until ? zoned(hold.until, "00:00", tz) : 0;
       if (step.what === "ask") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `问你：${c.title}${held > step.atMs ? "（你说过先别问）" : ""}` });
       else if (step.what === "nag") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `没答就再问（第 ${step.round} 次，最多 ${c.nag.max} 次）` });
+      else if (step.what === "again") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `先别问的时间过了，再问一次「${c.title}」（不另算追问）` });
       else lines.push({ ms: step.atMs, at: stamp(step.atMs), line: "还没答就不再问，记成「问了没人答」" });
     }
     const poll = pollOf(f.caseId);

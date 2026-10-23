@@ -506,8 +506,10 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     const out = new Map<string, number>();
     for (const e of sides[i]!.store.events) {
       if (e.type !== "action" || e.action.kind !== "ask" || e.action.status !== "planned") continue;
-      const m = /^ask:(.+):(\d+)$/.exec(e.action.key);
-      if (m && !out.has(`${m[1]}\u0000${m[2]}`)) out.set(`${m[1]}\u0000${m[2]}`, Date.parse(e.at));
+      // A round asked again after a hold has its own key (":after:<the hold>"), so it is an ask of its own here.
+      const m = /^ask:(.+?):(\d+)(?::after:(.+))?$/.exec(e.action.key);
+      const k = m ? `${m[1]}\u0000${m[2]}\u0000${m[3] ?? ""}` : "";
+      if (m && !out.has(k)) out.set(k, Date.parse(e.at));
     }
     return out;
   };
@@ -523,14 +525,15 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   const asksDue: Array<[string, number, number | null, number | null]> = [];
   const [ba, ca] = [asksOf(0), asksOf(1)];
   for (const key of new Set([...ba.keys(), ...ca.keys()])) {
-    const [id, round] = key.split("\u0000") as [string, string];
+    const [id, round, after] = key.split("\u0000") as [string, string, string];
     const x = ba.get(key);
     const y = ca.get(key);
     if (x === y) continue;
     const c = cand.store.state.commitments[id] ?? base.store.state.commitments[id];
     const r = Number(round);
-    asks.push({ label: label(c?.caseId ?? null), title: c?.title ?? id, round: r, inUse: x === undefined ? null : askWhen(id, r, x), candidate: y === undefined ? null : askWhen(id, r, y) });
-    asksDue.push([id, r, x === undefined ? null : dueAt(id, r, x), y === undefined ? null : dueAt(id, r, y)]);
+    const title = `${c?.title ?? id}${after ? "（先别问的时间过了，再问一次）" : ""}`;
+    asks.push({ label: label(c?.caseId ?? null), title, round: r, inUse: x === undefined ? null : askWhen(id, r, x), candidate: y === undefined ? null : askWhen(id, r, y) });
+    asksDue.push([after ? `${id}:after:${after}` : id, r, x === undefined ? null : dueAt(id, r, x), y === undefined ? null : dueAt(id, r, y)]);
   }
   asksDue.sort((x, y) => x[0].localeCompare(y[0]) || x[1] - y[1]);
   const firstAt = (a: AskChange) => [a.inUse, a.candidate].filter((t): t is string => !!t).map((t) => (t === "现在" ? "" : t)).sort()[0] ?? "";

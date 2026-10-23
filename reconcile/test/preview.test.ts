@@ -138,6 +138,25 @@ test("the cards each side raises now, when they differ", () =>
     { run: "2026-10-16 18:00" },
   ));
 
+test("a question a hold took off its card, asked again when the hold ends, is an ask of its own", () =>
+  withWorld(
+    async (w, candidate) => {
+      w.store.append([{ type: "annotation.added", annotation: { id: "a_hold", caseId: "gcp-demo:1", kind: "hold", until: "2026-10-19", person: null, by: "owner", said: "先别问", at: "2026-10-16T18:31:00+08:00", via: "x", how: "own-words", what: null, expected: null, revoked: null } }]);
+      w.clock.now = at("2026-10-16 18:31");
+      await w.engine.tick();
+      put(candidate, "rules/mini.mjs", rule(false));
+      const p = await look(w, candidate);
+      assert.deepEqual(
+        p.later.asks.map((a) => [a.title, a.round, a.inUse, a.candidate]),
+        [
+          ["q gcp-demo:1（先别问的时间过了，再问一次）", 1, "10-19 09:30", null],
+          ["q gcp-demo:1", 2, "10-20 10:00", null],
+        ],
+      );
+    },
+    { run: "2026-10-16 18:30" },
+  ));
+
 test("questions added, taken back and changed, and whether the breaker would hold the change", () =>
   withWorld(
     async (w, candidate) => {

@@ -9,7 +9,7 @@ import type { EngineStatus, PlanEntry } from "../server/engine";
 import { DROPPED } from "../server/engine";
 import { planText } from "../index.server";
 import { commandOf, commandWords, currentTurn, mentions, notOwnWords, readConversation, sayCalls, TIMELINE_PAGE, type Conversation, type ConversationSource, type Request, type TurnStep } from "../server/requests";
-import { issue, makeWorld, TEST_POLICY, type World } from "./helpers";
+import { at, issue, makeWorld, TEST_POLICY, type World } from "./helpers";
 
 // What a person says in a conversation about an item, handed over by bin/reconcile-say.mjs as
 // a request file: their own words take effect at once and one sentence takes them back; words
@@ -34,8 +34,8 @@ const RULE = `export default { name: "mini", description: "x", applies: { source
         brief: "b", nag: { everyWorkdays: 1, at: "10:00", max: 3 }, backstop: { at: ctx.at(f.Backstop || "2026-12-31", "18:00") }, level: "push" }] };
   } };`;
 
-async function withWorld(body: (w: World) => Promise<void>, policy: Record<string, unknown> = {}, persons?: unknown) {
-  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": RULE }, policy: { ...TEST_POLICY, ...policy }, ...(persons ? { persons } : {}) } });
+async function withWorld(body: (w: World) => Promise<void>, policy: Record<string, unknown> = {}, persons?: unknown, rule = RULE) {
+  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": rule }, policy: { ...TEST_POLICY, ...policy }, ...(persons ? { persons } : {}) } });
   try {
     for (const id of [1, 2]) w.items.set(`gcp-demo:${id}`, issue(id, { fields: { Release: "2026-10-16" } }));
     await w.run("2026-10-13 12:00");
@@ -803,17 +803,111 @@ test("answers on a form still open on a card since cut down are kept for what th
     assert.match(w.engine.answer(old.id, { kind: "answers", answers: { "gcp-demo:1": "A" }, via: "form" }), /这张卡已经结束了/);
   }));
 
-test("taking back a hold says when what was held is asked again", () =>
+test("taking back a hold says when what was held is asked again: one the hold took off its card goes back up at once, the same round", () =>
   withWorld(async (w) => {
     await w.run("2026-10-16 18:00");
+    const q1 = () => ruleCommitments(w).find((c) => c.caseId === "gcp-demo:1")!;
     own(w, "#1 先别问，到下周三");
     say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
     await w.engine.tick();
+    const cards = w.cards.length;
     own(w, "刚才那条不要了");
     const undo = say(w, { cmd: "undo", target: "last", said: "刚才那条不要了" });
     await w.engine.tick();
-    assert.match(w.receipt(undo)!.text, /接下来：「gcp-demo:1」10-19 10:00 第 2 次问。/);
+    assert.match(w.receipt(undo)!.text, /接下来：「gcp-demo:1」放回卡上了（先别问之前问过的那次，不另算追问）；10-19 10:00 第 2 次问。/);
+    assert.ok(w.cards.slice(cards).some((c) => c.card.commitments.some((x) => x.id === q1().id && x.round === 1)), "back on a card, round 1");
+    assert.equal(q1().rounds, 1, "not counted as a nag");
   }));
+
+test("a hold set and taken back before its card was cut leaves the card as it was: nothing asked again", () =>
+  withWorld(async (w) => {
+    await w.run("2026-10-16 18:00");
+    const first = w.cards[0]!.card;
+    own(w, "#1 先别问，到下周三", "算了，刚才那条不要了");
+    say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+    say(w, { cmd: "undo", target: "last", said: "算了，刚才那条不要了" });
+    await w.engine.tick();
+    assert.equal(Object.values(w.store.state.annotations).filter((a) => a.revoked).length, 1, "set and taken back");
+    await w.run("2026-10-16 19:00");
+    assert.equal(w.cards.length, 1, "no card cut, none raised again");
+    assert.equal(w.store.state.cards[first.id]!.status, "raised");
+  }));
+
+// The question asked once and no more (max 1), as a rule's reminder is.
+const ONCE = RULE.replace("max: 3", "max: 1");
+
+test("a question held after it was asked, so taken off its card, is asked again the same round when the hold ends, its last round too", () =>
+  withWorld(
+    async (w) => {
+      await w.run("2026-10-16 18:00");
+      const q = (n: number) => ruleCommitments(w).find((c) => c.caseId === `gcp-demo:${n}`)!;
+      const on = (n: number) => w.cards.filter((c) => c.card.commitments.some((x) => x.id === q(n).id));
+      assert.equal(on(1).length, 1);
+      own(w, "#1 先别问，到下周三");
+      say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+      await w.engine.tick();
+      const hold = Object.values(w.store.state.annotations).find((a) => a.kind === "hold")!;
+      assert.equal(w.store.state.cards[on(1)[0]!.card.id]!.status, "closed", "off its card");
+      // The page says it comes back, not that it is over.
+      assert.ok(w.engine.graph("gcp-demo:1")!.schedule.some((s) => s.at?.startsWith("2026-10-21") && s.line.includes("再问一次")), JSON.stringify(w.engine.graph("gcp-demo:1")!.schedule));
+      await w.run("2026-10-20 20:00");
+      assert.equal(on(1).length, 1, "not asked while held");
+      assert.equal(q(1).status, "waiting");
+      await w.run("2026-10-21 10:00");
+      assert.equal(on(1).length, 2, "asked again when the hold ends");
+      const again = on(1)[1]!;
+      assert.equal(again.card.raisedAt, "2026-10-21T09:30:00+08:00", "at the start of the day's window");
+      assert.deepEqual(again.card.commitments.find((x) => x.id === q(1).id), { id: q(1).id, round: 1 });
+      assert.equal(q(1).rounds, 1, "the same round: not a nag");
+      assert.equal(w.store.state.ledger[`ask:${q(1).id}:1:after:${hold.id}`]?.status, "done");
+      // Once: its rounds are asked. #2, never held, rides along unanswered (carried), not asked as a round again.
+      await w.run("2026-10-23 20:00");
+      assert.equal(on(1).length, 2, "asked again once");
+      assert.deepEqual(Object.keys(w.store.state.ledger).filter((k) => k.startsWith(`ask:${q(2).id}:`)), [`ask:${q(2).id}:1`]);
+    },
+    {},
+    undefined,
+    ONCE,
+  ));
+
+test("held again before the first hold ends, a question comes back when the last of its holds ends; a hold for someone else does not keep it", () =>
+  withWorld(
+    async (w) => {
+      await w.run("2026-10-16 18:00");
+      const q1 = () => ruleCommitments(w).find((c) => c.caseId === "gcp-demo:1")!;
+      const hold = (id: string, until: string, person: string | null, at: string) =>
+        w.store.append([{ type: "annotation.added", annotation: { id, caseId: "gcp-demo:1", kind: "hold", until, person, by: "owner", said: "先别问", at, via: "x", how: "own-words", what: null, expected: null, revoked: null } }]);
+      hold("a_one", "2026-10-21", null, "2026-10-16T18:01:00+08:00");
+      hold("a_else", "2026-10-28", "someone", "2026-10-16T18:02:00+08:00");
+      hold("a_two", "2026-10-23", "owner", "2026-10-16T18:03:00+08:00");
+      w.clock.now = at("2026-10-16 18:05");
+      await w.engine.tick();
+      const again = w.engine.graph("gcp-demo:1")!.schedule.find((s) => s.line.includes("再问一次"));
+      assert.equal(again?.at?.slice(0, 10), "2026-10-23", JSON.stringify(w.engine.graph("gcp-demo:1")!.schedule));
+      await w.run("2026-10-23 10:00");
+      const on = w.cards.filter((c) => c.card.commitments.some((x) => x.id === q1().id));
+      assert.deepEqual(on.map((c) => c.card.raisedAt.slice(0, 10)), ["2026-10-16", "2026-10-23"], "not on 10-21 when the first ended, not on 10-28 when the other person's does");
+    },
+    {},
+    undefined,
+    ONCE,
+  ));
+
+test("a question held before it is asked is asked once when the hold ends, not again on top", () =>
+  withWorld(
+    async (w) => {
+      own(w, "#1 先别问，到下周三");
+      say(w, { cmd: "say", kind: "hold", item: "#1", until: "2026-10-21", said: "#1 先别问，到下周三" });
+      await w.engine.tick();
+      const q1 = () => ruleCommitments(w).find((c) => c.caseId === "gcp-demo:1")!;
+      await w.run("2026-10-23 20:00");
+      assert.equal(w.cards.filter((c) => c.card.commitments.some((x) => x.id === q1().id)).length, 1);
+      assert.equal(q1().rounds, 1);
+    },
+    {},
+    undefined,
+    ONCE,
+  ));
 
 test("one message of the person's lets one request through, however its words are cut down", () =>
   withWorld(async (w) => {
