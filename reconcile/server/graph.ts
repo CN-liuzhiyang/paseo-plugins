@@ -23,7 +23,7 @@ import {
 } from "../shared/graph";
 import type { Config } from "./config";
 import { createJournalBook, type Chain, type Fmt, type JournalBook } from "./journal-book";
-import type { nextStep } from "./policy";
+import { reachesAt, type nextStep } from "./policy";
 import { clip, KIND_LABEL } from "./requests";
 import type { RuleSet } from "./rules";
 import type { Store } from "./store";
@@ -62,6 +62,7 @@ export function createGraph(deps: GraphDeps) {
     store.dir,
     new Set(config.sources.filter((s) => s.kind === "flags").map((s) => s.id)),
     tz,
+    store.memory,
   );
   const personName = (id: string) => config.persons[id]?.name ?? id;
   const fmtOf = (metas: StageMeta[]): Fmt => ({ stage: (id) => metaOf(metas, id).label, person: personName });
@@ -135,7 +136,7 @@ export function createGraph(deps: GraphDeps) {
         cause: raw.cause,
         headline: raw.headline,
         lastHeadline: raw.lastHeadline,
-        balls: raw.balls.map((b, j) => ({ actor: b.actor, what: b.what, from: b.from, to: raw.balls[j + 1]?.from ?? (to ?? null) })),
+        balls: raw.balls.map((b, j) => ({ actor: b.actor, what: b.what, from: b.from, to: raw.balls[j + 1]?.from ?? (to ?? null), seen: b.seen, cause: b.cause })),
         handoffs: [],
         evidence: stageEnd(to),
         skipped: [],
@@ -188,14 +189,30 @@ export function createGraph(deps: GraphDeps) {
    * stay, so that a change of what it is doing (the holder the same) does not start the wait again.
    * `atLeast`: that start is where tracking began, not where the wait did, so the length is a floor.
    */
-  function heldFrom(v: Visit | undefined): { from: string | null; atLeast: boolean } {
-    if (!v) return { from: null, atLeast: false };
+  /**
+   * Since when it has been the current holder's move. `rulesAt`: it became theirs when the rules
+   * changed (the data did not); with no evidence of when it really did, the wait is counted from
+   * that change and is a floor (`atLeast`), as from where tracking began.
+   */
+  function heldFrom(v: Visit | undefined): { from: string | null; atLeast: boolean; rulesAt: string | null } {
+    if (!v) return { from: null, atLeast: false, rulesAt: null };
     const balls = v.balls;
     const holder = balls[balls.length - 1]?.actor;
     let i = balls.length - 1;
     while (i > 0 && balls[i - 1]!.actor === holder) i--;
-    return { from: balls[i]?.from ?? v.from, atLeast: v.before && v.fromKind !== "happened" && i <= 0 };
+    const run = balls[i];
+    const rulesAt = run?.cause === "rules-changed" && run.seen ? run.seen : null;
+    const guessed = rulesAt !== null && run!.from === run!.seen;
+    return { from: run?.from ?? v.from, atLeast: (v.before && v.fromKind !== "happened" && i <= 0) || guessed, rulesAt };
   }
+
+  /** Where the wait is counted from, in words: "从 … 起", and why when it is not plain. */
+  const sinceText = (held: { from: string | null; atLeast: boolean; rulesAt: string | null }, who: string): string => {
+    if (!held.from) return "";
+    if (held.rulesAt && held.atLeast) return `从 ${clockText(held.from)} 起：判断方法这时更新，才算到${who}这边，之前多久不知道`;
+    if (held.rulesAt) return `从 ${clockText(held.from)} 起（判断方法 ${clockText(held.rulesAt)} 更新后才算到${who}这边）`;
+    return `从 ${clockText(held.from)} ${held.atLeast ? "开始追踪起" : "起"}`;
+  };
 
   /**
    * How long the item took, from its first stay to its end: the moment it got to its last stage, or `endAt`
@@ -290,12 +307,22 @@ export function createGraph(deps: GraphDeps) {
 
   // ---- the lines of the page ------------------------------------------------------------------
 
+  /** When a question due at `dueMs` really goes to its person (policy.ts reachesAt, as asking decides). */
+  function reaches(c: Commitment, dueMs: number): { atMs: number; why: "quiet" | "budget" | null } {
+    const person = config.persons[c.ask.person];
+    const nowMs = deps.now();
+    if (!person) return { atMs: Math.max(dueMs, nowMs), why: null };
+    const confirm = deps.isConfirm(c);
+    return reachesAt(person, c.domain, dueMs, nowMs, Object.values(state.cards), config.calendar, confirm, confirm ? config.policy.confirmPerDay : person.pushPerDay);
+  }
+
   function askOf(c: Commitment): AskView {
     const step = deps.step(c);
     const hold = deps.inForce(c.caseId ?? "").find((s) => s.kind === "hold" && s.until && (!s.person || s.person === c.ask.person));
     const holdMs = hold?.until ? zoned(hold.until, "00:00", tz) : 0;
     const next = step && step.what !== "ask" ? step : null;
     const card = Object.values(state.cards).find((k) => (k.status === "pending" || k.status === "raised") && k.commitments.some((x) => x.id === c.id));
+    const nextMs = next ? (next.what === "nag" || next.what === "again" ? reaches(c, Math.max(next.atMs, holdMs)).atMs : next.atMs) : 0;
     return {
       commitmentId: c.id,
       round: c.rounds,
@@ -306,7 +333,7 @@ export function createGraph(deps: GraphDeps) {
       allowOther: c.ask.allowOther,
       confirm: deps.isConfirm(c),
       askedAt: c.lastAskedAt,
-      nextAskAt: next ? stamp(next.what === "nag" || next.what === "again" ? Math.max(next.atMs, holdMs) : next.atMs) : null,
+      nextAskAt: next ? stamp(nextMs) : null,
       // Asked again after a hold is, to the person, asked again.
       nextAskWhat: next && next.what !== "ask" ? (next.what === "again" ? "nag" : next.what) : null,
       maxRounds: c.nag.max,
@@ -350,9 +377,16 @@ export function createGraph(deps: GraphDeps) {
       if (!step) continue;
       const hold = f.said.find((s) => s.kind === "hold" && s.until && (!s.person || s.person === c.ask.person));
       const held = hold?.until ? zoned(hold.until, "00:00", tz) : 0;
-      if (step.what === "ask") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `问你：${c.title}${held > step.atMs ? "（你说过先别问）" : ""}` });
-      else if (step.what === "nag") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `没答就再问（第 ${step.round} 次，最多 ${c.nag.max} 次）` });
-      else if (step.what === "again") lines.push({ ms: Math.max(step.atMs, held), at: stamp(Math.max(step.atMs, held)), line: `先别问的时间过了，再问一次「${c.title}」（不另算追问）` });
+      if (step.what === "ask" || step.what === "nag" || step.what === "again") {
+        // Not when it is due but when it goes: after the holds, the quiet hours, the day's budget.
+        const due = Math.max(step.atMs, held);
+        const { atMs, why } = reaches(c, due);
+        // Why not then, and, when then has passed, that it was then: not a question missed.
+        const late = [held > step.atMs ? "你说过先别问" : "", why === "quiet" ? "不打扰时段过了才问" : why === "budget" ? "那天的推送用完了" : ""].filter(Boolean);
+        const tail = late.length > 0 ? `（${why && due < nowMs ? `${clockText(stamp(due))} 就该问了，` : ""}${late.join("，")}）` : "";
+        const line = step.what === "ask" ? `问你：${c.title}${tail}` : step.what === "nag" ? `没答就再问（第 ${step.round} 次，最多 ${c.nag.max} 次）${tail}` : `先别问的时间过了，再问一次「${c.title}」（不另算追问）${tail}`;
+        lines.push({ ms: atMs, at: stamp(atMs), line });
+      }
       else lines.push({ ms: step.atMs, at: stamp(step.atMs), line: "还没答就不再问，记成「问了没人答」" });
     }
     const poll = pollOf(f.caseId);
@@ -386,7 +420,7 @@ export function createGraph(deps: GraphDeps) {
     const asks = f.waiting.map(askOf);
     const actor: Ball = ask ? "me" : (a?.next.actor ?? "nobody");
     const what = ask ? `回答：${ask.header}` : (a?.next.what ?? "");
-    const held = ask ? { from: ask.askedAt, atLeast: false } : heldFrom(last);
+    const held = ask ? { from: ask.askedAt, atLeast: false, rulesAt: null } : heldFrom(last);
     const waitingSince = held.from;
     const poll = finished ? null : pollOf(caseId);
     const schedule = scheduleOf(f, nowMs, finished);
@@ -433,7 +467,7 @@ export function createGraph(deps: GraphDeps) {
       case "them":
         kicker = `在等别人${a?.next.what ? ` · ${a.next.what}` : ""}`;
         line = a?.headline ?? "";
-        sub = sinceMs !== null ? `${held.atLeast ? "至少已等" : "已等"} ${durationText(sinceMs)}${held.atLeast ? "（开始追踪时就在等了，之前多久不知道）" : ""}。` : "";
+        sub = sinceMs !== null ? `${held.atLeast ? "至少已等" : "已等"} ${durationText(sinceMs)}${held.rulesAt ? `（${sinceText(held, "别人")}）` : held.atLeast ? "（开始追踪时就在等了，之前多久不知道）" : ""}。` : "";
         break;
       case "system":
         kicker = "系统在查 · 不用你做什么";
@@ -499,9 +533,7 @@ export function createGraph(deps: GraphDeps) {
             : real[0]?.from && last?.from
               ? `${clockText(real[0].from)} → ${clockText(last.from)}`
               : ""
-          : waitingSince
-            ? `从 ${clockText(waitingSince)} ${held.atLeast ? "开始追踪起" : "起"}`
-            : "",
+          : sinceText(held, whoText),
         hot: false,
       },
       {
@@ -554,7 +586,7 @@ export function createGraph(deps: GraphDeps) {
         sinceKind: last?.fromKind ?? "unknown",
         health: a?.health ?? "on-track",
         headline: a?.headline ?? "",
-        ball: { actor, who: null, what, waitingSince, atLeast: held.atLeast },
+        ball: { actor, who: null, what, waitingSince, atLeast: held.atLeast, rulesAt: held.rulesAt },
         ask,
         asks,
       },
@@ -626,7 +658,7 @@ export function createGraph(deps: GraphDeps) {
     const ask = f.waiting[0];
     const actor: Ball = ask ? "me" : (a?.next.actor ?? "nobody");
     const what = ask ? `回答：${ask.ask.header}` : (a?.next.what ?? "");
-    const held = ask ? { from: ask.lastAskedAt, atLeast: false } : heldFrom(last);
+    const held = ask ? { from: ask.lastAskedAt, atLeast: false, rulesAt: null } : heldFrom(last);
     const since = held.from;
     const schedule = scheduleOf(f, nowMs, finished);
     const drop = f.said.find((x) => x.kind === "drop");
@@ -644,7 +676,7 @@ export function createGraph(deps: GraphDeps) {
       strip: cells,
       side,
       who: { actor, label: finished ? "" : `${ballWho(actor)}${what ? ` · ${what}` : ""}` },
-      waiting: { ms, since: finished ? (took.atLeast ? (real[0]?.from ?? null) : since) : since, ended: finished, atLeast: finished ? took.atLeast : held.atLeast },
+      waiting: { ms, since: finished ? (took.atLeast ? (real[0]?.from ?? null) : since) : since, ended: finished, atLeast: finished ? took.atLeast : held.atLeast, rulesAt: finished ? null : held.rulesAt },
       notice: a?.notice ? clip(a.notice, 300) : null,
       stale: a?.stale === true,
       next: finished ? [] : schedule.filter((s) => s.at).slice(0, 2).map((s) => `${clockText(s.at!)} ${s.line}`),

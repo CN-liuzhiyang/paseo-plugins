@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Annotation, Assessment, Commitment, Note } from "../shared/model";
 import type { Ball, Cause, HistoryLine } from "../shared/graph";
 import { clip, KIND_LABEL } from "./requests";
+import type { JournalEvent } from "./state";
 import { iso, zoned } from "./time";
 
 // What the page of an item needs from the past, read from the journal: the stages an item went
@@ -37,13 +38,24 @@ export interface AssessRec {
   stale: boolean;
   /** When it got to this stage by the rule's own evidence, if the rule said and it was not later than the judgment. */
   since: string | null;
+  /** When it became the actor's move by the rule's own evidence, the same way. */
+  ballSince: string | null;
   rule: string;
 }
 
 export interface BallSeg {
   actor: Ball;
   what: string;
+  /** When it became theirs: the rule's `next.since` when it could be, else `seen`. */
   from: string;
+  /** The judgment that first saw it theirs. */
+  seen: string;
+  /**
+   * It became theirs in the first judgment by changed rules: when it would have become theirs is
+   * not known from when it was seen (data read in the meantime does not tell either: the rules in use
+   * before were judging it all along and did not hand it over).
+   */
+  cause: "rules-changed" | null;
 }
 
 export interface RawVisit {
@@ -122,10 +134,12 @@ const WANTED = new Set(["assessment", "item.snapshot", "note.set", "commitment.c
 
 /**
  * `shared`: the ids of sources whose items every item reads (switch files, version files): a
- * change in one is a change in the data of all.
+ * change in one is a change in the data of all. `memory`: a rehearsing store's (Store.memory): the
+ * journal in `dir` is read up to its `upTo`, then its events.
  */
-export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: string): JournalBook {
+export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: string, memory?: { upTo: number; events: readonly JournalEvent[] }): JournalBook {
   const journalDir = path.join(dir, "journal");
+  let eaten = 0;
   const offsets = new Map<string, number>();
   const chains = new Map<string, Chain>();
   const commitments = new Map<string, { caseId: string | null; owner: string; title: string }>();
@@ -149,7 +163,9 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
     // Read as an instant, in the instance's zone: a rule may write it in UTC or without an offset.
     const sinceAt = a.since ? instantOf(a.since, tz) : null;
     const since = sinceAt && Date.parse(sinceAt) <= Date.parse(a.at) ? sinceAt : null;
-    const rec: AssessRec = { seq, at: a.at, stage: a.stage, health: a.health, headline: a.headline, actor: a.next.actor, what: a.next.what, fp: a.rulesFingerprint, error: a.error, notice: a.notice ?? null, stale: a.stale, since, rule: a.rule };
+    const ballAt = a.next.since ? instantOf(a.next.since, tz) : null;
+    const ballSince = ballAt && Date.parse(ballAt) <= Date.parse(a.at) ? ballAt : null;
+    const rec: AssessRec = { seq, at: a.at, stage: a.stage, health: a.health, headline: a.headline, actor: a.next.actor, what: a.next.what, fp: a.rulesFingerprint, error: a.error, notice: a.notice ?? null, stale: a.stale, since, ballSince, rule: a.rule };
     chain.first ??= rec;
     if (rec.error !== null) {
       if (chain.errorSince === null) {
@@ -169,9 +185,12 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
       const from = before ? (before.happened ?? before.observed) : null;
       return at && (!from || Date.parse(at) >= Date.parse(from)) ? at : null;
     };
+    // Nor is a move someone's before the stay began, or before the move before it was another's.
+    const notBeforeMs = (at: string | null, floor: string): string | null => (at && Date.parse(at) >= Date.parse(floor) ? at : null);
     const start = (cause: Cause | null) => {
       const happened = notBefore(rec.since, chain.visits);
-      chain.visits.push({ stage: rec.stage, observed: rec.at, happened, cause, superseded: false, headline: rec.headline, lastHeadline: rec.headline, balls: [{ actor: rec.actor, what: rec.what, from: happened ?? rec.at }] });
+      const ballFrom = happened ? (notBeforeMs(rec.ballSince, happened) ?? happened) : rec.at;
+      chain.visits.push({ stage: rec.stage, observed: rec.at, happened, cause, superseded: false, headline: rec.headline, lastHeadline: rec.headline, balls: [{ actor: rec.actor, what: rec.what, from: ballFrom, seen: rec.at, cause: last && rec.fp !== last.fp ? "rules-changed" : null }] });
     };
     if (!last) {
       start(null);
@@ -196,8 +215,37 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
       if (visit) {
         visit.lastHeadline = rec.headline;
         if (visit.happened === null) visit.happened = notBefore(rec.since, chain.visits.slice(0, -1));
-        const ball = visit.balls[visit.balls.length - 1];
-        if (ball && (ball.actor !== rec.actor || ball.what !== rec.what)) visit.balls.push({ actor: rec.actor, what: rec.what, from: rec.at });
+        const balls = visit.balls;
+        const ball = balls[balls.length - 1];
+        // Where the turn of one holder that has its segment at `end` began (what it was doing may have changed since).
+        const turnOf = (end: number) => {
+          let j = end;
+          while (j > 0 && balls[j - 1]!.actor === balls[end]!.actor) j--;
+          return j;
+        };
+        // The rule's evidence of when the move became the holder's: not before the turn before began
+        // (nor the stay), and what is drawn of that turn after then was, by it, not that turn's.
+        const handOver = (before: number, at: string) => {
+          while (balls.length - 1 > before && Date.parse(balls[balls.length - 1]!.from) > Date.parse(at)) balls.pop();
+        };
+        if (ball && ball.actor !== rec.actor) {
+          const before = turnOf(balls.length - 1);
+          const from = notBeforeMs(rec.ballSince, balls[before]!.from) ?? rec.at;
+          handOver(before, from);
+          balls.push({ actor: rec.actor, what: rec.what, from, seen: rec.at, cause: rec.fp !== last.fp ? "rules-changed" : null });
+        } else if (ball && ball.what !== rec.what) balls.push({ actor: rec.actor, what: rec.what, from: rec.at, seen: rec.at, cause: null });
+        else if (ball && rec.ballSince) {
+          // Evidence given later (by rules that say it now): the turn began then.
+          const i = turnOf(balls.length - 1);
+          const before = i > 0 ? turnOf(i - 1) : -1;
+          const earlier = notBeforeMs(rec.ballSince, before >= 0 ? balls[before]!.from : (visit.happened ?? visit.observed));
+          if (earlier && Date.parse(earlier) < Date.parse(balls[i]!.from)) {
+            const turn = balls.splice(i);
+            if (before >= 0) handOver(before, earlier);
+            turn[0]!.from = earlier;
+            balls.push(...turn);
+          }
+        }
       }
     }
     chain.last = rec;
@@ -298,6 +346,8 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
       if (line === "") continue;
       const m = PREFIX.exec(line);
       if (!m || !WANTED.has(m[3]!)) continue;
+      // Written after the rehearsing store's state was read: not its history (its own events follow).
+      if (memory && Number(m[1]) > memory.upTo) continue;
       try {
         handle(m[3]!, Number(m[1]), m[2]!, line);
       } catch {
@@ -341,8 +391,7 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
       // A read that fails (a file another process holds for a moment, one replaced between the listing and the open)
       // leaves what is read as it was and is tried again at the next call: a page never fails for it.
       try {
-        if (!existsSync(journalDir)) return;
-        const files = readdirSync(journalDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort();
+        const files = existsSync(journalDir) ? readdirSync(journalDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort() : [];
         for (const file of files) {
           if (!readFile(file)) {
             // A file got shorter: not an append. Read everything again.
@@ -350,12 +399,22 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
             chains.clear();
             commitments.clear();
             annotations.clear();
+            eaten = 0;
             for (const again of files) readFile(again);
-            return;
+            break;
           }
         }
       } catch {
         // see above
+      }
+      for (; memory && eaten < memory.events.length; eaten++) {
+        const e = memory.events[eaten]!;
+        if (!WANTED.has(e.type)) continue;
+        try {
+          handle(e.type, e.seq, e.at, JSON.stringify(e));
+        } catch {
+          // as a line that does not parse
+        }
       }
     },
     chain: (caseId) => chains.get(caseId),

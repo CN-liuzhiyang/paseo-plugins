@@ -163,6 +163,9 @@ test("when the rules change the judgment of an item without its data changing, t
     assert.deepEqual(drawn, [["draft", true], ["review", true], ["ship", false]], "the review it was judged to be in is not drawn as a stay; the route up to ship is what is inferred");
     assert.ok(v.history.some((h) => h.kind === "rules"), "the history says the judgment changed with the rules");
     assert.deepEqual(rowOf(w, 31).strip, ["pre", "pre", "cur", "todo"]);
+    // whose move it is was seen anew with the stage: from the change, and a floor
+    const wait = rowOf(w, 31).waiting;
+    assert.deepEqual([wait.since, wait.atLeast, wait.rulesAt], [real[1]!.from, true, real[1]!.from]);
   }));
 
 test("the wait is counted from when the holder got the ball: a change in what it is doing does not start it again, a change of holder does", () =>
@@ -224,4 +227,107 @@ test("an item no rule has judged has a page that says so, and a key that is not 
     await w.run("2026-10-13 10:30");
     assert.equal(w.engine.graph("gcp-demo:999"), null);
     assert.equal(w.engine.graph("nonsense"), null);
+  }));
+
+// ---- what is next, and since when -------------------------------------------------------------------
+
+/** FLOW, its question asked at a time of the day the item says (`AskAt`). */
+const TIMED = FLOW.replace('trigger: { at: ctx.at(f.Ask, "10:00") }', 'trigger: { at: ctx.at(f.Ask, f.AskAt || "10:00") }');
+const PERSON = { name: "测试用户", admin: true, tz: "Asia/Shanghai", quiet: { work: "workdays 09:30-20:00" } };
+const lineOf = (w: World, id: number) => view(w, id).schedule.find((s) => s.line.startsWith("问你"))!;
+
+test("what is next is when it will really be asked: past the quiet hours, after the day's pushes, as the asking decides", async () => {
+  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "flow.mjs": TIMED }, persons: { owner: { ...PERSON, pushPerDay: 1 } } } });
+  try {
+    set(w, 41, { Ask: "2026-10-13", AskAt: "10:00" }); // asked at once: the day's one push
+    set(w, 42, { Ask: "2026-10-13", AskAt: "15:00" }); // due today, after it
+    set(w, 43, { Ask: "2026-10-17" }); // due on a Saturday
+    await w.run("2026-10-13 10:30");
+    assert.equal(w.cards.length, 1);
+    assert.deepEqual([lineOf(w, 42).at!.slice(0, 16), lineOf(w, 42).line], ["2026-10-14T09:30", "问你：q gcp-demo:42（那天的推送用完了）"]);
+    assert.deepEqual([lineOf(w, 43).at!.slice(0, 16), lineOf(w, 43).line], ["2026-10-19T09:30", "问你：q gcp-demo:43（不打扰时段过了才问）"]);
+    // and once its time has passed, the page says when it goes, not when it was due
+    await w.run("2026-10-13 16:00");
+    assert.equal(w.cards.length, 1, "not asked at its time");
+    assert.deepEqual([lineOf(w, 42).at!.slice(0, 16), lineOf(w, 42).line], ["2026-10-14T09:30", "问你：q gcp-demo:42（10-13 15:00 就该问了，那天的推送用完了）"]);
+    await w.run("2026-10-14 09:45");
+    assert.equal(w.cards.length, 2, "asked when the page said");
+    assert.ok(w.cards[1]!.content.questions.some((q) => q.question === "q gcp-demo:42?"), "with the one still unanswered");
+  } finally {
+    w.close();
+  }
+});
+
+test("a question due in quiet hours is told at the window's opening, and the page says it was due earlier", async () => {
+  const w = await makeWorld({ start: "2026-10-13 21:00", config: { rules: { "flow.mjs": TIMED }, persons: { owner: { ...PERSON, pushPerDay: 8 } } } });
+  try {
+    set(w, 44, { Ask: "2026-10-13", AskAt: "20:30" });
+    await w.run("2026-10-13 21:30");
+    assert.equal(w.cards.length, 0);
+    assert.deepEqual([lineOf(w, 44).at!.slice(0, 16), lineOf(w, 44).line], ["2026-10-14T09:30", "问你：q gcp-demo:44（10-13 20:30 就该问了，不打扰时段过了才问）"]);
+  } finally {
+    w.close();
+  }
+});
+
+/** FLOW, the rules changed: what was the system's move is the owner's, and the rule may say since when (`BallSince`). */
+const toMe = (w: World) => {
+  const file = path.join(w.configDir, "rules", "flow.mjs");
+  writeFileSync(file, readFileSync(file, "utf8").replace('next: { actor: f.Ball || "them", what: f.What || "等" }', 'next: { actor: f.Ball === "system" ? "me" : (f.Ball || "them"), what: f.What || "等", ...(f.BallSince ? { since: f.BallSince } : {}) }'));
+};
+
+test("a wait the rules changed hands is counted from the rule's evidence, or, with none, from the change and said to be a floor", () =>
+  withFlow(async (w) => {
+    set(w, 71, { Ball: "system" }); // nothing says when: from the change, at least
+    set(w, 72, { Ball: "system", BallSince: "2026-10-13T10:20:00+08:00" }); // the rule says when
+    set(w, 73, { Ball: "system", BallSince: "2026-10-13T09:00:00+08:00" }); // before the system's turn began: not believed
+    set(w, 74, { Ball: "system" }); // the data moves it
+    set(w, 77, { Ball: "system", BallSince: "2026-10-13T13:00:00+08:00" }); // later than it was judged: not evidence
+    set(w, 78, { Ball: "system", What: "等 a" }); // what the system waited on changes before the rule says it was the owner's
+    await w.run("2026-10-13 10:30");
+    set(w, 78, { What: "等 b", BallSince: "2026-10-13T10:10:00+08:00" });
+    set(w, 74, { Ball: "me" });
+    set(w, 71, { Other: "x" }); // data read meanwhile that changes nothing of the judgment: still the rules handed it over
+    await w.run("2026-10-13 11:00");
+    const byData = rowOf(w, 74).waiting.since;
+    toMe(w);
+    await w.run("2026-10-13 12:00");
+    const changed = view(w, 71).current.ball.rulesAt!;
+    assert.ok(changed.startsWith("2026-10-13T11:"), changed);
+
+    const none = rowOf(w, 71).waiting;
+    assert.deepEqual([none.since, none.atLeast, none.rulesAt], [changed, true, changed]);
+    assert.match(view(w, 71).facts[2]!.value, /^至少 /);
+    assert.match(view(w, 71).facts[2]!.sub, /^从 10-13 11:\d\d 起：判断方法这时更新，才算到你这边，之前多久不知道$/);
+
+    const told = rowOf(w, 72).waiting;
+    assert.deepEqual([told.since?.slice(0, 16), told.atLeast, told.rulesAt], ["2026-10-13T10:20", false, changed]);
+    assert.match(view(w, 72).facts[2]!.sub, /^从 10-13 10:20 起（判断方法 10-13 11:\d\d 更新后才算到你这边）$/);
+    assert.doesNotMatch(view(w, 72).facts[2]!.value, /至少/);
+
+    assert.deepEqual([rowOf(w, 73).waiting.since, rowOf(w, 73).waiting.atLeast], [changed, true], "a time before the turn before it is not believed");
+    assert.deepEqual([rowOf(w, 77).waiting.since, rowOf(w, 77).waiting.atLeast], [changed, true], "nor one after the judgment");
+    const turns = view(w, 78).visits.at(-1)!.balls.map((b) => [b.actor, b.what, b.from.slice(11, 16), b.to?.slice(11, 16) ?? null]);
+    assert.deepEqual(turns, [["system", "等 a", "10:00", "10:10"], ["me", "等 b", "10:10", null]], "the system's later \"等 b\" was, by the rule, already the owner's: not drawn as the system's");
+
+    const moved = rowOf(w, 74).waiting;
+    assert.deepEqual([moved.since, moved.atLeast, moved.rulesAt], [byData, false, null], "the data moved it: not the rules, and not again when they change");
+  }));
+
+test("evidence a rule gives later of when the move became the holder's moves the start of the wait back; none from before the turn before it, or from the future", () =>
+  withFlow(async (w) => {
+    set(w, 75, { Ball: "system" });
+    set(w, 76, { Ball: "system" });
+    await w.run("2026-10-13 10:30");
+    toMe(w);
+    await w.run("2026-10-13 11:30");
+    const changed = rowOf(w, 75).waiting.since!;
+    set(w, 75, { Ball: "system", BallSince: "2026-10-13T10:20:00+08:00" });
+    set(w, 76, { Ball: "system", BallSince: "2026-10-13T13:00:00+08:00" });
+    await w.run("2026-10-13 12:00");
+    assert.deepEqual([rowOf(w, 75).waiting.since?.slice(0, 16), rowOf(w, 75).waiting.atLeast], ["2026-10-13T10:20", false]);
+    assert.deepEqual([rowOf(w, 76).waiting.since, rowOf(w, 76).waiting.atLeast], [changed, true], "a time after the judgment is not evidence");
+    set(w, 75, { Ball: "system", BallSince: "2026-10-12T10:00:00+08:00" });
+    await w.run("2026-10-13 12:30");
+    assert.equal(rowOf(w, 75).waiting.since?.slice(0, 16), "2026-10-13T10:20", "nor one from before the system's turn began");
   }));

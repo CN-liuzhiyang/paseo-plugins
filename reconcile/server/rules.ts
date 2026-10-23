@@ -73,7 +73,12 @@ const output = z
     stage: z.string().min(1),
     health: z.enum(["on-track", "waiting", "stalled", "blocked", "conflict", "done"]),
     headline: z.string().min(1).max(200),
-    next: z.object({ actor: z.enum(["me", "them", "system", "nobody"]), what: z.string() }).strict(),
+    /**
+     * `since`: when it became this actor's move by what the rule can see (the step that has waited
+     * on the owner since a time, say), an instant, ISO. The page counts the wait from it, so that a
+     * rule changed or a judgment made later does not start the wait again.
+     */
+    next: z.object({ actor: z.enum(["me", "them", "system", "nobody"]), what: z.string(), since: z.string().min(1).optional() }).strict(),
     facts: z.array(fact),
     commitments: z.array(commitmentSpec),
     wake: z.array(wake).optional(),

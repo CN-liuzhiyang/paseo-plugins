@@ -74,6 +74,24 @@ function nextMorning(date: string, person: Person, domains: Domain[], calendar: 
   return until;
 }
 
+/**
+ * When a question that wants asking at `dueMs` reaches the person: from then, or now if that is
+ * later, the first moment `mayReach` lets a card go -- their quiet hours for its domain, and the
+ * day's budget as it stands (a later day's starts empty). Questions due together go on one card,
+ * so that moves nothing. What the page says is next is this, and asking goes by the same verdict.
+ */
+export function reachesAt(person: Person, domain: Domain, dueMs: number, nowMs: number, cards: Card[], calendar: Calendar, confirm: boolean, cap: number): { atMs: number; why: "quiet" | "budget" | null } {
+  let atMs = Math.max(dueMs, nowMs);
+  let why: "quiet" | "budget" | null = null;
+  for (let i = 0; i < 31; i++) {
+    const verdict = mayReach(person, [domain], confirm ? confirmsToday(cards, person, atMs) : cardsToday(cards, person, atMs), atMs, calendar, cap);
+    if (verdict.send) return { atMs, why };
+    atMs = verdict.until;
+    why ??= verdict.reason;
+  }
+  return { atMs, why };
+}
+
 /** Cards of questions raised for a person on their local today; one that never got a carrier did not reach them, and one cut down from another is that one. */
 export function cardsToday(cards: Card[], person: Person, nowMs: number): number {
   return raisedToday(cards.filter((card) => card.kind !== "confirm"), person, nowMs);

@@ -216,8 +216,8 @@ function checkDirs(configDir: string, candidateDir: string): void {
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** One engine on a copy of the state, with a carrier and channels that only record. */
-function shadow(state: State, config: Config, clock: { ms: number }, rulesKeep: KeepRules | null) {
-  const store = memoryStore(state, () => clock.ms);
+function shadow(state: State, dataDir: string, config: Config, clock: { ms: number }, rulesKeep: KeepRules | null) {
+  const store = memoryStore(state, () => clock.ms, dataDir);
   let raised = 0;
   const carrier: Carrier = {
     async raise() {
@@ -279,7 +279,7 @@ const ROW_FIELDS: Array<[string, (r: ListRow) => string]> = [
   ["列表里的分组", (r) => GROUP_LABEL[r.group]?.name ?? r.group],
   ["阶段名", (r) => r.stageLabel],
   ["在等谁", (r) => r.who.label],
-  ["等待从几点算起", (r) => (r.waiting.since ? clockText(r.waiting.since) : "（不算）")],
+  ["等待从几点算起", (r) => (r.waiting.since ? `${clockText(r.waiting.since)}${r.waiting.atLeast ? "（至少，之前多久不知道）" : ""}` : "（不算）")],
   ["岔路", (r) => r.side?.label ?? "无"],
 ];
 
@@ -338,8 +338,8 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   // The rules in use go on as the controller's kept copies where a file does not load, as there;
   // the candidate's are what was written, broken or not.
   const kept: KeepRules = { dir: path.join(dataDir, RULES_KEPT), write: false };
-  const base = shadow(state, inUseConfig, clock, kept);
-  const cand = shadow(state, candidateConfig, clock, null);
+  const base = shadow(state, dataDir, inUseConfig, clock, kept);
+  const cand = shadow(state, dataDir, candidateConfig, clock, null);
   // The candidate's rules as they will be once let through: what the breaker would hold is said
   // apart, and what it holds back is still shown.
   const candidateFingerprint = fingerprintOf(candidateConfig.rulesDir).fingerprint;

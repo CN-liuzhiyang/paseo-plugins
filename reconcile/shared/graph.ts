@@ -145,7 +145,12 @@ export interface Visit {
   headline: string;
   lastHeadline: string;
   /** Who had the ball, as the controller judged it: one entry per change in this stay. */
-  balls: Array<{ actor: Ball; what: string; from: string; to: string | null }>;
+  /**
+   * Whose move it was, in turn. `from`: when it became theirs (the rule's evidence if it gave it,
+   * else the judgment that saw it, `seen`). `cause` "rules-changed": it became theirs because the
+   * rules changed, not the data; with no evidence of when, the wait is counted from the change.
+   */
+  balls: Array<{ actor: Ball; what: string; from: string; to: string | null; seen?: string; cause?: "rules-changed" | null }>;
   /** Hand-offs between people inside this stay (a planner, then QA): not read from anywhere yet, always empty. */
   handoffs: Array<{ actor: Ball; who: string | null; what: string; from: string; to: string | null }>;
   /** Facts recorded during this stay, with where they came from. */
@@ -276,7 +281,7 @@ export interface GraphView {
     health: string;
     headline: string;
     /** `atLeast`: the wait is counted from where tracking began, so it was at least this long. */
-    ball: { actor: Ball; who: string | null; what: string; waitingSince: string | null; atLeast: boolean };
+    ball: { actor: Ball; who: string | null; what: string; waitingSince: string | null; atLeast: boolean; rulesAt?: string | null };
     ask: AskView | null;
     asks: AskView[];
   };
@@ -332,7 +337,7 @@ export interface ListRow {
    * tracking began, not when the wait did, so the length is a floor; ended with `ms` null and `atLeast`:
    * it was already over when tracking began.
    */
-  waiting: { ms: number | null; since: string | null; ended: boolean; atLeast: boolean };
+  waiting: { ms: number | null; since: string | null; ended: boolean; atLeast: boolean; rulesAt?: string | null };
   /** The rule's statement that something looks wrong, whatever state the item is in. */
   notice: string | null;
   /** The data it rests on is older than usual. */

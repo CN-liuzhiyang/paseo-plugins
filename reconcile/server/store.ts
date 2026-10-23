@@ -39,6 +39,11 @@ export interface Store {
   readonly skipped: number;
   /** Why the snapshot was not used on load, if it was not. */
   readonly snapshotIgnored: string | null;
+  /**
+   * A store that rehearses (memoryStore): what it appended, kept in memory, and how far the journal
+   * in `dir` it was read from goes (`upTo`, a seq). The page reads that journal up to there, then these.
+   */
+  readonly memory?: { upTo: number; events: readonly JournalEvent[] };
 }
 
 export class LockedError extends Error {}
@@ -95,15 +100,17 @@ export function readState(dir: string): { state: State; skipped: number; snapsho
 
 /**
  * A store that keeps its journal in memory, over a copy of a state: for an engine that only
- * rehearses (the preview's), whose events go nowhere but `events`.
+ * rehearses (the preview's), whose events go nowhere but `events`. `journal`: the data directory
+ * the state was read from, whose journal the page reads (only reads) for the history before.
  */
-export function memoryStore(from: State, now: () => number): Store & { readonly events: JournalEvent[] } {
+export function memoryStore(from: State, now: () => number, journal?: string): Store & { readonly events: JournalEvent[] } {
   const state = structuredClone(from);
   const events: JournalEvent[] = [];
   let closed = false;
   return {
     state,
-    dir: "(memory)",
+    dir: journal ?? "(memory)",
+    memory: { upTo: from.seq, events },
     events,
     skipped: 0,
     snapshotIgnored: null,

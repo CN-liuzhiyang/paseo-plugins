@@ -185,7 +185,8 @@ export interface Assessment {
   stage: string;
   health: "on-track" | "waiting" | "stalled" | "blocked" | "conflict" | "done";
   headline: string;
-  next: { actor: "me" | "them" | "system" | "nobody"; what: string };
+  /** `since`: when it became this actor's move, by the rule's evidence, when it said. */
+  next: { actor: "me" | "them" | "system" | "nobody"; what: string; since?: string };
   /** Something that looks wrong, told as a statement (not a question); null when nothing does. */
   notice?: string | null;
   /** When it got to this stage by what the rule could see, when that was earlier than this judgment. */

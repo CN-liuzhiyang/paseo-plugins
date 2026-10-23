@@ -427,6 +427,21 @@ test("what only the page shows: the list's group and stage name, and the stages 
     assert.deepEqual(moved.cases.map((c) => c.fields.find((f) => f.field === "阶段")), [{ field: "阶段", inUse: "s", candidate: "下一步（t）" }]);
   }));
 
+test("since when the page counts the wait: from the journal before, and the candidate's own judgments after", () =>
+  withWorld(
+    async (w, candidate) => {
+      put(candidate, "rules/mini.mjs", rule().replace('next: { actor: "me", what: "x" }', 'next: { actor: "me", what: "x", since: ctx.at("2026-10-13", "11:00") }'));
+      const p = await look(w, candidate);
+      const since = p.page.rows.flatMap((r) => r.fields).find((f) => f.field === "等待从几点算起");
+      assert.deepEqual(since, { field: "等待从几点算起", inUse: "10-13 10:00（至少，之前多久不知道）", candidate: "10-13 11:00" }, JSON.stringify(p.page.rows));
+      // without the rule's evidence, the change of hands is when the candidate's rules first judged it, and a floor
+      put(candidate, "rules/mini.mjs", rule());
+      const bare = (await look(w, candidate)).page.rows.flatMap((r) => r.fields).find((f) => f.field === "等待从几点算起");
+      assert.equal(bare?.candidate, "10-13 12:00（至少，之前多久不知道）");
+    },
+    { rules: { "mini.mjs": rule().replace('next: { actor: "me", what: "x" }', 'next: { actor: "them", what: "x" }') } },
+  ));
+
 test("what the preview cannot see is said: items cold on both sides, the hour, the daemon's memory, the candidate's code", () =>
   withWorld(
     async (w, candidate) => {

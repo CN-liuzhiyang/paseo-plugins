@@ -1139,7 +1139,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   const sameAssessment = (a: Assessment | undefined, b: Assessment) =>
-    !!a && a.stage === b.stage && a.health === b.health && a.headline === b.headline && a.next.what === b.next.what && a.next.actor === b.next.actor && (a.notice ?? null) === (b.notice ?? null) && a.error === b.error && a.stale === b.stale && a.rulesFingerprint === b.rulesFingerprint;
+    !!a && a.stage === b.stage && a.health === b.health && a.headline === b.headline && a.next.what === b.next.what && a.next.actor === b.next.actor && (a.next.since ?? null) === (b.next.since ?? null) && (a.notice ?? null) === (b.notice ?? null) && a.error === b.error && a.stale === b.stale && a.rulesFingerprint === b.rulesFingerprint;
 
   const action = (key: string, kind: Action["kind"], subject: string, summary: string, status: Action["status"], reason: string | null, nowMs: number): Action => ({
     key,
@@ -1388,6 +1388,7 @@ export function createEngine(deps: EngineDeps) {
       .filter(({ id }) => !dues.some((d) => d.commitment.id === id) && askable(id));
     const cards = Object.values(state.cards);
     const cap = confirm ? config.policy.confirmPerDay : person.pushPerDay;
+    // The page's "next" asks reachesAt (policy.ts) the same question, of one question at a time.
     const verdict = mayReach(person, dues.map((d) => d.commitment.domain), confirm ? confirmsToday(cards, person, nowMs) : cardsToday(cards, person, nowMs), nowMs, calendar, cap);
     const titles = dues.map((d) => `${d.commitment.ask.header}${d.why === "nag" ? `（第 ${d.round} 次）` : d.why === "again" ? "（先别问的时间过了，再问一次）" : ""}`).join("、");
     if (!verdict.send) {
