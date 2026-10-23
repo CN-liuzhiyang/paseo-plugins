@@ -8,48 +8,7 @@ import { issue, makeWorld, type World } from "./helpers";
 // The page of one item and the list's rows, through the engine: a rule with stages that carry
 // metadata (a detour, an end that is not finishing) judging made-up items whose fields the test moves.
 
-const FLOW = `export default {
-  name: "flow", description: "x", applies: { source: "gcp-demo" }, params: {},
-  stages: [
-    { id: "draft", label: "草稿" },
-    { id: "review", label: "评审" },
-    { id: "rework", label: "返工", side: true, when: "评审打回时" },
-    { id: "ship", label: "上线" },
-    { id: "finished", label: "完成", end: true },
-    { id: "dropped", label: "不再做", end: true, endKind: "dropped" },
-  ],
-  assess(kase, ctx) {
-    const f = kase.primary.fields;
-    if (f.Boom) throw new Error("rule failed on " + kase.id);
-    const stage = f.Phase || "draft";
-    const base = { stage, health: f.Health || (stage === "finished" ? "done" : "on-track"), headline: "h " + stage, next: { actor: f.Ball || "them", what: f.What || "等" }, facts: [], commitments: [] };
-    if (f.Ask) base.commitments = [{
-      key: "q:" + kase.id, title: "q " + kase.id, domain: "work", owner: "owner",
-      trigger: { at: ctx.at(f.Ask, "10:00") },
-      ask: { header: "H" + kase.id.split(":").pop(), question: "q " + kase.id + "?", options: [{ id: "a", label: "A", description: "" }, { id: "b", label: "B", description: "" }], allowOther: false },
-      brief: "b", nag: { everyWorkdays: 1, at: "10:00", max: 3 }, backstop: { at: ctx.at("2026-12-31", "18:00") }, level: "push" }];
-    return f.Since ? { ...base, since: f.Since } : base;
-  },
-};`;
-
-const START = "2026-10-13 10:00";
-
-async function withFlow<T>(body: (w: World) => Promise<T>, rule = FLOW): Promise<T> {
-  const w = await makeWorld({ start: START, config: { rules: { "flow.mjs": rule } } });
-  try {
-    return await body(w);
-  } finally {
-    w.close();
-  }
-}
-
-/** Sets fields of item `id` (a hot one: it has a release day close by). */
-const set = (w: World, id: number, fields: Record<string, string>) => {
-  const item = w.items.get(`gcp-demo:${id}`) ?? issue(id, { release: "2026-10-14" });
-  w.items.set(`gcp-demo:${id}`, { ...item, fields: { ...item.fields, ...fields } });
-};
-const view = (w: World, id: number) => w.engine.graph(`gcp-demo:${id}`)!;
-const rowOf = (w: World, id: number) => w.engine.status().cases.find((c) => c.caseId === `gcp-demo:${id}`)!.row!;
+import { FLOW, rowOf, set, view, withFlow } from "./item-flow";
 
 test("the stays of an item: each stage in order, when it was seen and when it happened, how long, and the current one", () =>
   withFlow(async (w) => {
@@ -220,14 +179,21 @@ test("the wait is counted from when the holder got the ball: a change in what it
     assert.ok(Date.parse(rowOf(w, 61).waiting.since!) > Date.parse(since), "a new holder, a new wait");
   }));
 
-test("a rule written the old way (stage ids as plain strings, no metadata, no `since`) gets a page too, with the names it has", () =>
+test("a rule written the old way (stage ids as plain strings, no metadata, no `since`) gets a page too, with step numbers where the names are not, and the ids only in the evidence layer", () =>
   withFlow(
     async (w) => {
       set(w, 41, {});
       await w.run("2026-10-13 10:30");
       const v = view(w, 41);
       // a rule with no end of its own gets one for "not following it any more", so that a word of the person's has somewhere to go
-      assert.deepEqual(v.graph.stages.map((s) => [s.id, s.label, s.side, s.end]), [["one", "one", false, false], ["two", "two", false, false], ["dropped", "不再追踪", false, true]]);
+      assert.deepEqual(v.graph.stages.map((s) => [s.id, s.label, s.side, s.end]), [["one", "第 1 步", false, false], ["two", "第 2 步", false, false], ["dropped", "不再追踪", false, true]]);
+      assert.equal(rowOf(w, 41).stageLabel, "第 1 步", "the list says the same, not the id");
+      assert.equal(v.current.stageLabel, "第 1 步");
+      assert.match(v.facts[0]!.value, /第 1 步/);
+      assert.deepEqual(v.evidence.stages.filter((s) => !s.named).map((s) => [s.id, s.label]), [["one", "第 1 步"], ["two", "第 2 步"]], "where the ids are");
+      // what is for the page to show: the stage ids the data carries for logic (visits, current) are not text
+      const shown = JSON.stringify({ ...v, evidence: null, graph: null, current: { ...v.current, stage: "" }, visits: v.visits.map((x) => ({ ...x, stage: "" })) });
+      assert.ok(!/\bone\b|\btwo\b/.test(shown), "no id of a stage anywhere else on the page");
       assert.deepEqual(v.visits.map((s) => [s.stage, s.cur, s.fromKind]), [["one", true, "observed"]]);
       assert.deepEqual(rowOf(w, 41).strip, ["cur", "todo"]);
       assert.deepEqual(v.graph.normal, ["one", "two"]);
@@ -247,7 +213,7 @@ test("a stage the rule no longer declares (the rule changed after the item was j
       await w.run("2026-10-13 11:30");
       const v = view(w, 51);
       assert.ok(v.visits.some((s) => s.stage === "legacy"), "the stay in it is still on the page");
-      assert.deepEqual(v.graph.stages.filter((s) => s.id === "legacy").map((s) => [s.label, s.side, s.when]), [["legacy", true, "规则里已经没有这一步"]]);
+      assert.deepEqual(v.graph.stages.filter((s) => s.id === "legacy").map((s) => [s.label, s.side, s.when]), [["已经没有的一步", true, "规则里已经没有这一步"]], "a stage the rule lost has no name to show, and its id is not shown instead");
       assert.equal(rowOf(w, 51).group, "errors", "and the rule now fails the item, which is what the list says");
     },
     FLOW.replace('{ id: "rework"', '{ id: "legacy", label: "旧阶段", side: true }, { id: "rework"'),

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { Annotation, Assessment, Commitment, Note } from "../shared/model";
 import type { Ball, Cause, HistoryLine } from "../shared/graph";
 import { clip, KIND_LABEL } from "./requests";
+import { iso, zoned } from "./time";
 
 // What the page of an item needs from the past, read from the journal: the stages an item went
 // through and when. The state keeps only the last assessment of each item, but the journal has
@@ -100,6 +101,20 @@ export interface JournalBook {
   chain(caseId: string): Chain | undefined;
 }
 
+const OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i;
+const WALL = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2})(?:\.\d+)?)?$/;
+
+/**
+ * An instant a rule wrote, in the instance's zone and the way the journal stores times. A rule may
+ * write it with an offset, in UTC ("Z"), or as a wall clock with none; the last is read in the
+ * instance's zone, not the machine's. Null for what is not a time.
+ */
+export function instantOf(text: string, tz: string): string | null {
+  const wall = OFFSET.test(text) ? null : WALL.exec(text.trim());
+  const ms = wall ? zoned(wall[1]!, wall[2]!, tz) + Number(wall[3] ?? 0) * 1000 : Date.parse(text);
+  return Number.isNaN(ms) ? null : iso(ms, tz);
+}
+
 const PREFIX = /^\{"v":1,"seq":(\d+),"at":"([^"]+)","type":"([^"]+)"/;
 const SNAPSHOT_KEY = /"item":\{"key":"([^"]+)","source":"([^"]+)"/;
 
@@ -109,7 +124,7 @@ const WANTED = new Set(["assessment", "item.snapshot", "note.set", "commitment.c
  * `shared`: the ids of sources whose items every item reads (switch files, version files): a
  * change in one is a change in the data of all.
  */
-export function createJournalBook(dir: string, shared: ReadonlySet<string>): JournalBook {
+export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: string): JournalBook {
   const journalDir = path.join(dir, "journal");
   const offsets = new Map<string, number>();
   const chains = new Map<string, Chain>();
@@ -131,7 +146,9 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>): Jou
 
   function assessed(seq: number, a: Assessment) {
     const chain = chainOf(a.caseId);
-    const since = a.since && Date.parse(a.since) <= Date.parse(a.at) ? a.since : null;
+    // Read as an instant, in the instance's zone: a rule may write it in UTC or without an offset.
+    const sinceAt = a.since ? instantOf(a.since, tz) : null;
+    const since = sinceAt && Date.parse(sinceAt) <= Date.parse(a.at) ? sinceAt : null;
     const rec: AssessRec = { seq, at: a.at, stage: a.stage, health: a.health, headline: a.headline, actor: a.next.actor, what: a.next.what, fp: a.rulesFingerprint, error: a.error, notice: a.notice ?? null, stale: a.stale, since, rule: a.rule };
     chain.first ??= rec;
     if (rec.error !== null) {
@@ -146,8 +163,15 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>): Jou
       entry(chain, { at: rec.at, seq, kind: "error", text: () => "检查恢复了", detail: null });
     }
     const last = chain.last;
+    // A stage is not entered before the one before it was: a `since` that says so is not believed.
+    const notBefore = (at: string | null, visits: RawVisit[]): string | null => {
+      const before = visits.filter((v) => !v.superseded).pop();
+      const from = before ? (before.happened ?? before.observed) : null;
+      return at && (!from || Date.parse(at) >= Date.parse(from)) ? at : null;
+    };
     const start = (cause: Cause | null) => {
-      chain.visits.push({ stage: rec.stage, observed: rec.at, happened: rec.since, cause, superseded: false, headline: rec.headline, lastHeadline: rec.headline, balls: [{ actor: rec.actor, what: rec.what, from: rec.since ?? rec.at }] });
+      const happened = notBefore(rec.since, chain.visits);
+      chain.visits.push({ stage: rec.stage, observed: rec.at, happened, cause, superseded: false, headline: rec.headline, lastHeadline: rec.headline, balls: [{ actor: rec.actor, what: rec.what, from: happened ?? rec.at }] });
     };
     if (!last) {
       start(null);
@@ -171,7 +195,7 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>): Jou
       const visit = chain.visits[chain.visits.length - 1];
       if (visit) {
         visit.lastHeadline = rec.headline;
-        if (visit.happened === null && rec.since) visit.happened = rec.since;
+        if (visit.happened === null) visit.happened = notBefore(rec.since, chain.visits.slice(0, -1));
         const ball = visit.balls[visit.balls.length - 1];
         if (ball && (ball.actor !== rec.actor || ball.what !== rec.what)) visit.balls.push({ actor: rec.actor, what: rec.what, from: rec.at });
       }
@@ -314,18 +338,24 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>): Jou
 
   return {
     refresh() {
-      if (!existsSync(journalDir)) return;
-      const files = readdirSync(journalDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort();
-      for (const file of files) {
-        if (!readFile(file)) {
-          // A file got shorter: not an append. Read everything again.
-          offsets.clear();
-          chains.clear();
-          commitments.clear();
-          annotations.clear();
-          for (const again of files) readFile(again);
-          return;
+      // A read that fails (a file another process holds for a moment, one replaced between the listing and the open)
+      // leaves what is read as it was and is tried again at the next call: a page never fails for it.
+      try {
+        if (!existsSync(journalDir)) return;
+        const files = readdirSync(journalDir).filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f)).sort();
+        for (const file of files) {
+          if (!readFile(file)) {
+            // A file got shorter: not an append. Read everything again.
+            offsets.clear();
+            chains.clear();
+            commitments.clear();
+            annotations.clear();
+            for (const again of files) readFile(again);
+            return;
+          }
         }
+      } catch {
+        // see above
       }
     },
     chain: (caseId) => chains.get(caseId),

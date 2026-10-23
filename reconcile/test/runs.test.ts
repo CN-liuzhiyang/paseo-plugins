@@ -1,80 +1,14 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import type { RunView } from "../shared/graph";
 import { caseOfStart, createRunReader, resolveRunsDir } from "../server/runs";
 import { issue, makeWorld } from "./helpers";
+import { AFFAIR, ago, callEnd, callStart, fixture, MIN, NOW, only, phaseEnd, phaseStart, runView, start } from "./run-files";
 
-// The runs of flows started for an item, read from fixture event files written the way the
-// orchestration runtime writes them (EVENTS.md): one json per line, `v`, `seq`, `ts`, `runId`, `kind`
-// first, and a `.claim` file beside whose modification time says whether the run is alive. No flow
-// runs in the real system yet; these are made-up runs of a made-up flow.
-
-const NOW = Date.parse("2026-10-23T12:00:00Z");
-const ago = (ms: number) => new Date(NOW - ms).toISOString();
-const MIN = 60_000;
-const AFFAIR = (caseId: string, extra: Record<string, string> = {}) => ({ label: "示例单的流程", link: { plugin: "reconcile", screen: "inbox", params: { case: caseId, ...extra } } });
-
-interface Fixture {
-  dir: string;
-  /** Writes a run's events; `claimAgeMs` null: no claim file. */
-  run(runId: string, events: Array<Record<string, unknown>>, options?: { claimAgeMs?: number | null }): void;
-  append(runId: string, events: Array<Record<string, unknown>>, raw?: string): void;
-  reader: ReturnType<typeof createRunReader>;
-  close(): void;
-}
-
-function fixture(): Fixture {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-runs-"));
-  const runsDir = path.join(dir, "runs");
-  mkdirSync(runsDir);
-  const seqs = new Map<string, number>();
-  const lines = (runId: string, events: Array<Record<string, unknown>>) =>
-    events.map((e) => JSON.stringify({ v: 1, seq: seqs.get(runId) ?? 0, runId, ...((seqs.set(runId, (seqs.get(runId) ?? 0) + 1), e)) }) + "\n").join("");
-  return {
-    dir: runsDir,
-    run(runId, events, options = {}) {
-      writeFileSync(path.join(runsDir, `${runId}.jsonl`), lines(runId, events));
-      const age = options.claimAgeMs === undefined ? 10_000 : options.claimAgeMs;
-      if (age !== null) {
-        const claim = path.join(runsDir, `${runId}.claim`);
-        writeFileSync(claim, JSON.stringify({ pid: 1, hostname: "h", startedAt: ago(60 * MIN) }));
-        utimesSync(claim, new Date(NOW - age), new Date(NOW - age));
-      }
-    },
-    append(runId, events, raw = "") {
-      appendFileSync(path.join(runsDir, `${runId}.jsonl`), lines(runId, events) + raw);
-    },
-    reader: createRunReader({ runsDir, tz: "Asia/Shanghai", now: () => NOW, affair: { plugin: "reconcile", screen: "inbox" }, view: { plugin: "orchestration-ui", screen: "runs" } }),
-    close: () => rmSync(dir, { recursive: true, force: true }),
-  };
-}
-
-const start = (ts: string, affair: unknown, phases = ["collect", "draft", "publish"]) => ({
-  kind: "run.start",
-  ts,
-  flow: { name: "示例流程", description: "x", phases: phases.map((id) => ({ id, title: `阶段 ${id}` })), inputs: {}, grants: [] },
-  source: null,
-  input: {},
-  caller: null,
-  cwd: "/x",
-  host: null,
-  pid: 1,
-  hostname: "h",
-  affair,
-});
-const phaseStart = (ts: string, phase: string) => ({ kind: "phase.start", ts, phase });
-const phaseEnd = (ts: string, phase: string, ok = true) => ({ kind: "phase.end", ts, phase, ok });
-const callStart = (ts: string, callId: string, type: "ask" | "do" | "gate", extra: Record<string, unknown> = {}) => ({ kind: "call.start", ts, callId, type, name: callId, title: `调用 ${callId}`, phase: null, ...extra });
-const callEnd = (ts: string, callId: string, ok = true, extra: Record<string, unknown> = {}) => ({ kind: "call.end", ts, callId, ok, durationMs: 1000, output: null, error: null, agentId: null, cost: { usd: 0.25, inputTokens: 1, outputTokens: 1 }, ...extra });
-
-const only = (f: Fixture, caseId = "tracker:1"): RunView => {
-  const runs = f.reader.forCase(caseId);
-  assert.equal(runs.length, 1);
-  return runs[0]!;
-};
+// The runs of flows started for an item, read from fixture event files (run-files.ts).
 
 test("a run belongs to an item only by the affair link it was started with; every other run is passed over", () => {
   const f = fixture();
@@ -139,7 +73,7 @@ test("a gate waiting for a person is the run asking you, not a run that is stuck
     ]);
     const r = only(f);
     assert.equal(r.situation, "me", "70 minutes quiet, and still not 'maybe stuck': it waits for a person");
-    assert.deepEqual(r.gate, { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-23T18:50:00+08:00", carrier: "provider" });
+    assert.deepEqual(r.gate, { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-23T18:50:00+08:00", kind: "provider", agentId: "gate-agent" });
     assert.deepEqual(r.steps, ["ok", "wait", "todo"]);
     assert.equal(r.agentId, "gate-agent");
   } finally {
@@ -147,20 +81,20 @@ test("a gate waiting for a person is the run asking you, not a run that is stuck
   }
 });
 
-test("alive but quiet too long is 'maybe stuck', and the limit is the longest running call's own timeout plus a margin, not a fixed time", () => {
+test("alive but quiet too long is 'maybe stuck', and the limit is the runtime's: the running call's own timeout plus two minutes, from the last event, not a fixed time", () => {
   const f = fixture();
   try {
     f.run("quiet", [start(ago(60 * MIN), AFFAIR("tracker:1")), phaseStart(ago(59 * MIN), "collect"), callStart(ago(40 * MIN), "c1", "ask", { phase: "collect", timeout: "30m" })]);
     const slow = only(f);
     assert.equal(slow.situation, "slow");
-    assert.deepEqual([slow.quiet!.ms, slow.quiet!.limitMs], [40 * MIN, 35 * MIN]);
+    assert.deepEqual([slow.quiet!.ms, slow.quiet!.limitMs], [40 * MIN, 32 * MIN], "the call's timeout and the runtime's two minutes of grace, from the last event");
     assert.deepEqual(slow.steps, ["slow", "todo", "todo"]);
     const g = fixture();
     try {
       g.run("patient", [start(ago(60 * MIN), AFFAIR("tracker:1")), phaseStart(ago(59 * MIN), "collect"), callStart(ago(40 * MIN), "c1", "ask", { phase: "collect", timeout: "2h" })]);
       const ok = only(g);
       assert.equal(ok.situation, "doing", "a call allowed two hours is not stuck after 40 minutes");
-      assert.equal(ok.quiet!.limitMs, 125 * MIN);
+      assert.equal(ok.quiet!.limitMs, 122 * MIN);
     } finally {
       g.close();
     }
@@ -260,7 +194,7 @@ test("done and stopped are both over without a problem; a timeout is a failure; 
     assert.deepEqual([by.done!.situation, by.done!.outcome, by.done!.steps], ["done", "一共改了 3 处", ["ok", "skip", "skip"]]);
     assert.deepEqual([by.stopped!.situation, by.stopped!.stopReason, by.stopped!.outcome], ["done", "没有需要做的", "中止了：没有需要做的"]);
     assert.deepEqual([by.timeout!.situation, by.timeout!.error!.plain], ["fail", "超过了这次流程的总时限"]);
-    assert.deepEqual([by.odd!.situation, by.odd!.error!.plain, by.odd!.error!.raw], ["fail", "出错了：boom", "WeirdThing: boom\nsecond line"]);
+    assert.deepEqual([by.odd!.situation, by.odd!.error!.plain, by.odd!.error!.raw], ["fail", "出错了：boom", "WeirdThing: boom second line"], "the sentence is the first line, the raw one the whole message on one line");
     assert.deepEqual(f.reader.forCase("tracker:1").map((r) => r.runId), ["odd", "timeout", "stopped", "done"], "newest first");
   } finally {
     f.close();
@@ -311,34 +245,13 @@ test("the runs directory is found in the runtime's order: ORCH_LOG_DIR, the conf
 const RULE = `export default { name: "flow", description: "x", applies: { source: "gcp-demo" }, params: {}, stages: ["a", "b"],
   assess() { return { stage: "a", health: "on-track", headline: "h", next: { actor: "them", what: "w" }, facts: [], commitments: [] }; } };`;
 
-const runView = (situation: RunView["situation"], over: Partial<RunView> = {}): RunView => ({
-  runId: "r1",
-  stage: "a",
-  flow: "示例流程",
-  startedAt: "2026-10-13T09:30:00+08:00",
-  situation,
-  outcome: null,
-  step: { index: 2, total: 3, title: "阶段 draft" },
-  steps: ["ok", "run", "todo"],
-  costUsd: 0.42,
-  quiet: { ms: 0, limitMs: 15 * MIN },
-  gate: null,
-  error: null,
-  stopReason: null,
-  sideEffects: [],
-  agentId: null,
-  link: { plugin: "orchestration-ui", screen: "runs", params: { run: "r1" } },
-  retry: null,
-  ...over,
-});
-
 test("a run's state decides where the item stands on the list and what the page says first", async () => {
   const states: Record<number, RunView> = {
     1: runView("doing"),
     2: runView("fail", { error: { name: "OutputMismatch", plain: "agent 的回答不合约定的格式，这一步没拿到结果", raw: "OutputMismatch: x" }, sideEffects: ["拷贝示例文件"], quiet: null }),
     3: runView("lost"),
     4: runView("slow", { quiet: { ms: 40 * MIN, limitMs: 35 * MIN } }),
-    5: runView("me", { gate: { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-13T09:40:00+08:00", carrier: "provider" } }),
+    5: runView("me", { gate: { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-13T09:40:00+08:00", kind: "provider", agentId: null } }),
     6: runView("done", { quiet: null, outcome: "一共改了 3 处" }),
   };
   const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "flow.mjs": RULE } }, runs: (caseId) => [states[Number(caseId.split(":")[1])]].filter((r): r is RunView => !!r) });

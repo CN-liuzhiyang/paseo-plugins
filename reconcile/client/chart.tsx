@@ -18,7 +18,7 @@ const MID = 16;
 /** Half of a detour's drop: the connector is two corners, each this high. */
 const HALF = 18;
 
-const stageOf = (view: GraphView, id: string): StageMeta => view.graph.stages.find((s) => s.id === id) ?? { id, label: id, next: [], side: true, when: null, end: false, endKind: null, done: null };
+const stageOf = (view: GraphView, id: string): StageMeta => view.graph.stages.find((s) => s.id === id) ?? { id, label: "已经没有的一步", named: false, next: [], side: true, when: null, end: false, endKind: null, done: null };
 
 export function Dot({ kind, tone }: { kind: "ok" | "cur" | "no"; tone?: Tone }) {
   const ui = useUi();

@@ -1428,6 +1428,14 @@ export function createEngine(deps: EngineDeps) {
         await deps.carrier!.archive(agentId).catch((error: unknown) => deps.log(`archiving ${agentId} after a stop failed: ${(error as Error).message}`));
         return;
       }
+      // The questions are on the page from the moment they are waiting, so a person may have answered while the carrier was starting.
+      // If nothing is left to ask, the card is over (the answer closed it): it is not raised again and its carrier goes.
+      const now = state.cards[card.id];
+      if ((now && now.status !== "pending" && now.status !== "raised") || card.commitments.every(({ id }) => !isOpen(state.commitments[id]?.status))) {
+        await deps.carrier!.archive(agentId).catch((error: unknown) => deps.log(`archiving ${agentId} of an answered card failed: ${(error as Error).message}`));
+        append(dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody));
+        return;
+      }
       append([
         { type: "card.changed", id: card.id, patch: { status: "raised", agentId, attempts: attempt } },
         ...dues.map((d) => ({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "done", null, nowMs) }) as EventBody),
@@ -1439,14 +1447,18 @@ export function createEngine(deps: EngineDeps) {
       const message = (error as Error).message;
       deps.log(`card ${card.id}: could not start its carrier: ${message}`);
       carrierRetryAt = nowMs + CARRIER_RETRY_MS;
-      // A card re-raised for a carrier it lost stays open and waits for the next try; a new one is closed.
-      const events: EventBody[] =
-        dues.length === 0 && card.attempts > 0
+      // A card re-raised for a carrier it lost stays open and waits for the next try; a new one is closed. One that an answer
+      // already ended (given on the page while the carrier was starting) is left as it is.
+      const open = state.cards[card.id]?.status === "pending" || state.cards[card.id]?.status === "raised";
+      const events: EventBody[] = !open
+        ? []
+        : dues.length === 0 && card.attempts > 0
           ? [{ type: "card.changed", id: card.id, patch: { status: "pending", agentId: null, attempts: attempt, reason: `起不了卡片：${message}` } }]
           : [{ type: "card.changed", id: card.id, patch: { status: "closed", attempts: attempt, reason: `起不了卡片：${message}`, closedAt: nowIso(nowMs) } }];
       dues.forEach((d, i) => {
         events.push({ type: "action", action: action(`ask:${d.commitment.id}:${d.round}`, "ask", d.commitment.id, `问 ${personName(card.person)}：${d.commitment.ask.question}`, "failed", message, nowMs) });
-        // Back to how it was, so the next try asks the same round.
+        // Back to how it was, so the next try asks the same round: only a question still waiting, not one that was answered meanwhile.
+        if (state.commitments[d.commitment.id]?.status !== "waiting") return;
         const was = before[i];
         events.push({
           type: "commitment.changed",
@@ -1575,6 +1587,8 @@ export function createEngine(deps: EngineDeps) {
   // ---- public -----------------------------------------------------------------------------
 
   // The flow chart of an item and the list's rows (graph.ts); read-only.
+  /** The items whose list row failed, told once each. */
+  const rowFailed = new Set<string>();
   const graphBook: Graph = createGraph({
     store,
     config,
@@ -1585,6 +1599,7 @@ export function createEngine(deps: EngineDeps) {
     step: (c) => nextStep(afterHolds(c), tz, calendar),
     inForce: (caseId) => (["drop", "hold", "wrong"] as const).flatMap((kind) => inForce(caseId, kind, deps.now())),
     runs: deps.runs ?? undefined,
+    isConfirm,
   });
 
   return {
@@ -1775,6 +1790,8 @@ export function createEngine(deps: EngineDeps) {
       if (c.status === "done" && c.answer) return { ok: false, already: true, detail: `已经答过了：${c.answer.text ?? c.answer.label}（${answeredWhere(c.answer.via)} ${c.answer.at.slice(5, 16).replace("T", " ")}），这次的没有记下` };
       if (c.status === "expired" || c.status === "cancelled") return no(`这个问题已经${c.status === "expired" ? "过期" : "收回"}了，没有记下`);
       if (c.status !== "waiting") return no("这个问题还没有问到，到时候再答");
+      // Whether some words were the person's own is for the admin to say on the card it was sent on, not on a page anyone with the app can open.
+      if (isConfirm(c)) return no("这是在确认「某句话是不是本人说的」，只能在它的确认卡上答（页面上有打开那张卡的按钮）");
       if (c.rounds !== round) return no(`这个问题已经又问了一轮（第 ${c.rounds} 次），页面上的是旧的，刷新后再答`);
       let raw: string;
       if (input.option !== undefined) {
@@ -1818,8 +1835,25 @@ export function createEngine(deps: EngineDeps) {
     return out;
   }
 
+  /** One row of the list. One that cannot be worked out is left out (the list says how many), it does not take the whole status with it. */
+  function listRow(key: string) {
+    try {
+      const row = graphBook.row(key);
+      rowFailed.delete(key);
+      return row;
+    } catch (error) {
+      if (!rowFailed.has(key)) {
+        rowFailed.add(key);
+        deps.log(`the list row of ${key} could not be worked out: ${(error as Error).message}`);
+      }
+      return null;
+    }
+  }
+
   function status(): Status {
     const nowMs = deps.now();
+    graphBook.refresh(); // once for all the rows
+
     const openCommitments = Object.values(state.commitments).filter((c) => c.status === "scheduled" || c.status === "waiting");
     const judged = Object.values(state.items).filter((item) => (ruleset?.rules ?? []).some((r) => r.source === item.source));
     const heat = (key: string) => lastHeat.get(key) ?? [];
@@ -1843,7 +1877,7 @@ export function createEngine(deps: EngineDeps) {
         commitments,
         open: commitments.some((c) => c.status === "scheduled" || c.status === "waiting"),
         hot: heat(item.key),
-        row: graphBook.row(item.key),
+        row: listRow(item.key),
       };
     });
     // Most urgent first: a rule error, then what is wrong, then what waits, then what is fine.

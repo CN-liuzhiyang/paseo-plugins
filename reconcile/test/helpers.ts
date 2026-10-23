@@ -43,7 +43,7 @@ export const TEST_POLICY = {
   coldTitles: ["【总单】", "长期维护"],
 };
 
-export function writeConfig(dir: string, overrides: { persons?: unknown; policy?: unknown; rules?: Record<string, string>; watch?: number[]; extraSources?: unknown[] } = {}) {
+export function writeConfig(dir: string, overrides: { persons?: unknown; policy?: unknown; rules?: Record<string, string>; watch?: number[]; extraSources?: unknown[]; sourceLabels?: Record<string, string> } = {}) {
   mkdirSync(path.join(dir, "rules"), { recursive: true });
   mkdirSync(path.join(dir, "calendar"), { recursive: true });
   writeFileSync(
@@ -59,6 +59,7 @@ export function writeConfig(dir: string, overrides: { persons?: unknown; policy?
     JSON.stringify([
       {
         id: "gcp-demo",
+        ...(overrides.sourceLabels?.["gcp-demo"] ? { label: overrides.sourceLabels["gcp-demo"] } : {}),
         kind: "gcp",
         command: ["node", "cli.js"],
         gateway: { path: "/api/tracker/call", tool: "tool_call", target: "tracker" },
@@ -75,6 +76,7 @@ export function writeConfig(dir: string, overrides: { persons?: unknown; policy?
       },
       {
         id: "flags-demo",
+        ...(overrides.sourceLabels?.["flags-demo"] ? { label: overrides.sourceLabels["flags-demo"] } : {}),
         kind: "flags",
         files: [{ id: "outer", url: "https://flags.example/outer.json", labels: { env: "outer" } }],
         sections: ["switches"],
@@ -138,6 +140,8 @@ export interface World {
   archived: string[];
   /** Times the engine made sure of the cards' workspace. */
   ensured: number;
+  /** Runs inside the carrier, while a card is being raised (the engine is waiting for it): a person answering at that moment. */
+  hooks: { raise: ((card: Card) => void | Promise<void>) | null };
   /** files: switch files (by name) that fail to read while the others do. */
   fail: { source: Error | null; carrier: Error | null; files: Set<string>; deliver: Error | null };
   /** What server.deliver was handed, failed tries included. */
@@ -186,7 +190,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0 } as World;
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null } } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -234,6 +238,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   };
   const carrier: Carrier = {
     async raise(card, content, attempt) {
+      await world.hooks.raise?.(card);
       if (fail.carrier) throw fail.carrier;
       const agentId = `agent-${++agents}`;
       cards.push({ card: structuredClone(card), content, attempt, agentId });

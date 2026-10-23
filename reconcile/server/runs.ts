@@ -2,7 +2,9 @@ import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, 
 import os from "node:os";
 import path from "node:path";
 import type { RunView } from "../shared/graph";
+import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe } from "../shared/liveness.mjs";
 import { iso } from "./time";
+import { agentIdOf, cleanText, hasUnsafe } from "./untrusted";
 
 // The runs of flows started for an item, read from what the orchestration runtime writes
 // (orchestration/EVENTS.md): one `<runsDir>/<runId>.jsonl` per run, and a `<runId>.claim` beside it
@@ -14,19 +16,24 @@ import { iso } from "./time";
 // the contract, so what the contract adds later is ignored until this learns it, and what it leaves out
 // of old files is read as the contract says.
 //
-// Honest limits: whether the process of an unfinished run is alive is answered by the claim alone (the
-// runtime and orchestration-ui also look at the pid on the same machine, which shows a death sooner);
-// a run whose process died reads as lost once its claim has gone stale, two minutes at most.
+// Whether a run is alive is not decided here: it is the runtime's own table, `shared/liveness.mjs`, a copy of
+// orchestration/runtime/liveness.mjs made by `npm run sync:liveness` there, and the same facts the runtime reads
+// (the claim's age and content, the holder's pid on the same machine) go into it.
+//
+// What the files say is not trusted (anyone who can write the log directory can write them): every text shown is
+// cut and cleaned (untrusted.ts), an agent is opened only by an id that looks like one, and a file is read for as
+// long as it takes to see whether it is this plugin's, and then only in bounded pieces.
 
-const CLAIM_FRESH_MS = 2 * 60_000;
-/** Without a claim (an old file), a run is lost after this long without an event. */
-const OLD_FILE_QUIET_MS = 15 * 60_000;
-/** A run alive but with no event for this long is "maybe stuck"; a call with a longer timeout gets its timeout plus a margin. */
-const QUIET_BASE_MS = 15 * 60_000;
-const QUIET_MARGIN_MS = 5 * 60_000;
 const SCAN_EVERY_MS = 3_000;
+/** The first line of a run, `run.start`, is read within this much; a file whose first line is longer is not ours. */
 const HEAD_BYTES = 256 * 1024;
-const CHUNK = 8 << 20;
+/** A line longer than this is skipped, whatever it says. */
+const MAX_LINE = 4 << 20;
+/** Runs that have not been written to for this long are not read: a page shows what is recent. */
+const RECENT_MS = 60 * 86_400_000;
+/** What one run may cost in memory, however many events its file has. */
+const MAX_CALLS = 2_000;
+const MAX_PHASES = 200;
 
 export interface RunsDeps {
   runsDir: string;
@@ -35,7 +42,11 @@ export interface RunsDeps {
   /** The plugin and screen an affair link must name to be this plugin's, and where a run's page is. */
   affair: { plugin: string; screen: string };
   view: { plugin: string; screen: string };
+  /** Whether a pid exists, on this machine; absent: asks the system. */
+  probe?: Probe;
 }
+
+const localProbe = (): Probe => ({ hostname: os.hostname(), kill: (pid, signal) => process.kill(pid, signal) });
 
 /** The same order the runtime and orchestration-ui use: ORCH_LOG_DIR, then the config file's logDir, then the default. */
 export function resolveRunsDir(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): string | null {
@@ -65,10 +76,11 @@ interface CallRec {
   startedAt: number;
   timeoutMs: number | null;
   effects: string | null;
+  /** What kind of carrier a gate has (EVENTS.md): "provider" or "model". */
   carrier: string | null;
   summary: string | null;
   agentId: string | null;
-  end: { at: number; ok: boolean; error: { name: string; message: string } | null; usd: number; outcome: string | null } | null;
+  end: { at: number; ok: boolean; error: RunError | null; usd: number; outcome: string | null } | null;
 }
 
 interface RunRec {
@@ -78,19 +90,27 @@ interface RunRec {
   phases: Array<{ id: string; title: string }>;
   stage: string | null;
   caseId: string;
+  /** Who ran it, as run.start says: asked about when the run has no claim. */
+  holder: { pid?: unknown; hostname?: unknown };
   phaseState: Map<string, "run" | "ok" | "bad">;
   calls: Map<string, CallRec>;
   lastAt: number;
-  end: { outcome: string; summary: string | null; stop: string | null; error: { name: string; message: string } | null } | null;
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null } | null;
 }
 
-const DURATION = /^(\d+)(s|m|h)$/;
-const durationMs = (text: unknown): number | null => {
-  const m = typeof text === "string" ? DURATION.exec(text) : null;
-  return m ? Number(m[1]) * { s: 1_000, m: 60_000, h: 3_600_000 }[m[2] as "s" | "m" | "h"] : null;
-};
+/** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
+interface RunError {
+  name: string;
+  message: string;
+  headline: string;
+}
+
 const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
 const obj = (v: unknown): Record<string, unknown> | null => (v !== null && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null);
+const errorOf = (v: unknown): RunError | null => {
+  const e = obj(v);
+  return e ? { name: cleanText(e.name, 60) ?? "Error", message: cleanText(e.message, 300) ?? "", headline: cleanText(str(e.message)?.split("\n")[0], 120) ?? "" } : null;
+};
 
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
 export function caseOfStart(start: Record<string, unknown>, affair: RunsDeps["affair"]): { caseId: string; stage: string | null } | null {
@@ -98,9 +118,9 @@ export function caseOfStart(start: Record<string, unknown>, affair: RunsDeps["af
   if (!link || link.plugin !== affair.plugin || link.screen !== affair.screen) return null;
   const params = obj(link.params);
   const caseId = str(params?.case);
-  if (!caseId || caseId.length > 256 || /[\u0000-\u001f]/.test(caseId)) return null;
+  if (!caseId || caseId.length > 256 || hasUnsafe(caseId)) return null;
   const stage = str(params?.stage);
-  return { caseId, stage: stage && stage.length <= 128 ? stage : null };
+  return { caseId, stage: stage && stage.length <= 128 && !hasUnsafe(stage) ? stage : null };
 }
 
 function fold(run: RunRec, e: Record<string, unknown>) {
@@ -108,25 +128,25 @@ function fold(run: RunRec, e: Record<string, unknown>) {
   if (Number.isFinite(at)) run.lastAt = Math.max(run.lastAt, at);
   switch (e.kind) {
     case "phase.start":
-      if (typeof e.phase === "string") run.phaseState.set(e.phase, "run");
+      if (typeof e.phase === "string" && (run.phaseState.has(e.phase) || run.phaseState.size < MAX_PHASES)) run.phaseState.set(e.phase, "run");
       return;
     case "phase.end":
-      if (typeof e.phase === "string") run.phaseState.set(e.phase, e.ok === false ? "bad" : "ok");
+      if (typeof e.phase === "string" && (run.phaseState.has(e.phase) || run.phaseState.size < MAX_PHASES)) run.phaseState.set(e.phase, e.ok === false ? "bad" : "ok");
       return;
     case "call.start": {
       const id = str(e.callId);
       const type = e.type === "ask" || e.type === "do" || e.type === "gate" ? e.type : null;
-      if (!id || !type) return;
+      if (!id || !type || id.length > 128 || (!run.calls.has(id) && run.calls.size >= MAX_CALLS)) return;
       run.calls.set(id, {
         id,
         type,
-        title: str(e.title) ?? str(e.name) ?? id,
+        title: cleanText(e.title) ?? cleanText(e.name) ?? cleanText(id) ?? "（没有名字的调用）",
         phase: str(e.phase),
         startedAt: Number.isFinite(at) ? at : run.startedAt,
-        timeoutMs: durationMs(e.timeout),
+        timeoutMs: parseDuration(str(e.timeout)),
         effects: str(e.effects),
         carrier: str(e.carrier),
-        summary: str(e.summary),
+        summary: cleanText(e.summary, 200),
         agentId: null,
         end: null,
       });
@@ -134,29 +154,27 @@ function fold(run: RunRec, e: Record<string, unknown>) {
     }
     case "call.agent": {
       const call = run.calls.get(str(e.callId) ?? "");
-      if (call && !call.agentId) call.agentId = str(e.agentId);
+      if (call && !call.agentId) call.agentId = agentIdOf(e.agentId);
       return;
     }
     case "call.end": {
       const call = run.calls.get(str(e.callId) ?? "");
       if (!call || call.end) return;
-      const error = obj(e.error);
       const cost = obj(e.cost);
       const output = obj(e.output);
-      call.agentId ??= str(e.agentId);
+      call.agentId ??= agentIdOf(e.agentId);
       call.end = {
         at: Number.isFinite(at) ? at : call.startedAt,
         ok: e.ok === true,
-        error: error ? { name: str(error.name) ?? "Error", message: str(error.message) ?? "" } : null,
-        usd: typeof cost?.usd === "number" ? cost.usd : 0,
-        outcome: call.type === "gate" ? str(output?.outcome) : null,
+        error: errorOf(e.error),
+        usd: typeof cost?.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0 ? cost.usd : 0,
+        outcome: call.type === "gate" ? cleanText(output?.outcome, 40) : null,
       };
       return;
     }
     case "run.end": {
       const stop = obj(e.stop);
-      const error = obj(e.error);
-      run.end = { outcome: str(e.outcome) ?? "failed", summary: str(e.summary), stop: str(stop?.reason), error: error ? { name: str(error.name) ?? "Error", message: str(error.message) ?? "" } : null };
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error) };
     }
   }
 }
@@ -171,28 +189,49 @@ const PLAIN: Record<string, string> = {
   RunEnded: "流程结束的时候这一步还没做完",
   RunRefused: "流程没有起来：被拒绝了",
 };
-const plainError = (e: { name: string; message: string }) => PLAIN[e.name] ?? (e.message ? `出错了：${e.message.split("\n")[0]!.slice(0, 120)}` : "出错了");
+const plainError = (e: RunError) => PLAIN[e.name] ?? (e.headline ? `出错了：${e.headline}` : "出错了");
 
-function viewOf(run: RunRec, claimMtime: number | null, deps: RunsDeps): RunView {
+/** What the claim beside a run says: its age, and who holds it; null for a run without one. */
+interface ClaimRead {
+  mtimeMs: number;
+  body: { pid?: unknown; hostname?: unknown; refused?: unknown } | null;
+}
+
+/** Who holds the run: whoever the claim names; what it does not say (or a claim that cannot be read) falls back to run.start. */
+const holderOf = (body: ClaimRead["body"], run: RunRec): { pid?: unknown; hostname?: unknown } => ({
+  pid: typeof body?.pid === "number" ? body.pid : run.holder.pid,
+  hostname: typeof body?.hostname === "string" ? body.hostname : run.holder.hostname,
+});
+
+function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Probe): RunView {
   const now = deps.now();
   const calls = [...run.calls.values()];
   const open = calls.filter((c) => !c.end);
   const gate = open.find((c) => c.type === "gate") ?? null;
   const ended = run.end !== null;
-  // Alive is the claim's word; a file from before claims existed is read by how long it has been quiet.
-  const alive = !ended && (claimMtime !== null ? now - claimMtime <= CLAIM_FRESH_MS : now - run.lastAt <= OLD_FILE_QUIET_MS);
-  const limitMs = Math.max(QUIET_BASE_MS, ...open.map((c) => (c.timeoutMs ?? 0) + QUIET_MARGIN_MS));
   const quietMs = Math.max(0, now - run.lastAt);
+  const limitMs = staleAfterMs({ baseMs: STALE_BASE_MS, lastEventAtMs: run.lastAt, openCalls: open.map((c) => ({ startedAtMs: c.startedAt, timeoutMs: c.timeoutMs })) });
+
+  // The runtime's own table, with the facts it reads: the claim's age and word, and whether the holder's pid is gone.
+  const verdict = ended
+    ? "ended"
+    : classify({
+        claim: claim ? { ageMs: now - claim.mtimeMs, refused: typeof claim.body?.refused === "string", unreadable: claim.body === null } : null,
+        events: "open",
+        pid: pidFact(holderOf(claim?.body ?? null, run), probe),
+        quietMs,
+      }).state;
 
   let situation: RunView["situation"];
   if (ended) situation = run.end!.outcome === "done" || run.end!.outcome === "stopped" ? "done" : "fail";
-  else if (!alive) situation = "lost";
+  else if (verdict === "lost") situation = "lost";
+  else if (verdict === "refused") situation = "fail";
   else if (gate) situation = "me";
   else situation = quietMs > limitMs ? "slow" : "doing";
 
   const failedCall = [...calls].reverse().find((c) => c.end && !c.end.ok && c.end.error?.name !== "RunEnded");
-  const errorSource = run.end?.error ?? failedCall?.end?.error ?? null;
-  const error = situation === "fail" || situation === "lost" || situation === "slow" ? (errorSource ? { name: errorSource.name, plain: plainError(errorSource), raw: `${errorSource.name}: ${errorSource.message}`.slice(0, 500) } : null) : null;
+  const errorSource = run.end?.error ?? failedCall?.end?.error ?? (verdict === "refused" ? { name: "RunRefused", message: "", headline: "" } : null);
+  const error = situation === "fail" || situation === "lost" || situation === "slow" ? (errorSource ? { name: errorSource.name, plain: plainError(errorSource), raw: `${errorSource.name}: ${errorSource.message}`.slice(0, 300) } : null) : null;
 
   const stateOfPhase = (id: string): RunView["steps"][number] => {
     const s = run.phaseState.get(id);
@@ -224,13 +263,14 @@ function viewOf(run: RunRec, claimMtime: number | null, deps: RunsDeps): RunView
     stage: run.stage,
     flow: run.flow,
     startedAt: iso(run.startedAt, deps.tz),
+    endedAt: end ? iso(end.at, deps.tz) : null,
     situation,
     outcome,
     step,
     steps,
     costUsd: done.reduce((sum, c) => sum + c.end!.usd, 0),
     quiet: ended ? null : { ms: quietMs, limitMs },
-    gate: gate ? { callId: gate.id, summary: gate.summary || gate.title, since: iso(gate.startedAt, deps.tz), carrier: gate.carrier } : null,
+    gate: gate ? { callId: gate.id, summary: gate.summary || gate.title, since: iso(gate.startedAt, deps.tz), kind: gate.carrier === "provider" || gate.carrier === "model" ? gate.carrier : null, agentId: gate.agentId } : null,
     error,
     stopReason: end?.stop ?? null,
     sideEffects,
@@ -247,6 +287,8 @@ interface FileRec {
   owner: { caseId: string; stage: string | null } | "none" | null;
   run: RunRec | null;
   offset: number;
+  /** Inside a line that was too long: what is left of it is passed over. */
+  skipping: boolean;
 }
 
 export interface RunReader {
@@ -254,9 +296,51 @@ export interface RunReader {
   forCase(caseId: string): RunView[];
 }
 
+/** The first line of a file: its text, "wait" while it is not written to the end, "long" when it does not end within the head. */
+function firstLine(fd: number, size: number): { text: string; length: number } | "wait" | "long" {
+  const want = Math.min(size, HEAD_BYTES);
+  const buffer = Buffer.alloc(want);
+  readSync(fd, buffer, 0, want, 0);
+  const cut = buffer.indexOf(0x0a);
+  if (cut >= 0) return { text: buffer.subarray(0, cut).toString("utf8"), length: cut + 1 };
+  return size > HEAD_BYTES ? "long" : "wait";
+}
+
 export function createRunReader(deps: RunsDeps): RunReader {
   const files = new Map<string, FileRec>();
+  const probe = deps.probe ?? localProbe();
   let scannedAt = -Infinity;
+
+  function startOf(file: string, rec: FileRec, line: string) {
+    let e: Record<string, unknown>;
+    try {
+      e = obj(JSON.parse(line)) ?? {};
+    } catch {
+      e = {};
+    }
+    // The first line of a run is its start.
+    const owner = e.kind === "run.start" ? caseOfStart(e, deps.affair) : null;
+    rec.owner = owner ?? "none";
+    if (!owner) return;
+    const flow = obj(e.flow);
+    const phases = Array.isArray(flow?.phases)
+      ? (flow!.phases as unknown[]).slice(0, MAX_PHASES).flatMap((p) => (obj(p) && typeof obj(p)!.id === "string" && (obj(p)!.id as string).length <= 128 ? [{ id: obj(p)!.id as string, title: cleanText(obj(p)!.title, 80) ?? cleanText(obj(p)!.id, 80) ?? "—" }] : []))
+      : [];
+    const startedAt = typeof e.ts === "string" ? Date.parse(e.ts) : NaN;
+    rec.run = {
+      runId: file.replace(/\.jsonl$/, ""),
+      startedAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
+      flow: cleanText(flow?.name, 80) ?? "（没有名字的流程）",
+      phases,
+      stage: owner.stage,
+      caseId: owner.caseId,
+      holder: { pid: e.pid, hostname: e.hostname },
+      phaseState: new Map(),
+      calls: new Map(),
+      lastAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
+      end: null,
+    };
+  }
 
   function readNew(file: string, rec: FileRec) {
     const full = path.join(deps.runsDir, file);
@@ -273,54 +357,48 @@ export function createRunReader(deps: RunsDeps): RunReader {
         rec.offset = 0;
         rec.run = null;
         rec.owner = null;
+        rec.skipping = false;
       }
-      while (rec.offset < size) {
-        let want = Math.min(CHUNK, size - rec.offset);
-        let buffer: Buffer;
-        let cut: number;
-        for (;;) {
-          buffer = Buffer.alloc(want);
-          readSync(fd, buffer, 0, want, rec.offset);
-          cut = buffer.lastIndexOf(0x0a);
-          if (cut >= 0 || rec.offset + want >= size || want >= HEAD_BYTES * 8) break;
-          want = Math.min(want * 2, size - rec.offset);
+      if (rec.owner === null) {
+        // Whether the file is ours is the first line's answer, and only that much is read to get it.
+        const first = firstLine(fd, size);
+        if (first === "wait") return;
+        if (first === "long") {
+          rec.owner = "none";
+          return;
         }
-        if (cut < 0) break;
+        startOf(file, rec, first.text);
+        rec.offset = first.length;
+      }
+      if (rec.owner === "none") return;
+      while (rec.offset < size) {
+        const want = Math.min(MAX_LINE, size - rec.offset);
+        const buffer = Buffer.alloc(want);
+        readSync(fd, buffer, 0, want, rec.offset);
+        if (rec.skipping) {
+          const end = buffer.indexOf(0x0a);
+          rec.offset += end < 0 ? want : end + 1;
+          if (end >= 0) rec.skipping = false;
+          continue;
+        }
+        const cut = buffer.lastIndexOf(0x0a);
+        if (cut < 0) {
+          // No end of line in a whole piece: a line too long to be one of the runtime's, whose rest is passed over. Less than a piece: still being written.
+          if (want < MAX_LINE) break;
+          rec.skipping = true;
+          rec.offset += want;
+          continue;
+        }
         for (const line of buffer.subarray(0, cut + 1).toString("utf8").split("\n")) {
-          if (line === "") continue;
-          // Not this plugin's run: the rest of the file is not read.
-          if (rec.owner === "none") break;
-          let e: Record<string, unknown>;
+          if (line === "" || !rec.run) continue;
           try {
-            e = JSON.parse(line) as Record<string, unknown>;
+            const e = obj(JSON.parse(line));
+            if (e) fold(rec.run, e);
           } catch {
-            continue;
+            // A line that is not json says nothing.
           }
-          if (rec.owner === null) {
-            // The first line of a run is its start.
-            const owner = e.kind === "run.start" ? caseOfStart(e, deps.affair) : null;
-            rec.owner = owner ?? "none";
-            if (owner) {
-              const flow = obj(e.flow);
-              const phases = Array.isArray(flow?.phases) ? (flow!.phases as unknown[]).flatMap((p) => (obj(p) && typeof obj(p)!.id === "string" ? [{ id: obj(p)!.id as string, title: str(obj(p)!.title) ?? (obj(p)!.id as string) }] : [])) : [];
-              const startedAt = typeof e.ts === "string" ? Date.parse(e.ts) : NaN;
-              rec.run = {
-                runId: file.replace(/\.jsonl$/, ""),
-                startedAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
-                flow: str(flow?.name) ?? "（没有名字的流程）",
-                phases,
-                stage: owner.stage,
-                caseId: owner.caseId,
-                phaseState: new Map(),
-                calls: new Map(),
-                lastAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
-                end: null,
-              };
-            }
-          } else if (rec.run) fold(rec.run, e);
         }
         rec.offset += cut + 1;
-        if (rec.owner === "none") break;
       }
     } finally {
       closeSync(fd);
@@ -337,14 +415,41 @@ export function createRunReader(deps: RunsDeps): RunReader {
     } catch {
       return;
     }
+    const present = new Set(names);
     for (const name of names) {
       let rec = files.get(name);
-      if (!rec) files.set(name, (rec = { owner: null, run: null, offset: 0 }));
+      if (!rec) {
+        rec = { owner: null, run: null, offset: 0, skipping: false };
+        files.set(name, rec);
+        // A file nobody has written to for long is history: not read, and not looked at again.
+        try {
+          if (now - statSync(path.join(deps.runsDir, name)).mtimeMs > RECENT_MS) rec.owner = "none";
+        } catch {
+          continue;
+        }
+      }
       // Another plugin's run, or one that has ended and been read: nothing more to learn from it.
       if (rec.owner === "none" || rec.run?.end) continue;
       readNew(name, rec);
     }
-    for (const name of files.keys()) if (!names.includes(name)) files.delete(name);
+    for (const name of files.keys()) if (!present.has(name)) files.delete(name);
+  }
+
+  function claimOf(name: string): ClaimRead | null {
+    const file = path.join(deps.runsDir, name.replace(/\.jsonl$/, ".claim"));
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(file).mtimeMs;
+    } catch {
+      return null;
+    }
+    try {
+      const body = obj(JSON.parse(readFileSync(file, "utf8")));
+      return { mtimeMs, body };
+    } catch {
+      // Being written, or not json: the table calls that "unreadable" and treats it as alive while it is fresh.
+      return { mtimeMs, body: null };
+    }
   }
 
   return {
@@ -353,17 +458,9 @@ export function createRunReader(deps: RunsDeps): RunReader {
       const out: RunView[] = [];
       for (const [name, rec] of files) {
         if (!rec.run || rec.run.caseId !== caseId) continue;
-        let mtime: number | null = null;
-        if (!rec.run.end) {
-          try {
-            mtime = statSync(path.join(deps.runsDir, name.replace(/\.jsonl$/, ".claim"))).mtimeMs;
-          } catch {
-            mtime = null;
-          }
-        }
-        out.push(viewOf(rec.run, mtime, deps));
+        out.push(viewOf(rec.run, rec.run.end ? null : claimOf(name), deps, probe));
       }
-      return out.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
+      return out.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
     },
   };
 }

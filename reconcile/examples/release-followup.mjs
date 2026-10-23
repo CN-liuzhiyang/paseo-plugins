@@ -15,7 +15,7 @@
 //             after it got there (weak); on the branch and the day come is inferred. Also out when
 //             the key is in an outward switch file or a person said so. Checked in the background:
 //             some workdays after the release day, a region without the commit, or with it but no
-//             newer outward version, is said as a statement (`notice`), on the page and once on a
+//             newer outward version, is said as a statement (`notice`), on the page and on the list's row and once on a
 //             card whose only answer is "知道了" (plus a line of one's own, kept as a note); the same
 //             situation is not said again, a changed one is. `releaseCheck: "ask"` asks instead.
 //   freeze    a release branch made by copying (from stable, say) is frozen by the copy: as soon

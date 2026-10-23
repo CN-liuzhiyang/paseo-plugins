@@ -6,7 +6,8 @@ import { Pressable, Text, View } from "react-native";
 import { clockText, durationText, SITUATION, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
 import { answerRpc, graphRpc } from "../shared/rpc";
 import { BallChip, StageChart, StageRail } from "./chart";
-import { Banner, Button, Fold, openExternal, OpenAgent, openPluginScreenOf, ScreenLink, tint, useUi } from "./ui";
+import { go, jumpOf } from "./jump";
+import { Banner, Button, Fold, openExternal, OpenAgent, ScreenLink, tint, useUi } from "./ui";
 
 // The page of one item: the bar that says what it is doing (and whose ball), four cells, the
 // question if there is one (answered here, the same answer as on its card), then the chart and,
@@ -63,7 +64,7 @@ function Hero({ view }: { view: GraphView }) {
   const ask = view.current.ask;
   const actions = (
     <View style={[ui.styles.row, { gap: 8 }]}>
-      {gate?.gate?.carrier ? <OpenAgent agentId={gate.gate.carrier} label="去批准" primary /> : null}
+      {gate?.gate?.agentId ? <OpenAgent agentId={gate.gate.agentId} label="去批准" primary /> : null}
       {ask?.cardAgentId ? <OpenAgent agentId={ask.cardAgentId} label="在问题卡里答" /> : null}
       {run?.situation === "slow" && run.agentId ? <OpenAgent agentId={run.agentId} label="打开那个 agent" primary /> : null}
       {run ? <ScreenLink plugin={run.link.plugin} screen={run.link.screen} params={run.link.params} label="看这次流程" /> : null}
@@ -86,14 +87,18 @@ function Hero({ view }: { view: GraphView }) {
           ) : null}
         </View>
       </View>
-      {view.marks.map((m) => (
-        <View key={m.kind + m.line} style={{ borderRadius: 8, borderWidth: 1, borderColor: m.kind === "stale" ? tint(ui.tone("warning"), 0.6) : ui.theme.colors.border, backgroundColor: ui.theme.colors.surface1, paddingHorizontal: 10, paddingVertical: 6 }}>
-          <Text style={[ui.styles.small, { color: m.kind === "stale" ? ui.tone("warning") : ui.theme.colors.foregroundMuted }]} selectable>
-            {m.kind === "stale" ? "⚠ " : ""}
-            {m.line}
-          </Text>
-        </View>
-      ))}
+      {view.marks.map((m) => {
+        // Something that looks wrong (stale data, the rule's own notice) is shown loud; what a person said is shown quiet.
+        const loud = m.kind === "stale" || m.kind === "notice";
+        return (
+          <View key={m.kind + m.line} style={{ borderRadius: 8, borderWidth: 1, borderColor: loud ? tint(ui.tone("warning"), 0.6) : ui.theme.colors.border, backgroundColor: ui.theme.colors.surface1, paddingHorizontal: 10, paddingVertical: 6 }}>
+            <Text style={[ui.styles.small, { color: loud ? ui.tone("warning") : ui.theme.colors.foregroundMuted }]} selectable>
+              {loud ? "⚠ " : ""}
+              {m.line}
+            </Text>
+          </View>
+        );
+      })}
       {actions}
     </View>
   );
@@ -154,6 +159,28 @@ function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boolean; t
       },
     );
   };
+  if (ask.confirm) {
+    // Whether some words were the person's own is told on the card it was sent on, not on a page: shown here, not answerable.
+    return (
+      <View style={{ borderRadius: 12, borderWidth: 1, borderColor: color, backgroundColor: c.surface1, overflow: "hidden" }}>
+        <View style={{ paddingHorizontal: 12, paddingVertical: 7, backgroundColor: tint(color, 0.12) }}>
+          <Text style={{ color, fontSize: 12, fontWeight: "700" }}>要你确认 · 第 {ask.round} 次问</Text>
+        </View>
+        <View style={{ padding: 12, gap: 8 }}>
+          <Text style={[ui.styles.strong, { fontSize: 15 }]} selectable>
+            {ask.question}
+          </Text>
+          {ask.brief ? (
+            <Text style={ui.styles.muted} selectable>
+              {ask.brief}
+            </Text>
+          ) : null}
+          <Text style={ui.styles.small}>这是在确认某句话是不是本人说的，只能在它的确认卡上答。</Text>
+          {ask.cardAgentId ? <OpenAgent agentId={ask.cardAgentId} label="去确认卡上答" primary /> : <Text style={ui.styles.small}>确认卡还没有起来；起来以后这里会有按钮。</Text>}
+        </View>
+      </View>
+    );
+  }
   return (
     <View style={{ borderRadius: 12, borderWidth: 1, borderColor: color, backgroundColor: c.surface1, overflow: "hidden" }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 6, paddingHorizontal: 12, paddingVertical: 7, backgroundColor: tint(color, 0.12) }}>
@@ -422,6 +449,8 @@ function Evidence({ view }: { view: GraphView }) {
         {view.graph.stages.map((s) => (
           <Text key={s.id} style={ui.styles.small}>
             <Text style={{ fontWeight: "700", color: c.foreground }}>{s.label}</Text>
+            <Text style={{ fontFamily: ui.styles.mono.fontFamily }}> {s.id}</Text>
+            {view.evidence.stages.find((x) => x.id === s.id)?.named === false ? "（规则里没有给名字）" : ""}
             {s.side ? `（岔路：${s.when ?? ""}）` : ""}
             {s.end ? `（终点${s.endKind === "dropped" ? "：不再追踪" : s.endKind === "other" ? "：不跟了" : ""}）` : ""}
             {s.done ? `：${s.done}` : ""}
@@ -452,7 +481,7 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
   const { view, error, gone, refresh } = useGraph(caseId);
   const [tab, setTab] = useState<"graph" | "history" | "evidence">("graph");
   const [selected, setSelected] = useState<string | null>(null);
-  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const [note, setNote] = useState<{ ok: boolean; text: string; title?: string } | null>(null);
   const askAt = useRef(0);
   useEffect(() => {
     setSelected(null);
@@ -462,15 +491,15 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
 
   const openRun = useCallback(
     (run: RunView) => {
-      const open = openPluginScreenOf(ui.navigation);
-      if (!open) return;
-      try {
-        open(run.link.plugin, run.link.screen, run.link.params);
-      } catch {
-        // The host says why, in a toast.
+      const jump = jumpOf({ navigation: ui.navigation, hostId: ui.hostId, routes: ui.routes, plugin: run.link.plugin, screen: run.link.screen, params: run.link.params });
+      if (jump.how === "none") {
+        setNote({ ok: false, title: "打不开这次流程", text: "这个版本的 Paseo 不能从这里跳过去；到「流程」页里按运行号找它：" + run.runId });
+        return;
       }
+      // The web route loads the page again; the host's own way does not.
+      go(jump, run.link, (url) => (globalThis as { location?: { assign(url: string): void } }).location?.assign(url));
     },
-    [ui.navigation],
+    [ui.navigation, ui.hostId, ui.routes],
   );
 
   const wide = !ui.compact;
@@ -507,7 +536,7 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
       <Hero view={view} />
       <Facts view={view} />
       {note ? (
-        <Banner tone={note.ok ? "success" : "warning"} icon={note.ok ? "Check" : "Info"} title={note.ok ? "已记下" : "没记下"}>
+        <Banner tone={note.ok ? "success" : "warning"} icon={note.ok ? "Check" : "Info"} title={note.title ?? (note.ok ? "已记下" : "没记下")}>
           <Text style={ui.styles.text} selectable>
             {note.text}
           </Text>

@@ -48,9 +48,11 @@ export interface GraphDeps {
   inForce(caseId: string): Annotation[];
   /** The runs of flows started for an item; absent until the engine starts any. */
   runs?(caseId: string): RunView[];
+  /** A question about whether words were the person's own: only its card answers it. */
+  isConfirm(c: Commitment): boolean;
 }
 
-const FALLBACK_DROPPED: StageMeta = { id: "dropped", label: "不再追踪", next: [], side: false, when: null, end: true, endKind: "dropped", done: null };
+const FALLBACK_DROPPED: StageMeta = { id: "dropped", label: "不再追踪", named: true, next: [], side: false, when: null, end: true, endKind: "dropped", done: null };
 
 export function createGraph(deps: GraphDeps) {
   const { store, config } = deps;
@@ -59,6 +61,7 @@ export function createGraph(deps: GraphDeps) {
   const book: JournalBook = createJournalBook(
     store.dir,
     new Set(config.sources.filter((s) => s.kind === "flags").map((s) => s.id)),
+    tz,
   );
   const personName = (id: string) => config.persons[id]?.name ?? id;
   const fmtOf = (metas: StageMeta[]): Fmt => ({ stage: (id) => metaOf(metas, id).label, person: personName });
@@ -81,7 +84,7 @@ export function createGraph(deps: GraphDeps) {
   }
   /** A stage the rule no longer declares (an older judgment names it) shows as a detour under its own name. */
   function metaOf(metas: readonly StageMeta[], id: string): StageMeta {
-    return metas.find((m) => m.id === id) ?? { id, label: id, next: [], side: true, when: "规则里已经没有这一步", end: false, endKind: null, done: null };
+    return metas.find((m) => m.id === id) ?? { id, label: "已经没有的一步", named: false, next: [], side: true, when: "规则里已经没有这一步", end: false, endKind: null, done: null };
   }
   const withUnknown = (metas: StageMeta[], ids: string[]): StageMeta[] => [...metas, ...[...new Set(ids)].filter((id) => !metas.some((m) => m.id === id)).map((id) => metaOf(metas, id))];
 
@@ -115,7 +118,7 @@ export function createGraph(deps: GraphDeps) {
       if (!raw.superseded) rounds.set(raw.stage, round);
       const spanEnd = to ? Date.parse(to) : cur ? nowMs : null;
       const before = i === 0 && !(happened && Date.parse(raw.observed) - Date.parse(happened) < 60_000);
-      const stageEnd = (end: string) => chain?.notes.filter((n) => n.at >= from && n.at < end).map((n) => ({ field: n.field, value: n.value, evidence: n.evidence, at: n.at })) ?? [];
+      const stageEnd = (end: string | null) => chain?.notes.filter((n) => Date.parse(n.at) >= Date.parse(from) && (end === null || Date.parse(n.at) < Date.parse(end))).map((n) => ({ field: n.field, value: n.value, evidence: n.evidence, at: n.at })) ?? [];
       out.push({
         id: `v${i}`,
         stage: raw.stage,
@@ -134,7 +137,7 @@ export function createGraph(deps: GraphDeps) {
         lastHeadline: raw.lastHeadline,
         balls: raw.balls.map((b, j) => ({ actor: b.actor, what: b.what, from: b.from, to: raw.balls[j + 1]?.from ?? (to ?? null) })),
         handoffs: [],
-        evidence: stageEnd(to ?? "9999"),
+        evidence: stageEnd(to),
         skipped: [],
       });
     });
@@ -183,13 +186,31 @@ export function createGraph(deps: GraphDeps) {
   /**
    * When the one holding the ball now got it: the start of the latest run of the same holder in this
    * stay, so that a change of what it is doing (the holder the same) does not start the wait again.
+   * `atLeast`: that start is where tracking began, not where the wait did, so the length is a floor.
    */
-  function heldSince(v: Visit | undefined): string | null {
-    if (!v) return null;
-    const holder = v.balls[v.balls.length - 1]?.actor;
-    let from: string | null = null;
-    for (let i = v.balls.length - 1; i >= 0 && v.balls[i]!.actor === holder; i--) from = v.balls[i]!.from;
-    return from ?? v.from;
+  function heldFrom(v: Visit | undefined): { from: string | null; atLeast: boolean } {
+    if (!v) return { from: null, atLeast: false };
+    const balls = v.balls;
+    const holder = balls[balls.length - 1]?.actor;
+    let i = balls.length - 1;
+    while (i > 0 && balls[i - 1]!.actor === holder) i--;
+    return { from: balls[i]?.from ?? v.from, atLeast: v.before && v.fromKind !== "happened" && i <= 0 };
+  }
+
+  /**
+   * How long the item took, from its first stay to its end: the moment it got to its last stage, or `endAt`
+   * (when a person stopped it). `atLeast`: it was already under way when tracking began, so it took at least
+   * that long; `ms` null with `atLeast`: it was already over then, and how long it took is not known.
+   */
+  function tookOf(real: Visit[], endAt: string | null): { ms: number | null; atLeast: boolean } {
+    const first = real[0];
+    const last = real[real.length - 1];
+    if (!first || !last) return { ms: null, atLeast: false };
+    const early = first.before && first.fromKind !== "happened";
+    const end = endAt ?? last.from;
+    if (early && real.length === 1 && endAt === null) return { ms: null, atLeast: true };
+    if (!end || !first.from) return { ms: null, atLeast: early };
+    return { ms: Math.max(0, Date.parse(end) - Date.parse(first.from)), atLeast: early };
   }
 
   // ---- situation ------------------------------------------------------------------------------
@@ -202,21 +223,42 @@ export function createGraph(deps: GraphDeps) {
     waiting: Commitment[];
     open: Commitment[];
     said: Annotation[];
+    /** Every run started for the item, newest first as the reader gives them. */
     runs: RunView[];
+    /** The runs that say what the item is: see decidingRuns. */
+    deciding: RunView[];
+  }
+
+  /**
+   * Of the runs of an item, the ones that count for what it is now: the newest of each stage (a run that
+   * failed and was run again is the second one), and no break of a stage the item has left (a failure or
+   * a run that went silent there is history, the item went on). A run with no stage is of the current one.
+   */
+  function decidingRuns(runs: RunView[], stage: string | undefined): RunView[] {
+    const newest = new Map<string, RunView>();
+    for (const r of runs) {
+      const key = r.stage ?? stage ?? "";
+      const seen = newest.get(key);
+      if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
+    }
+    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {
     const item = state.items[caseId];
     const commitments = Object.values(state.commitments).filter((c) => c.caseId === caseId && isOpen(c));
+    const a = state.assessments[caseId];
+    const runs = deps.runs?.(caseId) ?? [];
     return {
       caseId,
       item,
-      a: state.assessments[caseId],
+      a,
       metas: metas ?? metasFor(item),
       waiting: commitments.filter((c) => c.status === "waiting").sort((x, y) => (x.lastAskedAt ?? "").localeCompare(y.lastAskedAt ?? "")),
       open: commitments,
       said: deps.inForce(caseId),
-      runs: deps.runs?.(caseId) ?? [],
+      runs,
+      deciding: decidingRuns(runs, a?.stage),
     };
   }
 
@@ -229,7 +271,7 @@ export function createGraph(deps: GraphDeps) {
     if (meta?.end && meta.endKind !== "done") return "dropped";
     if (a && a.health === "done" && !a.error) return "done";
     if (a?.error) return "error";
-    for (const s of RUN_RANK) if (f.runs.some((r) => r.situation === s)) return s as Situation;
+    for (const s of RUN_RANK) if (f.deciding.some((r) => r.situation === s)) return s as Situation;
     if (f.waiting.length > 0) return "me";
     if (a && (a.health === "blocked" || a.health === "stalled")) return "stuck";
     if (!a) return "system";
@@ -261,6 +303,7 @@ export function createGraph(deps: GraphDeps) {
       brief: plainMd(c.brief),
       options: c.ask.options,
       allowOther: c.ask.allowOther,
+      confirm: deps.isConfirm(c),
       askedAt: c.lastAskedAt,
       nextAskAt: next ? stamp(next.what === "nag" ? Math.max(next.atMs, holdMs) : next.atMs) : null,
       nextAskWhat: next && next.what !== "ask" ? next.what : null,
@@ -283,11 +326,17 @@ export function createGraph(deps: GraphDeps) {
     return [...out];
   }
 
+  /** Sources as people read them: their labels if every one has one, else how many. The ids are for the evidence layer. */
+  function sourcesText(ids: string[]): string {
+    const labels = ids.map((id) => config.sources.find((s) => s.id === id)?.label);
+    return labels.every((l): l is string => !!l) ? labels.join("、") : `${ids.length} 个来源`;
+  }
+
   function pollOf(caseId: string): GraphView["poll"] {
     const ids = sourcesOf(caseId);
     const at = ids.map((id) => state.sources[id]?.health.nextPollAt ?? 0).filter((t) => t > 0);
     if (ids.length === 0) return null;
-    return { what: `读 ${ids.join("、")}`, nextAt: at.length > 0 ? stamp(Math.min(...at)) : null };
+    return { what: `读 ${sourcesText(ids)}`, nextAt: at.length > 0 ? stamp(Math.min(...at)) : null };
   }
 
   function scheduleOf(f: Facts, nowMs: number, finished: boolean): GraphView["schedule"] {
@@ -334,7 +383,8 @@ export function createGraph(deps: GraphDeps) {
     const asks = f.waiting.map(askOf);
     const actor: Ball = ask ? "me" : (a?.next.actor ?? "nobody");
     const what = ask ? `回答：${ask.header}` : (a?.next.what ?? "");
-    const waitingSince = ask?.askedAt ?? heldSince(last);
+    const held = ask ? { from: ask.askedAt, atLeast: false } : heldFrom(last);
+    const waitingSince = held.from;
     const poll = finished ? null : pollOf(caseId);
     const schedule = scheduleOf(f, nowMs, finished);
     const nextAsk = schedule.find((s) => s.line.startsWith("问你") || s.line.startsWith("没答就再问"));
@@ -347,11 +397,12 @@ export function createGraph(deps: GraphDeps) {
       const h = bad[0] ? state.sources[bad[0]]?.health : null;
       marks.push({
         kind: "stale",
-        line: bad.length > 0 ? `${bad.join("、")} ${h?.lastOkAt ? `从 ${clockText(h.lastOkAt)} 起` : ""}读不到了${h?.lastError ? "（一直在重试）" : ""}：下面是那之前读到的，可能已经变了` : "这个事项依赖的数据比平时旧，下面的判断可能已经过时",
+        line: bad.length > 0 ? `${sourcesText(bad)} ${h?.lastOkAt ? `从 ${clockText(h.lastOkAt)} 起` : ""}读不到了${h?.lastError ? "（一直在重试）" : ""}：下面是那之前读到的，可能已经变了` : "这个事项依赖的数据比平时旧，下面的判断可能已经过时",
         since: h?.lastOkAt ?? null,
         until: null,
       });
     }
+    if (a?.notice) marks.push({ kind: "notice", line: clip(a.notice, 300), since: null, until: null });
     if (hold) marks.push({ kind: "held", line: `${personName(hold.by)} ${clockText(hold.at)} 说「${clip(hold.said, 60)}」${hold.until ? ` · ${hold.until} 前不问` : ""} · 说一句就撤`, since: hold.at, until: hold.until });
     const wrong = f.said.find((s) => s.kind === "wrong");
     if (wrong) marks.push({ kind: "wrong", line: `${personName(wrong.by)} ${clockText(wrong.at)} 说这个判断错了：「${clip(wrong.said, 60)}」`, since: wrong.at, until: null });
@@ -361,9 +412,9 @@ export function createGraph(deps: GraphDeps) {
     const stepNo = stepOf(last);
     const whoText = actor === "me" ? "你" : actor === "system" ? "系统" : actor === "them" ? "别人" : "没有";
     const sinceMs = waitingSince ? nowMs - Date.parse(waitingSince) : null;
-    const totalMs = real.length > 0 && last ? (last.cur ? null : Math.max(0, Date.parse(last.from ?? real[0]!.from!) - Date.parse(real[0]!.from!))) : null;
+    const took = tookOf(real, drop && !stageMeta.end ? drop.at : null);
     const answerable = asks.length > 0;
-    const lastRun = f.runs.find((r) => r.situation === situation);
+    const lastRun = f.deciding.find((r) => r.situation === situation);
 
     let kicker: string;
     let line: string;
@@ -378,7 +429,7 @@ export function createGraph(deps: GraphDeps) {
       case "them":
         kicker = `在等别人${a?.next.what ? ` · ${a.next.what}` : ""}`;
         line = a?.headline ?? "";
-        sub = `${sinceMs !== null ? `已等 ${durationText(sinceMs)}。` : ""}要催的话：催办还没做。`;
+        sub = sinceMs !== null ? `${held.atLeast ? "至少已等" : "已等"} ${durationText(sinceMs)}${held.atLeast ? "（开始追踪时就在等了，之前多久不知道）" : ""}。` : "";
         break;
       case "system":
         kicker = "系统在查 · 不用你做什么";
@@ -393,14 +444,14 @@ export function createGraph(deps: GraphDeps) {
       case "fail":
       case "lost":
       case "slow":
-        kicker = situation === "fail" ? "流程失败了 · 要你定下一步" : situation === "lost" ? "流程断了 · 要你定下一步" : "可能卡住了 · 看一眼";
+        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : "可能卡住了 · 看一眼";
         line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? "出错了"}` : situation === "lost" ? "断了：之后再没有动静" : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
         sub = lastRun ? `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。` : "";
         break;
       case "stuck":
         kicker = "卡住了 · 看一眼";
         line = a?.headline ?? "";
-        sub = a?.notice ?? "";
+        sub = "";
         break;
       case "error":
         kicker = "检查出错 · 不是事项本身的问题";
@@ -418,7 +469,7 @@ export function createGraph(deps: GraphDeps) {
         sub = drop ? `说一句「${numberOf(caseId)} 接着跟」就恢复；图保留。` : "";
         break;
       default:
-        kicker = totalMs !== null ? `结束了 · 共 ${durationText(totalMs)}` : "结束了";
+        kicker = took.ms !== null ? `结束了 · ${took.atLeast ? "至少用了" : "共"} ${durationText(took.ms)}` : took.atLeast ? "结束了 · 开始追踪时就已经结束了" : "结束了";
         line = a?.headline ?? "";
         sub = "";
     }
@@ -429,25 +480,48 @@ export function createGraph(deps: GraphDeps) {
       { label: "在等谁", value: finished ? "没有" : whoText, sub: finished ? "" : what, hot: false },
       {
         label: finished ? "用了多久" : "等了多久",
-        value: finished ? (totalMs !== null ? durationText(totalMs) : "—") : sinceMs !== null ? durationText(sinceMs) : "—",
-        sub: finished ? (real[0]?.from && last?.from ? `${clockText(real[0].from)} → ${clockText(last.from)}` : "") : waitingSince ? `从 ${clockText(waitingSince)} 起` : "",
+        value: finished
+          ? took.ms !== null
+            ? `${took.atLeast ? "至少 " : ""}${durationText(took.ms)}`
+            : took.atLeast
+              ? "追踪前就结束了"
+              : "—"
+          : sinceMs !== null
+            ? `${held.atLeast ? "至少 " : ""}${durationText(sinceMs)}`
+            : "—",
+        sub: finished
+          ? real[0]?.from && took.atLeast
+            ? `从 ${clockText(real[0].from)} 开始追踪起`
+            : real[0]?.from && last?.from
+              ? `${clockText(real[0].from)} → ${clockText(last.from)}`
+              : ""
+          : waitingSince
+            ? `从 ${clockText(waitingSince)} ${held.atLeast ? "开始追踪起" : "起"}`
+            : "",
         hot: false,
       },
       {
         label: "要你做吗",
-        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" ? "看一眼" : situation === "fail" || situation === "lost" ? "要" : finished ? "不用" : "不用",
+        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" ? "看一眼" : "不用",
         sub: answerable ? "在下面选一个答案" : situation === "me" ? "批准只在审批卡上点" : situation === "stuck" ? "是顺延了还是漏了" : nextAsk?.at ? `${clockText(nextAsk.at)} 还没有变化才问你` : "",
         hot: answerable || situation === "me" || situation === "stuck" || situation === "fail" || situation === "lost",
       },
     ];
 
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
-    const history: HistoryLine[] = (chain?.entries ?? [])
-      .map((e) => ({ e, ms: Date.parse(e.at) }))
-      .sort((x, y) => x.ms - y.ms || x.e.seq - y.e.seq)
+    const flowLines = f.runs.flatMap((r) => [
+      { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: null as string | null },
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : null }] : []),
+    ]);
+    const history: HistoryLine[] = [
+      ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),
+      ...flowLines.map((l, i) => ({ ms: l.ms, order: Number.MAX_SAFE_INTEGER - 1000 + i, line: { kind: "run" as const, line: l.line, detail: l.detail } })),
+    ]
+      .sort((x, y) => x.ms - y.ms || x.order - y.order)
       .slice(-120)
-      .map(({ e, ms }) => ({ at: stamp(ms), kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null, beforeTracking: false }));
+      .map(({ ms, line }) => ({ at: stamp(ms), ...line, beforeTracking: false }));
 
+    const stageRows = metas.map((m) => ({ id: m.id, label: m.label, named: m.named }));
     const sourceRows = sourcesOf(caseId).map((id) => ({ id, state: state.sources[id]?.health.state ?? "never", lastOkAt: state.sources[id]?.health.lastOkAt ?? null, nextPollAt: state.sources[id]?.health.nextPollAt ? stamp(state.sources[id]!.health.nextPollAt) : null }));
     const factRows = Object.values(state.notes[caseId] ?? {})
       .filter((n) => !n.field.startsWith("woken."))
@@ -476,8 +550,7 @@ export function createGraph(deps: GraphDeps) {
         sinceKind: last?.fromKind ?? "unknown",
         health: a?.health ?? "on-track",
         headline: a?.headline ?? "",
-        ball: { actor, who: null, what, waitingSince },
-        nudge: { can: false, why: "催办还没做" },
+        ball: { actor, who: null, what, waitingSince, atLeast: held.atLeast },
         ask,
         asks,
       },
@@ -490,7 +563,7 @@ export function createGraph(deps: GraphDeps) {
         .sort((x, y) => y.at.localeCompare(x.at))
         .map((s) => ({ id: s.id, kind: s.kind, label: KIND_LABEL[s.kind], said: clip(s.said, 200), by: personName(s.by), at: s.at, until: s.until, how: s.how, inForce: f.said.some((x) => x.id === s.id), revokedAt: s.revoked?.at ?? null })),
       history,
-      evidence: { facts: factRows, sources: sourceRows, rule: a ? { name: a.rule, fingerprint: a.rulesFingerprint } : null, handoffsRead: false },
+      evidence: { facts: factRows, sources: sourceRows, stages: stageRows, rule: a ? { name: a.rule, fingerprint: a.rulesFingerprint } : null, handoffsRead: false },
     };
   }
 
@@ -549,10 +622,13 @@ export function createGraph(deps: GraphDeps) {
     const ask = f.waiting[0];
     const actor: Ball = ask ? "me" : (a?.next.actor ?? "nobody");
     const what = ask ? `回答：${ask.ask.header}` : (a?.next.what ?? "");
-    const since = ask?.lastAskedAt ?? heldSince(last);
+    const held = ask ? { from: ask.lastAskedAt, atLeast: false } : heldFrom(last);
+    const since = held.from;
     const schedule = scheduleOf(f, nowMs, finished);
-    const first = real[0];
-    const ms = finished ? (first?.from && last?.from ? Math.max(0, Date.parse(last.from) - Date.parse(first.from)) : null) : since ? nowMs - Date.parse(since) : null;
+    const drop = f.said.find((x) => x.kind === "drop");
+    const dropAt = situation === "dropped" && drop && !(last && metaOf(walk.metas, last.stage).end) ? drop.at : null;
+    const took = tookOf(real, dropAt);
+    const ms = finished ? took.ms : since ? nowMs - Date.parse(since) : null;
     return {
       caseId,
       number: numberOf(caseId),
@@ -564,7 +640,9 @@ export function createGraph(deps: GraphDeps) {
       strip: cells,
       side,
       who: { actor, label: finished ? "" : `${ballWho(actor)}${what ? ` · ${what}` : ""}` },
-      waiting: { ms, since, ended: finished },
+      waiting: { ms, since: finished ? (took.atLeast ? (real[0]?.from ?? null) : since) : since, ended: finished, atLeast: finished ? took.atLeast : held.atLeast },
+      notice: a?.notice ? clip(a.notice, 300) : null,
+      stale: a?.stale === true,
       next: finished ? [] : schedule.filter((s) => s.at).slice(0, 2).map((s) => `${clockText(s.at!)} ${s.line}`),
       asking: f.waiting.length,
     };
@@ -574,10 +652,8 @@ export function createGraph(deps: GraphDeps) {
     /** Reads what the journal got since, so that the first page after a tick is not the one to wait. */
     refresh: () => book.refresh(),
     view: viewOf,
-    row: (caseId: string) => {
-      book.refresh();
-      return rowOf(caseId);
-    },
+    /** One row of the list. Reads nothing from disk: call `refresh` once before a pass over many. */
+    row: rowOf,
     situation: (caseId: string): Situation => situationOf(factsOf(caseId)),
   };
 }

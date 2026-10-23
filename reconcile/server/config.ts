@@ -37,6 +37,8 @@ const personSchema = z
 const gcpSourceSchema = z
   .object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    /** What people call it, on the page and the list; the id is for the files. Absent: the page says only how many sources. */
+    label: z.string().min(1).max(40).optional(),
     kind: z.literal("gcp"),
     /** The tracker's command-line tool, run without a shell: ["<node>", "<…>/cli.js"]. */
     command: z.array(z.string().min(1)).min(1),
@@ -103,6 +105,8 @@ const gcpSourceSchema = z
 const flagsSourceSchema = z
   .object({
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    /** What people call it, on the page and the list; the id is for the files. Absent: the page says only how many sources. */
+    label: z.string().min(1).max(40).optional(),
     kind: z.literal("flags"),
     files: z.array(z.object({ id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/), url: z.string().url(), labels: z.record(z.string(), z.string()) }).strict()).min(1),
     /** Top-level objects of each file whose entries are keys, e.g. ["switches"]; "" for the top level's own scalars. */

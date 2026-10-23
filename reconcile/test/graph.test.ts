@@ -40,13 +40,14 @@ const visit = (stage: string, over: Partial<Visit> = {}): Visit => ({
 
 // ---- declarations --------------------------------------------------------------------------------
 
-test("bare ids are stages; a stage goes on to the next of the usual route, a detour back to the first route stage after it", () => {
+test("bare ids are stages with a neutral name, never their id; a stage goes on to the next of the usual route, a detour back to the first route stage after it", () => {
   const bare = normalizeStages(["open", "review", "closed"]);
   assert.deepEqual(bare.map((m) => [m.id, m.label, m.next, m.side, m.end]), [
-    ["open", "open", ["review"], false, false],
-    ["review", "review", ["closed"], false, false],
-    ["closed", "closed", [], false, false],
+    ["open", "第 1 步", ["review"], false, false],
+    ["review", "第 2 步", ["closed"], false, false],
+    ["closed", "第 3 步", [], false, false],
   ]);
+  assert.deepEqual(bare.map((m) => m.named), [false, false, false]);
   assert.deepEqual(routeOf(metas), ["a", "b", "d", "e", "z"], "detours and ends that are not finishing are off the route");
   const byId = Object.fromEntries(metas.map((m) => [m.id, m]));
   assert.deepEqual(byId.a!.next, ["b"]);
@@ -79,7 +80,7 @@ test("the loader takes string stages as before and object stages with their meta
     const plain = set.rules.find((r) => r.name === "plain")!;
     const rich = set.rules.find((r) => r.name === "rich")!;
     assert.deepEqual(plain.stages, ["one", "two"]);
-    assert.deepEqual(plain.stageMeta!.map((m) => [m.id, m.label]), [["one", "one"], ["two", "two"]]);
+    assert.deepEqual(plain.stageMeta!.map((m) => [m.id, m.label]), [["one", "第 1 步"], ["two", "第 2 步"]]);
     assert.deepEqual(rich.stages, ["one", "two", "off", "end"], "the ids stay a string array for everything that checks a stage against them");
     assert.equal(rich.stageMeta![0]!.label, "第一");
     assert.equal(rich.stageMeta![2]!.side, true);
@@ -103,7 +104,7 @@ test("a stage declaration that is wrong goes the way of any rule that stops load
     // twice the same id: the schema takes it, the declaration does not
     writeFileSync(path.join(rules, "r.mjs"), rule('["one", "one"]'));
     const second = await loadRules(rules, { dir: kept, write: true });
-    assert.deepEqual(second.rules.map((r) => r.stageMeta!.map((m) => m.label)), [["第一", "two"]], "what runs is the copy that loaded, with its names");
+    assert.deepEqual(second.rules.map((r) => r.stageMeta!.map((m) => m.label)), [["第一", "第 2 步"]], "what runs is the copy that loaded, with its names");
     assert.match(second.errors[0]!.error, /^stages: stage "one" is declared twice/);
     assert.ok(second.errors[0]!.fallback, "and the error says a copy is running instead");
     // no copy to go on with: the rule is not loaded at all
@@ -177,7 +178,7 @@ test("the strip: one cell per stage of the route; walked, here, not yet, passed,
   assert.deepEqual(stripOf([visit("a"), visit("d", { cur: true })], metas).cells, ["done", "skip", "cur", "todo", "todo"]);
   const dip = stripOf([visit("a"), visit("b"), visit("c"), visit("d", { cur: true })], metas);
   assert.deepEqual(dip.cells, ["done", "done", "cur", "todo", "todo"]);
-  assert.deepEqual(dip.side, { after: 1, label: "c" }, "the detour was taken after the second cell");
+  assert.deepEqual(dip.side, { after: 1, label: "岔路 1" }, "the detour was taken after the second cell");
 });
 
 // ---- the journal fold ----------------------------------------------------------------------------------------
@@ -205,7 +206,7 @@ function withJournal<T>(lines: string[], body: (dir: string, file: string) => T,
 }
 
 const book = (dir: string, shared: string[] = []) => {
-  const b = createJournalBook(dir, new Set(shared));
+  const b = createJournalBook(dir, new Set(shared), "Asia/Shanghai");
   b.refresh();
   return b;
 };
@@ -333,3 +334,44 @@ test("lines that are not assessments are passed over without being parsed, and a
   withJournal(["{this is not json\n", line("source.state", "2026-10-20T01:00:00.000Z", { id: "x" }), assessment("tracker:10", "2026-10-20T02:00:00.000Z", "a")], (dir) => {
     assert.equal(book(dir).chain("tracker:10")!.visits.length, 1);
   }));
+
+test("`since` is an instant: a rule may write it in UTC or with no offset, and the page reads it in the instance's zone", () =>
+  withJournal(
+    [
+      assessment("tracker:11", "2026-10-13T10:00:00+08:00", "a", { since: "2026-10-13T01:00:00.000Z" }),
+      assessment("tracker:11", "2026-10-14T10:00:00+08:00", "b", { since: "2026-10-14T09:00:00" }),
+      assessment("tracker:11", "2026-10-15T10:00:00+08:00", "d", { since: "2026-10-15T09:30:00+08:00" }),
+    ],
+    (dir) => {
+      assert.deepEqual(book(dir).chain("tracker:11")!.visits.map((v) => v.happened), ["2026-10-13T09:00:00+08:00", "2026-10-14T09:00:00+08:00", "2026-10-15T09:30:00+08:00"]);
+    },
+  ));
+
+test("`since` that puts a stage before the one it came after is not believed", () =>
+  withJournal(
+    [
+      assessment("tracker:12", "2026-10-23T10:00:00+08:00", "a", { since: "2026-10-22T10:00:00+08:00" }),
+      assessment("tracker:12", "2026-10-23T11:00:00+08:00", "b", { since: "2026-10-21T10:00:00+08:00" }),
+      assessment("tracker:12", "2026-10-23T12:00:00+08:00", "d", { since: "2026-10-23T11:30:00+08:00" }),
+    ],
+    (dir) => {
+      const visits = book(dir).chain("tracker:12")!.visits;
+      assert.deepEqual(visits.map((v) => v.happened), ["2026-10-22T10:00:00+08:00", null, "2026-10-23T11:30:00+08:00"], "b was not before a; it has only the time it was seen");
+      assert.deepEqual(visits[1]!.balls.map((b) => b.from), ["2026-10-23T11:00:00+08:00"]);
+    },
+  ));
+
+test("a journal that cannot be listed leaves the page as it was and is read again next time", () =>
+  withJournal([assessment("tracker:13", "2026-10-20T01:00:00.000Z", "a")], (dir) => {
+    const b = book(dir);
+    rmSync(path.join(dir, "journal"), { recursive: true, force: true });
+    writeFileSync(path.join(dir, "journal"), "not a directory"); // readdir now throws
+    assert.doesNotThrow(() => b.refresh());
+    assert.equal(b.chain("tracker:13")!.visits.length, 1, "what was read stays");
+  }));
+
+test("a stage the rule gave no name is never shown by its id: a step number, a detour number, or what kind of end", () => {
+  const m = normalizeStages(["a", { id: "b", label: "有名字" }, { id: "x", side: true }, { id: "y", side: true, label: "打回" }, { id: "z", side: true }, "c", { id: "fin", end: true }, { id: "off", end: true, endKind: "dropped" }, { id: "odd", end: true, endKind: "other" }, "dropped"]);
+  assert.deepEqual(m.map((s) => s.label), ["第 1 步", "有名字", "岔路 1", "打回", "岔路 2", "第 3 步", "结束", "不再追踪", "另一种结束", "不再追踪"]);
+  assert.ok(m.every((s) => s.named === (s.id === "b" || s.id === "y")));
+});

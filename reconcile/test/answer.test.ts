@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Commitment } from "../shared/model";
-import { issue, makeWorld, type World } from "./helpers";
+import { at, issue, makeWorld, type World } from "./helpers";
 
 // A question answered on the item's page and on its card: the same answer either way, whichever
 // arrives first counts, the one that comes second is told "already answered" and records nothing,
@@ -141,3 +141,50 @@ test("a question that expired or was taken back says so instead of taking an ans
     assert.deepEqual([r.ok, r.already], [false, false]);
     assert.match(r.detail, /过期/);
   }));
+
+// ---- while the card is being raised -------------------------------------------------------------------------------
+// The question is on the page from the moment it is waiting, which is before the card's carrier is up: an answer given
+// in that window is the answer, whether the carrier then comes up or fails.
+
+async function answeredWhileRaising(carrierFails: boolean) {
+  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": mini } } });
+  try {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    await w.run("2026-10-14 17:00");
+    let result: ReturnType<typeof w.engine.answerQuestion> | null = null;
+    w.hooks.raise = () => {
+      const c = commitment(w, 1);
+      assert.equal(c.status, "waiting", "the page can already see the question");
+      result = w.engine.answerQuestion(c.id, c.rounds, { option: "a" });
+    };
+    if (carrierFails) w.fail.carrier = new Error("carrier down");
+    w.clock.now = at("2026-10-14 18:05");
+    await w.engine.tick();
+    w.hooks.raise = null;
+    w.fail.carrier = null;
+    const afterTick = { commitment: { ...commitment(w, 1) }, cards: Object.values(w.store.state.cards).map((c) => c.status), raised: w.cards.length, archived: [...w.archived] };
+    await w.run("2026-10-14 19:30");
+    return { result: result as ReturnType<typeof w.engine.answerQuestion> | null, afterTick, later: { commitment: commitment(w, 1), raised: w.cards.length, cards: Object.values(w.store.state.cards).map((c) => c.status) } };
+  } finally {
+    w.close();
+  }
+}
+
+test("an answer given on the page while the card is being raised is kept, and the card that comes up for it is taken down, not raised", async () => {
+  const r = await answeredWhileRaising(false);
+  assert.deepEqual([r.result!.ok, r.result!.already], [true, false]);
+  assert.deepEqual([r.afterTick.commitment.status, r.afterTick.commitment.answer!.label, r.afterTick.commitment.answer!.via], ["done", "A", "page"]);
+  assert.deepEqual(r.afterTick.cards, ["answered"], "the answer ended the card; the carrier coming up does not make it a card again");
+  assert.deepEqual(r.afterTick.archived, ["agent-1"], "and the agent that came up for it goes");
+  assert.equal(r.later.commitment.answer!.label, "A");
+  assert.equal(r.later.raised, 1, "nothing is asked again");
+});
+
+test("an answer given on the page while the card is being raised is kept when the card cannot be raised: the question is not asked again", async () => {
+  const r = await answeredWhileRaising(true);
+  assert.equal(r.result!.ok, true);
+  assert.deepEqual([r.afterTick.commitment.status, r.afterTick.commitment.answer!.label], ["done", "A"], "it is not put back to 'not asked yet'");
+  assert.equal(r.afterTick.raised, 0);
+  assert.equal(r.later.raised, 0, "and 25 minutes on, no card is raised for a question that has been answered");
+  assert.deepEqual([r.later.commitment.status, r.later.commitment.answer!.label], ["done", "A"], "the answer is not overwritten or lost");
+});

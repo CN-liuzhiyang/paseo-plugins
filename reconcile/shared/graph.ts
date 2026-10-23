@@ -53,7 +53,10 @@ export interface StageSpec {
 
 export interface StageMeta {
   id: string;
+  /** What people read. A stage the rule gave no name has a neutral one ("第 3 步"); its id is for the evidence layer only. */
   label: string;
+  /** The rule named it. */
+  named: boolean;
   next: string[];
   side: boolean;
   when: string | null;
@@ -81,6 +84,7 @@ export function normalizeStages(raw: ReadonlyArray<string | StageSpec>): StageMe
   const metas: StageMeta[] = specs.map((s) => ({
     id: s.id,
     label: s.label ?? s.id,
+    named: s.label !== undefined,
     next: s.next ?? [],
     side: s.side === true,
     when: s.when ?? null,
@@ -89,6 +93,13 @@ export function normalizeStages(raw: ReadonlyArray<string | StageSpec>): StageMe
     done: s.done ?? null,
   }));
   const route = routeOf(metas);
+  // A stage with no name is not shown by its id: that is a word of whoever wrote the rule.
+  let detours = 0;
+  for (const m of metas) {
+    if (m.named) continue;
+    // "dropped" is the id the engine itself gives to the end of not following an item.
+    m.label = m.end || m.id === "dropped" ? (m.endKind === "other" ? "另一种结束" : m.endKind === "dropped" || m.id === "dropped" ? "不再追踪" : "结束") : m.side ? `岔路 ${++detours}` : `第 ${route.indexOf(m.id) + 1} 步`;
+  }
   metas.forEach((m, i) => {
     if (specs[i]!.next !== undefined || m.end) return;
     // A detour goes back to the route at the first route stage declared after it.
@@ -161,6 +172,8 @@ export interface AskView {
   brief: string;
   options: Array<{ id: string; label: string; description: string }>;
   allowOther: boolean;
+  /** A question about whether words were the person's own: answered on its card only, never here. */
+  confirm: boolean;
   askedAt: string | null;
   nextAskAt: string | null;
   nextAskWhat: "nag" | "backstop" | "exhausted" | null;
@@ -170,7 +183,7 @@ export interface AskView {
 }
 
 export interface Mark {
-  kind: "stale" | "held" | "weak" | "wrong";
+  kind: "stale" | "held" | "weak" | "wrong" | "notice";
   line: string;
   since: string | null;
   until: string | null;
@@ -203,6 +216,8 @@ export interface RunView {
   stage: string | null;
   flow: string;
   startedAt: string;
+  /** When it ended; null while it has not. */
+  endedAt: string | null;
   /** How alive it is: the runtime's own reading (readRunState), mapped. */
   situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused";
   outcome: string | null;
@@ -211,7 +226,8 @@ export interface RunView {
   costUsd: number;
   /** How long it has been quiet, and the limit it is judged by. */
   quiet: { ms: number; limitMs: number } | null;
-  gate: { callId: string; summary: string; since: string; carrier: string | null } | null;
+  /** `kind`: what carries the approval (a provider without a model, or a model); `agentId`: the agent that holds the card, if the run said. */
+  gate: { callId: string; summary: string; since: string; kind: "provider" | "model" | null; agentId: string | null } | null;
   error: { name: string; plain: string; raw: string } | null;
   stopReason: string | null;
   /** Steps that already changed something outside: what a failure or a break left behind. */
@@ -254,9 +270,8 @@ export interface GraphView {
     sinceKind: "happened" | "observed" | "unknown";
     health: string;
     headline: string;
-    ball: { actor: Ball; who: string | null; what: string; waitingSince: string | null };
-    /** Whether the person can nudge the one it waits for: not yet, for any. */
-    nudge: { can: boolean; why: string };
+    /** `atLeast`: the wait is counted from where tracking began, so it was at least this long. */
+    ball: { actor: Ball; who: string | null; what: string; waitingSince: string | null; atLeast: boolean };
     ask: AskView | null;
     asks: AskView[];
   };
@@ -270,6 +285,8 @@ export interface GraphView {
   evidence: {
     facts: Array<{ field: string; value: string; evidence: string | null; at: string; by: string }>;
     sources: Array<{ id: string; state: string; lastOkAt: string | null; nextPollAt: string | null }>;
+    /** The stages of the rule by the id it wrote them with: ids are for here, the rest of the page uses the names. */
+    stages: Array<{ id: string; label: string; named: boolean }>;
     rule: { name: string; fingerprint: string } | null;
     /** The hand-off data (who held the ball inside a stage) is not read; the screen leaves its place empty. */
     handoffsRead: false;
@@ -281,7 +298,7 @@ export interface GraphView {
 export type Group = "me" | "errors" | "them" | "system" | "mine" | "done";
 
 export const GROUP_LABEL: Record<Group, { name: string; sub: string }> = {
-  me: { name: "要你做的", sub: "在这里就能做完：回答问题、看一眼卡住的" },
+  me: { name: "要你做的", sub: "回答问题、批准、看一眼卡住的" },
   errors: { name: "检查出错的", sub: "不是事项本身的问题，是判断它的时候出错了" },
   them: { name: "在等别人的", sub: "谁、在干什么、等了多久" },
   system: { name: "系统在查的", sub: "不用管，有变化或到点会叫你" },
@@ -305,8 +322,16 @@ export interface ListRow {
   /** A detour taken, and how far along the route it was taken (after this many cells), or null. */
   side: { after: number; label: string } | null;
   who: { actor: Ball; label: string };
-  /** How long it has waited (or, ended, how long it took) and since when. */
-  waiting: { ms: number | null; since: string | null; ended: boolean };
+  /**
+   * How long it has waited (or, ended, how long it took) and since when. `atLeast`: the clock starts when
+   * tracking began, not when the wait did, so the length is a floor; ended with `ms` null and `atLeast`:
+   * it was already over when tracking began.
+   */
+  waiting: { ms: number | null; since: string | null; ended: boolean; atLeast: boolean };
+  /** The rule's statement that something looks wrong, whatever state the item is in. */
+  notice: string | null;
+  /** The data it rests on is older than usual. */
+  stale: boolean;
   next: string[];
   /** Questions waiting for you: the page can answer them. */
   asking: number;

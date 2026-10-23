@@ -1,7 +1,7 @@
 import { Pressable, Text, View } from "react-native";
 import { durationText, GROUP_LABEL, SITUATION, type Group, type ListRow, type StripCell } from "../shared/graph";
 import { BallChip } from "./chart";
-import { tint, useUi } from "./ui";
+import { Badge, tint, useUi } from "./ui";
 
 // The list: items in groups by who has to act -- you, someone else, the system, you yourself
 // developing -- not by health. Each row says in a line what the item is doing, shows how far it
@@ -12,6 +12,17 @@ import { tint, useUi } from "./ui";
 const whatOf = (label: string) => (label.includes(" · ") ? label.slice(label.indexOf(" · ") + 3) : "");
 
 export const GROUP_ORDER: Group[] = ["me", "errors", "them", "system", "mine", "done"];
+
+/**
+ * How long, in words. A clock that starts when tracking began is "at least": it says so, and an item that was already over
+ * when tracking began does not get a length made up for it.
+ */
+export function waitText(row: ListRow): string {
+  if (row.group === "mine") return ""; // your own work is not something to nag about: no clock on it
+  const w = row.waiting;
+  if (w.ended) return w.ms !== null ? `${w.atLeast ? "至少用了" : "用了"} ${durationText(w.ms)}` : w.atLeast ? "追踪前就结束了" : "";
+  return w.ms !== null ? `${w.atLeast ? "至少已等" : "已等"} ${durationText(w.ms)}` : "";
+}
 
 function Strip({ row }: { row: ListRow }) {
   const ui = useUi();
@@ -48,8 +59,7 @@ function RowView({ row, onOpen }: { row: ListRow; onOpen(caseId: string): void }
   const s = SITUATION[row.situation];
   const color = ui.tone(s.tone);
   const finished = row.group === "done";
-  // Your own work is not something to nag about: no clock on it.
-  const wait = row.waiting.ms !== null && row.group !== "mine" ? `${row.waiting.ended ? "用了" : "已等"} ${durationText(row.waiting.ms)}` : "";
+  const wait = waitText(row);
   const icon = (
     <View style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: color, alignItems: "center", justifyContent: "center" }}>
       <Text style={{ color: c.surface0, fontWeight: "800", fontSize: 13 }}>{s.icon}</Text>
@@ -63,6 +73,16 @@ function RowView({ row, onOpen }: { row: ListRow; onOpen(caseId: string): void }
       <Text style={ui.styles.small} numberOfLines={2}>
         {row.headline}
       </Text>
+      {row.notice ? (
+        <Text style={[ui.styles.small, { color: ui.tone("warning") }]} numberOfLines={2}>
+          ⚠ {row.notice}
+        </Text>
+      ) : null}
+      {row.stale ? (
+        <View style={{ flexDirection: "row" }}>
+          <Badge tone="warning" label="数据可能过时" />
+        </View>
+      ) : null}
     </View>
   );
   if (ui.compact) {

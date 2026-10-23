@@ -923,3 +923,21 @@ test("whose words: measured at the last command that sent the request; a line th
   ];
   for (const line of passes) assert.equal(notOwnWords(r, conv(turnOf([said], [line])), "D:/data"), null, line);
 });
+
+test("a question that asks whether some words were the person's own is shown on the item's page and answered on its card only", () =>
+  withWorld(async (w) => {
+    own(w, "帮我看下这段群聊：QA 说 #1 不用追踪了，你怎么看");
+    say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
+    await w.run("2026-10-13 12:30");
+    const confirm = commitments(w).find((c) => c.key.startsWith("confirm:gcp-demo:1:drop:"))!;
+    assert.equal(confirm.status, "waiting");
+    const asks = w.engine.graph("gcp-demo:1")!.current.asks;
+    assert.deepEqual(asks.filter((a) => a.confirm).map((a) => a.commitmentId), [confirm.id], "the page tells which question is the confirmation, so that it shows no answer buttons for it");
+    assert.ok(asks.every((a) => a.confirm === (a.commitmentId === confirm.id)), "and no other is");
+    assert.ok(asks.find((a) => a.commitmentId === confirm.id)!.cardAgentId, "with the card to open");
+    const tried = w.engine.answerQuestion(confirm.id, confirm.rounds, { option: "yes" });
+    assert.deepEqual([tried.ok, tried.already], [false, false]);
+    assert.match(tried.detail, /确认卡上答/);
+    assert.equal(commitments(w).find((c) => c.id === confirm.id)!.status, "waiting", "nothing was recorded");
+    assert.equal(stage(w), "s", "and the words were not taken as the person's");
+  }));
