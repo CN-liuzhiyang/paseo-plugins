@@ -6,7 +6,7 @@ import type { Assessment, Commitment, SourceHealth } from "./model";
 
 export interface PlanEntry {
   at: string;
-  kind: "card" | "deferred" | "commitment" | "skipped" | "note" | "held" | "expire" | "notice";
+  kind: "card" | "deferred" | "commitment" | "skipped" | "note" | "held" | "expire" | "notice" | "said";
   person: string | null;
   summary: string;
 }
@@ -21,6 +21,7 @@ export const PLAN_LABEL: Record<PlanEntry["kind"], string> = {
   held: "挂起",
   expire: "到期",
   notice: "提醒",
+  said: "对话里说的",
 };
 
 /** A rules change the breaker held: how many commitments it would create, cancel, change and open again at once. */
@@ -41,6 +42,22 @@ export function describeChanges(c: Pick<RulesHeld, "newCommitments" | "dropped" 
     c.reopened > 0 ? `重开 ${c.reopened}` : "",
   ].filter(Boolean);
   return `${parts.join("、") || "改动 0"} 条承诺`;
+}
+
+export interface StatusSaid {
+  id: string;
+  caseId: string;
+  title: string;
+  kind: "drop" | "hold" | "wrong";
+  /** How the kind reads: 不再追踪, 先别问, 判断错了. */
+  label: string;
+  said: string;
+  by: string;
+  at: string;
+  until: string | null;
+  how: "own-words" | "confirmed";
+  inForce: boolean;
+  revokedAt: string | null;
 }
 
 export interface StatusCase {
@@ -96,4 +113,9 @@ export interface Status {
   plan: PlanEntry[];
   evals: number;
   pushesToday: Record<string, number>;
+  /**
+   * What people said in conversations about items: those in force, and those taken back in the
+   * last 7 days. A session reads this to find the id to take one back by.
+   */
+  said: StatusSaid[];
 }

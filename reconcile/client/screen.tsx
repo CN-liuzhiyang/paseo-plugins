@@ -250,6 +250,7 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
   const errors = status.cases.filter((k) => !k.open && k.assessment?.error);
   const finished = status.cases.filter((k) => !k.open && k.assessment?.health === "done");
   const held = status.rules.held;
+  const said = status.said ?? [];
   const { late, sources } = troubleOf(status);
   const alarm = late || sources.length > 0;
   const notes = status.plan.filter((p) => p.kind === "note");
@@ -293,6 +294,23 @@ function Body({ status, busy, onRelease }: { status: Status; busy: string | null
       <Section title={`到时候会问（${scheduled.length}）`}>
         {scheduled.length === 0 ? <Text style={ui.styles.muted}>没有排着的。</Text> : scheduled.map((k) => <CaseRow key={k.caseId} kase={k} />)}
       </Section>
+
+      {said.length > 0 ? (
+        <Section title={`对话里说过的（${said.filter((a) => a.inForce).length} 条在生效）`}>
+          {said.map((a) => (
+            <View key={a.id} style={ui.styles.card}>
+              <Text style={a.inForce ? ui.styles.strong : ui.styles.muted}>
+                {a.caseId.slice(a.caseId.lastIndexOf(":") + 1)}「{a.label}」{a.until ? `到 ${a.until}` : ""}
+                {a.inForce ? "" : a.revokedAt ? `（${clock(a.revokedAt)} 撤了）` : "（过期了）"}
+              </Text>
+              <Text style={ui.styles.small} selectable>
+                {a.by} {clock(a.at)} 说：「{a.said}」{a.how === "confirmed" ? "（在卡片上确认的）" : ""} · {a.id}
+              </Text>
+            </View>
+          ))}
+          <Text style={ui.styles.muted}>要撤掉一条，在对话里说一句（比如"刚才那条不要了"）。</Text>
+        </Section>
+      ) : null}
 
       {alarm ? null : <Alive status={status} />}
 

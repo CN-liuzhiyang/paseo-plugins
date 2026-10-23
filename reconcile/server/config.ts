@@ -126,7 +126,7 @@ const policySchema = z
   .object({
     /** The instance's own zone: for calendar days, source windows and the status line. */
     tz: z.string().min(1),
-    /** A rules change that would newly create more commitments than this is held for a person. */
+    /** A rules change that would create, cancel, change or reopen more commitments than this at once is held for a person. */
     ruleBreakerChanges: z.number().int().min(0),
     /** A source that has failed this long is reported as an evaluation candidate. */
     sourceDownHours: z.number().min(1),
@@ -134,6 +134,11 @@ const policySchema = z
      * Which items are judged each reconcile. The rest stay cold -- not judged, not shown, not
      * read again -- until something that matters about them changes.
      */
+    /**
+     * Working directories of conversations that come from a chat app (a Feishu or other chat route): words
+     * said there are not taken as the admin's own, since the host does not say who sent them.
+     */
+    chatCwds: z.array(z.string().min(1)).default([]),
     hot: z
       .object({
         /** A person changed it within this many days. */

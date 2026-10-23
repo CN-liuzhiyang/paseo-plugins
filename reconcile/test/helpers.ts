@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,7 @@ import { loadConfig } from "../server/config";
 import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine } from "../server/engine";
 import type { Card, Item } from "../shared/model";
 import type { PollInput, Source } from "../server/sources/source";
+import type { Conversation, Receipt } from "../server/requests";
 import { openStore, type Store } from "../server/store";
 
 // A world for the engine: a private config written to a temp dir, a source that serves
@@ -145,6 +146,12 @@ export interface World {
   engine: Engine;
   logs: string[];
   statuses: unknown[];
+  /** Conversations by agent id, as the host would show them to the engine. */
+  conversations: Map<string, Conversation>;
+  /** Leaves a request where bin/reconcile-say.mjs would, and returns its id. */
+  say(request: Record<string, unknown>): string;
+  /** The receipt of a request, once the engine has written it. */
+  receipt(id: string): Receipt | null;
   /** Answers the newest card the way the app does. */
   answer(answers: Record<string, string>): string;
   respond(answer: CardAnswer): string;
@@ -172,7 +179,11 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const statuses: unknown[] = [];
   let agents = 0;
 
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses } as World;
+  const conversations = new Map<string, Conversation>();
+  const requestsDir = path.join(dataDir, "requests");
+  let requests = 0;
+
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -231,6 +242,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   };
 
   const boot = async (mode: "live" | "dry-run") => {
+    mkdirSync(requestsDir, { recursive: true });
     world.store = openStore({ dir: dataDir, now: () => clock.now });
     world.engine = createEngine({
       store: world.store,
@@ -241,6 +253,8 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
       instanceId: "test",
       home: dir,
       tickSeconds: 60,
+      requestsDir,
+      conversation: async (agentId) => conversations.get(agentId) ?? null,
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),
@@ -262,6 +276,16 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
     return world.engine.answer(newest.card.id, answer);
   };
   world.answer = (answers) => world.respond({ kind: "answers", answers, via: "form" });
+  world.say = (request) => {
+    const id = (request.id as string | undefined) ?? `r_${(++requests).toString(16).padStart(12, "0")}`;
+    mkdirSync(requestsDir, { recursive: true });
+    writeFileSync(path.join(requestsDir, `${id}.json`), JSON.stringify({ v: 1, id, at: new Date(clock.now).toISOString(), via: "agent-me", ...request }));
+    return id;
+  };
+  world.receipt = (id) => {
+    const file = path.join(requestsDir, "done", `${id}.json`);
+    return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Receipt) : null;
+  };
   world.run = async (untilLocal, stepMinutes = 15) => {
     const end = at(untilLocal);
     while (clock.now <= end) {

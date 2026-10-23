@@ -127,6 +127,33 @@ export interface Commitment {
   reason: string | null;
 }
 
+/**
+ * What a person said about one item in a conversation, in force until taken back: stop following
+ * it, do not ask about it until a day, or this judgment is wrong. It carries the words and who
+ * said them, and one sentence takes it back.
+ */
+export interface Annotation {
+  id: string;
+  caseId: string;
+  kind: "drop" | "hold" | "wrong";
+  said: string;
+  /** The person, by id in persons.json. */
+  by: string;
+  /** The agent whose conversation it was said in. */
+  via: string | null;
+  /** The person's own words in their own conversation, or a card they answered yes to. */
+  how: "own-words" | "confirmed";
+  at: string;
+  /** hold: asking starts again on this day (YYYY-MM-DD, local). */
+  until: string | null;
+  /** hold: only this person's questions. */
+  person: string | null;
+  /** wrong: what is wrong, and what would be right. */
+  what: string | null;
+  expected: string | null;
+  revoked: { at: string; said: string; by: string } | null;
+}
+
 /** One card: a question form for one person, one question per commitment. */
 export interface Card {
   id: string;
@@ -190,4 +217,4 @@ export interface SourceHealth {
   failingSince?: Record<string, string>;
 }
 
-export type EvalKind = "woke-noop" | "nag-ignored" | "commitment-expired" | "rule-breaker" | "source-down-long" | "budget-overflow";
+export type EvalKind = "woke-noop" | "nag-ignored" | "commitment-expired" | "rule-breaker" | "source-down-long" | "budget-overflow" | "correction";

@@ -1,4 +1,5 @@
-import type { Action, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, SourceHealth } from "../shared/model";
+import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, SourceHealth } from "../shared/model";
+import type { Request } from "./requests";
 import type { RulesHeld } from "../shared/status";
 
 // Every change to the controller's state is one event in the journal; the state is the fold of
@@ -22,6 +23,10 @@ export type EventBody =
   | { type: "rules.released"; fingerprint: string }
   | { type: "workspace"; workspaceId: string }
   | { type: "eval.candidate"; kind: EvalKind; subject: string; detail: string }
+  | { type: "annotation.added"; annotation: Annotation }
+  | { type: "annotation.revoked"; id: string; said: string; by: string }
+  /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
+  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
@@ -50,6 +55,8 @@ export interface State {
   rules: { fingerprint: string | null; held: RulesHeld | null; released: string[] };
   workspaceId: string | null;
   evals: number;
+  annotations: Record<string, Annotation>;
+  requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request }>;
 }
 
 export function emptyState(): State {
@@ -66,6 +73,8 @@ export function emptyState(): State {
     rules: { fingerprint: null, held: null, released: [] },
     workspaceId: null,
     evals: 0,
+    annotations: {},
+    requests: {},
   };
 }
 
@@ -125,6 +134,17 @@ export function apply(state: State, event: JournalEvent): void {
     case "rules.released":
       state.rules.released.push(event.fingerprint);
       if (state.rules.held?.fingerprint === event.fingerprint) state.rules.held = null;
+      return;
+    case "annotation.added":
+      state.annotations[event.annotation.id] = event.annotation;
+      return;
+    case "annotation.revoked": {
+      const found = state.annotations[event.id];
+      if (found && !found.revoked) found.revoked = { at: event.at, said: event.said, by: event.by };
+      return;
+    }
+    case "request.handled":
+      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}) };
       return;
     case "workspace":
       state.workspaceId = event.workspaceId;

@@ -1,4 +1,4 @@
-import { renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
@@ -10,6 +10,7 @@ import { createCarrier } from "./server/carrier";
 import { ConfigError, loadConfig } from "./server/config";
 import { createEngine, type Deliver, type Engine, type EngineStatus } from "./server/engine";
 import { exec } from "./server/exec";
+import { currentTurn, REQUEST_ID, type Conversation } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
 import { createGcpSource } from "./server/sources/gcp";
@@ -41,6 +42,11 @@ export function planText(status: EngineStatus): string {
     "",
     `## 在管的事（热的 ${status.cases.length} 件；冷的 ${status.cold.length} 件不判断、不显示）`,
     ...status.cases.map((c) => `- ${c.caseId} ${c.assessment ? c.assessment.headline : "（没有规则判断）"}（热：${c.hot.join("；")}）${c.assessment?.notice ? `\n  - ⚠ ${c.assessment.notice}` : ""}${c.commitments.map((k) => `\n  - 承诺「${k.title}」${k.status}：${k.step}${k.answer ? `，回答 ${k.answer}` : ""}`).join("")}`),
+    "",
+    "## 对话里说过的（还在生效的，和 7 天内撤掉的）",
+    ...(status.said.length === 0
+      ? ["（没有）"]
+      : status.said.map((a) => `- ${a.id} ${a.caseId}「${a.label}」${a.until ? `到 ${a.until}` : ""}：${a.by} ${a.at.slice(5, 16).replace("T", " ")} 说「${a.said}」${a.how === "confirmed" ? "（在卡片上确认的）" : ""}${a.inForce ? "" : a.revokedAt ? `，${a.revokedAt.slice(5, 16).replace("T", " ")} 撤了` : "，已过期"}`)),
   ];
   return lines.join("\n") + "\n";
 }
@@ -68,6 +74,8 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
   /** The settings the running engine started with, to tell a write that changed nothing. */
   let runningWith: string | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
+  /** Watches the requests directory, so that what a person says is taken up within seconds, not at the next tick. */
+  let watcher: FSWatcher | null = null;
   /**
    * Starts and stops, one after another: a settings write that comes while the previous one is
    * still waiting for its engine to stop runs after it, so two engines never share the journal.
@@ -92,6 +100,8 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
     timer = null;
     if (retry) clearTimeout(retry);
     retry = null;
+    watcher?.close();
+    watcher = null;
     const running = engine;
     const closing = store;
     engine = null;
@@ -158,6 +168,18 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
             : `设置里的 home（${values.home || "空"}）和这个 daemon 的 PASEO_HOME（${home}）不一致，只演练`
           : null;
       if (why) log(why);
+      const requestsDir = path.join(dataDir, "requests");
+      mkdirSync(requestsDir, { recursive: true });
+      const conversation = paseo
+        ? async (agentId: string): Promise<Conversation | null> => {
+            const ref = paseo.agents.ref(agentId);
+            const page = await ref.timeline.refetch({ direction: "tail", limit: 80 });
+            const agent = page.agent ?? ((await ref.refresh()) ? ref.current() : null);
+            if (!agent) return null;
+            const entries = page.entries.map((e) => ({ type: e.item.type, text: "text" in e.item && typeof e.item.text === "string" ? e.item.text : undefined, turnId: e.turnId }));
+            return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(entries) };
+          }
+        : null;
       engine = createEngine({
         store,
         config,
@@ -169,6 +191,8 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         tickSeconds: values.tickSeconds,
         notices: why ? [why] : [],
         deliver,
+        requestsDir,
+        conversation,
         now: Date.now,
         log,
         writeStatus: (status) => {
@@ -191,6 +215,20 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       }
       timer = setInterval(() => void running.tick(), values.tickSeconds * 1000);
       void running.tick();
+      let kick: ReturnType<typeof setTimeout> | null = null;
+      try {
+        watcher = watch(requestsDir, (_event, name) => {
+          if (!name || !REQUEST_ID.test(String(name).replace(/\.json$/, "")) || kick) return;
+          // A reconcile in flight takes it up if it has not read the directory yet; else the next does.
+          kick = setTimeout(() => {
+            kick = null;
+            void running.tick();
+          }, 500);
+        });
+        watcher.on("error", (error) => log(`watching ${requestsDir} failed: ${error.message}`));
+      } catch (error) {
+        log(`cannot watch ${requestsDir}, requests wait for the next reconcile: ${(error as Error).message}`);
+      }
       problem = { state: "stopped", detail: "" };
       runningWith = wanted;
       log(`started (${values.instanceId || "unnamed"}, ${mode}, every ${values.tickSeconds}s, data ${dataDir})`);
