@@ -414,10 +414,18 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
       // An observation is read as the controller takes it, whichever way the rule asks.
       const seen = found.kind === "observation" ? inputs.observed?.(key) : null;
       if (!seen) return copy(found);
-      // What it found too: nothing of what was read for another request than the one asked.
-      const fields = Object.fromEntries(Object.entries(found.fields).filter(([field]) => field !== "numbers" && !field.startsWith("notes.")));
+      // All of it as concluded: nothing of what was read for another request than the one asked
+      // (what it found, what the command said, when, for which request).
+      const mine = seen.readAt !== null;
+      const fields = Object.fromEntries(Object.entries(found.fields).filter(([field]) => field !== "numbers" && !field.startsWith("notes.") && (mine || (field !== "request" && field !== "observedAt"))));
       seen.notes.forEach((note, i) => (fields[`notes.${i}`] = note));
-      return copy({ ...found, fields: { ...fields, numbers: JSON.stringify(seen.numbers), freshUntil: seen.freshUntil ?? "", verdict: seen.verdict, "verdict.reported": seen.reported ?? "", "verdict.why": seen.why ?? "" } });
+      if (seen.window) Object.assign(fields, { "window.from": seen.window.from, "window.to": seen.window.to });
+      return copy({
+        ...found,
+        status: seen.verdict,
+        observedAt: seen.readAt ?? "",
+        fields: { ...fields, numbers: JSON.stringify(seen.numbers), freshUntil: seen.freshUntil ?? "", verdict: seen.verdict, "verdict.reported": seen.reported ?? "", "verdict.why": seen.why ?? "" },
+      });
     },
     siblings: (key: string) => {
       const parent = inputs.items[key]?.parent ?? null;

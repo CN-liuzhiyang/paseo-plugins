@@ -235,7 +235,7 @@ export function createEngine(deps: EngineDeps) {
         running.delete(source.id);
         const calls = health.calls.filter((t) => nowMs - t < 3_600_000);
         if ("poll" in run.outcome) took(source.id, health, calls, stillAsked(source.id, run.outcome.poll), run.startedMs, nowMs, run.asked);
-        else if (run.retry && (run.outcome.error as { nothingRead?: boolean }).nothingRead) keysFailed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
+        else if (run.retry && keysOnly(run.outcome.error)) keysFailed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
         else failed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
         continue;
       }
@@ -383,6 +383,12 @@ export function createEngine(deps: EngineDeps) {
     return out;
   }
 
+  /** A failure that is the keys' asked, not the source's: it ran and gave nothing, without saying anything went wrong. */
+  const keysOnly = (error: Error) => {
+    const e = error as { nothingRead?: boolean; reported?: string[] };
+    return e.nothingRead === true && (e.reported?.length ?? 0) === 0;
+  };
+
   /**
    * A retry of keys that keep failing on their own (Run.retry) that read nothing again: theirs to
    * count (and back off on), not the source's, which reads the others; nor is the source down for it.
@@ -501,23 +507,21 @@ export function createEngine(deps: EngineDeps) {
     });
   }
 
-  /** Per case and key asked: the request (its version) it asked for last, and when that changed (in this process). */
-  const askedVersions = new Map<string, { version: string; changes: number[] }>();
-  /** More changes than this in an hour, the last one this round: the request changes round after round. */
-  const CHURN_CHANGES = 3;
+  /** Per case and key asked: the request (its version) it asked for last, and how many rounds in a row it has changed (in this process). */
+  const askedVersions = new Map<string, { version: string; rounds: number }>();
+  /** Changed this many judgments in a row: the request changes round after round (a few changes with a round between are steps). */
+  const CHURN_ROUNDS = 3;
 
-  /** A request of a case's that keeps changing (OBSERVE churn), or null. */
-  function churn(caseId: string, asked: ObserveRequest[], nowMs: number): { key: string; changes: number } | null {
-    let found: { key: string; changes: number } | null = null;
+  /** A request of a case's that keeps changing, or null. */
+  function churn(caseId: string, asked: ObserveRequest[]): { key: string; rounds: number } | null {
+    let found: { key: string; rounds: number } | null = null;
     for (const a of asked) {
       const at = `${caseId}\0${a.source}\0${a.key}`;
       const version = requestVersion(a);
       const had = askedVersions.get(at);
-      const changes = (had?.changes ?? []).filter((t) => nowMs - t < 3_600_000);
-      const changed = had !== undefined && had.version !== version;
-      if (changed) changes.push(nowMs);
-      askedVersions.set(at, { version, changes });
-      if (changed && changes.length > CHURN_CHANGES && !found) found = { key: a.key, changes: changes.length };
+      const rounds = had !== undefined && had.version !== version ? had.rounds + 1 : 0;
+      askedVersions.set(at, { version, rounds });
+      if (rounds >= CHURN_ROUNDS && !found) found = { key: a.key, rounds };
     }
     return found;
   }
@@ -1276,7 +1280,7 @@ export function createEngine(deps: EngineDeps) {
       }
       // A request that changes round after round is never read: told, as a judgment that went wrong
       // (what was asked before stays, as for any judgment that fails).
-      const churning = churn(item.key, asked, nowMs);
+      const churning = churn(item.key, asked);
       if (churning) {
         const a = judged.assessment;
         judged = {
@@ -1290,7 +1294,7 @@ export function createEngine(deps: EngineDeps) {
             health: "conflict",
             headline: `判断出错：${rule.name}`,
             next: { actor: "me", what: "看一眼判断文件" },
-            error: `${rule.file}: observe ${churning.key}: 参数每轮都在变（一小时里变了 ${churning.changes} 次），读不到；params 里不要放 ctx.now 这类每轮都变的值`,
+            error: `${rule.file}: observe ${churning.key}: 参数每轮都在变（连续 ${churning.rounds} 轮都变了），读不到；params 里不要放 ctx.now 这类每轮都变的值`,
           },
           output: null,
         };

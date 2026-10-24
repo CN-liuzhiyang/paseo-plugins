@@ -69,9 +69,15 @@ export class CommandAuthError extends Error {
   readonly auth = true;
 }
 
-/** It ran, and said nothing usable for anything asked (no result, or errors and nothing found). */
+/** It ran, and said nothing usable for anything asked (no result, or errors and nothing found); `reported`: the errors it said itself. */
 export class NothingReadError extends Error {
   readonly nothingRead = true;
+  constructor(
+    message: string,
+    readonly reported: string[],
+  ) {
+    super(message);
+  }
 }
 
 export function createCommandSource(config: CommandSourceConfig, deps: { exec: Exec }): Source {
@@ -105,7 +111,8 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
       if (errors.includes("auth")) throw new CommandAuthError("观察命令说登录不了（auth）");
       // It says what went wrong for the whole run and found nothing for any request: that is a
       // read that failed (it counts towards telling the admin), not a set of answers.
-      if (errors.length > 0 && parsed.results.every((res) => res.verdict === "insufficient-data")) throw new NothingReadError(`观察命令读不了：${errors.join("、")}`);
+      if (errors.length > 0 && parsed.results.every((res) => res.verdict === "insufficient-data")) throw new NothingReadError(`观察命令读不了：${errors.join("、")}`, errors);
+      const reported = [...errors];
       const asked = new Map(requests.map((q) => [q.key, q]));
       const snapshots: Item[] = [];
       const seen = new Set<string>();
@@ -148,7 +155,7 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
       const missing: Record<string, string> = {};
       for (const q of requests) if (!seen.has(q.key)) missing[q.key] = "观察命令没给结果";
       // Nothing for anything asked: not a read.
-      if (snapshots.length === 0) throw new NothingReadError(`观察命令没给要的结果${errors.length > 0 ? `：${errors.slice(0, 3).join("；")}` : ""}`);
+      if (snapshots.length === 0) throw new NothingReadError(`观察命令没给要的结果${errors.length > 0 ? `：${errors.slice(0, 3).join("；")}` : ""}`, reported);
       for (const [key, why] of Object.entries(missing)) errors.push(`${key}: ${why}`);
       return { snapshots, cursor: null, calls: 1, errors: errors.slice(0, 20), more: false, ...(Object.keys(missing).length > 0 ? { missing } : {}) };
     },
