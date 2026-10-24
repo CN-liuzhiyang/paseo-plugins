@@ -122,9 +122,38 @@ const flagsSourceSchema = z
   })
   .strict();
 
+/**
+ * An observing source: a command that is handed what the rules ask to have watched and answers
+ * with what it found (server/sources/command.ts). It runs only while something is being watched.
+ */
+const commandSourceSchema = z
+  .object({
+    id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
+    label: z.string().min(1).max(40).optional(),
+    kind: z.literal("command"),
+    /** Run without a shell: ["<python>", "<…>/observe.py"]. */
+    command: z.array(z.string().min(1)).min(1),
+    /** While a window is open, a read this often (and one at its end, and at each reread). */
+    everyMinutes: z.number().int().min(1).max(240),
+    maxCallsPerHour: z.number().int().min(1),
+    timeoutSeconds: z.number().int().min(5).max(900),
+    /** Past this, the command is stopped and the read fails. */
+    maxOutputBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(256 * 1024),
+    /** How far the data may lag behind the read and still count ("nothing found" on older data is "too little to tell"). */
+    maxLagMinutes: z.number().int().min(1).max(24 * 60).default(30),
+    /**
+     * A read failing this long while something is being watched: the admin is told (a window is
+     * short; policy.sourceDownHours is for sources read all day). Absent: sourceDownHours.
+     */
+    downAfterMinutes: z.number().int().min(5).optional(),
+    domain: z.enum(["work", "personal", "family"]),
+  })
+  .strict();
+
 export type GcpSourceConfig = z.output<typeof gcpSourceSchema>;
 export type FlagsSourceConfig = z.output<typeof flagsSourceSchema>;
-export type SourceConfig = GcpSourceConfig | FlagsSourceConfig;
+export type CommandSourceConfig = z.output<typeof commandSourceSchema>;
+export type SourceConfig = GcpSourceConfig | FlagsSourceConfig | CommandSourceConfig;
 
 const policySchema = z
   .object({
@@ -210,7 +239,7 @@ export function loadConfig(dir: string, over?: string): Config {
     for (const [domain, text] of Object.entries(person.quiet)) windows[domain as keyof Person["windows"]] = parseWindow(text as string);
     persons[id] = { ...person, id, windows };
   }
-  const sources = parse(z.array(z.discriminatedUnion("kind", [gcpSourceSchema, flagsSourceSchema])), readJson(sourcesFile), sourcesFile);
+  const sources = parse(z.array(z.discriminatedUnion("kind", [gcpSourceSchema, flagsSourceSchema, commandSourceSchema])), readJson(sourcesFile), sourcesFile);
   const ids = new Set<string>();
   for (const source of sources) {
     if (ids.has(source.id)) throw new ConfigError(`${sourcesFile}: source id "${source.id}" appears twice`);

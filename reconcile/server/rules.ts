@@ -6,6 +6,7 @@ import type { Assessment, Commitment, Item, Note, Observation } from "../shared/
 import { normalizeStages, type StageMeta, type StageSpec } from "../shared/graph";
 import { flagOf, linksOf, type FlagLink, type Vocabulary } from "./links";
 import { addWorkdays, iso, workdaysBetween, zoned, type Calendar } from "./time";
+import type { Concluded } from "./observe";
 
 // Rules are the deployment's private judgment: one ES module per file in <config>/rules, each
 // a pure function from a case and a read-only context to an assessment. They are code, but the
@@ -68,6 +69,27 @@ const fact = z.object({ field: z.string().regex(/^[a-zA-Z][a-zA-Z0-9._-]*$/), va
 /** Another case to judge again soon, e.g. one that waits on this one; it stays hot for a while. */
 const wake = z.object({ caseId: z.string().min(1), reason: z.string().min(1).max(200) }).strict();
 
+/** The most `params` of one request may take, as JSON. */
+export const OBSERVE_PARAMS_BYTES = 8 * 1024;
+/** The longest a window, or a reread after it, may be. */
+export const OBSERVE_SPAN_MINUTES = 7 * 24 * 60;
+
+/**
+ * Something to have watched by an observing source (a "command" source): read every few minutes
+ * from `window.from` to `window.to`, then once `reread` minutes after it, each. The key is the
+ * request's own (the same key asked again with another window is a new watch); `params` goes to
+ * the command as it is.
+ */
+const observe = z
+  .object({
+    source: z.string().min(1),
+    key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/).max(200),
+    window: z.object({ from: z.string(), to: z.string() }).strict(),
+    reread: z.array(z.number().int().min(1).max(OBSERVE_SPAN_MINUTES)).max(6).default([]),
+    params: z.record(z.string(), z.unknown()).default({}),
+  })
+  .strict();
+
 const output = z
   .object({
     stage: z.string().min(1),
@@ -82,6 +104,7 @@ const output = z
     facts: z.array(fact),
     commitments: z.array(commitmentSpec),
     wake: z.array(wake).optional(),
+    observe: z.array(observe).max(20).optional(),
     /** A statement for the owner when something looks wrong; not a question, nothing to answer. */
     notice: z.string().min(1).max(300).optional(),
     /**
@@ -133,6 +156,14 @@ export interface RuleContext {
   local(instant: string): string;
   /** Whether the source has succeeded recently enough that silence in it means something. */
   fresh(sourceId: string): boolean;
+  /**
+   * What an observing source found for a key this rule (or another) asked it to watch, as the
+   * controller takes it: `verdict` is the command's, except that "no-signal" is "insufficient-data"
+   * until the window has been watched to its end on data read in time (`why` says what is missing).
+   * Null for a source that is not an observing one. `ctx.item` gives an observation's item with the
+   * same `verdict` in its fields (the command's own is `verdict.reported`).
+   */
+  observation(sourceId: string, key: string): Concluded | null;
 }
 
 interface RuleModule {
@@ -359,6 +390,8 @@ export interface ContextInputs {
   assessments?: Record<string, Assessment>;
   /** Filled with the keys of the items the rule looks up: what its judgment rests on. */
   reads?: Set<string>;
+  /** What an observation item comes to now (observe.ts); null: not an observing source's item. */
+  observed?(itemKey: string): Concluded | null;
 }
 
 export function makeContext(inputs: ContextInputs, params: Record<string, unknown>): RuleContext {
@@ -374,7 +407,15 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
     now: iso(inputs.nowMs, tz),
     tz,
     params: copy(params),
-    item: (key: string) => (inputs.reads?.add(key), inputs.items[key] ? copy(inputs.items[key]) : null),
+    item: (key: string) => {
+      inputs.reads?.add(key);
+      const found = inputs.items[key];
+      if (!found) return null;
+      // An observation is read as the controller takes it, whichever way the rule asks.
+      const seen = found.kind === "observation" ? inputs.observed?.(key) : null;
+      if (!seen) return copy(found);
+      return copy({ ...found, fields: { ...found.fields, verdict: seen.verdict, "verdict.reported": seen.reported ?? "", "verdict.why": seen.why ?? "" } });
+    },
     siblings: (key: string) => {
       const parent = inputs.items[key]?.parent ?? null;
       return parent === null ? [] : copy(Object.values(inputs.items).filter((i) => i.parent === parent && i.key !== key));
@@ -398,6 +439,11 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
     at: (date: string, time: string) => iso(zoned(date, time, tz), tz),
     local: (instant: string) => iso(parseIso(instant), tz),
     fresh: (sourceId: string) => inputs.fresh(sourceId),
+    observation: (sourceId: string, key: string) => {
+      inputs.reads?.add(`${sourceId}:${key}`);
+      const seen = inputs.observed?.(`${sourceId}:${key}`) ?? null;
+      return seen ? copy(seen) : null;
+    },
   });
 }
 
@@ -424,6 +470,15 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
   if (!parsed.success) return failed(`${rule.file}: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`);
   const out = parsed.data;
   if (!rule.stages.includes(out.stage)) return failed(`${rule.file}: stage "${out.stage}" is not one of the declared stages`);
+  const keys = new Set<string>();
+  for (const o of out.observe ?? []) {
+    const [from, to] = [Date.parse(o.window.from), Date.parse(o.window.to)];
+    if (Number.isNaN(from) || Number.isNaN(to)) return failed(`${rule.file}: observe ${o.key}: window is not two instants`);
+    if (to < from || to - from > OBSERVE_SPAN_MINUTES * 60_000) return failed(`${rule.file}: observe ${o.key}: window ends before it starts, or is longer than 7 days`);
+    if (JSON.stringify(o.params).length > OBSERVE_PARAMS_BYTES) return failed(`${rule.file}: observe ${o.key}: params over ${OBSERVE_PARAMS_BYTES} bytes`);
+    if (keys.has(`${o.source}:${o.key}`)) return failed(`${rule.file}: observe ${o.key} asked twice`);
+    keys.add(`${o.source}:${o.key}`);
+  }
   for (const spec of out.commitments) {
     for (const value of [spec.trigger.at, spec.backstop.at]) if (Number.isNaN(Date.parse(value))) return failed(`${rule.file}: not an instant: ${value}`);
     const ids = spec.ask.options.map((o) => o.id);

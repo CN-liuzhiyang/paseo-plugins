@@ -35,7 +35,7 @@ test("the svn reader finds the branch a revision is on, reads its diff once, and
     const verb = args[0];
     const url = args.find((a) => a.startsWith("https://"));
     if (verb === "log" && url === "https://svn.example/repo/branches/trunk")
-      return { code: 0, stdout: '<?xml version="1.0"?><log><logentry revision="100"><author>甲</author><date>2026-10-12T02:00:00.000Z</date><msg>add new_switch_x &amp; more\nsecond line</msg></logentry></log>', stderr: "", ms: 1, timedOut: false };
+      return { code: 0, stdout: '<?xml version="1.0"?><log><logentry revision="100"><author>甲</author><date>2026-10-12T02:00:00.000Z</date><paths><path action="M" kind="file">/repo/branches/trunk/code/a &amp; b.lua</path><path action="A" kind="dir">/repo/branches/trunk/code/new</path><path action="D" kind="file">/repo/elsewhere/x.lua</path></paths><msg>add new_switch_x &amp; more\nsecond line</msg></logentry></log>', stderr: "", ms: 1, timedOut: false };
     if (verb === "log") return { code: 0, stdout: "<log>\n</log>", stderr: "", ms: 1, timedOut: false };
     return { code: 0, stdout: DIFF, stderr: "", ms: 1, timedOut: false };
   };
@@ -58,6 +58,11 @@ test("the svn reader finds the branch a revision is on, reads its diff once, and
     author: "甲",
     summary: "add new_switch_x & more",
     added: [["new_switch_x", "new_switch_x = dict(enabled = true),"]],
+    // the files it changed, relative to the branch where they are under it; a directory is not one
+    files: [
+      { path: "code/a & b.lua", action: "M" },
+      { path: "/repo/elsewhere/x.lua", action: "D" },
+    ],
     in: { trunk: { rev: 100, at: "2026-10-12T02:00:00.000Z" } },
   });
   assert.deepEqual(calls, ["log --xml -v -c", "log --xml -v -c", "diff -c 100 https://svn.example/repo/branches/trunk"]);

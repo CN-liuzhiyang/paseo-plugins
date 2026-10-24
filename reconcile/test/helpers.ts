@@ -9,6 +9,8 @@ import type { Card, Item } from "../shared/model";
 import type { PollInput, Source } from "../server/sources/source";
 import type { Conversation, Receipt } from "../server/requests";
 import { openStore, type Store } from "../server/store";
+import { exec } from "../server/exec";
+import { createCommandSource } from "../server/sources/command";
 
 // A world for the engine: a private config written to a temp dir, a source that serves
 // whatever the test puts in `items`, a carrier that records cards instead of starting agents,
@@ -255,10 +257,12 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const boot = async (mode: "live" | "dry-run") => {
     mkdirSync(requestsDir, { recursive: true });
     world.store = openStore({ dir: dataDir, now: () => clock.now });
+    const config = loadConfig(configDir);
     world.engine = createEngine({
       store: world.store,
-      config: loadConfig(configDir),
-      sources: [source, flagSource],
+      config,
+      // An observing source in the config runs its command for real (a test's own script).
+      sources: [source, flagSource, ...config.sources.flatMap((s) => (s.kind === "command" ? [createCommandSource(s, { exec })] : []))],
       carrier,
       mode,
       instanceId: "test",

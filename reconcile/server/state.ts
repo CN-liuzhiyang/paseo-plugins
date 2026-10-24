@@ -1,4 +1,4 @@
-import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, SourceHealth } from "../shared/model";
+import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, ObserveRequest, SourceHealth } from "../shared/model";
 import type { Request } from "./requests";
 import type { RulesHeld } from "../shared/status";
 
@@ -27,6 +27,8 @@ export type EventBody =
   /** The controller saved a copy of a rule file (its sha256, and the source its rule judges); sha256 null: the copy is gone. */
   | { type: "rules.kept"; file: string; sha256: string | null; source?: string }
   | { type: "workspace"; workspaceId: string }
+  /** What a case's rule asks observing sources to watch now (none: nothing). */
+  | { type: "observe.set"; caseId: string; requests: ObserveRequest[] }
   | { type: "eval.candidate"; kind: EvalKind; subject: string; detail: string }
   | { type: "annotation.added"; annotation: Annotation }
   | { type: "annotation.revoked"; id: string; said: string; by: string }
@@ -69,6 +71,8 @@ export interface State {
    * theirs, why not; only here, the receipt does not say.
    */
   requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string }>;
+  /** By case: what its rule asks to have watched, and since when it asks that. Absent in states from before it was kept. */
+  observing?: Record<string, { at: string; requests: ObserveRequest[] }>;
 }
 
 export interface RuleBroken {
@@ -177,6 +181,10 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     case "workspace":
       state.workspaceId = event.workspaceId;
+      return;
+    case "observe.set":
+      if (event.requests.length === 0) delete (state.observing ??= {})[event.caseId];
+      else (state.observing ??= {})[event.caseId] = { at: event.at, requests: event.requests };
       return;
     case "eval.candidate":
       state.evals += 1;

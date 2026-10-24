@@ -56,6 +56,28 @@ export interface Revision {
   summary: string;
   /** Identifiers on added lines that no removed line has, each with the first such line. */
   added: Array<[string, string]>;
+  /**
+   * The files it changed, relative to the branch it was committed on (the repository's path when
+   * not under it), with how: A added, M modified, D deleted, R replaced. Capped; absent in revisions
+   * read before it was kept.
+   */
+  files?: Array<{ path: string; action: "A" | "M" | "D" | "R" }>;
+}
+
+/** What an observation can conclude: nothing found, something to look at, a failure, or too little to tell. */
+export type ObserveVerdict = "no-signal" | "needs-look" | "hard-fail" | "insufficient-data";
+
+/**
+ * A rule's request that an observing source (a "command" source) watch something for a case:
+ * every few minutes from `window.from` to `window.to`, then once at each of `reread` (minutes after
+ * the window). `params` goes to the command as it is; the controller does not read it.
+ */
+export interface ObserveRequest {
+  source: string;
+  key: string;
+  window: { from: string; to: string };
+  reread: number[];
+  params: Record<string, unknown>;
 }
 
 /** "This source said this at that time." Append-only. */

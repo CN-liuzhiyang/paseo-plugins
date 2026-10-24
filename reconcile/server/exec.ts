@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 
 // The one way a source runs a command: an argument array, no shell, hidden window, a timeout,
 // and a cap on what is kept of its output (past it the command is stopped and what came so far
-// is returned, marked truncated).
+// is returned, marked truncated). `input` is written to its stdin, which is then closed.
 // No shell because on Windows a .cmd/.ps1 shim goes through cmd.exe or PowerShell, which
 // mangle Chinese text and inline JSON; sources name the real entry instead ("node <…>/cli.js").
 
@@ -16,11 +16,11 @@ export interface ExecResult {
   truncated?: boolean;
 }
 
-export type Exec = (command: string[], args: string[], options: { timeoutMs: number; maxBytes?: number }) => Promise<ExecResult>;
+export type Exec = (command: string[], args: string[], options: { timeoutMs: number; maxBytes?: number; input?: string }) => Promise<ExecResult>;
 
 const MAX_BYTES = 16 * 1024 * 1024;
 
-export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES }) =>
+export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, input }) =>
   new Promise((resolve) => {
     const started = Date.now();
     const [file, ...prefix] = command;
@@ -51,6 +51,11 @@ export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES }) =
     child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
       if (stderr.length < 64 * 1024) stderr += chunk;
     });
+    if (input !== undefined) {
+      // A command that exits without reading it all is not an error here; its exit code says.
+      child.stdin?.on("error", () => {});
+      child.stdin?.end(input, "utf8");
+    }
     child.on("error", (error) => {
       clearTimeout(timer);
       resolve({ code: null, stdout, stderr: stderr + error.message, ms: Date.now() - started, timedOut, truncated });

@@ -16,6 +16,7 @@ import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
 import { createRunReader, resolveRunsDir } from "./server/runs";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
+import { createCommandSource } from "./server/sources/command";
 import { createGcpSource } from "./server/sources/gcp";
 import { createSvnReader } from "./server/sources/svn";
 import { LockedError, openStore, type Store } from "./server/store";
@@ -150,7 +151,9 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       const sources = config.sources.map((s) =>
         s.kind === "flags"
           ? createFlagsSource(s, { fetchText: io.fetchText })
-          : createGcpSource(s, { exec: io.exec, localDate: (ms) => localParts(ms, tz).date, addDays, svn: s.changes ? createSvnReader(s.changes, io.exec) : null }),
+          : s.kind === "command"
+            ? createCommandSource(s, { exec: io.exec })
+            : createGcpSource(s, { exec: io.exec, localDate: (ms) => localParts(ms, tz).date, addDays, svn: s.changes ? createSvnReader(s.changes, io.exec) : null }),
       );
       const opened = store;
       // Rehearsing has no carrier at all: nothing that missed a mode check could raise a card.

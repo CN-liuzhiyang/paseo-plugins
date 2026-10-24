@@ -101,7 +101,9 @@ sources.json       [ { id, label?, kind: "gcp", command, gateway: { path, tool, 
                        changes?: { command, timeoutSeconds, maxRevisions, recheckMinutes?, maxCallsPerPoll?,
                                    repos: [ { name, pattern, branches: [ { name, url, copied? } ] } ] } },
                      { id, label?, kind: "flags", files: [ { id, url, labels } ], sections, itemKind?, activeHours,
-                       everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain } ]
+                       everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain },
+                     { id, label?, kind: "command", command, everyMinutes, maxCallsPerHour, timeoutSeconds,
+                       maxOutputBytes?, maxLagMinutes?, downAfterMinutes?, domain } ]
 policy.json        { tz, ruleBreakerChanges, sourceDownHours,
                      hot?: { recentDays, dateWindowDays, dateFields }, coldTitles? }
 calendar/<年>.json { holidays: [日期], workdays: [调休上班的日期] }
@@ -121,6 +123,71 @@ revision 和时间当「进分支的时刻」；还没进的过 `recheckMinutes`
 一张单子关联的提交里有一个读不到（网络、服务器），这张单这一轮不算读过，下一次正常轮询再读，不会带着缺了的提交去判断；
 svn 说「那个分支在那个版本还不存在」不算读不到。连续 3 次都读不全（比如某个分支这个账号没有权限），就按读到的收下，
 标成不完整（`incomplete`），页面上提示；示例规则对不完整的单子不说封版和外放的提醒。
+读到的每个提交还记下它改了哪些文件（`revisions[].files`：相对它提交的分支的路径，加 `A` / `M` / `D` / `R`，目录不算，
+最多 500 个）；之前读的提交没有这一项。
+
+### 观察来源（`kind: "command"`）
+
+有些事要「盯一阵子」才知道：比如开关调了一档以后，盯半小时看有没有新的问题。规则在输出里写 `observe`，说要盯什么、
+盯多久；一个配置好的命令去读，读到的结果当成一个数据项交回规则。**命令怎么读、读什么，是部署自己的事**，这里只管
+什么时候跑它、它交回来的东西对不对、规则看到的结论能不能信。
+
+规则输出（每项最多 20 个）：
+
+```js
+observe: [{
+  source: "watch",                         // 一个 kind: "command" 的来源
+  key: "step-123-cn-2",                    // 这个请求自己的名字；同一个 key 换了窗口就是另一次观察
+  window: { from: "<ISO>", to: "<ISO>" },  // 窗口里每 everyMinutes 读一次，结束时再读一次；最长 7 天
+  reread: [60, 180],                       // 窗口结束后再各读一次（分钟），最多 6 个
+  params: { … },                           // 原样交给命令，框架不看；JSON 最多 8 KB
+}]
+```
+
+一轮判断里不再写的请求就撤掉；判断出错的那一轮不动原来的请求；不再追踪的事项什么都不盯；判断方法改动被停着时，
+新的请求和写事实一样不生效。
+
+**什么时候跑**：只在有请求、而且到了该读的时刻才跑（窗口开始、每 `everyMinutes`、窗口结束、每个补读点）；没有要盯的
+就一次都不跑，来源的状态也不动。一次跑一个进程，把这一刻该读的请求都交给它。
+
+**命令的契约**（不经 shell 直接起，stdin 进、stdout 出，都是 JSON）：
+
+```
+stdin   { "now": "<ISO>",
+          "requests": [ { "key", "window": { "from", "to" }, "params": {…},
+                          "last": { "verdict", "readAt", "freshUntil" } | null } ] }
+stdout  { "results": [ { "key", "verdict", "freshUntil": "<ISO>",
+                         "numbers"?: { "<名字>": <数> },   // 最多 50 个
+                         "notes"?: [ "…" ] } ],              // 最多 10 句，每句截到 300 字
+          "errors"?: [ "…" ] }
+```
+
+- `verdict` 只能是 `no-signal`（没发现问题）、`needs-look`（有值得看一眼的）、`hard-fail`（出问题了）、
+  `insufficient-data`（判断不了）。`freshUntil` 是它读到的数据到了哪个时刻（最新一条记录的时间之类）。
+- 字段多一个、少一个、类型不对，整次输出都不收；退出码不是 0、超时、输出超过 `maxOutputBytes`（缺省 256 KB）也一样，
+  按读失败记，下次再试（失败退避）。`errors` 里有 `"auth"` 表示凭据不行了，来源直接记成读不到。
+- 没要过的 key 的结果不收，要了没给的记一条错误。`notes` 去掉控制字符和看不见的字符、压成一行、截短，是命令输出里
+  唯一交给规则的文字（规则拿它写卡片和页面时还是当数据看）；stderr 只在读失败时截一行进来源的错误。
+- **命令只该输出聚合后的数**：这些都会进日志。要读的原始数据里有个人信息的话，在命令里算完就丢，不要写进输出、
+  stderr 或临时文件。
+
+**规则看到的结论由框架定**：`ctx.observation(source, key)` 给 `{ verdict, reported, why, whyText, readAt, freshUntil,
+window, numbers, notes }`；`ctx.item("<source>:<key>")` 的 `fields.verdict` 是同一个结论（命令自己说的在
+`verdict.reported`）。命令说 `no-signal`，下面几种情况规则读到的是 `insufficient-data`，`why` 说缺了什么：
+- `none-yet`：还没读到过（或读到的是同一个 key 上一个窗口的）；
+- `window-open`：窗口还没盯到头；
+- `not-read`：到了该读的时刻、又过了宽限（`everyMinutes` + `timeoutSeconds` + 2 分钟）还没读到；
+- `lagging`：数据比读的时刻落后超过 `maxLagMinutes`（缺省 30），或者没说数据到了哪里。
+
+**读到过的问题不会这样被抹掉**：`needs-look`、`hard-fail` 照旧给规则，只是 `why` 标出它不是最新的。「没看到问题」
+要样样都齐才算数；「看到了问题」看到了就是看到了。
+
+**读不到时**：观察来源不进「数据可能过时」那一套（它不在盯东西时本来就不读），由上面的结论替它说「判断不了」。
+有东西在盯、从盯的那一刻起读不到满 `downAfterMinutes`（不写就是 `sourceDownHours`）时给 admin 发故障卡；
+没东西要盯了，卡收起，原因写「不用再读了」，不说成恢复了。
+
+**预览**：预览不读任何来源，观察来源读到的结果保持原样；往后推演时到了该读的时刻没有新的读数，结论就按上面的规则
+变成「判断不了」。
 
 ## 列表和事项页（流程图）
 

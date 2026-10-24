@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import type { Config, Person } from "./config";
+import type { CommandSourceConfig, Config, Person } from "./config";
 import type { RunView } from "../shared/graph";
-import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, SourceHealth } from "../shared/model";
+import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
+import { conclude, endOf, wanted, type Concluded } from "./observe";
+import type { CommandRequest } from "./sources/command";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
 import { createGraph, type Graph } from "./graph";
@@ -129,10 +131,14 @@ export function createEngine(deps: EngineDeps) {
 
   function intervalMs(id: string, nowMs: number): number {
     const s = sourceConfig(id);
+    if (s.kind === "command") return s.everyMinutes * 60_000;
     return (inWindow(nowMs, parseWindow(s.activeHours), tz, calendar) ? s.everyMinutes : s.offHoursEveryMinutes) * 60_000;
   }
 
-  const freshWithin = (id: string, nowMs: number) => 3 * Math.max(intervalMs(id, nowMs), sourceConfig(id).offHoursEveryMinutes * 60_000);
+  const freshWithin = (id: string, nowMs: number) => {
+    const s = sourceConfig(id);
+    return 3 * Math.max(intervalMs(id, nowMs), (s.kind === "command" ? s.everyMinutes : s.offHoursEveryMinutes) * 60_000);
+  };
 
   function fresh(id: string, nowMs: number): boolean {
     const health = state.sources[id]?.health;
@@ -147,6 +153,9 @@ export function createEngine(deps: EngineDeps) {
   function staleNow(nowMs: number): string[] {
     const out: string[] = [];
     for (const s of config.sources) {
+      // An observing source is read only while something is watched; what it found is judged as
+      // current or not by itself (observe.ts), and "too little to tell" is what a rule then sees.
+      if (s.kind === "command") continue;
       if (!fresh(s.id, nowMs)) {
         out.push(s.id);
         continue;
@@ -207,6 +216,9 @@ export function createEngine(deps: EngineDeps) {
       }
       const vocabulary = vocabularyOf(state.items, state.recent);
       const watch = watchedIds(source.id, nowMs, vocabulary);
+      const observe = sourceConfig(source.id).kind === "command" ? observeWanted(source.id, nowMs) : undefined;
+      // Nothing is being watched, or nothing is due: an observing source is not run (and its state is left as it was).
+      if (observe && observe.length === 0) continue;
       try {
         const poll = await source.poll({
           cursor: current?.cursor ?? null,
@@ -216,6 +228,7 @@ export function createEngine(deps: EngineDeps) {
           callsLeft,
           decide: (row) => decide(row, nowMs, vocabulary),
           humanSince: nowIso(nowMs - config.policy.hot.recentDays * DAY),
+          ...(observe ? { observe } : {}),
         });
         if (stopped) return;
         const events: EventBody[] = [];
@@ -250,10 +263,11 @@ export function createEngine(deps: EngineDeps) {
           events.push({ type: "item.snapshot", item: snapshot });
         }
         const used = [...calls, ...Array.from({ length: poll.calls }, () => nowMs)];
-        const next = poll.more ? nowMs + 60_000 : nowMs + intervalMs(source.id, nowMs);
-        // Each file of a file source, when it was last read: one can fail while the others do not.
         const conf = sourceConfig(source.id);
-        const readAt = conf.kind === "flags" ? { ...(health.readAt ?? {}), ...Object.fromEntries(poll.snapshots.map((s) => [s.key, nowIso(nowMs)])) } : undefined;
+        // An observing source goes by what is due (observeWanted), looked at every tick.
+        const next = poll.more || conf.kind === "command" ? nowMs + 60_000 : nowMs + intervalMs(source.id, nowMs);
+        // Each file of a file source, each request of an observing one, when it was last read: one can fail while the others do not.
+        const readAt = conf.kind === "flags" || conf.kind === "command" ? { ...(health.readAt ?? {}), ...Object.fromEntries(poll.snapshots.map((s) => [s.key, nowIso(nowMs)])) } : undefined;
         // And since when each file that did not come has been failing.
         const got = new Set(poll.snapshots.map((s) => s.key));
         const failingSince =
@@ -295,6 +309,54 @@ export function createEngine(deps: EngineDeps) {
         deps.log(`source ${source.id} failed (${failures}): ${message}`);
       }
     }
+  }
+
+  // ---- observing sources ------------------------------------------------------------------
+
+  /** What an observing source is asked to watch, one request a key (of two cases asking for one key, the one set last). */
+  function observing(sourceId: string): Map<string, ObserveRequest> {
+    const found = new Map<string, { r: ObserveRequest; at: string }>();
+    for (const { at, requests } of Object.values(state.observing ?? {})) {
+      for (const r of requests) {
+        if (r.source !== sourceId) continue;
+        const had = found.get(r.key);
+        if (!had || had.at <= at) found.set(r.key, { r, at });
+      }
+    }
+    return new Map([...found].map(([key, { r }]) => [key, r]));
+  }
+
+  /** How long after a read was due it may still be on its way: a tick, a slow command, a poll after another source's. */
+  const observeGraceMs = (s: CommandSourceConfig) => s.everyMinutes * 60_000 + s.timeoutSeconds * 1000 + 2 * 60_000;
+
+  /** The requests of an observing source a read is wanted for now (observe.ts), as its command is handed them. */
+  function observeWanted(sourceId: string, nowMs: number): CommandRequest[] {
+    const s = sourceConfig(sourceId) as CommandSourceConfig;
+    const readAt = state.sources[sourceId]?.health.readAt ?? {};
+    const out: CommandRequest[] = [];
+    for (const r of observing(sourceId).values()) {
+      const itemKey = `${sourceId}:${r.key}`;
+      const read = readAt[itemKey] ?? null;
+      if (!wanted(r, s.everyMinutes * 60_000, nowMs, read ? Date.parse(read) : null)) continue;
+      const seen = observed(itemKey, nowMs);
+      out.push({ key: r.key, window: r.window, params: r.params, last: seen?.reported && seen.readAt && seen.why !== "none-yet" ? { verdict: seen.reported, readAt: seen.readAt, freshUntil: seen.freshUntil } : null });
+    }
+    return out.sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  /** An observation item as a rule is to take it now; null for an item of no observing source. */
+  function observed(itemKey: string, nowMs: number): Concluded | null {
+    const s = config.sources.find((x) => itemKey.startsWith(`${x.id}:`));
+    if (s?.kind !== "command") return null;
+    const key = itemKey.slice(s.id.length + 1);
+    const read = state.sources[s.id]?.health.readAt?.[itemKey] ?? null;
+    return conclude(observing(s.id).get(key) ?? null, state.items[itemKey] ?? null, read, {
+      everyMs: s.everyMinutes * 60_000,
+      graceMs: observeGraceMs(s),
+      maxLagMs: s.maxLagMinutes * 60_000,
+      nowMs,
+      tz,
+    });
   }
 
   /** Native ids of items open commitments follow, for the source that owns them. */
@@ -959,6 +1021,7 @@ export function createEngine(deps: EngineDeps) {
       notes: state.notes,
       commitments: state.commitments,
       fresh: (id: string) => fresh(id, nowMs),
+      observed: (key: string) => observed(key, nowMs),
     };
     const events: EventBody[] = [];
     // What a held rules change may not do: change commitments and record facts. A change that
@@ -991,6 +1054,8 @@ export function createEngine(deps: EngineDeps) {
         for (const c of Object.values(state.commitments)) {
           if (c.caseId === item.key && c.origin.by === "rule" && isOpen(c.status)) events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: DROPPED, updatedAt: nowIso(nowMs) } });
         }
+        // Nor is anything watched for it.
+        if (state.observing?.[item.key]) events.push({ type: "observe.set", caseId: item.key, requests: [] });
         continue;
       }
       // Cold: not judged; its last assessment stays as it was.
@@ -999,7 +1064,9 @@ export function createEngine(deps: EngineDeps) {
       const ctx = makeContext({ ...inputs, reads }, rule.params);
       const judged = judge(rule, { id: item.key, primary: item, items: [item], flags }, ctx, set.fingerprint, (out) => {
         const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !knownNames.has(u) && !state.items[u]));
-        return unknown.length > 0 ? `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项` : null;
+        if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
+        const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => config.sources.find((s) => s.id === id)?.kind !== "command"))];
+        return notObserving.length > 0 ? `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）` : null;
       });
       lastReads.set(item.key, reads);
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);
@@ -1020,6 +1087,23 @@ export function createEngine(deps: EngineDeps) {
           person: null,
           what: `${item.key} 记下事实 ${fact.field} = ${fact.value}（${fact.evidence}）`,
           events: [{ type: "note.set", note: { key: item.key, field: fact.field, value: fact.value, kind: "fact", basis: "source-derived", by: rule.name, rules: set.fingerprint, at: nowIso(nowMs), evidence: fact.evidence } }],
+        });
+      }
+      // What it asks to have watched: the request as it will be read (instants in the instance's
+      // zone, rereads in order). A held change of rules starts no watch, as it writes no fact.
+      const asked: ObserveRequest[] = (judged.output.observe ?? []).map((o) => ({
+        source: o.source,
+        key: o.key,
+        window: { from: nowIso(Date.parse(o.window.from)), to: nowIso(Date.parse(o.window.to)) },
+        reread: [...new Set(o.reread)].sort((a, b) => a - b),
+        params: o.params,
+      }));
+      if (JSON.stringify(state.observing?.[item.key]?.requests ?? []) !== JSON.stringify(asked)) {
+        gated.push({
+          kind: "fact",
+          person: null,
+          what: asked.length > 0 ? `${item.key} 要观察：${asked.map((o) => `${o.key}（${o.window.from.slice(5, 16).replace("T", " ")}–${o.window.to.slice(11, 16)}）`).join("、")}` : `${item.key} 不用再观察了`,
+          events: [{ type: "observe.set", caseId: item.key, requests: asked }],
         });
       }
       // A wake is a note on the other case; it makes that case hot from the next round on.
@@ -1217,13 +1301,24 @@ export function createEngine(deps: EngineDeps) {
    */
   function outages(nowMs: number, plan: PlanEntry[]): void {
     const admin = Object.values(config.persons).find((p) => p.admin);
-    const limitMs = config.policy.sourceDownHours * 3_600_000;
     const ongoing = new Set<string>();
     const events: EventBody[] = [];
     for (const s of config.sources) {
       const h = state.sources[s.id]?.health;
       if (!h) continue;
-      const down = [...(h.downSince ? [[s.id, h.downSince] as const] : []), ...Object.entries(h.failingSince ?? {})];
+      // An observing source is short-lived work: told sooner, and only while something is being
+      // watched (counted from when that began, not from a failure before it).
+      let watchingSince: number | null = null;
+      if (s.kind === "command") {
+        const live = [...observing(s.id).values()].filter((r) => Date.parse(r.window.from) <= nowMs && nowMs <= endOf(r) + observeGraceMs(s));
+        if (live.length === 0) continue;
+        watchingSince = Math.min(...live.map((r) => Date.parse(r.window.from)));
+      }
+      const limitMs = s.kind === "command" && s.downAfterMinutes ? s.downAfterMinutes * 60_000 : config.policy.sourceDownHours * 3_600_000;
+      const limitText = limitMs < 3_600_000 ? `${Math.round(limitMs / 60_000)} 分钟` : `${limitMs / 3_600_000} 小时`;
+      const down = [...(h.downSince ? [[s.id, h.downSince] as const] : []), ...Object.entries(h.failingSince ?? {})].map(
+        ([what, since]) => [what, watchingSince !== null && Date.parse(since) < watchingSince ? nowIso(watchingSince) : since] as const,
+      );
       for (const [what, since] of down) {
         if (nowMs - Date.parse(since) < limitMs) continue;
         const key = `source-down:${what}:${since}`;
@@ -1244,7 +1339,9 @@ export function createEngine(deps: EngineDeps) {
             trigger: { at: nowIso(nowMs) },
             ask: { person: admin.id, header: `${what} 故障`.slice(0, 40), question: said, options: [{ id: "ack", label: "知道了", description: "" }], allowOther: true },
             brief: [
-              `来源 **${what}** 从 ${at} 起一直没读到，超过 ${config.policy.sourceDownHours} 小时了。依赖它的判断标着「数据可能过时」，要问的问题先不发；读到了会自动接上，这张卡不用回。`,
+              s.kind === "command"
+                ? `观察来源 **${what}** 从 ${at} 起一直没读到，超过 ${limitText}了。依赖它的判断这期间只能说「判断不了」；读到了会自动接上，这张卡不用回。`
+                : `来源 **${what}** 从 ${at} 起一直没读到，超过 ${limitText}了。依赖它的判断标着「数据可能过时」，要问的问题先不发；读到了会自动接上，这张卡不用回。`,
               "",
               "最后一次的错误：",
               "",
@@ -1273,7 +1370,8 @@ export function createEngine(deps: EngineDeps) {
     // An outage that is over: its card, if not answered yet, goes.
     for (const c of Object.values(state.commitments)) {
       if (c.origin.by !== "controller" || !c.key.startsWith("source-down:") || ongoing.has(c.key)) continue;
-      if (c.status === "scheduled" || c.status === "waiting") events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: "来源恢复了", updatedAt: nowIso(nowMs) } });
+      const back = state.sources[c.key.split(":")[1] ?? ""]?.health.state === "ok";
+      if (c.status === "scheduled" || c.status === "waiting") events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: back ? "来源恢复了" : "不用再读了", updatedAt: nowIso(nowMs) } });
     }
     append(events);
   }

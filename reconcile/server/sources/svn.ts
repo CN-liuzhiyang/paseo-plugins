@@ -30,6 +30,8 @@ const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g;
 const NAMEY = /^(?=.{4,80}$)(?:.*[_0-9].*|.*[a-z][A-Z].*)$/;
 const MAX_TOKENS = 300;
 const MAX_LINE = 160;
+/** At most this many of a commit's changed files are kept. */
+const MAX_FILES = 500;
 /** How many copies back to look for the one that brought a commit. */
 const MAX_COPIES = 20;
 /** A diff kept up to this much: the names a huge commit adds after it are not looked at. */
@@ -69,7 +71,7 @@ interface LogEntry {
   author: string;
   at: string;
   summary: string;
-  paths: Array<{ path: string; copyFromRev: number | null; copyFromPath: string | null }>;
+  paths: Array<{ path: string; action: string; kind: string; copyFromRev: number | null; copyFromPath: string | null }>;
 }
 
 function logEntry(xml: string): LogEntry | null {
@@ -79,7 +81,9 @@ function logEntry(xml: string): LogEntry | null {
   const paths = [...entry.matchAll(/<path\b([^>]*)>([^<]+)<\/path>/g)].map((m) => {
     const from = /copyfrom-rev="(\d+)"/.exec(m[1]!)?.[1];
     const fromPath = /copyfrom-path="([^"]+)"/.exec(m[1]!)?.[1];
-    return { path: unescape(m[2]!), copyFromRev: from ? Number(from) : null, copyFromPath: fromPath ? unescape(fromPath) : null };
+    const action = /action="([A-Z])"/.exec(m[1]!)?.[1] ?? "M";
+    const kind = /kind="([a-z]*)"/.exec(m[1]!)?.[1] ?? "";
+    return { path: unescape(m[2]!), action, kind, copyFromRev: from ? Number(from) : null, copyFromPath: fromPath ? unescape(fromPath) : null };
   });
   return {
     revision: Number(/revision="(\d+)"/.exec(entry)?.[1] ?? 0),
@@ -198,8 +202,13 @@ export function createSvnReader(config: SvnConfig, exec: Exec, now: () => number
           const diff = await svn(["diff", "-c", String(number), branch.url], MAX_DIFF_BYTES);
           if (diff.timedOut || (diff.code !== 0 && !diff.truncated)) throw new Error(`svn diff ${id}: ${(diff.stderr || `exit ${diff.code}`).trim().slice(0, 200)}`);
           const at = r.entry.at || given.at;
+          // The files it changed, relative to the branch (a directory svn names as one is not a file).
+          const files = r.entry.paths
+            .filter((p) => p.kind !== "dir")
+            .slice(0, MAX_FILES)
+            .map((p) => ({ path: underBranch(branch.url, p.path) ?? p.path, action: (["A", "M", "D", "R"].includes(p.action) ? p.action : "M") as "A" | "M" | "D" | "R" }));
           known = {
-            revision: { id, repo: repo.name, branch: branch.name, at, author: r.entry.author || given.author, summary: r.entry.summary || given.summary, added: netAdded(diff.stdout), in: { [branch.name]: { rev: number, at } } },
+            revision: { id, repo: repo.name, branch: branch.name, at, author: r.entry.author || given.author, summary: r.entry.summary || given.summary, added: netAdded(diff.stdout), files, in: { [branch.name]: { rev: number, at } } },
             relative: r.entry.paths.map((p) => underBranch(branch.url, p.path)).filter((p): p is string => p !== null),
             missing: new Map(),
           };

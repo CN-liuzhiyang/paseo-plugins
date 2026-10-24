@@ -245,6 +245,9 @@ function shadow(state: State, dataDir: string, config: Config, clock: { ms: numb
           calls: [],
           nextPollAt: clock.ms + DAY,
           ...(s.kind === "flags" ? { readAt: Object.fromEntries(s.files.map((f) => [`${s.id}:${f.id}`, iso(clock.ms, config.policy.tz)])) } : {}),
+          // What an observing source found stays as it was read: nothing new is read, so a window
+          // that goes on comes to "too little to tell" when its reads fall due (observe.ts).
+          ...(s.kind === "command" ? { readAt: { ...(store.state.sources[s.id]?.health.readAt ?? {}) } } : {}),
         },
       })),
     );
@@ -600,6 +603,8 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   if (coldBoth > 0) caveats.push(`现在有 ${coldBoth} 个事项两边都是冷的：冷的不判断，它们在候选下会怎样，要等变热才看得到。`);
   const stale = inUseConfig.sources.filter((s) => {
     const h = state.sources[s.id]?.health;
+    // An observing source is read only while something is watched: not reading it is not being behind.
+    if (s.kind === "command") return false;
     return !h?.lastOkAt || h.state === "down" || nowMs - Date.parse(h.lastOkAt) > 3 * Math.max(s.everyMinutes, s.offHoursEveryMinutes) * 60_000;
   });
   if (stale.length > 0) caveats.push(`现在 ${stale.map((s) => s.id).join("、")} 有一阵没读到了，推演按能读算；真跑时依赖它的问题会等它恢复。`);

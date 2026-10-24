@@ -1,4 +1,5 @@
 import type { Domain, Item } from "../../shared/model";
+import type { CommandRequest } from "./command";
 
 // What a source is to the core. A source normalizes what an outside system says into item
 // snapshots; the core diffs them against the last ones and records the changes. A source gets
@@ -19,6 +20,8 @@ export interface PollInput {
   decide?(row: ListedRow): "full" | "people" | "skip";
   /** For "people": a change by a person at or after this instant makes the row worth a full read. */
   humanSince?: string;
+  /** For an observing source: what to read this time (the engine has decided a read is wanted for each). */
+  observe?: CommandRequest[];
 }
 
 /** One row of a source's list: enough to decide whether the item is worth a full read. */
