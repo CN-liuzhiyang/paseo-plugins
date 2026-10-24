@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -17,18 +17,20 @@ let input = "";
 process.stdin.on("data", (d) => (input += d));
 process.stdin.on("end", () => {
   const dir = process.argv[2];
-  fs.appendFileSync(dir + "/observe-in.jsonl", input.trim() + "\\n");
+  fs.appendFileSync(dir + "/observe-in.jsonl", JSON.stringify({ ...JSON.parse(input), cwd: process.cwd() }) + "\\n");
   const plan = JSON.parse(fs.readFileSync(dir + "/observe-out.json", "utf8"));
   if (plan.exit) { process.stderr.write(plan.stderr || "boom"); process.exit(plan.exit); }
   if (plan.raw !== undefined) { process.stdout.write(plan.raw); return; }
   const req = JSON.parse(input);
   const results = req.requests.filter((r) => !(plan.skip || []).includes(r.key)).map((r) => ({
-    key: r.key, verdict: plan.verdict || "no-signal",
-    freshUntil: plan.freshUntil || req.now, numbers: plan.numbers || { devices: 0 }, notes: plan.notes || [],
+    key: r.key, verdict: plan.verdict || "no-signal", observedAt: req.now,
+    freshUntil: "freshUntil" in plan ? plan.freshUntil : req.now, numbers: plan.numbers || { devices: 0 }, notes: plan.notes || [],
     ...(plan.extra ? { extra: 1 } : {}),
   }));
   for (const key of plan.alsoKeys || []) results.push({ key, verdict: "hard-fail", freshUntil: req.now });
-  process.stdout.write(JSON.stringify({ results, ...(plan.errors ? { errors: plan.errors } : {}) }));
+  const send = () => process.stdout.write(JSON.stringify({ results, ...(plan.errors ? { errors: plan.errors } : {}), ...(plan.meta ? { meta: plan.meta } : {}) }));
+  if (plan.sleepMs) setTimeout(send, plan.sleepMs);
+  else send();
 });
 `;
 
@@ -52,21 +54,21 @@ const RULE = `export default {
   },
 };`;
 
-const WATCH = { id: "watch-demo", kind: "command", everyMinutes: 10, maxCallsPerHour: 30, timeoutSeconds: 30, maxOutputBytes: 4096, maxLagMinutes: 30, downAfterMinutes: 30, domain: "work" };
+const WATCH = { id: "watch-demo", kind: "command", everyMinutes: 10, maxCallsPerHour: 30, timeoutSeconds: 30, maxOutputBytes: 65536, maxLagMinutes: 30, downAfterMinutes: 30, domain: "work" };
 
-async function withWatch(body: (w: World, plan: (p: Record<string, unknown>) => void, calls: () => Array<{ now: string; requests: Array<{ key: string; last: unknown; params: Record<string, unknown> }> }>) => Promise<void>, start = "2026-10-13 09:50") {
+async function withWatch(body: (w: World, plan: (p: Record<string, unknown>) => void, calls: () => Array<{ now: string; cwd: string; requests: Array<{ key: string; last: unknown; params: Record<string, unknown> }> }>, dir: string) => Promise<void>, start = "2026-10-13 09:50") {
   // The script and its plan live in a directory of their own; the source runs node on it.
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-observe-"));
   const script = path.join(dir, "observe.cjs");
   writeFileSync(script, SCRIPT);
-  const w = await makeWorld({ start, config: { rules: { "watcher.mjs": RULE }, policy: TEST_POLICY, extraSources: [{ ...WATCH, command: [process.execPath, script, dir] }] } });
+  const w = await makeWorld({ start, config: { rules: { "watcher.mjs": RULE }, policy: TEST_POLICY, extraSources: [{ ...WATCH, command: [process.execPath, script, dir], cwd: dir }] } });
   const out = path.join(dir, "observe-out.json");
   const inFile = path.join(dir, "observe-in.jsonl");
   const plan = (p: Record<string, unknown>) => writeFileSync(out, JSON.stringify(p));
   plan({});
   const calls = () => (existsSync(inFile) ? readFileSync(inFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   try {
-    await body(w, plan, calls);
+    await body(w, plan, calls, dir);
   } finally {
     w.close();
     rmSync(dir, { recursive: true, force: true });
@@ -94,7 +96,7 @@ test("the command runs only while something is watched: through the window every
     assert.equal((calls()[1]!.requests[0]!.last as { verdict: string }).verdict, "no-signal", "after that, what it found last time");
     // the item kept for it
     const item = w.store.state.items["watch-demo:w-1"]!;
-    assert.deepEqual([item.kind, item.fields.verdict, item.fields["numbers.devices"], item.fields["window.to"].slice(11, 16)], ["observation", "no-signal", "0", "10:30"]);
+    assert.deepEqual([item.kind, item.fields.verdict, item.fields.numbers, item.fields["window.to"].slice(11, 16)], ["observation", "no-signal", '{"devices":0}', "10:30"]);
   }));
 
 test("'nothing found' stands only for a window watched to its end on data read in time; a problem found stays found", () =>
@@ -113,7 +115,7 @@ test("'nothing found' stands only for a window watched to its end on data read i
     assert.match(headline(w, 2)!, /^v insufficient-data lagging insufficient-data no-signal$/);
     // a read that was due and did not come: what was found before is not current; a problem found stays
     plan({ verdict: "hard-fail" });
-    await w.run("2026-10-13 11:20", 5);
+    await w.run("2026-10-13 11:25", 5);
     assert.equal(headline(w, 3), "v hard-fail window-open hard-fail hard-fail", "a failure is told while the window is open");
     plan({ exit: 1, stderr: "no route" });
     await w.run("2026-10-13 12:00", 5);
@@ -140,28 +142,45 @@ test("what the command prints is checked: a field it should not have, an answer 
     put(w, 1, { Watch: "10:00", WatchTo: "12:00" });
     plan({ extra: true });
     await w.run("2026-10-13 10:00", 5);
+    assert.equal(health(w), undefined, "a run is taken in at the round after it started");
+    await w.run("2026-10-13 10:05", 5);
     assert.equal(health(w)?.state, "degraded");
     assert.match(health(w)!.lastError!, /观察命令的输出不对：.*extra/);
     assert.equal(w.store.state.items["watch-demo:w-1"], undefined, "nothing of it is kept");
     plan({ alsoKeys: ["w-99"] });
-    await w.run("2026-10-13 10:20", 5);
+    await w.run("2026-10-13 10:25", 5);
     assert.equal(health(w)?.state, "ok");
     assert.match(health(w)!.lastError!, /w-99: 没有要过它/);
     assert.equal(w.store.state.items["watch-demo:w-99"], undefined, "an answer for what was not asked is not kept");
     plan({ skip: ["w-1"] });
-    await w.run("2026-10-13 10:30", 5);
+    await w.run("2026-10-13 10:35", 5);
     assert.match(health(w)!.lastError!, /w-1: 观察命令没给结果/);
-    plan({ raw: "x".repeat(5000) });
-    await w.run("2026-10-13 10:40", 5);
-    assert.match(health(w)!.lastError!, /输出超过 4096 字节/);
+    plan({ raw: "x".repeat(70_000) });
+    await w.run("2026-10-13 10:45", 5);
+    assert.match(health(w)!.lastError!, /输出超过 65536 字节/);
+    // numbers past the cap: the output is not taken
+    plan({ numbers: { big: "x".repeat(17_000) } });
+    await w.run("2026-10-13 10:55", 5);
+    assert.match(health(w)!.lastError!, /numbers over 16384 bytes/);
+    // an error for the whole run beside something found: taken, the error kept beside it; nothing read: no time for the data
+    plan({ verdict: "needs-look", errors: ["query"], meta: { seconds: 61, log: "y".repeat(5000) }, freshUntil: null, numbers: { related: [{ symbol: "A::b" }] } });
+    await w.run("2026-10-13 11:10", 5);
+    assert.deepEqual([health(w)?.state, health(w)?.lastError, (w.store.state.items["watch-demo:w-1"] as Item | undefined)?.fields.verdict], ["ok", "query", "needs-look"]);
     plan({ exit: 3, stderr: "line one\nline two" });
-    await w.run("2026-10-13 11:20", 5);
+    await w.run("2026-10-13 11:30", 5);
     assert.match(health(w)!.lastError!, /观察命令退出码 3：line one line two/);
-    const before = calls().length;
+    // what is wrong for the whole run, and nothing found for anything: a read that failed
+    plan({ verdict: "insufficient-data", errors: ["network"], notes: ["连不上"] });
+    await w.run("2026-10-13 12:00", 5);
+    assert.match(health(w)!.lastError!, /观察命令读不了：network/);
+    assert.equal((w.store.state.items["watch-demo:w-1"] as Item | undefined)?.fields.verdict, "needs-look", "and what was found before is not replaced by it");
+    // read again, then credentials that stop working: down at once, not after three failures
+    plan({});
+    await w.run("2026-10-13 12:25", 5);
+    assert.deepEqual([health(w)?.state, health(w)?.failures], ["ok", 0]);
     plan({ errors: ["auth"] });
-    await w.run("2026-10-13 12:30", 5);
-    assert.equal(health(w)?.state, "down", "credentials that do not work: down at once");
-    assert.ok(calls().length > before);
+    await w.run("2026-10-13 13:05", 5);
+    assert.deepEqual([health(w)?.state, health(w)?.failures], ["down", 1], "credentials that do not work: down at once");
   }));
 
 test("an observing source failing while it watches is told after its own downAfterMinutes, and the card goes when there is nothing left to watch", () =>
@@ -257,6 +276,33 @@ test("the preview runs on what was found as it was read: nothing new is read, an
     }
   }));
 
+test("a slow command runs beside the rounds: they go on meanwhile, it is not started again, and what it brings is taken in after", () =>
+  withWatch(async (w, plan, calls, dir) => {
+    put(w, 1, { Watch: "10:00", WatchTo: "10:30" });
+    await w.run("2026-10-13 09:55", 5);
+    plan({ sleepMs: 1500 });
+    const at = (hm: string) => (w.clock.now = Date.parse(`2026-10-13T${hm}:00+08:00`));
+    at("10:00");
+    let started = Date.now();
+    await w.engine.tick();
+    assert.ok(Date.now() - started < 1000, "the round did not wait for it");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    at("10:10");
+    started = Date.now();
+    await w.engine.tick();
+    assert.ok(Date.now() - started < 1000);
+    assert.equal(calls().length, 1, "running: not started again, though a read is due");
+    assert.equal(w.store.state.items["watch-demo:w-1"], undefined, "nothing taken in yet");
+    await w.engine.settled();
+    at("10:12");
+    await w.engine.tick();
+    const readAt = w.store.state.sources["watch-demo"]!.health.readAt!["watch-demo:w-1"]!;
+    assert.equal(readAt.slice(11, 16), "10:00", "taken in as read when it started");
+    assert.equal(w.store.state.sources["watch-demo"]!.health.lastOkAt!.slice(11, 16), "10:00");
+    // it runs where it was told to
+    assert.equal(realpathSync.native(calls()[0]!.cwd).toLowerCase(), realpathSync.native(dir).toLowerCase());
+  }));
+
 // ---- the timing, on its own --------------------------------------------------------------------
 
 const REQ: ObserveRequest = { source: "s", key: "k", window: { from: "2026-10-13T10:00:00+08:00", to: "2026-10-13T10:30:00+08:00" }, reread: [60, 180], params: {} };
@@ -277,12 +323,12 @@ test("when a read is due: every few minutes from the window's start, at its end,
 });
 
 test("what is concluded from an item: grace for a read on its way; lag measured from the read", () => {
-  const item: Item = { key: "s:k", source: "s", kind: "observation", title: "k", url: null, status: "no-signal", closed: false, fields: { verdict: "no-signal", freshUntil: "2026-10-13T10:25:00+08:00", "window.from": REQ.window.from, "window.to": REQ.window.to, "numbers.devices": "2", "notes.0": "n" }, people: {}, parent: null, sourceUpdatedAt: null, observedAt: "" };
+  const item: Item = { key: "s:k", source: "s", kind: "observation", title: "k", url: null, status: "no-signal", closed: false, fields: { verdict: "no-signal", freshUntil: "2026-10-13T10:25:00+08:00", "window.from": REQ.window.from, "window.to": REQ.window.to, numbers: '{"devices":2,"related":[{"symbol":"A::b","devices":2}]}', "notes.0": "n" }, people: {}, parent: null, sourceUpdatedAt: null, observedAt: "" };
   const o = { everyMs: 600_000, graceMs: 5 * 60_000, maxLagMs: 30 * 60_000, tz: "Asia/Shanghai" };
   const at = (now: string, read: string, it = item) => conclude(REQ, it, `2026-10-13T${read}:00+08:00`, { ...o, nowMs: ms(now) });
   assert.deepEqual([at("10:33", "10:21").verdict, at("10:33", "10:21").why], ["insufficient-data", "window-open"], "the end's read on its way: the window is not watched to its end yet");
   assert.deepEqual([at("10:40", "10:21").why, at("10:40", "10:21").whyText], ["not-read", "10-13 10:30 该读的没读到（上次读到是 10-13 10:21）"]);
-  assert.deepEqual([at("10:31", "10:30").verdict, at("10:31", "10:30").numbers, at("10:31", "10:30").notes], ["no-signal", { devices: 2 }, ["n"]]);
+  assert.deepEqual([at("10:31", "10:30").verdict, at("10:31", "10:30").numbers, at("10:31", "10:30").notes], ["no-signal", { devices: 2, related: [{ symbol: "A::b", devices: 2 }] }, ["n"]], "what it found, nested as it gave it");
   const old = { ...item, fields: { ...item.fields, freshUntil: "2026-10-13T09:59:00+08:00" } };
   assert.deepEqual([at("10:31", "10:30", old).verdict, at("10:31", "10:30", old).whyText], ["insufficient-data", "数据只到 10-13 09:59"]);
   const unknown = { ...item, fields: { ...item.fields, freshUntil: "" } };

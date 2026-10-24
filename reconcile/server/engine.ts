@@ -12,7 +12,7 @@ import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
-import type { ListedRow, Source } from "./sources/source";
+import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
 import type { Store } from "./store";
 import { addDays, addWorkdays, inWindow, iso, localParts, parseWindow, zoned } from "./time";
@@ -202,11 +202,28 @@ export function createEngine(deps: EngineDeps) {
     return extra(before) !== extra(after);
   }
 
+  /**
+   * Observing sources' commands in flight: one at a time each, never awaited by a round (one can
+   * take minutes); what it came back with is taken in at the first round after, as read when it
+   * started.
+   */
+  const running = new Map<string, { startedMs: number; done: Promise<void>; outcome: { poll: Poll } | { error: Error } | null }>();
+
   async function pollSources(nowMs: number): Promise<void> {
     for (const source of deps.sources) {
       if (stopped) return;
       const current = state.sources[source.id];
       const health: SourceHealth = current?.health ?? { state: "never", lastOkAt: null, lastError: null, failures: 0, calls: [], nextPollAt: 0 };
+      const run = running.get(source.id);
+      if (run) {
+        // Still running: not started again. Back: taken in now, and the next run is for a later round.
+        if (!run.outcome) continue;
+        running.delete(source.id);
+        const calls = health.calls.filter((t) => nowMs - t < 3_600_000);
+        if ("poll" in run.outcome) took(source.id, health, calls, run.outcome.poll, run.startedMs, nowMs);
+        else failed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs);
+        continue;
+      }
       if (nowMs < health.nextPollAt) continue;
       const calls = health.calls.filter((t) => nowMs - t < 3_600_000);
       const callsLeft = sourceConfig(source.id).maxCallsPerHour - calls.length;
@@ -219,96 +236,116 @@ export function createEngine(deps: EngineDeps) {
       const observe = sourceConfig(source.id).kind === "command" ? observeWanted(source.id, nowMs) : undefined;
       // Nothing is being watched, or nothing is due: an observing source is not run (and its state is left as it was).
       if (observe && observe.length === 0) continue;
+      const input: PollInput = {
+        cursor: current?.cursor ?? null,
+        watch,
+        now: nowIso(nowMs),
+        nowMs,
+        callsLeft,
+        decide: (row) => decide(row, nowMs, vocabulary),
+        humanSince: nowIso(nowMs - config.policy.hot.recentDays * DAY),
+        ...(observe ? { observe } : {}),
+      };
+      if (observe) {
+        const started: { startedMs: number; done: Promise<void>; outcome: { poll: Poll } | { error: Error } | null } = { startedMs: nowMs, done: Promise.resolve(), outcome: null };
+        started.done = source.poll(input).then(
+          (poll) => void (started.outcome = { poll }),
+          (error: unknown) => void (started.outcome = { error: error instanceof Error ? error : new Error(String(error)) }),
+        );
+        running.set(source.id, started);
+        continue;
+      }
       try {
-        const poll = await source.poll({
-          cursor: current?.cursor ?? null,
-          watch,
-          now: nowIso(nowMs),
-          nowMs,
-          callsLeft,
-          decide: (row) => decide(row, nowMs, vocabulary),
-          humanSince: nowIso(nowMs - config.policy.hot.recentDays * DAY),
-          ...(observe ? { observe } : {}),
-        });
+        const poll = await source.poll(input);
         if (stopped) return;
-        const events: EventBody[] = [];
-        for (const snapshot of poll.snapshots) {
-          // The last read before this one: a read without a change leaves no observation, so it is
-          // kept here (a file's in the source's state, any item's while this process runs).
-          const readBefore = Math.max(Date.parse(health.readAt?.[snapshot.key] ?? "") || 0, lastRead.get(snapshot.key) ?? 0);
-          lastRead.set(snapshot.key, nowMs);
-          const before = state.items[snapshot.key];
-          if (before) {
-            const changes = diffItem(before, snapshot);
-            // What was read besides the record (text, commits, history) is kept, but is not an observation.
-            if (changes.length === 0) {
-              if (readMore(before, snapshot)) events.push({ type: "item.snapshot", item: snapshot });
-              continue;
-            }
-            const obs: Observation = {
-              id: hash(`${snapshot.key}\0${snapshot.sourceUpdatedAt}\0${JSON.stringify(changes)}`).slice(0, 16),
-              at: snapshot.sourceUpdatedAt ?? snapshot.observedAt,
-              seenAt: snapshot.observedAt,
-              readBefore: nowIso(Math.max(readBefore, Date.parse(before.observedAt) || 0)),
-              source: source.id,
-              key: snapshot.key,
-              kind: "changed",
-              trust: "source",
-              actor: null,
-              changes,
-              text: null,
-            };
-            events.push({ type: "obs", obs });
-          }
-          events.push({ type: "item.snapshot", item: snapshot });
-        }
-        const used = [...calls, ...Array.from({ length: poll.calls }, () => nowMs)];
-        const conf = sourceConfig(source.id);
-        // An observing source goes by what is due (observeWanted), looked at every tick.
-        const next = poll.more || conf.kind === "command" ? nowMs + 60_000 : nowMs + intervalMs(source.id, nowMs);
-        // Each file of a file source, each request of an observing one, when it was last read: one can fail while the others do not.
-        const readAt = conf.kind === "flags" || conf.kind === "command" ? { ...(health.readAt ?? {}), ...Object.fromEntries(poll.snapshots.map((s) => [s.key, nowIso(nowMs)])) } : undefined;
-        // And since when each file that did not come has been failing.
-        const got = new Set(poll.snapshots.map((s) => s.key));
-        const failingSince =
-          conf.kind === "flags"
-            ? Object.fromEntries(conf.files.map((f) => `${source.id}:${f.id}`).filter((k) => !got.has(k)).map((k) => [k, health.failingSince?.[k] ?? nowIso(nowMs)]))
-            : {};
-        events.push({
-          type: "source.state",
-          id: source.id,
-          cursor: poll.cursor,
-          health: {
-            state: "ok",
-            lastOkAt: nowIso(nowMs),
-            lastError: poll.errors.length > 0 ? poll.errors.join("; ").slice(0, 500) : null,
-            failures: 0,
-            calls: used,
-            nextPollAt: next,
-            ...(readAt ? { readAt } : {}),
-            ...(Object.keys(failingSince).length > 0 ? { failingSince } : {}),
-          },
-        });
-        append(events);
+        took(source.id, health, calls, poll, nowMs, nowMs);
       } catch (error) {
-        const message = (error as Error).message;
-        const failures = health.failures + 1;
-        const auth = (error as { auth?: boolean }).auth === true;
-        const nextState: SourceHealth["state"] = auth || failures >= 3 ? "down" : "degraded";
-        const backoff = Math.min(60, 2 ** Math.min(failures, 6)) * 60_000;
-        const events: EventBody[] = [
-          { type: "source.state", id: source.id, health: { ...health, state: nextState, lastError: message.slice(0, 500), failures, calls: [...calls, nowMs], nextPollAt: nowMs + backoff, downSince: health.downSince ?? nowIso(nowMs) } },
-        ];
-        const downSince = health.lastOkAt ? Date.parse(health.lastOkAt) : null;
-        const evalKey = `eval:source-down:${source.id}:${health.lastOkAt ?? "never"}`;
-        if (downSince !== null && nowMs - downSince > config.policy.sourceDownHours * 3_600_000 && !state.ledger[evalKey]) {
-          events.push({ type: "eval.candidate", kind: "source-down-long", subject: source.id, detail: message.slice(0, 300) });
-          events.push({ type: "action", action: { key: evalKey, kind: "note.set", subject: source.id, summary: "记评测候选：来源长时间不可用", status: "done", reason: null, at: nowIso(nowMs) } });
-        }
-        append(events);
-        deps.log(`source ${source.id} failed (${failures}): ${message}`);
+        failed(source.id, health, calls, error as Error, nowMs, nowMs);
       }
     }
+  }
+
+  /** What a poll that read at `readMs` brought, taken in at `nowMs` (the same for all but an observing source). */
+  function took(sourceId: string, health: SourceHealth, calls: number[], poll: Poll, readMs: number, nowMs: number): void {
+    const events: EventBody[] = [];
+    for (const snapshot of poll.snapshots) {
+      // The last read before this one: a read without a change leaves no observation, so it is
+      // kept here (a file's in the source's state, any item's while this process runs).
+      const readBefore = Math.max(Date.parse(health.readAt?.[snapshot.key] ?? "") || 0, lastRead.get(snapshot.key) ?? 0);
+      lastRead.set(snapshot.key, readMs);
+      const before = state.items[snapshot.key];
+      if (before) {
+        const changes = diffItem(before, snapshot);
+        // What was read besides the record (text, commits, history) is kept, but is not an observation.
+        if (changes.length === 0) {
+          if (readMore(before, snapshot)) events.push({ type: "item.snapshot", item: snapshot });
+          continue;
+        }
+        const obs: Observation = {
+          id: hash(`${snapshot.key}\0${snapshot.sourceUpdatedAt}\0${JSON.stringify(changes)}`).slice(0, 16),
+          at: snapshot.sourceUpdatedAt ?? snapshot.observedAt,
+          seenAt: snapshot.observedAt,
+          readBefore: nowIso(Math.max(readBefore, Date.parse(before.observedAt) || 0)),
+          source: sourceId,
+          key: snapshot.key,
+          kind: "changed",
+          trust: "source",
+          actor: null,
+          changes,
+          text: null,
+        };
+        events.push({ type: "obs", obs });
+      }
+      events.push({ type: "item.snapshot", item: snapshot });
+    }
+    const used = [...calls, ...Array.from({ length: poll.calls }, () => readMs)];
+    const conf = sourceConfig(sourceId);
+    // An observing source goes by what is due (observeWanted), looked at every tick.
+    const next = poll.more || conf.kind === "command" ? nowMs + 60_000 : nowMs + intervalMs(sourceId, nowMs);
+    // Each file of a file source, each request of an observing one, when it was last read: one can fail while the others do not.
+    const readAt = conf.kind === "flags" || conf.kind === "command" ? { ...(health.readAt ?? {}), ...Object.fromEntries(poll.snapshots.map((s) => [s.key, nowIso(readMs)])) } : undefined;
+    // And since when each file that did not come has been failing.
+    const got = new Set(poll.snapshots.map((s) => s.key));
+    const failingSince =
+      conf.kind === "flags"
+        ? Object.fromEntries(conf.files.map((f) => `${sourceId}:${f.id}`).filter((k) => !got.has(k)).map((k) => [k, health.failingSince?.[k] ?? nowIso(nowMs)]))
+        : {};
+    events.push({
+      type: "source.state",
+      id: sourceId,
+      cursor: poll.cursor,
+      health: {
+        state: "ok",
+        lastOkAt: nowIso(readMs),
+        lastError: poll.errors.length > 0 ? poll.errors.join("; ").slice(0, 500) : null,
+        failures: 0,
+        calls: used,
+        nextPollAt: next,
+        ...(readAt ? { readAt } : {}),
+        ...(Object.keys(failingSince).length > 0 ? { failingSince } : {}),
+      },
+    });
+    append(events);
+  }
+
+  /** A poll that failed, started at `readMs` (its failure counted from then), taken in at `nowMs`. */
+  function failed(sourceId: string, health: SourceHealth, calls: number[], error: Error, readMs: number, nowMs: number): void {
+    const message = error.message;
+    const failures = health.failures + 1;
+    const auth = (error as { auth?: boolean }).auth === true;
+    const nextState: SourceHealth["state"] = auth || failures >= 3 ? "down" : "degraded";
+    const backoff = Math.min(60, 2 ** Math.min(failures, 6)) * 60_000;
+    const events: EventBody[] = [
+      { type: "source.state", id: sourceId, health: { ...health, state: nextState, lastError: message.slice(0, 500), failures, calls: [...calls, readMs], nextPollAt: nowMs + backoff, downSince: health.downSince ?? nowIso(readMs) } },
+    ];
+    const downSince = health.lastOkAt ? Date.parse(health.lastOkAt) : null;
+    const evalKey = `eval:source-down:${sourceId}:${health.lastOkAt ?? "never"}`;
+    if (downSince !== null && nowMs - downSince > config.policy.sourceDownHours * 3_600_000 && !state.ledger[evalKey]) {
+      events.push({ type: "eval.candidate", kind: "source-down-long", subject: sourceId, detail: message.slice(0, 300) });
+      events.push({ type: "action", action: { key: evalKey, kind: "note.set", subject: sourceId, summary: "记评测候选：来源长时间不可用", status: "done", reason: null, at: nowIso(nowMs) } });
+    }
+    append(events);
+    deps.log(`source ${sourceId} failed (${failures}): ${message}`);
   }
 
   // ---- observing sources ------------------------------------------------------------------
@@ -1773,6 +1810,10 @@ export function createEngine(deps: EngineDeps) {
   });
 
   return {
+    /** Waits for the observing commands in flight to come back; what they bring is taken in at the next round. */
+    async settled(): Promise<void> {
+      await Promise.all([...running.values()].map((r) => r.done));
+    },
     /** After a start: cards whose carriers died with the previous process get new ones. */
     async recover(): Promise<void> {
       const nowMs = deps.now();

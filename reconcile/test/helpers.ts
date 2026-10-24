@@ -307,6 +307,8 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
     const end = at(untilLocal);
     while (clock.now <= end) {
       await world.engine.tick();
+      // An observing command runs beside the rounds; here it is back before the clock moves on.
+      await world.engine.settled();
       clock.now += stepMinutes * 60_000;
     }
     clock.now = end;

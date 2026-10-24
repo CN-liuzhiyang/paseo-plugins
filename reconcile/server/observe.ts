@@ -24,7 +24,8 @@ export interface Concluded {
   readAt: string | null;
   freshUntil: string | null;
   window: { from: string; to: string } | null;
-  numbers: Record<string, number>;
+  /** What the command found, as it gave it (the controller does not read it). */
+  numbers: Record<string, unknown>;
   notes: string[];
 }
 
@@ -73,11 +74,14 @@ export function conclude(
 ): Concluded {
   const reported = item && (VERDICTS as readonly string[]).includes(item.fields.verdict ?? "") ? (item.fields.verdict as ObserveVerdict) : null;
   const window = r?.window ?? (item?.fields["window.from"] && item.fields["window.to"] ? { from: item.fields["window.from"], to: item.fields["window.to"] } : null);
-  const numbers: Record<string, number> = {};
-  const notes: string[] = [];
-  for (const [field, value] of Object.entries(item?.fields ?? {})) {
-    if (field.startsWith("numbers.") && value !== "" && Number.isFinite(Number(value))) numbers[field.slice(8)] = Number(value);
+  let numbers: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(item?.fields.numbers || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) numbers = parsed as Record<string, unknown>;
+  } catch {
+    // kept as it came, so it parses; a hand-made item that does not is read as nothing found out
   }
+  const notes: string[] = [];
   for (let i = 0; item?.fields[`notes.${i}`] !== undefined; i++) notes.push(item.fields[`notes.${i}`]!);
   const hm = (ms: number) => iso(ms, o.tz).slice(5, 16).replace("T", " ");
   const freshUntil = item?.fields.freshUntil || null;

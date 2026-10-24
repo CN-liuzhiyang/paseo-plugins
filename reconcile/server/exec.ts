@@ -16,11 +16,11 @@ export interface ExecResult {
   truncated?: boolean;
 }
 
-export type Exec = (command: string[], args: string[], options: { timeoutMs: number; maxBytes?: number; input?: string }) => Promise<ExecResult>;
+export type Exec = (command: string[], args: string[], options: { timeoutMs: number; maxBytes?: number; input?: string; cwd?: string }) => Promise<ExecResult>;
 
 const MAX_BYTES = 16 * 1024 * 1024;
 
-export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, input }) =>
+export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, input, cwd }) =>
   new Promise((resolve) => {
     const started = Date.now();
     const [file, ...prefix] = command;
@@ -30,7 +30,7 @@ export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, inp
     let truncated = false;
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(file!, [...prefix, ...args], { shell: false, windowsHide: true, env: process.env });
+      child = spawn(file!, [...prefix, ...args], { shell: false, windowsHide: true, env: process.env, ...(cwd ? { cwd } : {}) });
     } catch (error) {
       resolve({ code: null, stdout: "", stderr: (error as Error).message, ms: 0, timedOut: false });
       return;

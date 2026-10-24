@@ -131,12 +131,15 @@ const commandSourceSchema = z
     id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
     label: z.string().min(1).max(40).optional(),
     kind: z.literal("command"),
-    /** Run without a shell: ["<python>", "<…>/observe.py"]. */
+    /** Run without a shell: ["python", "watch.py"]. */
     command: z.array(z.string().min(1)).min(1),
+    /** The directory it runs in (an absolute path); absent: the daemon's. */
+    cwd: z.string().min(1).refine((p) => path.isAbsolute(p), "not an absolute path").optional(),
     /** While a window is open, a read this often (and one at its end, and at each reread). */
     everyMinutes: z.number().int().min(1).max(240),
     maxCallsPerHour: z.number().int().min(1),
-    timeoutSeconds: z.number().int().min(5).max(900),
+    /** A run is beside the rounds, not in one (they go on every minute meanwhile): this is how long one may take. */
+    timeoutSeconds: z.number().int().min(5).max(1800),
     /** Past this, the command is stopped and the read fails. */
     maxOutputBytes: z.number().int().min(1024).max(4 * 1024 * 1024).default(256 * 1024),
     /** How far the data may lag behind the read and still count ("nothing found" on older data is "too little to tell"). */

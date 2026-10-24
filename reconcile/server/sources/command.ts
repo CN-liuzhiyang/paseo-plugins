@@ -13,7 +13,7 @@ import type { Poll, PollInput, Source } from "./source";
 // per request. Nothing it prints is shown as it is but its notes, cut short.
 //
 // stdin:  { "now": "<ISO>", "requests": [{ "key", "window": { "from", "to" }, "params": {…}, "last": { "verdict", "readAt", "freshUntil" } | null }] }
-// stdout: { "results": [{ "key", "verdict", "freshUntil", "numbers": { "<name>": <number> }, "notes": ["…"] }], "errors": ["…"] }
+// stdout: { "results": [{ "key", "verdict", "freshUntil", "observedAt"?, "numbers": {…}, "notes": ["…"] }], "errors": ["…"], "meta"?: {…} }
 // An error "auth" in `errors` says its credentials do not work: the source is down at once.
 
 export interface CommandRequest {
@@ -24,7 +24,8 @@ export interface CommandRequest {
 }
 
 const instant = z.string().refine((v) => !Number.isNaN(Date.parse(v)), "not an instant");
-const NAME = /^[a-zA-Z][a-zA-Z0-9_.-]{0,63}$/;
+/** The most what a result found may take, as JSON: it is kept in the journal with every read. */
+export const NUMBERS_BYTES = 16 * 1024;
 // Not trusted: one clean line, cut short (untrusted.ts).
 const clean = (text: string, max: number) => cleanText(text, max) ?? "";
 
@@ -32,17 +33,27 @@ const result = z
   .object({
     key: z.string().min(1).max(200),
     verdict: z.enum(VERDICTS),
-    /** Up to when the data it read goes (the newest record it saw, say). */
-    freshUntil: instant,
+    /** Up to when the data it read goes (the newest record it saw, say); null: it could not tell (nothing read). */
+    freshUntil: instant.nullable(),
+    /** When it read it, by its own clock: kept for the record; what counts is when the run started. */
+    observedAt: instant.optional(),
+    /** What it found, for the rule to read: any JSON object, not read here; kept as it came, within NUMBERS_BYTES. */
     numbers: z
-      .record(z.string().regex(NAME), z.number().finite())
-      .refine((n) => Object.keys(n).length <= 50, "more than 50 numbers")
+      .record(z.string(), z.unknown())
+      .refine((n) => JSON.stringify(n).length <= NUMBERS_BYTES, `numbers over ${NUMBERS_BYTES} bytes as JSON`)
       .default({}),
     notes: z.array(z.string().max(1000)).max(10).default([]),
   })
   .strict();
 
-const output = z.object({ results: z.array(result).max(500), errors: z.array(z.string().max(1000)).max(20).default([]) }).strict();
+/** `meta`: about the run itself (how long it took, say); not kept. */
+const output = z
+  .object({
+    results: z.array(result).max(500),
+    errors: z.array(z.string().max(1000)).max(20).default([]),
+    meta: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
 
 export class CommandAuthError extends Error {
   readonly auth = true;
@@ -56,7 +67,7 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
       const requests = input.observe ?? [];
       if (requests.length === 0) return { snapshots: [], cursor: null, calls: 0, errors: [], more: false };
       const stdin = JSON.stringify({ now: input.now, requests });
-      const r = await deps.exec(config.command, [], { timeoutMs: config.timeoutSeconds * 1000, maxBytes: config.maxOutputBytes, input: stdin });
+      const r = await deps.exec(config.command, [], { timeoutMs: config.timeoutSeconds * 1000, maxBytes: config.maxOutputBytes, input: stdin, ...(config.cwd ? { cwd: config.cwd } : {}) });
       if (r.timedOut) throw new Error(`观察命令 ${config.timeoutSeconds} 秒没跑完`);
       if (r.truncated) throw new Error(`观察命令的输出超过 ${config.maxOutputBytes} 字节`);
       if (r.code !== 0) throw new Error(`观察命令退出码 ${r.code ?? "无"}：${clean(r.stderr, 300) || "（没有输出错误）"}`);
@@ -70,6 +81,9 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
       }
       const errors = parsed.errors.map((e) => clean(e, 300));
       if (errors.includes("auth")) throw new CommandAuthError("观察命令说登录不了（auth）");
+      // It says what went wrong for the whole run and found nothing for any request: that is a
+      // read that failed (it counts towards telling the admin), not a set of answers.
+      if (errors.length > 0 && parsed.results.every((res) => res.verdict === "insufficient-data")) throw new Error(`观察命令读不了：${errors.join("、")}`);
       const asked = new Map(requests.map((q) => [q.key, q]));
       const snapshots: Item[] = [];
       const seen = new Set<string>();
@@ -84,8 +98,14 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
           continue;
         }
         seen.add(res.key);
-        const fields: Record<string, string> = { verdict: res.verdict, freshUntil: res.freshUntil, "window.from": q.window.from, "window.to": q.window.to };
-        for (const [name, value] of Object.entries(res.numbers)) fields[`numbers.${name}`] = String(value);
+        const fields: Record<string, string> = {
+          verdict: res.verdict,
+          freshUntil: res.freshUntil ?? "",
+          "window.from": q.window.from,
+          "window.to": q.window.to,
+          numbers: JSON.stringify(res.numbers),
+          ...(res.observedAt ? { observedAt: res.observedAt } : {}),
+        };
         res.notes.forEach((note, i) => (fields[`notes.${i}`] = clean(note, 300)));
         snapshots.push({
           key: `${config.id}:${res.key}`,

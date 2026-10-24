@@ -102,7 +102,7 @@ sources.json       [ { id, label?, kind: "gcp", command, gateway: { path, tool, 
                                    repos: [ { name, pattern, branches: [ { name, url, copied? } ] } ] } },
                      { id, label?, kind: "flags", files: [ { id, url, labels } ], sections, itemKind?, activeHours,
                        everyMinutes, offHoursEveryMinutes, maxCallsPerHour, timeoutSeconds, domain },
-                     { id, label?, kind: "command", command, everyMinutes, maxCallsPerHour, timeoutSeconds,
+                     { id, label?, kind: "command", command, cwd?, everyMinutes, maxCallsPerHour, timeoutSeconds,
                        maxOutputBytes?, maxLagMinutes?, downAfterMinutes?, domain } ]
 policy.json        { tz, ruleBreakerChanges, sourceDownHours,
                      hot?: { recentDays, dateWindowDays, dateFields }, coldTitles? }
@@ -150,22 +150,34 @@ observe: [{
 **什么时候跑**：只在有请求、而且到了该读的时刻才跑（窗口开始、每 `everyMinutes`、窗口结束、每个补读点）；没有要盯的
 就一次都不跑，来源的状态也不动。一次跑一个进程，把这一刻该读的请求都交给它。
 
+**跑在检查旁边，不在检查里**：一次可能要几分钟（`timeoutSeconds` 最多 1800），所以起了就不等，每分钟的检查照常走；
+还在跑时不再起第二个，哪怕又到了该读的时刻。跑完的结果在下一轮检查时收进来，当成**起跑那一刻**读到的（`readAt`、
+`lastOkAt` 都记起跑的时间，失败也从起跑算起）。daemon 重启时正在跑的那一次丢掉，到点再起。`cwd` 是它的工作目录。
+
 **命令的契约**（不经 shell 直接起，stdin 进、stdout 出，都是 JSON）：
 
 ```
 stdin   { "now": "<ISO>",
           "requests": [ { "key", "window": { "from", "to" }, "params": {…},
                           "last": { "verdict", "readAt", "freshUntil" } | null } ] }
-stdout  { "results": [ { "key", "verdict", "freshUntil": "<ISO>",
-                         "numbers"?: { "<名字>": <数> },   // 最多 50 个
+stdout  { "results": [ { "key", "verdict", "freshUntil": "<ISO>" | null,
+                         "observedAt"?: "<ISO>",              // 它自己记的读的时间，只留作记录
+                         "numbers"?: { … },                   // 它算出来的，任意 JSON 对象，最多 16 KB
                          "notes"?: [ "…" ] } ],              // 最多 10 句，每句截到 300 字
-          "errors"?: [ "…" ] }
+          "errors"?: [ "<种类>" ],                            // 整次运行的问题，比如 "auth"、"network"
+          "meta"?: { … } }                                   // 关于这次运行（花了多久、查询日志之类），不留
 ```
 
+`requests[].last` 是上次读到的结论（没有就是 `null`），命令可以不看。
+
 - `verdict` 只能是 `no-signal`（没发现问题）、`needs-look`（有值得看一眼的）、`hard-fail`（出问题了）、
-  `insufficient-data`（判断不了）。`freshUntil` 是它读到的数据到了哪个时刻（最新一条记录的时间之类）。
+  `insufficient-data`（判断不了）。`freshUntil` 是它读到的数据到了哪个时刻（最新一条记录的时间之类），什么都没读到可以给 `null`（这时它说 `no-signal` 也按 `lagging` 算，见下）。
+- `numbers` 框架不看，原样交给规则（`ctx.observation().numbers`）；它每读一次就进一次日志，所以只放规则要用的，
+  诊断用的、大块的（查询语句、耗时明细）放 `meta`，`meta` 不进日志。
 - 字段多一个、少一个、类型不对，整次输出都不收；退出码不是 0、超时、输出超过 `maxOutputBytes`（缺省 256 KB）也一样，
-  按读失败记，下次再试（失败退避）。`errors` 里有 `"auth"` 表示凭据不行了，来源直接记成读不到。
+  按读失败记，下次再试（失败退避）。`errors` 里有 `"auth"` 表示凭据不行了，来源直接记成读不到；`errors` 不空、
+  而且每个结果都是 `insufficient-data`（什么都没读到），这一次也按读失败记（算进 `downAfterMinutes`），之前读到的不被它盖掉；
+  有读到东西的，结果照收，`errors` 记在来源的错误里。某个请求读不到，那条结果给 `insufficient-data`，原因写在 `notes`。
 - 没要过的 key 的结果不收，要了没给的记一条错误。`notes` 去掉控制字符和看不见的字符、压成一行、截短，是命令输出里
   唯一交给规则的文字（规则拿它写卡片和页面时还是当数据看）；stderr 只在读失败时截一行进来源的错误。
 - **命令只该输出聚合后的数**：这些都会进日志。要读的原始数据里有个人信息的话，在命令里算完就丢，不要写进输出、
