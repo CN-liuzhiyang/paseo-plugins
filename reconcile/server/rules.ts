@@ -414,7 +414,10 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
       // An observation is read as the controller takes it, whichever way the rule asks.
       const seen = found.kind === "observation" ? inputs.observed?.(key) : null;
       if (!seen) return copy(found);
-      return copy({ ...found, fields: { ...found.fields, verdict: seen.verdict, "verdict.reported": seen.reported ?? "", "verdict.why": seen.why ?? "" } });
+      // What it found too: nothing of what was read for another request than the one asked.
+      const fields = Object.fromEntries(Object.entries(found.fields).filter(([field]) => field !== "numbers" && !field.startsWith("notes.")));
+      seen.notes.forEach((note, i) => (fields[`notes.${i}`] = note));
+      return copy({ ...found, fields: { ...fields, numbers: JSON.stringify(seen.numbers), freshUntil: seen.freshUntil ?? "", verdict: seen.verdict, "verdict.reported": seen.reported ?? "", "verdict.why": seen.why ?? "" } });
     },
     siblings: (key: string) => {
       const parent = inputs.items[key]?.parent ?? null;
@@ -472,6 +475,13 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
   if (!rule.stages.includes(out.stage)) return failed(`${rule.file}: stage "${out.stage}" is not one of the declared stages`);
   const keys = new Set<string>();
   for (const o of out.observe ?? []) {
+    // What is kept of params, and handed on, is their JSON: taken as that from here on (a Date as
+    // its string, an undefined left out), so that what is checked, stored and told apart by is it.
+    try {
+      o.params = JSON.parse(JSON.stringify(o.params)) as Record<string, unknown>;
+    } catch (error) {
+      return failed(`${rule.file}: observe ${o.key}: params are not JSON (${(error as Error).message})`);
+    }
     const [from, to] = [Date.parse(o.window.from), Date.parse(o.window.to)];
     if (Number.isNaN(from) || Number.isNaN(to)) return failed(`${rule.file}: observe ${o.key}: window is not two instants`);
     if (to < from || to - from > OBSERVE_SPAN_MINUTES * 60_000) return failed(`${rule.file}: observe ${o.key}: window ends before it starts, or is longer than 7 days`);

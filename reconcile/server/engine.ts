@@ -213,6 +213,8 @@ export function createEngine(deps: EngineDeps) {
   interface Run {
     startedMs: number;
     asked: CommandRequest[];
+    /** Only keys that keep failing on their own, tried again: what it reads nothing for is theirs, not the source's. */
+    retry: boolean;
     abort: AbortController;
     done: Promise<void>;
     outcome: { poll: Poll } | { error: Error } | null;
@@ -233,6 +235,7 @@ export function createEngine(deps: EngineDeps) {
         running.delete(source.id);
         const calls = health.calls.filter((t) => nowMs - t < 3_600_000);
         if ("poll" in run.outcome) took(source.id, health, calls, stillAsked(source.id, run.outcome.poll), run.startedMs, nowMs, run.asked);
+        else if (run.retry && (run.outcome.error as { nothingRead?: boolean }).nothingRead) keysFailed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
         else failed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
         continue;
       }
@@ -259,7 +262,12 @@ export function createEngine(deps: EngineDeps) {
         ...(observe ? { observe } : {}),
       };
       if (observe) {
-        const started: Run = { startedMs: nowMs, asked: observe, abort: new AbortController(), done: Promise.resolve(), outcome: null };
+        // Keys failing while others are read (since), and nothing else: tried again on their own.
+        const retry = observe.every((q) => {
+          const f = health.keyFailures?.[`${source.id}:${q.key}`];
+          return f?.request === q.version && f.since !== undefined;
+        });
+        const started: Run = { startedMs: nowMs, asked: observe, retry, abort: new AbortController(), done: Promise.resolve(), outcome: null };
         started.done = source.poll({ ...input, signal: started.abort.signal }).then(
           (poll) => void (started.outcome = { poll }),
           (error: unknown) => void (started.outcome = { error: error instanceof Error ? error : new Error(String(error)) }),
@@ -375,6 +383,22 @@ export function createEngine(deps: EngineDeps) {
     return out;
   }
 
+  /**
+   * A retry of keys that keep failing on their own (Run.retry) that read nothing again: theirs to
+   * count (and back off on), not the source's, which reads the others; nor is the source down for it.
+   */
+  function keysFailed(sourceId: string, health: SourceHealth, calls: number[], error: Error, readMs: number, nowMs: number, asked: CommandRequest[]): void {
+    const missing = Object.fromEntries(asked.map((q) => [q.key, error.message.slice(0, 300)]));
+    const keyFailures = failingKeys(sourceId, health, { snapshots: [], cursor: null, calls: 0, errors: [], more: false, missing }, asked, readMs, nowMs, false);
+    append([
+      {
+        type: "source.state",
+        id: sourceId,
+        health: { ...health, calls: [...calls, readMs], nextPollAt: nowMs + 60_000, ...(Object.keys(keyFailures).length > 0 ? { keyFailures } : { keyFailures: undefined }) },
+      },
+    ]);
+  }
+
   /** A poll that failed, started at `readMs` (its failure counted from then), taken in at `nowMs`; of an observing source, what it `asked` failed with it. */
   function failed(sourceId: string, health: SourceHealth, calls: number[], error: Error, readMs: number, nowMs: number, asked: CommandRequest[] = []): void {
     const message = error.message;
@@ -408,15 +432,20 @@ export function createEngine(deps: EngineDeps) {
    * the one set last; the other's case is told nothing was read for its own), each with since when.
    */
   function observing(sourceId: string): Map<string, ObserveRequest> {
-    const found = new Map<string, { r: ObserveRequest; at: string }>();
-    for (const { at, requests } of Object.values(state.observing ?? {})) {
+    return new Map([...observingBy(sourceId)].map(([key, { r }]) => [key, r]));
+  }
+
+  /** The same, with the case each request in force is of. */
+  function observingBy(sourceId: string): Map<string, { r: ObserveRequest; caseId: string }> {
+    const found = new Map<string, { r: ObserveRequest; at: string; caseId: string }>();
+    for (const [caseId, { at, requests }] of Object.entries(state.observing ?? {})) {
       for (const r of requests) {
         if (r.source !== sourceId) continue;
         const had = found.get(r.key);
-        if (!had || had.at <= at) found.set(r.key, { r: { ...r, since: r.since ?? at }, at });
+        if (!had || had.at <= at) found.set(r.key, { r: { ...r, since: r.since ?? at }, at, caseId });
       }
     }
-    return new Map([...found].map(([key, { r }]) => [key, r]));
+    return found;
   }
 
   /** How long after a read was due it may still be on its way: a tick, a slow command, a poll after another source's. */
@@ -446,10 +475,10 @@ export function createEngine(deps: EngineDeps) {
 
   /**
    * An observation item as a rule is to take it now; null for an item of no observing source.
-   * `asking`: the requests a rule asks for this round, taken in place of those in force (what was
-   * read for one before it changed is then not its).
+   * `asking`: the requests a rule asks for this round (for case `caseId`), taken in place of those
+   * in force (what was read for one before it changed is then not its).
    */
-  function observed(itemKey: string, nowMs: number, asking?: Map<string, ObserveRequest>): Concluded | null {
+  function observed(itemKey: string, nowMs: number, asking?: Map<string, ObserveRequest>, caseId?: string): Concluded | null {
     const s = config.sources.find((x) => itemKey.startsWith(`${x.id}:`));
     if (s?.kind !== "command") return null;
     const key = itemKey.slice(s.id.length + 1);
@@ -458,7 +487,11 @@ export function createEngine(deps: EngineDeps) {
     const r = asking?.get(itemKey) ?? observing(s.id).get(key) ?? null;
     const failing = health?.keyFailures?.[itemKey];
     const failure = r && failing?.request === requestVersion(r) ? failing.error : health && (health.state === "degraded" || health.state === "down") ? health.lastError : null;
+    // Its key is read for another case's request: its own is not read at all.
+    const owner = asking?.has(itemKey) && caseId ? observingBy(s.id).get(key)?.caseId : undefined;
+    const occupied = owner !== undefined && owner !== caseId;
     return conclude(r, state.items[itemKey] ?? null, read, {
+      occupied,
       everyMs: s.everyMinutes * 60_000,
       graceMs: observeGraceMs(s),
       maxLagMs: s.maxLagMinutes * 60_000,
@@ -466,6 +499,27 @@ export function createEngine(deps: EngineDeps) {
       tz,
       failure,
     });
+  }
+
+  /** Per case and key asked: the request (its version) it asked for last, and when that changed (in this process). */
+  const askedVersions = new Map<string, { version: string; changes: number[] }>();
+  /** More changes than this in an hour, the last one this round: the request changes round after round. */
+  const CHURN_CHANGES = 3;
+
+  /** A request of a case's that keeps changing (OBSERVE churn), or null. */
+  function churn(caseId: string, asked: ObserveRequest[], nowMs: number): { key: string; changes: number } | null {
+    let found: { key: string; changes: number } | null = null;
+    for (const a of asked) {
+      const at = `${caseId}\0${a.source}\0${a.key}`;
+      const version = requestVersion(a);
+      const had = askedVersions.get(at);
+      const changes = (had?.changes ?? []).filter((t) => nowMs - t < 3_600_000);
+      const changed = had !== undefined && had.version !== version;
+      if (changed) changes.push(nowMs);
+      askedVersions.set(at, { version, changes });
+      if (changed && changes.length > CHURN_CHANGES && !found) found = { key: a.key, changes: changes.length };
+    }
+    return found;
   }
 
   /** The version of the request for a key in force now, null when none is. */
@@ -1217,8 +1271,29 @@ export function createEngine(deps: EngineDeps) {
       if (asked.some((a) => reads.has(`${a.source}:${a.key}`) && versionInForce(a.source, a.key) !== requestVersion(a))) {
         const asking = new Map(asked.map((a) => [`${a.source}:${a.key}`, a]));
         reads = new Set([item.source, ...switchFiles]);
-        judged = judge(rule, kase, makeContext({ ...inputs, reads, observed: (key: string) => observed(key, nowMs, asking) }, rule.params), set.fingerprint, check);
+        judged = judge(rule, kase, makeContext({ ...inputs, reads, observed: (key: string) => observed(key, nowMs, asking, item.key) }, rule.params), set.fingerprint, check);
         asked = askedOf(item.key, judged.output, nowMs);
+      }
+      // A request that changes round after round is never read: told, as a judgment that went wrong
+      // (what was asked before stays, as for any judgment that fails).
+      const churning = churn(item.key, asked, nowMs);
+      if (churning) {
+        const a = judged.assessment;
+        judged = {
+          assessment: {
+            caseId: a.caseId,
+            at: a.at,
+            rule: a.rule,
+            rulesFingerprint: a.rulesFingerprint,
+            stale: false,
+            stage: "error",
+            health: "conflict",
+            headline: `判断出错：${rule.name}`,
+            next: { actor: "me", what: "看一眼判断文件" },
+            error: `${rule.file}: observe ${churning.key}: 参数每轮都在变（一小时里变了 ${churning.changes} 次），读不到；params 里不要放 ctx.now 这类每轮都变的值`,
+          },
+          output: null,
+        };
       }
       lastReads.set(item.key, reads);
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);

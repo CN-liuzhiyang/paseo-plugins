@@ -92,23 +92,19 @@ export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, inp
       resolve({ code, stdout: Buffer.concat(out).toString("utf8"), stderr: stderr + extra, ms: Date.now() - started, timedOut, truncated, ...(aborted ? { aborted } : {}) });
     };
     let stopping = false;
-    const stop = () => {
-      if (stopping) return;
+    // Exited already (its output not closed yet): nothing to stop, and its id may be another's by now.
+    const exited = () => child.exitCode !== null || child.signalCode !== null;
+    /** Stops it, marking why (`mark`), unless it has exited already: then it is not stopped, nor marked. */
+    const stop = (mark: () => void) => {
+      if (stopping || exited()) return;
+      mark();
       stopping = true;
       killTree(child);
       timers.push(setTimeout(() => finish(null), KILL_GRACE_MS));
     };
-    const onAbort = () => {
-      aborted = true;
-      stop();
-    };
+    const onAbort = () => stop(() => (aborted = true));
     signal?.addEventListener("abort", onAbort, { once: true });
-    timers.push(
-      setTimeout(() => {
-        timedOut = true;
-        stop();
-      }, timeoutMs),
-    );
+    timers.push(setTimeout(() => stop(() => (timedOut = true)), timeoutMs));
     child.stdout?.on("data", (chunk: Buffer) => {
       if (truncated) return;
       // Bytes, as it wrote them: the cap is on what is kept.
@@ -116,7 +112,7 @@ export const exec: Exec = (command, args, { timeoutMs, maxBytes = MAX_BYTES, inp
         out.push(chunk.subarray(0, maxBytes - outBytes));
         outBytes = maxBytes;
         truncated = true;
-        stop();
+        stop(() => {});
         return;
       }
       out.push(chunk);

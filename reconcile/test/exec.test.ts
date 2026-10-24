@@ -174,3 +174,34 @@ test("what is handed on stdin arrives whole, then its end; a command that exits 
   const early = await exec([process.execPath, "-e", "process.exit(0)"], [], { timeoutMs: 15_000, input });
   assert.equal(early.code, 0);
 });
+
+// Its child holds the output for a while after it exits: a timeout or an abort then is not a stop.
+test(
+  "a command that has exited is not stopped, nor told as timed out or aborted, while its output is still held",
+  { ...BOUND, skip: PY ? false : "no python on this machine" },
+  withDir(async (dir) => {
+    const parent = path.join(dir, "parent.py");
+    writeFileSync(parent, PY_PARENT);
+    const pidFile = path.join(dir, "child.pid");
+    const command = [PY!, parent, process.execPath, pidFile, "exit"];
+    const timed = await exec(command, [], { timeoutMs: 1_000, input: "{}" });
+    let child = await pidIn(pidFile);
+    try {
+      assert.deepEqual([timed.code, timed.timedOut], [0, false]);
+    } finally {
+      if (alive(child)) process.kill(child);
+    }
+    rmSync(pidFile);
+    const abort = new AbortController();
+    const pending = exec(command, [], { timeoutMs: 60_000, input: "{}", signal: abort.signal });
+    child = await pidIn(pidFile);
+    await sleep(500);
+    abort.abort();
+    const r = await pending;
+    try {
+      assert.deepEqual([r.code, r.aborted ?? false], [0, false]);
+    } finally {
+      if (alive(child)) process.kill(child);
+    }
+  }),
+);

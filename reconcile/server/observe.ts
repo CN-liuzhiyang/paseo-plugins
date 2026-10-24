@@ -100,13 +100,13 @@ export function wanted(r: ObserveRequest, everyMs: number, nowMs: number, readAt
  * own window is used and no read is wanted); `readAt`: when the item was last read. `graceMs`: how
  * long after a read was due it may still be on its way (a poll a few minutes late, a slow command);
  * `maxLagMs`: how far the data may lag behind the read and still count; `failure`: why the last
- * read of it failed, if it did.
+ * read of it failed, if it did; `occupied`: its key is read for another case's request.
  */
 export function conclude(
   r: ObserveRequest | null,
   item: Item | null,
   readAt: string | null,
-  o: { everyMs: number; graceMs: number; maxLagMs: number; nowMs: number; tz: string; failure?: string | null },
+  o: { everyMs: number; graceMs: number; maxLagMs: number; nowMs: number; tz: string; failure?: string | null; occupied?: boolean },
 ): Concluded {
   const reported = item && (VERDICTS as readonly string[]).includes(item.fields.verdict ?? "") ? (item.fields.verdict as ObserveVerdict) : null;
   const window = r?.window ?? (item?.fields["window.from"] && item.fields["window.to"] ? { from: item.fields["window.from"], to: item.fields["window.to"] } : null);
@@ -135,7 +135,8 @@ export function conclude(
       failure,
       verdict: "insufficient-data",
       why: over ? "gave-up" : "none-yet",
-      whyText: over ? `一直没读到，${hm(deadline)} 以后不再读了${because}` : `还没读到${because}`,
+      // Its key read for another case's request: its own was never tried.
+      whyText: o.occupied ? "这个 key 被另一个事项占用，没有读" : over ? `一直没读到，${hm(deadline)} 以后不再读了${because}` : `还没读到${because}`,
     };
   }
   const readMs = Date.parse(readAt);

@@ -40,17 +40,19 @@ const RULE = `export default {
   assess(kase, ctx) {
     const f = kase.primary.fields;
     const key = "w-" + kase.id.split(":")[1];
-    const o = f.Watch ? ctx.observation("watch-demo", key) : null;
-    const item = f.Watch ? ctx.item("watch-demo:" + key) : null;
+    const o = f.Watch ? ctx.observation("watch-demo", f.Key || key) : null;
+    const item = f.Watch ? ctx.item("watch-demo:" + (f.Key || key)) : null;
     const said = o ? [o.verdict, o.why || "-", item ? item.fields.verdict : "none", o.reported || "none"].join(" ") : "none";
+    const told = JSON.stringify({ f: o ? o.failure : null, w: o ? o.whyText : null, n: item ? item.fields.numbers : null });
     return {
-      stage: "s", health: "waiting", headline: "v " + said, next: { actor: "system", what: o && o.failure ? o.failure : "x" }, facts: [],
+      stage: "s", health: "waiting", headline: "v " + said, next: { actor: "system", what: told }, facts: [],
       commitments: f.Ask ? [{ key: "q:" + kase.id, title: "q " + kase.id, domain: "work", owner: "owner", trigger: { at: ctx.at("2026-10-13", f.Ask) },
         ask: { header: "H", question: "推吗？" + said, options: [{ id: "a", label: "A", description: "" }], allowOther: false },
         brief: "b", nag: { everyWorkdays: 1, at: "10:00", max: 1 }, backstop: { at: ctx.at("2026-12-31", "18:00") }, level: "push" }] : [],
       ...(f.Watch ? { observe: [{ source: f.Via || "watch-demo", key: f.Key || key,
         window: { from: ctx.at("2026-10-13", f.Watch), to: ctx.at("2026-10-13", f.WatchTo) }, reread: [60],
-        params: { item: kase.id, big: f.Big ? "汉".repeat(3000) : "", ...(f.Region ? { region: f.Region } : {}) } }] } : {}),
+        params: { item: kase.id, big: f.Big ? "汉".repeat(3000) : "", ...(f.Region ? { region: f.Region } : {}),
+          ...(f.Cutoff ? { cutoff: new Date(ctx.at("2026-10-13", f.Cutoff)) } : {}), platform: f.Platform, ...(f.Churn ? { asOf: ctx.now } : {}) } }] } : {}),
     };
   },
 };`;
@@ -348,6 +350,7 @@ test("what was read is for the request it was read for: other params or a window
     put(w, 1, { Region: "global" });
     await untilTaken(w, "10:41", "Region", "global");
     assert.equal(headline(w, 1), "v insufficient-data none-yet insufficient-data none", "the round it is asked in: what was read for the params before is not its");
+    assert.equal(JSON.parse(w.store.state.assessments["gcp-demo:1"]!.next.what).n, "{}", "ctx.item: nor what it found");
     await w.run("2026-10-13 11:05", 1);
     const after = calls().slice(n);
     assert.equal(after.length, 1, "read again, once, though the window is over and read to its end");
@@ -410,7 +413,14 @@ test("a key the command gives nothing for, while it does for others, fails on it
     put(w, 1, { Watch: "10:00", WatchTo: "11:30" });
     put(w, 2, { Watch: "10:00", WatchTo: "11:30" });
     plan({ skip: ["w-2"] });
-    await w.run("2026-10-13 10:40", 1);
+    const states = new Set<string>();
+    for (let t = ms("09:50"); t <= ms("10:40"); t += 60_000) {
+      await tickAt(w, t);
+      await w.engine.settled();
+      if (health(w)) states.add(health(w)!.state);
+    }
+    assert.deepEqual([...states], ["ok"], "w-2 tried again on its own, giving nothing: the source is not failing for it");
+    assert.equal(Object.values(w.store.state.commitments).filter((c) => c.key.startsWith("source-down:watch-demo:2")).length, 0, "no card for the source");
     const h = health(w)!;
     assert.ok(w.store.state.items["watch-demo:w-1"], "the other key taken");
     const f = h.keyFailures?.["watch-demo:w-2"];
@@ -480,6 +490,61 @@ test("a stop stops the command in flight, with what it started, before it resolv
     await w.engine.stop();
     assert.ok(Date.now() - started < 10_000);
     assert.equal(alive(pid), false, "gone once the stop resolves: before another engine could start one");
+  }));
+
+test("params are taken as their JSON: a Date changed is another request; an undefined left out the same across a restart, not read again for it", () =>
+  withWatch(async (w, _plan, calls) => {
+    put(w, 1, { Watch: "10:00", WatchTo: "10:30", Cutoff: "09:00" });
+    await w.run("2026-10-13 10:40", 5);
+    const n = calls().length;
+    assert.equal(calls()[0]!.requests[0]!.params.cutoff, "2026-10-13T01:00:00.000Z", "a Date goes as its JSON");
+    assert.equal("platform" in calls()[0]!.requests[0]!.params, false, "an undefined is left out");
+    put(w, 1, { Cutoff: "09:30" });
+    await untilTaken(w, "10:41", "Cutoff", "09:30");
+    await w.run("2026-10-13 11:05", 1);
+    assert.deepEqual(calls().slice(n).map((c) => c.requests[0]!.params.cutoff), ["2026-10-13T01:30:00.000Z"], "another Date: read anew");
+    // across a restart: the same request, read when it is due, not at once
+    put(w, 2, { Watch: "11:00", WatchTo: "12:00" });
+    await w.run("2026-10-13 11:15", 5);
+    // what is in flight at a restart is lost (read again when due): taken in first
+    await w.run("2026-10-13 11:16", 1);
+    const before = calls().length;
+    const set = w.store.state.observing!["gcp-demo:2"]!;
+    await w.engine.stop();
+    await w.restart();
+    await w.run("2026-10-13 11:19", 1);
+    assert.equal(calls().length, before, "not read again for the restart");
+    assert.deepEqual(w.store.state.observing!["gcp-demo:2"], set, "nor asked again (since kept)");
+    await w.run("2026-10-13 11:21", 1);
+    assert.equal(calls().length, before + 1, "read when it is due");
+  }));
+
+test("a request that changes round after round is told as a judgment gone wrong; the rule put right, it is judged again", () =>
+  withWatch(async (w) => {
+    put(w, 1, { Watch: "10:00", WatchTo: "11:30", Churn: "1" });
+    await w.run("2026-10-13 10:05", 5);
+    assert.equal(w.store.state.assessments["gcp-demo:1"]!.error, null, "three changes: not yet");
+    await w.run("2026-10-13 10:10", 5);
+    const a = w.store.state.assessments["gcp-demo:1"]!;
+    assert.equal(a.stage, "error");
+    assert.match(a.error!, /observe w-1: 参数每轮都在变（一小时里变了 4 次），读不到/);
+    put(w, 1, { Churn: "" });
+    await untilTaken(w, "10:11", "Churn", "");
+    // the round it changes back is a change too; the next is steady
+    await tickAt(w, w.clock.now + 60_000);
+    assert.equal(w.store.state.assessments["gcp-demo:1"]!.error, null, "steady again: no error, though it changed within the hour");
+  }));
+
+test("a key read for another case's request: the other's case is told its own is not read, not that it was tried", () =>
+  withWatch(async (w, _plan, calls) => {
+    put(w, 1, { Watch: "10:00", WatchTo: "10:30", Key: "same", Region: "cn" });
+    put(w, 2, { Watch: "10:00", WatchTo: "10:30", Key: "same", Region: "global" });
+    await w.run("2026-10-13 10:15", 5);
+    assert.ok(calls().every((c) => c.requests.every((r) => r.params.region === "global")), "one request read for the key: the one set last");
+    const said = (id: number) => JSON.parse(w.store.state.assessments[`gcp-demo:${id}`]!.next.what);
+    assert.equal(said(1).w, "这个 key 被另一个事项占用，没有读");
+    await w.run("2026-10-13 11:00", 5);
+    assert.equal(said(1).w, "这个 key 被另一个事项占用，没有读", "past its deadline too");
   }));
 
 // ---- the timing, on its own --------------------------------------------------------------------
