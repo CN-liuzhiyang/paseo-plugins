@@ -301,6 +301,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
     disposed = true;
     unsubscribe();
     process.off("unhandledRejection", onRejection);
-    void serially(stop);
+    // Awaited by the host: the engine stopped, its commands gone, the journal closed.
+    return serially(stop);
   };
 }

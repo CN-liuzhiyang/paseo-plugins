@@ -22,6 +22,8 @@ export interface PollInput {
   humanSince?: string;
   /** For an observing source: what to read this time (the engine has decided a read is wanted for each). */
   observe?: CommandRequest[];
+  /** Aborted when the engine stops: what the poll started is stopped with it. */
+  signal?: AbortSignal;
 }
 
 /** One row of a source's list: enough to decide whether the item is worth a full read. */
@@ -44,6 +46,8 @@ export interface Poll {
   errors: string[];
   /** More is waiting than the budget allowed this time. */
   more: boolean;
+  /** For an observing source: the keys asked that it gave no result for, with why. */
+  missing?: Record<string, string>;
 }
 
 export interface Source {

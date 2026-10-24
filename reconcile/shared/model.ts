@@ -78,6 +78,8 @@ export interface ObserveRequest {
   window: { from: string; to: string };
   reread: number[];
   params: Record<string, unknown>;
+  /** When the controller took this request as it is (its source, key, window and params) on: what failed before then is not its. Absent in older ones. */
+  since?: string;
 }
 
 /** "This source said this at that time." Append-only. */
@@ -246,6 +248,13 @@ export interface SourceHealth {
   downSince?: string;
   /** For a source of several files: item key -> since when that file has failed to read. */
   failingSince?: Record<string, string>;
+  /**
+   * For an observing source: item key -> a request (its version) that was not read, in a run that
+   * failed or one that gave nothing for it; retried on its own after `retryAt` (ms). `since`: since
+   * when the command has given nothing for it while it did for others (what is told as that key's
+   * outage; the source failing as a whole is told as the source's).
+   */
+  keyFailures?: Record<string, { request: string; since?: string; failures: number; error: string; retryAt: number }>;
 }
 
 export type EvalKind = "woke-noop" | "nag-ignored" | "commitment-expired" | "rule-breaker" | "source-down-long" | "budget-overflow" | "correction";

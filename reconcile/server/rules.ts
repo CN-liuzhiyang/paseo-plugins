@@ -475,7 +475,7 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
     const [from, to] = [Date.parse(o.window.from), Date.parse(o.window.to)];
     if (Number.isNaN(from) || Number.isNaN(to)) return failed(`${rule.file}: observe ${o.key}: window is not two instants`);
     if (to < from || to - from > OBSERVE_SPAN_MINUTES * 60_000) return failed(`${rule.file}: observe ${o.key}: window ends before it starts, or is longer than 7 days`);
-    if (JSON.stringify(o.params).length > OBSERVE_PARAMS_BYTES) return failed(`${rule.file}: observe ${o.key}: params over ${OBSERVE_PARAMS_BYTES} bytes`);
+    if (Buffer.byteLength(JSON.stringify(o.params), "utf8") > OBSERVE_PARAMS_BYTES) return failed(`${rule.file}: observe ${o.key}: params over ${OBSERVE_PARAMS_BYTES} bytes`);
     if (keys.has(`${o.source}:${o.key}`)) return failed(`${rule.file}: observe ${o.key} asked twice`);
     keys.add(`${o.source}:${o.key}`);
   }

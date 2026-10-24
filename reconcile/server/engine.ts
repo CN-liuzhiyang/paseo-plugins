@@ -3,14 +3,14 @@ import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
 import type { RunView } from "../shared/graph";
 import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
-import { conclude, endOf, wanted, type Concluded } from "./observe";
+import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleSet } from "./rules";
+import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleOutput, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import type { EventBody, RulesDiff } from "./state";
@@ -192,7 +192,9 @@ export function createEngine(deps: EngineDeps) {
     push("title", before.title, after.title);
     push("status", before.status, after.status);
     push("closed", String(before.closed), String(after.closed));
-    for (const field of new Set([...Object.keys(before.fields), ...Object.keys(after.fields)])) push(`fields.${field}`, before.fields[field] ?? "", after.fields[field] ?? "");
+    // What an observation found may be large: a change of it is told by its size and hash, the item keeps it whole.
+    const told = (field: string, value: string) => (after.kind === "observation" && field === "numbers" && value ? `${Buffer.byteLength(value, "utf8")} 字节 #${hash(value).slice(0, 12)}` : value);
+    for (const field of new Set([...Object.keys(before.fields), ...Object.keys(after.fields)])) push(`fields.${field}`, told(field, before.fields[field] ?? ""), told(field, after.fields[field] ?? ""));
     for (const role of new Set([...Object.keys(before.people), ...Object.keys(after.people)])) push(`people.${role}`, (before.people[role] ?? []).join(", "), (after.people[role] ?? []).join(", "));
     return changes;
   }
@@ -205,9 +207,19 @@ export function createEngine(deps: EngineDeps) {
   /**
    * Observing sources' commands in flight: one at a time each, never awaited by a round (one can
    * take minutes); what it came back with is taken in at the first round after, as read when it
-   * started.
+   * started, for the requests still asked as they were (a request changed or gone meanwhile is
+   * not given what was read for it). A stop aborts them (what they started is stopped too).
    */
-  const running = new Map<string, { startedMs: number; done: Promise<void>; outcome: { poll: Poll } | { error: Error } | null }>();
+  interface Run {
+    startedMs: number;
+    asked: CommandRequest[];
+    abort: AbortController;
+    done: Promise<void>;
+    outcome: { poll: Poll } | { error: Error } | null;
+  }
+  const running = new Map<string, Run>();
+  /** How long a stop waits for the commands it aborted to be gone. */
+  const STOP_RUNS_MS = 10_000;
 
   async function pollSources(nowMs: number): Promise<void> {
     for (const source of deps.sources) {
@@ -220,8 +232,8 @@ export function createEngine(deps: EngineDeps) {
         if (!run.outcome) continue;
         running.delete(source.id);
         const calls = health.calls.filter((t) => nowMs - t < 3_600_000);
-        if ("poll" in run.outcome) took(source.id, health, calls, run.outcome.poll, run.startedMs, nowMs);
-        else failed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs);
+        if ("poll" in run.outcome) took(source.id, health, calls, stillAsked(source.id, run.outcome.poll), run.startedMs, nowMs, run.asked);
+        else failed(source.id, health, calls, run.outcome.error, run.startedMs, nowMs, run.asked);
         continue;
       }
       if (nowMs < health.nextPollAt) continue;
@@ -247,8 +259,8 @@ export function createEngine(deps: EngineDeps) {
         ...(observe ? { observe } : {}),
       };
       if (observe) {
-        const started: { startedMs: number; done: Promise<void>; outcome: { poll: Poll } | { error: Error } | null } = { startedMs: nowMs, done: Promise.resolve(), outcome: null };
-        started.done = source.poll(input).then(
+        const started: Run = { startedMs: nowMs, asked: observe, abort: new AbortController(), done: Promise.resolve(), outcome: null };
+        started.done = source.poll({ ...input, signal: started.abort.signal }).then(
           (poll) => void (started.outcome = { poll }),
           (error: unknown) => void (started.outcome = { error: error instanceof Error ? error : new Error(String(error)) }),
         );
@@ -265,8 +277,8 @@ export function createEngine(deps: EngineDeps) {
     }
   }
 
-  /** What a poll that read at `readMs` brought, taken in at `nowMs` (the same for all but an observing source). */
-  function took(sourceId: string, health: SourceHealth, calls: number[], poll: Poll, readMs: number, nowMs: number): void {
+  /** What a poll that read at `readMs` brought, taken in at `nowMs` (the same for all but an observing source, which says what it `asked`). */
+  function took(sourceId: string, health: SourceHealth, calls: number[], poll: Poll, readMs: number, nowMs: number, asked: CommandRequest[] = []): void {
     const events: EventBody[] = [];
     for (const snapshot of poll.snapshots) {
       // The last read before this one: a read without a change leaves no observation, so it is
@@ -310,6 +322,7 @@ export function createEngine(deps: EngineDeps) {
       conf.kind === "flags"
         ? Object.fromEntries(conf.files.map((f) => `${sourceId}:${f.id}`).filter((k) => !got.has(k)).map((k) => [k, health.failingSince?.[k] ?? nowIso(nowMs)]))
         : {};
+    const keyFailures = conf.kind === "command" ? failingKeys(sourceId, health, poll, asked, readMs, nowMs, true) : {};
     events.push({
       type: "source.state",
       id: sourceId,
@@ -323,20 +336,60 @@ export function createEngine(deps: EngineDeps) {
         nextPollAt: next,
         ...(readAt ? { readAt } : {}),
         ...(Object.keys(failingSince).length > 0 ? { failingSince } : {}),
+        ...(Object.keys(keyFailures).length > 0 ? { keyFailures } : {}),
       },
     });
     append(events);
   }
 
-  /** A poll that failed, started at `readMs` (its failure counted from then), taken in at `nowMs`. */
-  function failed(sourceId: string, health: SourceHealth, calls: number[], error: Error, readMs: number, nowMs: number): void {
+  const backoffMs = (failures: number) => Math.min(60, 2 ** Math.min(failures, 6)) * 60_000;
+
+  /** Of a poll of an observing source, what is for the requests still asked as they were when it started. */
+  function stillAsked(sourceId: string, poll: Poll): Poll {
+    const now = versions(sourceId);
+    const snapshots = poll.snapshots.filter((s) => now.get(s.key.slice(sourceId.length + 1)) === s.fields.request);
+    return { ...poll, snapshots };
+  }
+
+  /** The version of each request an observing source is asked now, by key. */
+  const versions = (sourceId: string) => new Map([...observing(sourceId).values()].map((r) => [r.key, requestVersion(r)]));
+
+  /**
+   * The keys of an observing source not read (given nothing while others were, `others`; or in a
+   * run that failed): each retried after its own backoff, so that a key that keeps failing is not
+   * asked for every round the others are read. What was for a request no longer asked goes.
+   */
+  function failingKeys(sourceId: string, health: SourceHealth, poll: Poll, asked: CommandRequest[], readMs: number, nowMs: number, others: boolean): NonNullable<SourceHealth["keyFailures"]> {
+    const now = versions(sourceId);
+    const out = Object.fromEntries(Object.entries(health.keyFailures ?? {}).filter(([itemKey, f]) => now.get(itemKey.slice(sourceId.length + 1)) === f.request));
+    for (const s of poll.snapshots) delete out[s.key];
+    for (const q of asked) {
+      const why = poll.missing?.[q.key];
+      if (!why || now.get(q.key) !== q.version) continue;
+      const itemKey = `${sourceId}:${q.key}`;
+      const before = out[itemKey];
+      const failures = (before?.failures ?? 0) + 1;
+      const since = before?.since ?? (others ? nowIso(readMs) : undefined);
+      out[itemKey] = { request: q.version, ...(since ? { since } : {}), failures, error: why, retryAt: nowMs + backoffMs(failures) };
+    }
+    return out;
+  }
+
+  /** A poll that failed, started at `readMs` (its failure counted from then), taken in at `nowMs`; of an observing source, what it `asked` failed with it. */
+  function failed(sourceId: string, health: SourceHealth, calls: number[], error: Error, readMs: number, nowMs: number, asked: CommandRequest[] = []): void {
     const message = error.message;
     const failures = health.failures + 1;
     const auth = (error as { auth?: boolean }).auth === true;
     const nextState: SourceHealth["state"] = auth || failures >= 3 ? "down" : "degraded";
-    const backoff = Math.min(60, 2 ** Math.min(failures, 6)) * 60_000;
+    const backoff = backoffMs(failures);
+    const missing = Object.fromEntries(asked.map((q) => [q.key, message.slice(0, 300)]));
+    const keyFailures = asked.length > 0 ? failingKeys(sourceId, health, { snapshots: [], cursor: null, calls: 0, errors: [], more: false, missing }, asked, readMs, nowMs, false) : health.keyFailures;
     const events: EventBody[] = [
-      { type: "source.state", id: sourceId, health: { ...health, state: nextState, lastError: message.slice(0, 500), failures, calls: [...calls, readMs], nextPollAt: nowMs + backoff, downSince: health.downSince ?? nowIso(readMs) } },
+      {
+        type: "source.state",
+        id: sourceId,
+        health: { ...health, state: nextState, lastError: message.slice(0, 500), failures, calls: [...calls, readMs], nextPollAt: nowMs + backoff, downSince: health.downSince ?? nowIso(readMs), ...(keyFailures && Object.keys(keyFailures).length > 0 ? { keyFailures } : { keyFailures: undefined }) },
+      },
     ];
     const downSince = health.lastOkAt ? Date.parse(health.lastOkAt) : null;
     const evalKey = `eval:source-down:${sourceId}:${health.lastOkAt ?? "never"}`;
@@ -350,14 +403,17 @@ export function createEngine(deps: EngineDeps) {
 
   // ---- observing sources ------------------------------------------------------------------
 
-  /** What an observing source is asked to watch, one request a key (of two cases asking for one key, the one set last). */
+  /**
+   * What an observing source is asked to watch, one request a key (of two cases asking for one key,
+   * the one set last; the other's case is told nothing was read for its own), each with since when.
+   */
   function observing(sourceId: string): Map<string, ObserveRequest> {
     const found = new Map<string, { r: ObserveRequest; at: string }>();
     for (const { at, requests } of Object.values(state.observing ?? {})) {
       for (const r of requests) {
         if (r.source !== sourceId) continue;
         const had = found.get(r.key);
-        if (!had || had.at <= at) found.set(r.key, { r, at });
+        if (!had || had.at <= at) found.set(r.key, { r: { ...r, since: r.since ?? at }, at });
       }
     }
     return new Map([...found].map(([key, { r }]) => [key, r]));
@@ -369,30 +425,69 @@ export function createEngine(deps: EngineDeps) {
   /** The requests of an observing source a read is wanted for now (observe.ts), as its command is handed them. */
   function observeWanted(sourceId: string, nowMs: number): CommandRequest[] {
     const s = sourceConfig(sourceId) as CommandSourceConfig;
-    const readAt = state.sources[sourceId]?.health.readAt ?? {};
+    const health = state.sources[sourceId]?.health;
     const out: CommandRequest[] = [];
     for (const r of observing(sourceId).values()) {
+      // Past its deadline: not read any more (the rule is told it was not, observe.ts).
+      if (!live(r, observeGraceMs(s), nowMs)) continue;
       const itemKey = `${sourceId}:${r.key}`;
-      const read = readAt[itemKey] ?? null;
+      const version = requestVersion(r);
+      // What was read is for the request it was read for: one changed since is not read yet.
+      const read = state.items[itemKey]?.fields.request === version ? (health?.readAt?.[itemKey] ?? null) : null;
       if (!wanted(r, s.everyMinutes * 60_000, nowMs, read ? Date.parse(read) : null)) continue;
+      // A key the command gave nothing for, while it did for others: tried again after its own backoff.
+      const failing = health?.keyFailures?.[itemKey];
+      if (failing?.request === version && nowMs < failing.retryAt) continue;
       const seen = observed(itemKey, nowMs);
-      out.push({ key: r.key, window: r.window, params: r.params, last: seen?.reported && seen.readAt && seen.why !== "none-yet" ? { verdict: seen.reported, readAt: seen.readAt, freshUntil: seen.freshUntil } : null });
+      out.push({ version, key: r.key, window: r.window, params: r.params, last: seen?.reported && seen.readAt ? { verdict: seen.reported, readAt: seen.readAt, freshUntil: seen.freshUntil } : null });
     }
     return out.sort((a, b) => a.key.localeCompare(b.key));
   }
 
-  /** An observation item as a rule is to take it now; null for an item of no observing source. */
-  function observed(itemKey: string, nowMs: number): Concluded | null {
+  /**
+   * An observation item as a rule is to take it now; null for an item of no observing source.
+   * `asking`: the requests a rule asks for this round, taken in place of those in force (what was
+   * read for one before it changed is then not its).
+   */
+  function observed(itemKey: string, nowMs: number, asking?: Map<string, ObserveRequest>): Concluded | null {
     const s = config.sources.find((x) => itemKey.startsWith(`${x.id}:`));
     if (s?.kind !== "command") return null;
     const key = itemKey.slice(s.id.length + 1);
-    const read = state.sources[s.id]?.health.readAt?.[itemKey] ?? null;
-    return conclude(observing(s.id).get(key) ?? null, state.items[itemKey] ?? null, read, {
+    const health = state.sources[s.id]?.health;
+    const read = health?.readAt?.[itemKey] ?? null;
+    const r = asking?.get(itemKey) ?? observing(s.id).get(key) ?? null;
+    const failing = health?.keyFailures?.[itemKey];
+    const failure = r && failing?.request === requestVersion(r) ? failing.error : health && (health.state === "degraded" || health.state === "down") ? health.lastError : null;
+    return conclude(r, state.items[itemKey] ?? null, read, {
       everyMs: s.everyMinutes * 60_000,
       graceMs: observeGraceMs(s),
       maxLagMs: s.maxLagMinutes * 60_000,
       nowMs,
       tz,
+      failure,
+    });
+  }
+
+  /** The version of the request for a key in force now, null when none is. */
+  const versionInForce = (sourceId: string, key: string) => {
+    const r = observing(sourceId).get(key);
+    return r ? requestVersion(r) : null;
+  };
+
+  /** What a rule's output asks to have watched, as it will be read: instants in the instance's zone, rereads in order, since when (kept for a request asked before as it is). */
+  function askedOf(caseId: string, out: RuleOutput | null, nowMs: number): ObserveRequest[] {
+    const before = state.observing?.[caseId];
+    return (out?.observe ?? []).map((o) => {
+      const r: ObserveRequest = {
+        source: o.source,
+        key: o.key,
+        window: { from: nowIso(Date.parse(o.window.from)), to: nowIso(Date.parse(o.window.to)) },
+        reread: [...new Set(o.reread)].sort((a, b) => a - b),
+        params: o.params,
+      };
+      const version = requestVersion(r);
+      const had = before?.requests.find((p) => p.source === r.source && p.key === r.key && requestVersion(p) === version);
+      return { ...r, since: had ? (had.since ?? before!.at) : nowIso(nowMs) };
     });
   }
 
@@ -1067,6 +1162,16 @@ export function createEngine(deps: EngineDeps) {
     const staleList = staleNow(nowMs);
     const diff: RulesDiff = { changed: [], newCommitments: [], droppedCommitments: [], changedCommitments: [], reopenedCommitments: [] };
     const creations: Commitment[] = [];
+    // What a rule taken away (or an item gone) asked to have watched is not watched any more:
+    // nothing asks for it. Not while a rule file does not load (its last copy may run, or it may
+    // be the one), nor with the directory empty.
+    if (set.errors.length === 0 && set.files.length > 0) {
+      for (const [caseId, o] of Object.entries(state.observing ?? {})) {
+        const owner = state.items[caseId];
+        if (o.requests.length === 0 || (owner && set.rules.some((r) => r.source === owner.source))) continue;
+        gated.push({ kind: "fact", person: null, what: `${caseId} 不用再观察了（没有判断方法管它了）`, events: [{ type: "observe.set", caseId, requests: [] }] });
+      }
+    }
     for (const item of Object.values(state.items)) {
       const rule = set.rules.find((r) => r.source === item.source);
       if (!rule) continue;
@@ -1097,14 +1202,24 @@ export function createEngine(deps: EngineDeps) {
       }
       // Cold: not judged; its last assessment stays as it was.
       if (!hot.has(item.key)) continue;
-      const reads = new Set([item.source, ...switchFiles]);
-      const ctx = makeContext({ ...inputs, reads }, rule.params);
-      const judged = judge(rule, { id: item.key, primary: item, items: [item], flags }, ctx, set.fingerprint, (out) => {
+      let reads = new Set([item.source, ...switchFiles]);
+      const check = (out: RuleOutput) => {
         const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !knownNames.has(u) && !state.items[u]));
         if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
         const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => config.sources.find((s) => s.id === id)?.kind !== "command"))];
         return notObserving.length > 0 ? `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）` : null;
-      });
+      };
+      const kase = { id: item.key, primary: item, items: [item], flags };
+      let judged = judge(rule, kase, makeContext({ ...inputs, reads }, rule.params), set.fingerprint, check);
+      let asked = askedOf(item.key, judged.output, nowMs);
+      // It looked at what was read for a request it now asks for otherwise (another window, other
+      // params): judged again, on that request, for which nothing is read yet.
+      if (asked.some((a) => reads.has(`${a.source}:${a.key}`) && versionInForce(a.source, a.key) !== requestVersion(a))) {
+        const asking = new Map(asked.map((a) => [`${a.source}:${a.key}`, a]));
+        reads = new Set([item.source, ...switchFiles]);
+        judged = judge(rule, kase, makeContext({ ...inputs, reads, observed: (key: string) => observed(key, nowMs, asking) }, rule.params), set.fingerprint, check);
+        asked = askedOf(item.key, judged.output, nowMs);
+      }
       lastReads.set(item.key, reads);
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);
       // Judged on what may be old: its own source, a switch file, or an item it looked up is not fresh.
@@ -1126,15 +1241,7 @@ export function createEngine(deps: EngineDeps) {
           events: [{ type: "note.set", note: { key: item.key, field: fact.field, value: fact.value, kind: "fact", basis: "source-derived", by: rule.name, rules: set.fingerprint, at: nowIso(nowMs), evidence: fact.evidence } }],
         });
       }
-      // What it asks to have watched: the request as it will be read (instants in the instance's
-      // zone, rereads in order). A held change of rules starts no watch, as it writes no fact.
-      const asked: ObserveRequest[] = (judged.output.observe ?? []).map((o) => ({
-        source: o.source,
-        key: o.key,
-        window: { from: nowIso(Date.parse(o.window.from)), to: nowIso(Date.parse(o.window.to)) },
-        reread: [...new Set(o.reread)].sort((a, b) => a - b),
-        params: o.params,
-      }));
+      // What it asks to have watched (askedOf). A held change of rules starts no watch, as it writes no fact.
       if (JSON.stringify(state.observing?.[item.key]?.requests ?? []) !== JSON.stringify(asked)) {
         gated.push({
           kind: "fact",
@@ -1345,17 +1452,29 @@ export function createEngine(deps: EngineDeps) {
       if (!h) continue;
       // An observing source is short-lived work: told sooner, and only while something is being
       // watched (counted from when that began, not from a failure before it).
-      let watchingSince: number | null = null;
+      // Watched from when a request began to be read: its window's start, or when it was taken on if later.
+      const startOf = (r: ObserveRequest) => Math.max(Date.parse(r.window.from), Date.parse(r.since ?? "") || 0);
+      const clamp = (since: string, from: number | null) => (from !== null && Date.parse(since) < from ? nowIso(from) : since);
+      let down: Array<readonly [string, string]>;
+      const errorOf = new Map<string, string | null>([[s.id, h.lastError]]);
       if (s.kind === "command") {
-        const live = [...observing(s.id).values()].filter((r) => Date.parse(r.window.from) <= nowMs && nowMs <= endOf(r) + observeGraceMs(s));
-        if (live.length === 0) continue;
-        watchingSince = Math.min(...live.map((r) => Date.parse(r.window.from)));
+        // Still read (observe.ts live): the scheduler reads by the same, so an outage is told while reads are still tried.
+        const reading = [...observing(s.id).values()].filter((r) => live(r, observeGraceMs(s), nowMs));
+        if (reading.length === 0) continue;
+        const watchingSince = Math.min(...reading.map(startOf));
+        down = h.downSince ? [[s.id, clamp(h.downSince, watchingSince)]] : [];
+        // A key the command keeps giving nothing for, while it does for others (the source failing as a whole is told as that).
+        for (const r of reading) {
+          const f = h.keyFailures?.[`${s.id}:${r.key}`];
+          if (!f?.since || f.request !== requestVersion(r)) continue;
+          down.push([`${s.id}:${r.key}`, clamp(f.since, startOf(r))]);
+          errorOf.set(`${s.id}:${r.key}`, f.error);
+        }
+      } else {
+        down = [...(h.downSince ? [[s.id, h.downSince] as const] : []), ...Object.entries(h.failingSince ?? {})];
       }
       const limitMs = s.kind === "command" && s.downAfterMinutes ? s.downAfterMinutes * 60_000 : config.policy.sourceDownHours * 3_600_000;
       const limitText = limitMs < 3_600_000 ? `${Math.round(limitMs / 60_000)} 分钟` : `${limitMs / 3_600_000} 小时`;
-      const down = [...(h.downSince ? [[s.id, h.downSince] as const] : []), ...Object.entries(h.failingSince ?? {})].map(
-        ([what, since]) => [what, watchingSince !== null && Date.parse(since) < watchingSince ? nowIso(watchingSince) : since] as const,
-      );
       for (const [what, since] of down) {
         if (nowMs - Date.parse(since) < limitMs) continue;
         const key = `source-down:${what}:${since}`;
@@ -1383,7 +1502,7 @@ export function createEngine(deps: EngineDeps) {
               "最后一次的错误：",
               "",
               "```",
-              (h.lastError ?? "（没有记下）").slice(0, 500),
+              ((errorOf.has(what) ? errorOf.get(what) : h.lastError) ?? "（没有记下）").slice(0, 500),
               "```",
               "",
               "常见原因：登录过期、地址变了、网络或服务器出了问题。",
@@ -1407,7 +1526,11 @@ export function createEngine(deps: EngineDeps) {
     // An outage that is over: its card, if not answered yet, goes.
     for (const c of Object.values(state.commitments)) {
       if (c.origin.by !== "controller" || !c.key.startsWith("source-down:") || ongoing.has(c.key)) continue;
-      const back = state.sources[c.key.split(":")[1] ?? ""]?.health.state === "ok";
+      const sourceId = c.key.split(":")[1] ?? "";
+      const h = state.sources[sourceId]?.health;
+      // A key of an observing source still failing, no longer told: it is not read any more.
+      const what = c.title.replace(/ 读不到$/, "");
+      const back = h?.state === "ok" && !h.keyFailures?.[what]?.since;
       if (c.status === "scheduled" || c.status === "waiting") events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: back ? "来源恢复了" : "不用再读了", updatedAt: nowIso(nowMs) } });
     }
     append(events);
@@ -1814,6 +1937,10 @@ export function createEngine(deps: EngineDeps) {
     async settled(): Promise<void> {
       await Promise.all([...running.values()].map((r) => r.done));
     },
+    /** The observing commands in flight now: what each was started for (for tests and the page). */
+    runningNow(): Array<{ source: string; startedMs: number; keys: string[] }> {
+      return [...running].map(([source, r]) => ({ source, startedMs: r.startedMs, keys: r.asked.map((q) => q.key) }));
+    },
     /** After a start: cards whose carriers died with the previous process get new ones. */
     async recover(): Promise<void> {
       const nowMs = deps.now();
@@ -1872,12 +1999,17 @@ export function createEngine(deps: EngineDeps) {
     },
 
     /**
-     * Stops for good: a tick in flight does no more after the step it is in, and none starts.
-     * Resolves once the one in flight is over.
+     * Stops for good: a tick in flight does no more after the step it is in, and none starts; the
+     * observing commands in flight are stopped (with what they started). Resolves once the tick is
+     * over and the commands are gone, or STOP_RUNS_MS after they were stopped.
      */
-    stop(): Promise<void> {
+    async stop(): Promise<void> {
       stopped = true;
-      return inFlight;
+      for (const r of running.values()) r.abort.abort();
+      let waited: ReturnType<typeof setTimeout> | null = null;
+      await Promise.race([Promise.all([...running.values()].map((r) => r.done)), new Promise<void>((resolve) => (waited = setTimeout(resolve, STOP_RUNS_MS)))]);
+      if (waited) clearTimeout(waited);
+      await inFlight;
     },
 
     card(cardId: string): CardContent | null {

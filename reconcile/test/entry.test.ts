@@ -60,7 +60,10 @@ test("the entry registers, starts in dry-run, reconciles once, writes status and
     assert.ok(existsSync(path.join(dataDir, "status.json")));
     assert.match(readFileSync(path.join(dataDir, "plan.md"), "utf8"), /# 事项追踪（test，演练）/);
   } finally {
-    (cleanup as () => void)();
+    // The host awaits it: the engine stopped and the journal closed once it resolves.
+    const done = (cleanup as () => Promise<void>)();
+    assert.ok(done instanceof Promise);
+    await done;
     rmSync(dir, { recursive: true, force: true });
   }
 });

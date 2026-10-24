@@ -15,8 +15,12 @@ import type { Poll, PollInput, Source } from "./source";
 // stdin:  { "now": "<ISO>", "requests": [{ "key", "window": { "from", "to" }, "params": {…}, "last": { "verdict", "readAt", "freshUntil" } | null }] }
 // stdout: { "results": [{ "key", "verdict", "freshUntil", "observedAt"?, "numbers": {…}, "notes": ["…"] }], "errors": ["…"], "meta"?: {…} }
 // An error "auth" in `errors` says its credentials do not work: the source is down at once.
+// Not one result for what was asked is a read that failed; a result missing for some keys only is
+// a failure of those keys (Poll.missing), the others are taken.
 
 export interface CommandRequest {
+  /** Which request it is (observe.ts requestVersion): kept with what is read for it, not handed to the command. */
+  version: string;
   key: string;
   window: { from: string; to: string };
   params: Record<string, unknown>;
@@ -24,8 +28,10 @@ export interface CommandRequest {
 }
 
 const instant = z.string().refine((v) => !Number.isNaN(Date.parse(v)), "not an instant");
-/** The most what a result found may take, as JSON: it is kept in the journal with every read. */
+/** The most what a result found may take, as JSON in UTF-8: it is kept in the journal with every read. */
 export const NUMBERS_BYTES = 16 * 1024;
+/** Of a result's notes, how many are kept: what is past it is left out, not refused. */
+export const NOTES_KEPT = 10;
 // Not trusted: one clean line, cut short (untrusted.ts).
 const clean = (text: string, max: number) => cleanText(text, max) ?? "";
 
@@ -40,9 +46,13 @@ const result = z
     /** What it found, for the rule to read: any JSON object, not read here; kept as it came, within NUMBERS_BYTES. */
     numbers: z
       .record(z.string(), z.unknown())
-      .refine((n) => JSON.stringify(n).length <= NUMBERS_BYTES, `numbers over ${NUMBERS_BYTES} bytes as JSON`)
+      .refine((n) => Buffer.byteLength(JSON.stringify(n), "utf8") <= NUMBERS_BYTES, `numbers over ${NUMBERS_BYTES} bytes as JSON`)
       .default({}),
-    notes: z.array(z.string().max(1000)).max(10).default([]),
+    /** Said for people: the first NOTES_KEPT kept, each cut short (below); strings still. */
+    notes: z
+      .array(z.string())
+      .default([])
+      .transform((n) => n.slice(0, NOTES_KEPT)),
   })
   .strict();
 
@@ -66,8 +76,15 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
     async poll(input: PollInput): Promise<Poll> {
       const requests = input.observe ?? [];
       if (requests.length === 0) return { snapshots: [], cursor: null, calls: 0, errors: [], more: false };
-      const stdin = JSON.stringify({ now: input.now, requests });
-      const r = await deps.exec(config.command, [], { timeoutMs: config.timeoutSeconds * 1000, maxBytes: config.maxOutputBytes, input: stdin, ...(config.cwd ? { cwd: config.cwd } : {}) });
+      const stdin = JSON.stringify({ now: input.now, requests: requests.map(({ version: _version, ...q }) => q) });
+      const r = await deps.exec(config.command, [], {
+        timeoutMs: config.timeoutSeconds * 1000,
+        maxBytes: config.maxOutputBytes,
+        input: stdin,
+        ...(config.cwd ? { cwd: config.cwd } : {}),
+        ...(input.signal ? { signal: input.signal } : {}),
+      });
+      if (r.aborted) throw new Error("观察命令被停下了（检查停了）");
       if (r.timedOut) throw new Error(`观察命令 ${config.timeoutSeconds} 秒没跑完`);
       if (r.truncated) throw new Error(`观察命令的输出超过 ${config.maxOutputBytes} 字节`);
       if (r.code !== 0) throw new Error(`观察命令退出码 ${r.code ?? "无"}：${clean(r.stderr, 300) || "（没有输出错误）"}`);
@@ -99,6 +116,7 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
         }
         seen.add(res.key);
         const fields: Record<string, string> = {
+          request: q.version,
           verdict: res.verdict,
           freshUntil: res.freshUntil ?? "",
           "window.from": q.window.from,
@@ -122,8 +140,12 @@ export function createCommandSource(config: CommandSourceConfig, deps: { exec: E
           observedAt: input.now,
         });
       }
-      for (const q of requests) if (!seen.has(q.key)) errors.push(`${q.key}: 观察命令没给结果`);
-      return { snapshots, cursor: null, calls: 1, errors: errors.slice(0, 20), more: false };
+      const missing: Record<string, string> = {};
+      for (const q of requests) if (!seen.has(q.key)) missing[q.key] = "观察命令没给结果";
+      // Nothing for anything asked: not a read.
+      if (snapshots.length === 0) throw new Error(`观察命令没给要的结果${errors.length > 0 ? `：${errors.slice(0, 3).join("；")}` : ""}`);
+      for (const [key, why] of Object.entries(missing)) errors.push(`${key}: ${why}`);
+      return { snapshots, cursor: null, calls: 1, errors: errors.slice(0, 20), more: false, ...(Object.keys(missing).length > 0 ? { missing } : {}) };
     },
   };
 }
