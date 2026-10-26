@@ -160,6 +160,8 @@ const output = z
   .strict();
 
 export type RuleOutput = z.output<typeof output>;
+/** The output schema, for what reads a rule output back from a capsule. */
+export const ruleOutputSchema = output;
 
 export interface Case {
   id: string;
@@ -228,6 +230,8 @@ interface RuleModule {
 export interface LoadedRule {
   file: string;
   name: string;
+  /** The sha256 of the text that was loaded (what a capsule says it was judged by); absent on a rule made by hand in a test. */
+  sha256?: string;
   source: string;
   /** The ids of the stages it declares. */
   stages: string[];
@@ -338,7 +342,7 @@ async function loadOne(file: string, text: string, loaded: LoadedRule[]): Promis
       return { error: `stages: ${(error as Error).message}` };
     }
     if (loaded.some((r) => r.name === m.name)) return { error: `a rule named "${m.name}" is already loaded` };
-    return { file, name: m.name, source: m.applies.source, stages: stageMeta.map((s) => s.id), stageMeta, params: m.params, flows: declared.data, assess: m.assess };
+    return { file, name: m.name, sha256: sha256(text), source: m.applies.source, stages: stageMeta.map((s) => s.id), stageMeta, params: m.params, flows: declared.data, assess: m.assess };
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -424,7 +428,7 @@ export async function loadRules(dir: string, keepRules: KeepRules | null = null)
   return { fingerprint: hash.digest("hex").slice(0, 16), dirFingerprint, files: files.map((f) => f.file), rules, errors, kept: keptNow, keepErrors };
 }
 
-function deepFreeze<T>(value: T): T {
+export function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object") {
     for (const child of Object.values(value)) deepFreeze(child);
     Object.freeze(value);
@@ -520,6 +524,88 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
       return seen ? copy(seen) : null;
     },
   });
+}
+
+/**
+ * How each member of the rule's context is recorded for a capsule (server/capsule.ts): `value` is
+ * part of the capsule's clock (or the rule's own, `params`); `data` is read from the controller's
+ * state, so each call is taped with what it gave; `derived` is worked out from the clock and the
+ * holiday tables alone, so it is not taped and a replay works it out again. A member added to
+ * RuleContext has to be classed here (the type will not let it go without), and a `data` member
+ * that is not taped is a hole a replay falls into.
+ */
+export const CTX_KIND: Record<keyof RuleContext, "value" | "data" | "derived"> = {
+  now: "value",
+  tz: "value",
+  params: "value",
+  item: "data",
+  siblings: "data",
+  observations: "data",
+  notes: "data",
+  commitments: "data",
+  flag: "data",
+  flagsOf: "data",
+  naming: "data",
+  fresh: "data",
+  run: "data",
+  observation: "data",
+  workdaysBetween: "derived",
+  addWorkdays: "derived",
+  at: "derived",
+  local: "derived",
+};
+
+/** One call a rule made to a `data` member of its context, and what it was given. */
+export interface CtxCall {
+  m: string;
+  args: unknown[];
+  result: unknown;
+}
+
+/** The key a call is looked up by: the member and its arguments as JSON. */
+export const callKey = (m: string, args: unknown[]): string => `${m}\u0000${JSON.stringify(args)}`;
+
+/**
+ * A context that hands the rule exactly what `ctx` does and tapes every call to a `data` member:
+ * the first call of each (member, arguments) with its result as JSON. Nothing about the rule's
+ * judgment changes; what the rule is given is the same objects.
+ */
+export function recordingContext(ctx: RuleContext): { ctx: RuleContext; calls(): CtxCall[] } {
+  const taped = new Map<string, CtxCall>();
+  const wrapped: Record<string, unknown> = {};
+  for (const [name, member] of Object.entries(ctx)) {
+    if (typeof member !== "function" || CTX_KIND[name as keyof RuleContext] !== "data") {
+      wrapped[name] = member;
+      continue;
+    }
+    wrapped[name] = (...args: unknown[]) => {
+      const result = (member as (...a: unknown[]) => unknown)(...args);
+      const key = callKey(name, args);
+      if (!taped.has(key)) taped.set(key, { m: name, args: JSON.parse(JSON.stringify(args)) as unknown[], result: result === undefined ? null : (JSON.parse(JSON.stringify(result)) as unknown) });
+      return result;
+    };
+  }
+  return { ctx: Object.freeze(wrapped) as unknown as RuleContext, calls: () => [...taped.values()] };
+}
+
+/** What `outputCheck` asks about names an output refers to. */
+export interface OutputNames {
+  /** A configured source id or a file of a file source ("<source>:<file>"). */
+  known(name: string): boolean;
+  /** A data item the controller already has. */
+  item(key: string): boolean;
+  /** A configured observing source (kind "command"). */
+  observing(sourceId: string): boolean;
+}
+
+/** What the controller knows that the schema does not: names an output refers to must exist. An error string fails the judgment. */
+export function outputCheck(names: OutputNames): (out: RuleOutput) => string | null {
+  return (out) => {
+    const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !names.known(u) && !names.item(u)));
+    if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
+    const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => !names.observing(id)))];
+    return notObserving.length > 0 ? `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）` : null;
+  };
 }
 
 export interface Judged {

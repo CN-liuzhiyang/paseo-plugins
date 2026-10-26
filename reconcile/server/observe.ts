@@ -40,7 +40,7 @@ export interface Concluded {
 const MIN = 60_000;
 
 /** JSON with an object's keys in order: the same params however they were written. */
-function canonical(value: unknown): string {
+export function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.keys(value)

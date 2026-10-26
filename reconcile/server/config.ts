@@ -227,6 +227,8 @@ export interface Config {
   policy: Policy;
   calendar: Calendar;
   calendarYears: string[];
+  /** The holiday tables as they were read, by year: what a capsule keeps of the calendar. */
+  calendarTables: Record<string, CalendarYear>;
   rulesDir: string;
   /** How a flow is started (flows.json); null: this instance starts none. */
   launcher: LauncherConfig | null;
@@ -300,6 +302,7 @@ export function loadConfig(dir: string, over?: string): Config {
     policy,
     calendar: createCalendar(years),
     calendarYears: Object.keys(years).sort(),
+    calendarTables: years,
     rulesDir: pick("rules"),
     launcher,
   };

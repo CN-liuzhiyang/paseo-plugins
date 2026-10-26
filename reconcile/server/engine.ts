@@ -11,7 +11,7 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
+import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, type CommitmentSpec, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
@@ -1696,11 +1696,10 @@ export function createEngine(deps: EngineDeps) {
       // Judged now, so what the runs of this item that have ended came to has been read by its rule.
       for (const r of recs()) if (r.caseId === item.key && r.ended) endRead.add(r.runId);
       let reads = new Set([item.source, ...switchFiles]);
+      const outputOk = outputCheck({ known: (name) => knownNames.has(name), item: (key) => !!state.items[key], observing: (id) => config.sources.find((s) => s.id === id)?.kind === "command" });
       const check = (out: RuleOutput) => {
-        const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !knownNames.has(u) && !state.items[u]));
-        if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
-        const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => config.sources.find((s) => s.id === id)?.kind !== "command"))];
-        if (notObserving.length > 0) return `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）`;
+        const wrong = outputOk(out);
+        if (wrong) return wrong;
         const strangers = [...new Set((out.run ?? []).map((r) => r.owner).filter((o): o is string => !!o && !config.persons[o]))];
         return strangers.length > 0 ? `run 里的 owner ${strangers.map((u) => `"${u}"`).join("、")} 不是 persons.json 里的人` : null;
       };
