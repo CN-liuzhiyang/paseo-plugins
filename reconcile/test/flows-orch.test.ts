@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -36,9 +36,28 @@ export default flow({
 });
 `;
 
+/** A flow that writes a great deal to stdout before it returns, as a flow that logs does: the runner prints its result after all of it. */
+const NOISY = `import { flow, count } from ${JSON.stringify(FLOW_MJS)};
+export default flow({
+  name: "demo-noisy",
+  description: "spends nothing: writes a great deal to stdout, then returns",
+  phases: [{ id: "work", title: "work" }],
+  inputs: { noise: count("bytes written to stdout before the result") },
+  grants: [],
+  summarize: () => "noisy done",
+  async run({ noise }, $) {
+    return await $.phase("work", async () => {
+      await $.do("shout", () => { process.stdout.write("x".repeat(Math.max(0, noise - 1)) + "\\n"); });
+      return { found: 3 };
+    });
+  },
+});
+`;
+
 /** A rule that asks for runs as its item's `Runs` field says, and shows what it reads of them. */
 const RULE = `export const flows = {
   demo: { flow: "demo-triage", timeout: "1m", maxUsd: 0.1 },
+  noisy: { flow: "demo-noisy", timeout: "1m", maxUsd: 0.1 },
   hurried: { flow: "demo-triage", timeout: "1s", maxUsd: 0.1 },
   missing: { flow: "no-such-flow", maxUsd: 0.1 },
 };
@@ -83,6 +102,7 @@ async function withRig(body: (rig: Rig) => Promise<void>, options: { envDir?: st
   mkdirSync(flowsDir);
   mkdirSync(logDir);
   writeFileSync(path.join(flowsDir, "demo-triage.mjs"), DEMO);
+  writeFileSync(path.join(flowsDir, "demo-noisy.mjs"), NOISY);
   const configFile = path.join(base, "orch-config.json");
   writeFileSync(configFile, JSON.stringify({ flowsDirs: [flowsDir] }));
   const env = { ...process.env, ORCH_CONFIG: configFile, ORCH_LOG_DIR: logDir };
@@ -388,4 +408,25 @@ test("N7B-01: the runtime's files for a run are gone (cleaned) before the contro
     assert.deepEqual(Object.keys(flowsOf(w)), [id]);
     await tick();
     assert.match(headline(w, 1), /^r demo:k1=done\{"word":"once"/);
+  }));
+
+// ---- the result is printed last (N7C-03) -----------------------------------------------------------------------
+
+test("N7C-03: a flow that wrote more than the window to stdout before its result: the runtime's files are gone, and it is still not run again", () =>
+  withRig(async ({ w, logDir, runsDir, flowsDeps, starts, skew, tick }) => {
+    const id = ids(1, "noisy", "k1", "demo-noisy");
+    ask(w, 1, [{ flow: "noisy", key: "k1", input: { noise: 1_300_000 }, label: "吵" }], "noisy:k1");
+    await tick();
+    assert.equal(starts.length, 1);
+    await waitFor(() => ended(logDir, id) && printed(flowsDeps.dir, id), "the run to end and print its result");
+    assert.ok(statSync(path.join(flowsDeps.dir, `${id}.out`)).size > 1_300_000, "more was printed than the controller reads at a time");
+    rmSync(runsDir, { recursive: true, force: true });
+    await w.crash();
+    skew.ms += 120_000;
+    await tick();
+    await tick();
+    const rec = flowsOf(w)[id]!;
+    assert.equal(starts.length, 1, "the result is at the end of the file, and it is the end that is read: not a second run, and a second payment");
+    assert.deepEqual([rec.ended?.outcome, rec.ended?.summary, rec.ended?.value, rec.ended?.valueDropped], ["done", "noisy done", { found: 3 }, false]);
+    assert.deepEqual(Object.keys(flowsOf(w)), [id]);
   }));

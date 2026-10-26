@@ -184,12 +184,15 @@ export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value">): string |
   return why !== null && /[\p{L}\p{N}]/u.test(why) ? why : null;
 }
 
+/** What a place that may draw Markdown or tags (a message) draws from a character: a link, a tag, code, a mention, emphasis, a table, a heading. */
+const DRAWN: Record<string, string> = { "[": "［", "]": "］", "<": "＜", ">": "＞", "`": "｀", "@": "＠", "*": "＊", "_": "＿", "~": "～", "|": "｜", "#": "＃" };
+
 /**
- * A sentence of the flow's for a place that may draw Markdown or tags (a message): what makes a link, a tag or code is put in its
- * full-width form, so that it reads the same and is not drawn as one (a backslash would show as it is where nothing is drawn).
+ * A sentence of the flow's (its summary, the reason it stopped, the error it ended with) for a place that may draw Markdown or tags (a
+ * message): what would be drawn is put in its full-width form, so that it reads the same and is not drawn as anything (a backslash
+ * would show as it is where nothing is drawn). A bare address stays as it is: it shows as the address it is.
  */
-const plainForMessage = (text: string): string =>
-  text.replace(/[\[\]<>`]/g, (c) => ({ "[": "［", "]": "］", "<": "＜", ">": "＞", "`": "｀" })[c]!);
+const plainForMessage = (text: string): string => text.replace(/[\[\]<>`@*_~|#]/g, (c) => DRAWN[c]!);
 
 /** What a rule is told of a run. */
 export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
@@ -243,9 +246,10 @@ export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEn
   // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done".
   if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainForMessage(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。详情在「事项追踪」里。`, status: "failed" };
   if (end.outcome === "done" || end.outcome === "stopped") {
-    return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${end.summary ?? (end.outcome === "done" ? "完成了" : "中止了")}。详情在「事项追踪」里。`, status: "succeeded" };
+    return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${plainForMessage(end.summary ?? (end.outcome === "done" ? "完成了" : "中止了"))}。详情在「事项追踪」里。`, status: "succeeded" };
   }
-  return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainWhy(end)}${end.why ? `（${cleanText(end.why, 120)}）` : ""}，要自己看。`, status: "failed" };
+  const why = end.why ? cleanText(end.why, 120) : null;
+  return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainWhy(end)}${why ? `（${plainForMessage(why)}）` : ""}，要自己看。`, status: "failed" };
 }
 
 // ---- the affair a run is for -------------------------------------------------------------------------

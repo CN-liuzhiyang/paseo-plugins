@@ -622,9 +622,11 @@ const NOWHERE: RunProbe = { state: "absent", safeToRestart: false, refused: null
 
 // ---- what the runner printed --------------------------------------------------------------------
 
-/** How much of a runner's output file is read: its result is one JSON object, the value in it already as large as the flow made it. */
+/** How much of a runner's output file is read at a time: its result is one JSON object, printed last, the value in it as large as the flow made it. */
 const OUT_READ_BYTES = 1024 * 1024;
-const OUT_RESULT = /(?:^|\n)\{\s*\n\s*"ok":/g;
+// The top level of the printed result: `{`, a new line, `"ok"` at two spaces. Not tied to the start of a line (a flow that wrote a last line without
+// its new line has the result glued to it), and no object inside the result can be taken for it: those are indented four spaces or more.
+const OUT_RESULT = /\{\r?\n {2}"ok":/g;
 const OUT_HEAD = /^\{\s*"ok":\s*(?:true|false),\s*"outcome":\s*"(done|stopped|failed|timeout)"/;
 
 /**
@@ -638,7 +640,7 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
   const found = [...text.matchAll(OUT_RESULT)];
   const last = found[found.length - 1];
   if (!last) return null;
-  const body = text.slice(last.index! + (text[last.index!] === "\n" ? 1 : 0));
+  const body = text.slice(last.index!);
   let result: Record<string, unknown> | null = null;
   try {
     result = obj(JSON.parse(body) as unknown);
@@ -665,7 +667,12 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
   return { state: "ended", safeToRestart: false, refused: null, view: null, end, costUsd, costKnown, unread: 0, reachable: true, gate: false, slow: false };
 }
 
-/** The result a run printed, read from the runner's output file in `dir` (<runId>.out); null when there is none to be read. */
+/**
+ * The result a run printed, read from the runner's output file in `dir` (<runId>.out); null when there is none to be read.
+ * The runner prints its result last, after whatever the flow wrote to stdout, so it is the END of the file that is read (the last
+ * `OUT_READ_BYTES`). A result longer than that began before the window; then the head of the file, where it would be if nothing else
+ * was printed, says how it ended.
+ */
 export function createOutReader(dir: string): (runId: string) => RunProbe | null {
   return (runId) => {
     let fd: number;
@@ -676,9 +683,14 @@ export function createOutReader(dir: string): (runId: string) => RunProbe | null
     }
     try {
       const stat = fstatSync(fd);
-      const buffer = Buffer.alloc(Math.min(stat.size, OUT_READ_BYTES));
-      readSync(fd, buffer, 0, buffer.length, 0);
-      return probeFromRunnerOutput(buffer.toString("utf8"), stat.mtimeMs);
+      const read = (from: number): string => {
+        const buffer = Buffer.alloc(Math.min(stat.size - from, OUT_READ_BYTES));
+        const got = readSync(fd, buffer, 0, buffer.length, from);
+        return buffer.toString("utf8", 0, got);
+      };
+      const tail = probeFromRunnerOutput(read(Math.max(0, stat.size - OUT_READ_BYTES)), stat.mtimeMs);
+      if (tail || stat.size <= OUT_READ_BYTES) return tail;
+      return probeFromRunnerOutput(read(0), stat.mtimeMs);
     } catch {
       return null;
     } finally {

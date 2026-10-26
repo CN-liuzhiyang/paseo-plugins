@@ -209,8 +209,8 @@ test("N7B-07: in a message what would make a link, a tag or code is not sent as 
       w.flows.probes.set(idFor(2, "k1"), stop({ why: "。" }, 0));
       await advance(w, 10);
       const sent = w.deliveries.find((d) => d.text.startsWith("#1"))!;
-      assert.equal(/[\[\]<>`]/.test(sent.text), false, sent.text);
-      assert.equal(sent.text, "#1 初查没跑完：［点这里修复］(https://evil.example/x) ＜b＞x＜/b＞ ｀code｀ **bold**。详情在「事项追踪」里。");
+      assert.equal(/[\[\]<>`*]/.test(sent.text), false, sent.text);
+      assert.equal(sent.text, "#1 初查没跑完：［点这里修复］(https://evil.example/x) ＜b＞x＜/b＞ ｀code｀ ＊＊bold＊＊。详情在「事项追踪」里。");
       assert.equal(w.engine.graph("gcp-demo:1")!.runs[0]!.why, raw, "the page is not Markdown");
       const marks = w.deliveries.find((d) => d.text.startsWith("#2"))!;
       assert.equal(marks.title, "初查好了", "marks only: finished, not 'did not get done: 。'");

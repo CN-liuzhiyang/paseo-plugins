@@ -664,7 +664,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     return !h?.lastOkAt || h.state === "down" || nowMs - Date.parse(h.lastOkAt) > 3 * Math.max(s.everyMinutes, s.offHoursEveryMinutes) * 60_000;
   });
   if (stale.length > 0) caveats.push(`现在 ${stale.map((s) => s.id).join("、")} 有一阵没读到了，推演按能读算；真跑时依赖它的问题会等它恢复。`);
-  if (state.rules.held) caveats.push(`在用的 daemon 上有一版判断方法正被停着（${state.rules.held.fingerprint}），在用的这边按停着算。`);
+  if (state.rules.held) caveats.push(`在用的 daemon 上有一版判断方法正被停着（${state.rules.held.fingerprint}），在用的这边按停着算。${base.engine.heldFlows().length > 0 ? "排队等空位的流程请求，推演分不出哪些是被停着的那一版带来的，都当它带来的重新算进熔断：熔断数可能比 daemon 真算的多。" : ""}`);
 
   const local = (e: Preview["inUse"]["errors"][number]) => (e.fallback ? { ...e, fallback: iso(Date.parse(e.fallback), tz) } : e);
   const page = { rows, stages };
