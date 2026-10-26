@@ -56,8 +56,11 @@ async function withDemo(body: (t: Tools) => Promise<void>, options: { inUse?: st
     };
     await body(tools);
   } finally {
-    w.close();
-    rmSync(candidate, { recursive: true, force: true });
+    try {
+      w.close();
+    } finally {
+      rmSync(candidate, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   }
 }
 
