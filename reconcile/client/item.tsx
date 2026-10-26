@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { clockText, durationText, SITUATION, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
+import { clockText, durationText, retryLabel, SITUATION, troubleLine, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
 import { answerRpc, flowRpc, graphRpc } from "../shared/rpc";
 import { BallChip, StageChart, StageRail } from "./chart";
 import { go, jumpOf } from "./jump";
@@ -158,14 +158,13 @@ function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolea
       {runs.map((r) => (
         <View key={r.runId} style={{ borderRadius: 10, borderWidth: 1, borderColor: ui.tone("warning"), backgroundColor: ui.theme.colors.surface1, padding: 10, gap: 6 }}>
           <Text style={ui.styles.small} selectable>
-            流程「{r.flow}」{r.situation === "notstarted" ? "没起来" : r.situation === "lost" ? "断了" : r.situation === "slow" ? "可能卡住了" : "失败了"}
-            {r.why ? `：${r.why}` : ""}。不会自动重来。
+            {troubleLine(r)}
           </Text>
           <View style={[ui.styles.row, { gap: 8, flexWrap: "wrap" }]}>
             {r.actions!.includes("retry") ? (
               <Button
                 icon="RotateCw"
-                label={r.situation === "notstarted" ? "重新跑一次（上次没花钱）" : `重新跑一次（会再花钱${r.retry?.estimateUsd ? `，上次花了 $${r.retry.estimateUsd.toFixed(2)}` : ""}）`}
+                label={retryLabel(r)}
                 disabled={busy}
                 onPress={() => void press(r.runId, "retry")}
               />

@@ -3,7 +3,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
 import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
-import type { Action, Annotation, Assessment, Card, Commitment, FlowRec, FlowResult, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
+import type { Action, Annotation, Assessment, Card, Commitment, FlowEnd, FlowRec, FlowResult, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
@@ -14,7 +14,7 @@ import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
-import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, type Launcher, type Live } from "./flows";
+import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
 import type { Store } from "./store";
@@ -608,6 +608,8 @@ export function createEngine(deps: EngineDeps) {
   const adminId = () => Object.values(config.persons).find((p) => p.admin)?.id ?? null;
   /** A run that came to no result, so that a person may ask for it again (and none that did). */
   const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
+  /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (flows.ts unfinishedWhy). */
+  const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
   /** The flow a rule's name for one stands for now (rules.ts `flows`); null for a name the item's rule does not declare. */
   const declaredFlow = (caseId: string, name: string): string | null => {
@@ -813,14 +815,15 @@ export function createEngine(deps: EngineDeps) {
         if (before?.status === "done" || before?.status === "suppressed") continue;
         const tries = (before?.tries ?? 0) + 1;
         if (tries > MAX_NOTIFY_TRIES) continue;
-        const summary = `发 ${labelOf(target)}：${rec.label}${rec.ended.outcome === "done" || rec.ended.outcome === "stopped" ? "好了" : "没跑完"}`;
+        const came = (rec.ended.outcome === "done" || rec.ended.outcome === "stopped") && unfinishedWhy(rec.ended) === null;
+        const summary = `发 ${labelOf(target)}：${rec.label}${came ? "好了" : "没跑完"}`;
         // Told while it is news: past FLOW_TELL_MS it is left for the next card (the page has it), however it came to be late.
         if (nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > FLOW_TELL_MS) {
           append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "suppressed", "结束得太久了，不单发，并进下一张卡", nowMs), tries: before?.tries ?? 0 } }]);
           continue;
         }
         if (!mayReach(person, [domain], 0, nowMs, calendar).send) {
-          plan.push({ at: nowIso(nowMs), kind: "deferred", person: person.id, summary: `不打扰时段，先不发 ${labelOf(target)}：${rec.label} ${rec.ended.outcome === "done" ? "好了" : "没跑完"}` });
+          plan.push({ at: nowIso(nowMs), kind: "deferred", person: person.id, summary: `不打扰时段，先不发 ${labelOf(target)}：${rec.label} ${came ? "好了" : "没跑完"}` });
           continue;
         }
         const message = endedMessage(rec, rec.ended);
@@ -846,11 +849,15 @@ export function createEngine(deps: EngineDeps) {
   function viewOfRec(rec: FlowRec, read: RunView | undefined, currentStage: string | undefined): RunView {
     const live = liveOf.get(rec.runId) ?? null;
     const outcome = rec.ended?.outcome ?? null;
+    // A stop that says in its value it did not get done what it was for: "unchecked", a run in trouble that is not a failure.
+    const unfinished = rec.ended ? unfinishedWhy(rec.ended) : null;
     const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId === rec.runId;
     const situation: RunView["situation"] = rec.dismissed
       ? "done"
       : outcome === "done" || outcome === "stopped"
-        ? "done"
+        ? unfinished !== null
+          ? "unchecked"
+          : "done"
         : outcome === "lost"
           ? "lost"
           : outcome === "not-started"
@@ -866,7 +873,7 @@ export function createEngine(deps: EngineDeps) {
                     : "doing";
     // The way out is for a run in trouble in the stage the item is in; a stage it has left is history.
     const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
-    const inTrouble = (outcome !== null && RETRYABLE.has(outcome)) || (outcome === null && situation === "slow");
+    const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
     const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here ? [...(outcome !== null && latest ? (["retry"] as const) : []), "mine", "fold"] : [];
     const base: RunView = read ?? {
       runId: rec.runId,
@@ -895,16 +902,16 @@ export function createEngine(deps: EngineDeps) {
       situation,
       endedAt: rec.ended ? (rec.ended.completedAt ?? rec.ended.at) : base.endedAt,
       request: flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key),
-      outcome: rec.ended ? (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome))) : base.outcome,
+      outcome: rec.ended ? (unfinished !== null ? `没查成：${unfinished}` : (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome)))) : base.outcome,
       costUsd: rec.ended?.costUsd ?? base.costUsd,
       own: true,
       round: rec.round,
-      why: rec.ended?.why ?? null,
+      why: unfinished ?? rec.ended?.why ?? null,
       ...(rec.dismissed ? { dismissed: rec.dismissed.how } : {}),
       ...(suspects.has(rec.runId) && situation !== "done" ? { maybeAsleep: true } : {}),
       ...(drifted.has(rec.runId) ? { inputDrifted: true } : {}),
       ...(unwanted(rec) ? { unwanted: true } : {}),
-      retry: outcome !== null && RETRYABLE.has(outcome) && latest ? { round: rec.round + 1, estimateUsd: rec.ended!.costUsd > 0 ? rec.ended!.costUsd : null } : null,
+      retry: rec.ended && noResult(rec.ended) && latest ? { round: rec.round + 1, estimateUsd: rec.ended!.costUsd > 0 ? rec.ended!.costUsd : null } : null,
       actions: actions,
     };
   }
@@ -924,7 +931,7 @@ export function createEngine(deps: EngineDeps) {
     const rec = state.flows?.[runId];
     if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
     if (rec.dismissed) return { ok: false, detail: "已经收起过了" };
-    const trouble = (rec.ended && RETRYABLE.has(rec.ended.outcome)) || (!rec.ended && liveOf.get(runId) === "slow");
+    const trouble = (rec.ended && noResult(rec.ended)) || (!rec.ended && liveOf.get(runId) === "slow");
     if (!trouble) return { ok: false, detail: rec.ended ? "这个运行是正常结束的，不用收起" : "这个运行还在正常地跑，没有出问题" };
     append([{ type: "flow.dismissed", runId, how, by }]);
     return { ok: true, detail: how === "mine" ? "记下了：这件事你自己来，流程的失败不再算在事项头上" : "收起了" };
@@ -936,7 +943,7 @@ export function createEngine(deps: EngineDeps) {
     const rec = state.flows?.[runId];
     if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
     if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
-    if (!rec.ended || !RETRYABLE.has(rec.ended.outcome)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
+    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
     if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
     const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd }, nowMs, tz);
     if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };

@@ -1,5 +1,6 @@
 import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, FlowEnd, FlowRec, Item, Note, Observation, ObserveRequest, SourceHealth } from "../shared/model";
 import type { Request } from "./requests";
+import { unfinishedWhy } from "./flows";
 import type { RulesHeld } from "../shared/status";
 
 // Every change to the controller's state is one event in the journal; the state is the fold of
@@ -231,8 +232,8 @@ export function apply(state: State, event: JournalEvent): void {
       const rec = state.flows?.[event.runId];
       if (!rec || rec.ended) return;
       rec.ended = { at: event.at, ...event.end };
-      // A run that came to a result is not run again with this input; one that did not is, so it keeps it.
-      if (event.end.outcome === "done" || event.end.outcome === "stopped") rec.input = null;
+      // A run that came to a result is not run again with this input; one that did not is, so it keeps it (a stop that says it did not get done what it was for did not).
+      if ((event.end.outcome === "done" || event.end.outcome === "stopped") && unfinishedWhy(event.end) === null) rec.input = null;
       return;
     }
     case "flow.dismissed": {

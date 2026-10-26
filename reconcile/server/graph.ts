@@ -264,7 +264,7 @@ export function createGraph(deps: GraphDeps) {
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }
-    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted") || (r.stage ?? stage) === stage);
+    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted" && r.situation !== "unchecked") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {
@@ -285,7 +285,7 @@ export function createGraph(deps: GraphDeps) {
     };
   }
 
-  const RUN_RANK: Array<RunView["situation"]> = ["me", "fail", "lost", "notstarted", "slow", "doing"];
+  const RUN_RANK: Array<RunView["situation"]> = ["me", "fail", "lost", "notstarted", "unchecked", "slow", "doing"];
 
   function situationOf(f: Facts): Situation {
     const { a } = f;
@@ -301,7 +301,7 @@ export function createGraph(deps: GraphDeps) {
     return a.next.actor === "me" ? "mine" : a.next.actor === "them" ? "them" : "system";
   }
 
-  const GROUP: Record<Situation, Group> = { me: "me", fail: "me", lost: "me", notstarted: "me", slow: "me", stuck: "me", error: "errors", them: "them", system: "system", doing: "system", mine: "mine", dropped: "done", done: "done" };
+  const GROUP: Record<Situation, Group> = { me: "me", fail: "me", lost: "me", notstarted: "me", unchecked: "me", slow: "me", stuck: "me", error: "errors", them: "them", system: "system", doing: "system", mine: "mine", dropped: "done", done: "done" };
 
   /** The other end of a link, in one line. */
   function peek(caseId: string): LinkView["state"] {
@@ -494,9 +494,10 @@ export function createGraph(deps: GraphDeps) {
       case "lost":
       case "slow":
       case "notstarted":
-        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : "可能卡住了 · 看一眼";
-        line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
-        sub = lastRun ? (situation === "notstarted" ? `没花钱。${lastRun.retry ? "可以再跑一次，或者你自己来。" : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
+      case "unchecked":
+        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : situation === "unchecked" ? "没查成 · 看一眼" : "可能卡住了 · 看一眼";
+        line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : situation === "unchecked" ? `没查成：${lastRun.why ?? "没说原因"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
+        sub = lastRun ? (situation === "notstarted" || situation === "unchecked" ? `${situation === "unchecked" && lastRun.costUsd > 0 ? `已花 $${lastRun.costUsd.toFixed(2)}。` : "没花钱。"}${lastRun.retry ? "可以再跑一次，或者你自己来。" : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
         break;
       case "stuck":
         kicker = "卡住了 · 看一眼";
@@ -550,7 +551,7 @@ export function createGraph(deps: GraphDeps) {
       },
       {
         label: "要你做吗",
-        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" || situation === "notstarted" ? "看一眼" : "不用",
+        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" || situation === "notstarted" || situation === "unchecked" ? "看一眼" : "不用",
         sub: answerable ? "在下面选一个答案" : situation === "me" ? "批准只在审批卡上点" : situation === "stuck" ? "是顺延了还是漏了" : nextAsk?.at ? `${clockText(nextAsk.at)} 还没有变化才问你` : "",
         hot: answerable || situation === "me" || situation === "stuck" || situation === "fail" || situation === "lost" || situation === "notstarted",
       },
@@ -559,7 +560,7 @@ export function createGraph(deps: GraphDeps) {
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
       { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : null }] : []),
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : null }] : []),
     ]);
     const history: HistoryLine[] = [
       ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),

@@ -166,7 +166,7 @@ function StageBox({ v, view, selected, onSelect, nowMs }: { v: Visit; view: Grap
 function RunCard({ run, onOpen }: { run: RunView; onOpen: () => void }) {
   const ui = useUi();
   const c = ui.theme.colors;
-  const tone: Tone = run.situation === "fail" ? "danger" : run.situation === "me" || run.situation === "lost" || run.situation === "slow" || run.situation === "unreadable" ? "warning" : run.situation === "done" ? "success" : "accent";
+  const tone: Tone = run.situation === "fail" ? "danger" : run.situation === "me" || run.situation === "lost" || run.situation === "slow" || run.situation === "unreadable" || run.situation === "unchecked" ? "warning" : run.situation === "done" ? "success" : "accent";
   const color = ui.tone(tone);
   const stepColor = (s: RunView["steps"][number]) => (s === "ok" ? c.statusSuccess : s === "bad" ? c.statusDanger : s === "wait" || s === "slow" || s === "lost" ? c.statusWarning : s === "run" ? c.accent : c.border);
   return (

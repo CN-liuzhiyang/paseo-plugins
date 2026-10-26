@@ -168,6 +168,20 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
   }
 }
 
+/**
+ * A flow that stops on purpose (`$.stop`) and says in its value that it did not get done what it was for -- `value.why`, a
+ * sentence -- is a run that did not come to a result, however cleanly it ended ("could not reach the data, not looked at
+ * this time"). The engine reads only that one field: a stop with no `why` (absent, empty, not a text) is a finished one,
+ * as is every other outcome. Returns the sentence, cleaned for a line; null for any run that is not such a stop. A value
+ * too large to be kept (`valueDropped`) is not there to be read: that stop reads as finished.
+ */
+export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value">): string | null {
+  if (end.outcome !== "stopped") return null;
+  const value = end.value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return cleanText((value as Record<string, unknown>).why, 300);
+}
+
 /** What a rule is told of a run. */
 export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
   const ended = rec.ended;
@@ -216,6 +230,9 @@ export function plainWhy(end: Pick<FlowEnd, "outcome" | "why">): string {
 /** The one message for a run that ended: the rule's label, and the flow's own summary or why it did not come to a result. */
 export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEnd): { title: string; text: string; status: "succeeded" | "failed" } {
   const number = `#${rec.caseId.slice(rec.caseId.lastIndexOf(":") + 1)}`;
+  const unfinished = unfinishedWhy(end);
+  // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done".
+  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。详情在「事项追踪」里。`, status: "failed" };
   if (end.outcome === "done" || end.outcome === "stopped") {
     return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${end.summary ?? (end.outcome === "done" ? "完成了" : "中止了")}。详情在「事项追踪」里。`, status: "succeeded" };
   }

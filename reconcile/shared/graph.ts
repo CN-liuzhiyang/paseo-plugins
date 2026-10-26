@@ -13,7 +13,7 @@ export type StatusTone = "neutral" | "accent" | "success" | "warning" | "danger"
  * neutral, broken = danger, over = success. "Stale data" and "you said not to ask until..." are not
  * here: they are marks laid over one of these, since the item is in one of these anyway.
  */
-export type Situation = "me" | "them" | "system" | "doing" | "stuck" | "error" | "mine" | "dropped" | "fail" | "lost" | "slow" | "notstarted" | "done";
+export type Situation = "me" | "them" | "system" | "doing" | "stuck" | "error" | "mine" | "dropped" | "fail" | "lost" | "slow" | "notstarted" | "unchecked" | "done";
 
 export const SITUATION: Record<Situation, { tone: StatusTone; icon: string; name: string }> = {
   me: { tone: "warning", icon: "!", name: "在等你" },
@@ -28,6 +28,7 @@ export const SITUATION: Record<Situation, { tone: StatusTone; icon: string; name
   lost: { tone: "warning", icon: "?", name: "流程断了" },
   slow: { tone: "warning", icon: "…", name: "可能卡住了" },
   notstarted: { tone: "warning", icon: "?", name: "流程没起来" },
+  unchecked: { tone: "warning", icon: "?", name: "没查成" },
   done: { tone: "success", icon: "✓", name: "结束了" },
 };
 
@@ -231,7 +232,7 @@ export interface RunView {
    * How alive it is: the runtime's own reading (readRunState), mapped. "unreadable": a line of its record was too
    * long to read and nothing said what it was, so whether it went on, is stuck or is over is not known.
    */
-  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused" | "unreadable" | "notstarted";
+  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused" | "unreadable" | "notstarted" | "unchecked";
   /** Lines of its record too long to read whose head did not say what they were (0 for a record read whole). */
   unreadLines: number;
   outcome: string | null;
@@ -484,6 +485,22 @@ export function durationText(ms: number): string {
 
 /** "10-23 15:11" from an ISO instant that carries its own offset (the plugin writes them in the instance's zone). */
 export const clockText = (iso: string): string => iso.slice(5, 16).replace("T", " ");
+
+/** What the page calls a run that came to no result (or went quiet), in a word. */
+export const troubleWord = (situation: RunView["situation"]): string =>
+  situation === "notstarted" ? "没起来" : situation === "unchecked" ? "没查成" : situation === "lost" ? "断了" : situation === "slow" ? "可能卡住了" : "失败了";
+
+/** The line over the way out of a run in trouble: which run, what became of it and why in the flow's own words (no double stop). */
+export const troubleLine = (run: Pick<RunView, "flow" | "situation" | "why">): string => {
+  const why = run.why?.replace(/[。.]+$/u, "");
+  return `流程「${run.flow}」${troubleWord(run.situation)}${why ? `：${why}` : ""}。不会自动重来。`;
+};
+
+/** What the button that runs it again says: whether it will cost, and what the last round cost. */
+export const retryLabel = (run: Pick<RunView, "situation" | "retry">): string =>
+  run.situation === "notstarted" || (run.situation === "unchecked" && !run.retry?.estimateUsd)
+    ? "重新跑一次（上次没花钱）"
+    : `重新跑一次（会再花钱${run.retry?.estimateUsd ? `，上次花了 $${run.retry.estimateUsd.toFixed(2)}` : ""}）`;
 
 // One pass, so that what an escape protects is read as the character it stands for and not as a mark: `\#` is a
 // "#", and the "#" it makes is not the start of a heading. An escape is a backslash before ASCII punctuation (the
