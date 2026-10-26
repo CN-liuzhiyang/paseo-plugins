@@ -286,7 +286,9 @@ test("capsules made from a journal are of the judgments it holds, kept where ask
       // Again: the same capsules, the same files.
       const files = readdirSync(to, { recursive: true }).sort();
       const again = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
-      assert.deepEqual(again.made.map((m) => m.capsule.id), result.made.map((m) => m.capsule.id));
+      assert.deepEqual(again.made, [], "nothing is written that is already there");
+      assert.deepEqual(again.existing.map((m) => m.capsule.id), result.made.map((m) => m.capsule.id), "and it says so, not that it made them");
+      assert.deepEqual(again.superseded, []);
       assert.deepEqual(readdirSync(to, { recursive: true }).sort(), files);
       // The data directory was only read.
       assert.deepEqual(listing(w.dataDir), before);
@@ -323,16 +325,142 @@ test("the command: cases backfill writes where asked and says what it made; anot
       const run = (...args: string[]) => spawnSync(process.execPath, [BIN, ...args], { encoding: "utf8" });
       const ok = run("cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to);
       assert.equal(ok.status, 0, ok.stderr);
-      assert.match(ok.stdout, /补录了 \d+ 份存档到/);
+      assert.match(ok.stdout, /新补录了 \d+ 份存档到.*，0 份是同样的输入、早就有了，没动。/);
+      assert.match(ok.stdout, /冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的/);
       assert.match(ok.stdout, /gcp-demo:1 2026-10-2\d \d\d:\d\d first/);
-      assert.ok(readdirSync(to, { recursive: true }).some((f) => String(f).endsWith(".json.gz")));
-      const json = JSON.parse(run("cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to, "--json").stdout) as { made: Array<{ case: string; trigger: string[] }> };
-      assert.ok(json.made.length > 0 && json.made.every((m) => m.case === "gcp-demo:1"));
+      const files = readdirSync(to, { recursive: true }).map(String).filter((f) => f.endsWith(".json") || f.endsWith(".json.gz"));
+      assert.ok(files.length > 0 && files.every((f) => f.endsWith(".json")), "plain JSON, which a repository shows the changes of");
+      // Again: all of it is there already, and the command says so instead of saying it made them.
+      const json = JSON.parse(run("cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to, "--json").stdout) as { made: unknown[]; existing: Array<{ case: string }>; superseded: unknown[] };
+      assert.deepEqual(json.made, []);
+      assert.equal(json.existing.length, files.length);
+      assert.ok(json.existing.every((m) => m.case === "gcp-demo:1"));
+      const again = run("cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to);
+      assert.match(again.stdout, new RegExp(`新补录了 0 份存档到.*，${files.length} 份是同样的输入、早就有了，没动。`));
+      // --gzip: the compact form, for a place nobody reads the changes of.
+      const zipped = tmp();
+      try {
+        assert.equal(run("cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", zipped, "--gzip").status, 0);
+        const zfiles = readdirSync(zipped, { recursive: true }).map(String).filter((f) => f.endsWith(".json") || f.endsWith(".json.gz"));
+        assert.equal(zfiles.length, files.length);
+        assert.ok(zfiles.every((f) => f.endsWith(".json.gz")));
+      } finally {
+        rmSync(zipped, { recursive: true, force: true });
+      }
       for (const args of [["cases"], ["cases", "nope"], ["cases", "backfill", "--candidate", "x"], ["backfill"]]) {
         const bad = run(...args, "--config", w.configDir, "--data", w.dataDir);
         assert.equal(bad.status, 2, args.join(" "));
       }
     } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- a backfill again: plain JSON, only real writes, the same moment from other inputs, a journal with a hole (review F5, F8) ----
+
+const filesIn = (dir: string) => readdirSync(dir, { recursive: true }).map(String).filter((f) => f.endsWith(".json") || f.endsWith(".json.gz")).sort();
+
+test("a backfill writes plain JSON unless asked to compress, and a capsule already there in either form is not written again", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const [plain, zipped, mixed] = [tmp(), tmp(), tmp()];
+    try {
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: plain });
+      assert.ok(first.made.length > 0);
+      assert.ok(filesIn(plain).every((f) => f.endsWith(".json")), "plain by default");
+      assert.ok(readFileSync(first.made[0]!.file, "utf8").includes("\n  "), "indented");
+      await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: zipped, gzip: true });
+      assert.ok(filesIn(zipped).every((f) => f.endsWith(".json.gz")));
+      assert.equal(filesIn(zipped).length, filesIn(plain).length);
+      // Compressed first, plain after (or the other way): the same capsules, not a second copy of each.
+      await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: mixed, gzip: true });
+      const files = filesIn(mixed);
+      const after = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: mixed });
+      assert.deepEqual(after.made, []);
+      assert.equal(after.existing.length, first.made.length);
+      assert.deepEqual(filesIn(mixed), files);
+    } finally {
+      for (const d of [plain, zipped, mixed]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a backfill after the rule in use changed what it reads: the new capsules are told apart from the old ones for the same moments, which stay unless replaced", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const to = tmp();
+    try {
+      const ruleFile = path.join(w.configDir, "rules", readdirSync(path.join(w.configDir, "rules"))[0]!);
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      const old = first.made.map((m) => m.capsule.id);
+      // Another version of the rule: it reads one thing more, so the tape (and the id) differs.
+      writeFileSync(ruleFile, readFileSync(ruleFile, "utf8").replace("assess(kase, ctx) {", 'assess(kase, ctx) {\n    ctx.item("gcp-demo:98");'));
+      const second = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      assert.equal(second.made.length, first.made.length, "written now: they are others");
+      assert.ok(second.made.every((m) => !old.includes(m.capsule.id)));
+      assert.deepEqual(second.existing, []);
+      assert.deepEqual(second.superseded.map((x) => [x.capsule.id, x.removed]).sort(), old.map((id) => [id, false]).sort(), "the earlier ones are named, and left");
+      assert.equal(filesIn(to).length, first.made.length * 2, "two of each moment now");
+      // A capsule of another origin for the same moment is never taken away, nor one that is kept elsewhere.
+      const live: Capsule = { ...first.made[0]!.capsule, origin: "live", id: `k_${"0".repeat(16)}` };
+      const liveFile = writeCapsule(to, live, { gzip: false });
+      const third = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to, replace: true });
+      assert.deepEqual(third.made, []);
+      assert.equal(third.existing.length, second.made.length);
+      assert.deepEqual(third.superseded.map((x) => [x.capsule.id, x.removed]).sort(), old.map((id) => [id, true]).sort());
+      assert.equal(filesIn(to).length, second.made.length + 1, "the old ones are gone; the live one and the new ones are there");
+      assert.ok(readdirSync(path.dirname(liveFile)).some((f) => f === path.basename(liveFile)), "a capsule that was not made by a backfill stays");
+      // And a backfill with nothing to replace says nothing is.
+      const fourth = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to, replace: true });
+      assert.deepEqual(fourth.superseded, []);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the command says when an earlier backfill's capsule for the same moment is left, and takes it away only with --replace", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const to = tmp();
+    try {
+      const run = (...args: string[]) => spawnSync(process.execPath, [BIN, "cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to, ...args], { encoding: "utf8" });
+      assert.equal(run().status, 0);
+      const before = filesIn(to).length;
+      const ruleFile = path.join(w.configDir, "rules", readdirSync(path.join(w.configDir, "rules"))[0]!);
+      writeFileSync(ruleFile, readFileSync(ruleFile, "utf8").replace("assess(kase, ctx) {", 'assess(kase, ctx) {\n    ctx.item("gcp-demo:98");'));
+      const left = run();
+      assert.match(left.stdout, /同一时刻早先补录过另一份（输入不同，用的是别的判断方法）：gcp-demo:1 .*没动，两份都会进重放；要换掉旧的，加 --replace/);
+      assert.equal(filesIn(to).length, before * 2);
+      const replaced = run("--replace", "--json");
+      const json = JSON.parse(replaced.stdout) as { made: unknown[]; superseded: Array<{ removed: boolean }> };
+      assert.equal(json.made.length, 0);
+      assert.equal(json.superseded.length, before);
+      assert.ok(json.superseded.every((x) => x.removed));
+      assert.equal(filesIn(to).length, before);
+      assert.match(run("--replace").stdout, /新补录了 0 份/);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a journal with a hole in the middle is refused: the state folded over it was never one", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const [data, to] = [tmp(), tmp()];
+    try {
+      cpSync(w.dataDir, data, { recursive: true });
+      const file = path.join(data, "journal", readdirSync(path.join(data, "journal")).sort()[0]!);
+      const lines = readFileSync(file, "utf8").split("\n");
+      assert.ok(lines.length > 10);
+      const gone = JSON.parse(lines[4]!) as { seq: number };
+      writeFileSync(file, [...lines.slice(0, 4), ...lines.slice(5)].join("\n"));
+      await assert.rejects(backfill({ configDir: w.configDir, dataDir: data, to }), (e: Error) => e instanceof BackfillError && new RegExp(`日志中间缺了东西（seq ${gone.seq - 1} 后面是 ${gone.seq + 1}）`).test(e.message));
+      assert.deepEqual(readdirSync(to), [], "nothing is made");
+    } finally {
+      rmSync(data, { recursive: true, force: true });
       rmSync(to, { recursive: true, force: true });
     }
   });

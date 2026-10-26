@@ -1,6 +1,7 @@
+import { rmSync } from "node:fs";
 import path from "node:path";
 import type { Annotation, Assessment } from "../shared/model";
-import { buildCapsule, writeCapsule, type Capsule, type CaptureInput, type ShownJudgment } from "./capsule";
+import { buildCapsule, capsulePath, loadCapsules, writeCapsule, type Capsule, type CaptureInput, type ShownJudgment } from "./capsule";
 import { loadConfig } from "./config";
 import { shadow } from "./preview";
 import { RULES_KEPT } from "./rules";
@@ -85,7 +86,12 @@ export function backfillPoints(events: JournalEvent[]): BackfillPoint[] {
 
 export interface BackfillResult {
   points: number;
+  /** Written now. */
   made: Array<{ file: string; capsule: Capsule }>;
+  /** Already there, with the very same inputs (a capsule is its inputs): left as it is. */
+  existing: Array<{ file: string; capsule: Capsule }>;
+  /** Made earlier here for the same item and moment from other inputs (the rules in use then were others): left, or taken away with `replace`. */
+  superseded: Array<{ file: string; capsule: Capsule; by: string; removed: boolean }>;
   /** Moments the rules in use do not judge the item at (it is cold, dropped, or no rule is for it). */
   skipped: Array<{ caseId: string; at: string; why: string[] }>;
 }
@@ -97,6 +103,10 @@ export interface BackfillOptions {
   dataDir: string;
   /** Where the capsules are written. */
   to: string;
+  /** Compressed (the controller's own way); absent: plain JSON, which a repository shows the changes of. */
+  gzip?: boolean;
+  /** Take away what an earlier backfill into `to` made for the same moments from other inputs. */
+  replace?: boolean;
 }
 
 export async function backfill(options: BackfillOptions): Promise<BackfillResult> {
@@ -105,6 +115,10 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
   if (events.length === 0) throw new BackfillError(`数据目录里没有日志：${options.dataDir}`);
   // Folded from the start: a journal that begins later cannot say what the state was.
   if (events[0]!.seq !== 1) throw new BackfillError("日志不是从头开始的（第一条不是 seq 1）：补录要从头折叠，补不了");
+  // And with nothing missing in the middle: a state folded over a gap is not one that ever was.
+  for (let i = 1; i < events.length; i++) {
+    if (events[i]!.seq !== events[i - 1]!.seq + 1) throw new BackfillError(`日志中间缺了东西（seq ${events[i - 1]!.seq} 后面是 ${events[i]!.seq}）：折叠出来的状态不是真的，补不了`);
+  }
   const points = backfillPoints(events);
   const rounds = new Map<string, BackfillPoint[]>();
   for (const p of points) rounds.set(`${p.start}|${p.at}`, [...(rounds.get(`${p.start}|${p.at}`) ?? []), p]);
@@ -112,7 +126,12 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
   const state = emptyState();
   let cursor = 0;
   let instance: string | null = null;
-  const result: BackfillResult = { points: points.length, made: [], skipped: [] };
+  const result: BackfillResult = { points: points.length, made: [], existing: [], superseded: [], skipped: [] };
+  // What an earlier backfill left in `to`, by what it holds and by the moment it is of.
+  const there = loadCapsules([options.to]).capsules;
+  const byId = new Map(there.map((c) => [c.capsule.id, c.file] as const));
+  const ofMoment = new Map<string, typeof there>();
+  for (const c of there) if (c.capsule.origin === "backfill") ofMoment.set(`${c.capsule.case}|${c.capsule.at}`, [...(ofMoment.get(`${c.capsule.case}|${c.capsule.at}`) ?? []), c]);
   for (const round of [...rounds.values()].sort((a, b) => a[0]!.start - b[0]!.start)) {
     const { start, at } = round[0]!;
     for (; cursor < events.length && events[cursor]!.seq < start; cursor++) {
@@ -145,7 +164,18 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
             }
           : {}),
       });
-      result.made.push({ file: writeCapsule(options.to, capsule), capsule });
+      const gzip = options.gzip ?? false;
+      const had = byId.get(capsule.id);
+      if (had) result.existing.push({ file: had, capsule });
+      else {
+        result.made.push({ file: writeCapsule(options.to, capsule, { gzip }), capsule });
+        byId.set(capsule.id, capsulePath(options.to, capsule, gzip));
+      }
+      for (const old of ofMoment.get(`${capsule.case}|${capsule.at}`) ?? []) {
+        if (old.capsule.id === capsule.id || result.superseded.some((x) => x.file === old.file)) continue;
+        if (options.replace) rmSync(old.file, { force: true });
+        result.superseded.push({ file: old.file, capsule: old.capsule, by: capsule.id, removed: !!options.replace });
+      }
     }
   }
   return result;

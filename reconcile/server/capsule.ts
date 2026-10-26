@@ -199,16 +199,18 @@ export function capsuleFile(c: Pick<Capsule, "id" | "at" | "trigger">, gzip: boo
   return `${stamp}-${c.trigger[0]!.replace(/[^a-z0-9-]/g, "_")}-${c.id.slice(2, 10)}.json${gzip ? ".gz" : ""}`;
 }
 
+/** Where a capsule is written under a root. */
+export const capsulePath = (root: string, capsule: Pick<Capsule, "case" | "id" | "at" | "trigger">, gzip: boolean): string => path.join(root, caseDir(capsule.case), capsuleFile(capsule, gzip));
+
 /**
  * Writes a capsule under `root/<item>/`, into a temporary file first. A capsule of the same id
  * (and trigger) already there is left as it is; returns the path either way.
  */
 export function writeCapsule(root: string, capsule: Capsule, options: { gzip?: boolean } = {}): string {
   const gzip = options.gzip ?? true;
-  const dir = path.join(root, caseDir(capsule.case));
-  const file = path.join(dir, capsuleFile(capsule, gzip));
+  const file = capsulePath(root, capsule, gzip);
   if (existsSync(file)) return file;
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp`;
   try {
     writeFileSync(tmp, gzip ? gzipSync(JSON.stringify(capsule)) : `${JSON.stringify(capsule, null, 2)}\n`);

@@ -22,8 +22,10 @@ const HELP = `用法：
 
   reconcile-preview replay [--candidate <目录>]
       只做重放：存档拿在用的判断方法判断一遍，看和存下的一样不一样；给了候选就再拿候选判断，比这两遍
-  reconcile-preview cases backfill [--to <目录>]
-      从日志补录一批存档（拿在用的判断方法，在日志里每个值得留的时刻重判一遍）；缺省放进 <配置目录>/cases/backfill
+  reconcile-preview cases backfill [--to <目录>] [--gzip] [--replace]
+      从日志补录一批存档（拿在用的判断方法，在日志里每个值得留的时刻重判一遍）；缺省放进 <配置目录>/cases/backfill，
+      明文 JSON（进 git 看得出改了什么），--gzip 压缩；同样的输入已经有的不重写，同一时刻早先补录过别的输入的，
+      缺省留着，--replace 删掉它们（只删这个目录里补录出的旧存档）
   reconcile-preview cases list [--item <单号>]
       列出存档：在哪、为什么留、有没有写 expect
   reconcile-preview cases keep --id <存档编号> [--expect <文件>]
@@ -58,7 +60,7 @@ const KNOWN = {
   diff: ["candidate", "config", "data", "days", "now", "json"],
   apply: ["candidate", "expect", "accept-regress", "config", "data", "days", "now", "json"],
   replay: ["candidate", "config", "data", "json"],
-  "cases backfill": ["to", "config", "data", "json"],
+  "cases backfill": ["to", "gzip", "replace", "config", "data", "json"],
   "cases list": ["item", "config", "data", "json"],
   "cases keep": ["id", "expect", "config", "data", "json"],
   "cases expect": ["id", "expect", "config", "json"],
@@ -67,14 +69,15 @@ const KNOWN = {
 const sub = cmd === "cases" ? `cases ${args[0] ?? ""}`.trim() : cmd;
 const rest = cmd === "cases" ? args.slice(1) : args;
 if (!KNOWN[sub]) fail(`没有 ${sub} 这个子命令\n\n${HELP}`);
+const BOOLEAN = ["json", "gzip", "replace"];
 const flags = {};
 for (let i = 0; i < rest.length; i++) {
   const arg = rest[i];
   if (!arg.startsWith("--")) fail(`看不懂的参数：${arg}\n\n${HELP}`);
   const name = arg.slice(2);
   if (!KNOWN[sub].includes(name)) fail(`${sub} 不认识 --${name}`);
-  if (name === "json") {
-    flags.json = true;
+  if (BOOLEAN.includes(name)) {
+    flags[name] = true;
     continue;
   }
   const value = rest[++i];
@@ -120,14 +123,23 @@ try {
   }
   if (sub === "cases backfill") {
     const to = flags.to || path.join(configDir, "cases", "backfill");
-    const result = await backfill({ configDir, dataDir, to });
+    const result = await backfill({ configDir, dataDir, to, gzip: !!flags.gzip, replace: !!flags.replace });
     if (flags.json) {
-      const made = result.made.map((m) => ({ file: m.file, id: m.capsule.id, case: m.capsule.case, at: m.capsule.at, trigger: m.capsule.trigger }));
-      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, skipped: result.skipped }, null, 2)}\n`);
+      const row = (c, file) => ({ file, id: c.id, case: c.case, at: c.at, trigger: c.trigger });
+      const made = result.made.map((m) => row(m.capsule, m.file));
+      const existing = result.existing.map((m) => row(m.capsule, m.file));
+      const superseded = result.superseded.map((m) => ({ ...row(m.capsule, m.file), by: m.by, removed: m.removed }));
+      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, existing, superseded, skipped: result.skipped }, null, 2)}\n`);
       process.exit(0);
     }
-    const lines = [`日志里值得留的时刻 ${result.points} 个，补录了 ${result.made.length} 份存档到 ${to}（用的是在用的判断方法，不是当时那一版；配置是现在的）：`];
+    const lines = [
+      `日志里值得留的时刻 ${result.points} 个，新补录了 ${result.made.length} 份存档到 ${to}，${result.existing.length} 份是同样的输入、早就有了，没动。`,
+      "补录的存档用的是在用的判断方法，不是当时那一版；配置是现在的，冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的，也不是当时的。",
+    ];
     for (const m of result.made) lines.push(`- ${m.capsule.case} ${m.capsule.at.slice(0, 16).replace("T", " ")} ${m.capsule.trigger.join("+")}  ${path.relative(to, m.file)}`);
+    for (const s of result.superseded) {
+      lines.push(`- 同一时刻早先补录过另一份（输入不同，用的是别的判断方法）：${s.capsule.case} ${s.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, s.file)}${s.removed ? "  已删掉（--replace）" : "  没动，两份都会进重放；要换掉旧的，加 --replace（只删这个目录里补录出的旧存档）"}`);
+    }
     for (const s of result.skipped) lines.push(`- 没补：${s.caseId} ${s.at.slice(0, 16).replace("T", " ")} ${s.why.join("+")}（在用的判断方法这一刻不判断它：冷的、不再追踪的，或没有判断方法管它）`);
     process.stdout.write(`${lines.join("\n")}\n`);
     process.exit(0);
