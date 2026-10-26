@@ -3,11 +3,14 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import os from "node:os";
 import path from "node:path";
 import { clockText, GROUP_LABEL, type ListRow, type StageMeta } from "../shared/graph";
+import { describeChanges } from "../shared/status";
 import type { Assessment, Card, Commitment } from "../shared/model";
 import { loadConfig, type Config } from "./config";
 import { createEngine, RULES_BROKEN_MS, type Carrier, type Deliver } from "./engine";
+import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
+import type { RunProbe } from "./runs";
 import type { RulesDiff, State } from "./state";
 import { memoryStore, readState } from "./store";
 import { addWorkdays, inWindow, iso, localParts, nextInWindow } from "./time";
@@ -48,6 +51,19 @@ export interface FieldChange {
   field: string;
   inUse: string;
   candidate: string;
+}
+
+export interface FlowChange {
+  caseId: string;
+  label: string;
+  /** What the rule calls the request, the flow it is run as, and the most it is counted at (policy.json `flows`). */
+  request: string;
+  flow: string;
+  maxUsd: number;
+  /** When the side that would start it asks for it ("现在", or a time). */
+  from: string;
+  inUse: boolean;
+  candidate: boolean;
 }
 
 export interface CaseChange {
@@ -102,7 +118,7 @@ export interface Preview {
   inUse: { fingerprint: string | null; errors: Array<{ file: string; error: string; fallback?: string }> };
   candidate: { fingerprint: string | null; errors: Array<{ file: string; error: string; fallback?: string }> };
   /** The rules change would be held on the controller until someone lets it through. */
-  breaker: { changes: { newCommitments: number; dropped: number; changed: number; reopened: number }; limit: number } | null;
+  breaker: { changes: { newCommitments: number; dropped: number; changed: number; reopened: number; flows: number }; limit: number } | null;
   cases: CaseChange[];
   /** Of items both sides judge: hot on one side, cold on the other. */
   heat: Array<{ caseId: string; label: string; inUse: boolean; candidate: boolean }>;
@@ -122,6 +138,11 @@ export interface Preview {
     rows: Array<{ caseId: string; label: string; fields: FieldChange[] }>;
     stages: Array<{ rule: string; changes: string[] }>;
   };
+  /**
+   * The flows the rules would start for items (each costs money once started, and is counted in the breaker): those only one
+   * side would start, over the whole run on. Nothing is started in a preview, and a flow started here never comes to an end.
+   */
+  flows: FlowChange[];
   /** Items both sides judge that are cold now on both: not judged, so a change to them is not seen. */
   coldBoth: number;
   caveats: string[];
@@ -230,7 +251,11 @@ function shadow(state: State, dataDir: string, config: Config, clock: { ms: numb
   const deliver: Deliver = async (channel, message) => {
     deliveries.push({ cardId: message.idempotencyKey.split(":")[2] ?? "", channel });
   };
-  const engine = createEngine({ store, config, sources: [], carrier, mode: "live", instanceId: "preview", home: "", tickSeconds: 60, deliver, requestsDir: null, conversation: null, rulesKeep, now: () => clock.ms, log: () => {}, writeStatus: () => {} });
+  // A flow asked for is an intent in the copy of the journal and nothing more: no directory to write into, nothing started, and
+  // none ever comes to an end (the run is "waiting to start", which still counts as open against the day's limit).
+  const waiting: RunProbe = { state: "pending", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, gate: false, slow: false };
+  const flows = { launcher: recordingLauncher(), dir: null, probe: () => waiting };
+  const engine = createEngine({ store, config, sources: [], carrier, mode: "live", instanceId: "preview", home: "", tickSeconds: 60, deliver, requestsDir: null, conversation: null, rulesKeep, flows, now: () => clock.ms, log: () => {}, writeStatus: () => {} });
   /** Every source as just read, with nothing new: the preview runs on the data as it is. */
   const freshen = () =>
     store.append(
@@ -582,14 +607,27 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   }
   laterCases.sort((x, y) => x.from.localeCompare(y.from));
 
+  // ---- flows ------------------------------------------------------------------------------
+  // What each side asked to have run over the whole way: a run both ask for is no difference, one only a side asks for is.
+  const intentsOf = (i: number) => new Map(sides[i]!.store.events.flatMap((e) => (e.type === "flow.intent" ? [[e.rec.runId, e.rec] as const] : [])));
+  const [bi, ci] = [intentsOf(0), intentsOf(1)];
+  const flows: FlowChange[] = [];
+  for (const id of new Set([...bi.keys(), ...ci.keys()])) {
+    if (bi.has(id) === ci.has(id)) continue;
+    const rec = (bi.get(id) ?? ci.get(id))!;
+    flows.push({ caseId: rec.caseId, label: label(rec.caseId), request: rec.label, flow: rec.flow, maxUsd: rec.maxUsd, from: when(Date.parse(rec.intentAt)), inUse: bi.has(id), candidate: ci.has(id) });
+  }
+  flows.sort((x, y) => x.from.localeCompare(y.from) || x.label.localeCompare(y.label) || x.request.localeCompare(y.request));
+
   // ---- the breaker, and what cannot be seen -----------------------------------------------
   const changed = nowEvents(1).find((e): e is Extract<typeof e, { type: "rules.changed" }> => e.type === "rules.changed");
   let breaker: Preview["breaker"] = null;
   if (changed && state.rules.fingerprint !== null && !released) {
     const d: RulesDiff = changed.diff;
-    const changes = { newCommitments: d.newCommitments.length, dropped: d.droppedCommitments.length, changed: d.changedCommitments?.length ?? 0, reopened: d.reopenedCommitments?.length ?? 0 };
+    // Flows count with the rest, as the controller counts them: the ones the first round after the change asks for.
+    const changes = { newCommitments: d.newCommitments.length, dropped: d.droppedCommitments.length, changed: d.changedCommitments?.length ?? 0, reopened: d.reopenedCommitments?.length ?? 0, flows: nowEvents(1).filter((e) => e.type === "flow.intent").length };
     const limit = inUseConfig.policy.ruleBreakerChanges;
-    if (changes.newCommitments + changes.dropped + changes.changed + changes.reopened > limit) breaker = { changes, limit };
+    if (changes.newCommitments + changes.dropped + changes.changed + changes.reopened + changes.flows > limit) breaker = { changes, limit };
   }
   const caveats = [
     "推演里没有新数据：来源当作照常能读、读到的和现在一样。单子被人改了、开关文件变了，这些都不在里面。",
@@ -600,6 +638,8 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     "「在用」是配置目录里现在的文件，不是 daemon 内存里的：policy.json、persons.json、calendar/ 要 reload 才生效。拷过去以后、reload 以前，跑的是新的判断方法配旧的这几样，这个组合没有推演；在用目录里有改了还没 reload 的，这里也当它已经生效。",
     "diff 会把候选的判断方法当代码执行，和 daemon 加载它一样：「只读」指不写文件、不发消息，不是不执行。候选不是自己写的，先看过代码再 diff。",
   ];
+  if (flows.length > 0 || bi.size + ci.size > 0) caveats.push("推演里流程只记下「要起」，不真起，也没有一个会跑完：判断方法等流程结果的，推演里就一直在等；每天的上限（次数、花费、同时在跑的个数）按这样算。");
+  if (flows.length > 0 && !inUseConfig.launcher) caveats.push("在用的配置里没有起流程的命令（flows.json）：改动拷过去以后，这些流程在这个实例上起不来，计划里会写「没起」。");
   if (coldBoth > 0) caveats.push(`现在有 ${coldBoth} 个事项两边都是冷的：冷的不判断，它们在候选下会怎样，要等变热才看得到。`);
   const stale = inUseConfig.sources.filter((s) => {
     const h = state.sources[s.id]?.health;
@@ -617,10 +657,10 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   // and what an ask made this minute changes is left out -- the cards sent now, the list's rows
   // (they follow from the questions, the asks and each day's cards, which are in it, and from the
   // files; who may be reached this minute is not).
-  const body = { changedFiles, inUse: statusNow[0]!.rules.fingerprint, candidate: statusNow[1]!.rules.fingerprint, breaker, cases, heat, judged, questions, later: { asks: asksDue, expiries, cardsPerDay, cases: laterCases }, stages };
+  const body = { changedFiles, inUse: statusNow[0]!.rules.fingerprint, candidate: statusNow[1]!.rules.fingerprint, breaker, cases, heat, judged, questions, flows, later: { asks: asksDue, expiries, cardsPerDay, cases: laterCases }, stages };
   const id = `p_${hash(JSON.stringify({ files: [...inUseFiles], candidate: [...candidateFiles], workdays, body })).slice(0, 10)}`;
   const empty =
-    cases.length + heat.length + judged.onlyInUse.length + judged.onlyCandidate.length + questions.length + asks.length + expiries.length + cardsPerDay.length + laterCases.length + rows.length + stages.length === 0 && !cardsNow;
+    cases.length + heat.length + judged.onlyInUse.length + judged.onlyCandidate.length + questions.length + flows.length + asks.length + expiries.length + cardsPerDay.length + laterCases.length + rows.length + stages.length === 0 && !cardsNow;
   return {
     id,
     now: iso(nowMs, tz),
@@ -638,6 +678,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     cardsNow,
     later: { asks, expiries, cardsPerDay, cases: laterCases },
     page,
+    flows,
     coldBoth,
     caveats,
     empty,
@@ -665,9 +706,8 @@ export function previewText(p: Preview): string {
   for (const e of p.inUse.errors) lines.push(`⚠ 在用的判断方法 ${e.file} 现在就加载不上，${e.fallback ? `daemon 接着用 ${e.fallback.slice(5, 16).replace("T", " ")} 换上的那一版` : "它管的事项 daemon 现在都不判断"}：${e.error}`);
   for (const e of p.candidate.errors) lines.push(`⚠ 候选的判断方法 ${e.file} 加载不上，不能拷过去（拷过去 daemon 也只会接着用上一版）：${e.error}`);
   if (p.breaker) {
-    const c = p.breaker.changes;
-    const parts = [c.newCommitments && `新排 ${c.newCommitments}`, c.dropped && `收回 ${c.dropped}`, c.changed && `改动 ${c.changed}`, c.reopened && `重新排上 ${c.reopened}`].filter(Boolean).join("、");
-    lines.push(`⚠ 这个改动一下子会${parts} 个要问的问题，超过了上限 ${p.breaker.limit}：拷过去以后，daemon 会先停着它，要在「事项追踪」页面上放行才生效。下面是放行以后的样子。`);
+    // The words the controller's own hold uses (status.ts), so that this and the card say the same.
+    lines.push(`⚠ 这个改动一下子会${describeChanges(p.breaker.changes)}，超过了上限 ${p.breaker.limit}：拷过去以后，daemon 会先停着它，要在「事项追踪」页面上放行才生效。下面是放行以后的样子。`);
   }
   if (p.empty) {
     lines.push("", `没有差异：现在和往后这几个工作日，两版对事项的判断、要问的问题、发卡、页面上看到的都一样。${p.coldBoth > 0 ? `（${p.coldBoth} 个事项两边都是冷的，没判断）` : ""}`);
@@ -697,6 +737,10 @@ export function previewText(p: Preview): string {
       lines.push(...(p.cardsNow.candidate.length > 0 ? p.cardsNow.candidate.map((c) => `- 候选：${cardLine(c)}`) : ["- 候选：不发"]));
     }
     if (p.cases.length + p.heat.length + p.judged.onlyInUse.length + p.judged.onlyCandidate.length + p.questions.length === 0 && !p.cardsNow) lines.push("（现在没有差异）");
+    if (p.flows.length > 0) {
+      lines.push("", "## 会起的流程（起了要花钱，也计进熔断）");
+      for (const f of p.flows) lines.push(`- ${f.label}「${f.request}」（${f.flow}，按 $${f.maxUsd} 算）：${f.candidate ? "候选会起" : "在用会起、候选不起"}，${f.from === "现在" ? "现在" : `从 ${f.from} 起`}`);
+    }
     const l = p.later;
     lines.push("", `## 往后 ${p.workdays} 个工作日`);
     if (l.asks.length > 0) {

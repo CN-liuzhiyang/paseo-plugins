@@ -188,9 +188,35 @@ const policySchema = z
      * as a parent and as a sibling's parent.
      */
     coldTitles: z.array(z.string().min(1)).default([]),
+    /**
+     * What flows started for items may add up to (server/flows.ts): runs started a day, what they may cost a day
+     * (the finished ones at what they cost, the running at their `maxUsd`), runs for one item a day, runs at
+     * once. Asking for more than these is not started; the next day's counts start empty.
+     */
+    flows: z
+      .object({
+        perDay: z.number().int().min(0).max(100),
+        usdPerDay: z.number().min(0).max(1000),
+        perCasePerDay: z.number().int().min(0).max(100),
+        concurrent: z.number().int().min(1).max(20),
+      })
+      .strict()
+      .default({ perDay: 6, usdPerDay: 5, perCasePerDay: 3, concurrent: 2 }),
   })
   .strict();
 
+/**
+ * How a flow is started: the runtime's command line (`orch.mjs`) and the directory it runs in. Private config
+ * (flows.json, beside sources.json); absent: this instance starts no flows. Run without a shell.
+ */
+const launcherSchema = z
+  .object({
+    command: z.array(z.string().min(1)).min(1),
+    cwd: z.string().min(1).refine((p) => path.isAbsolute(p), "not an absolute path").optional(),
+  })
+  .strict();
+
+export type LauncherConfig = z.output<typeof launcherSchema>;
 export type Person = z.output<typeof personSchema> & { id: string; windows: Partial<Record<"work" | "personal" | "family", Window>> };
 export type Policy = z.output<typeof policySchema>;
 
@@ -202,6 +228,8 @@ export interface Config {
   calendar: Calendar;
   calendarYears: string[];
   rulesDir: string;
+  /** How a flow is started (flows.json); null: this instance starts none. */
+  launcher: LauncherConfig | null;
 }
 
 export class ConfigError extends Error {}
@@ -262,6 +290,9 @@ export function loadConfig(dir: string, over?: string): Config {
       );
     }
   }
+  // Like sources.json, only the config directory's own (a candidate change does not carry how things are started).
+  const flowsFile = path.join(dir, "flows.json");
+  const launcher = existsSync(flowsFile) ? parse(launcherSchema, readJson(flowsFile), flowsFile) : null;
   return {
     dir,
     persons,
@@ -270,5 +301,6 @@ export function loadConfig(dir: string, over?: string): Config {
     calendar: createCalendar(years),
     calendarYears: Object.keys(years).sort(),
     rulesDir: pick("rules"),
+    launcher,
   };
 }

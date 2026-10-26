@@ -13,7 +13,7 @@ export type StatusTone = "neutral" | "accent" | "success" | "warning" | "danger"
  * neutral, broken = danger, over = success. "Stale data" and "you said not to ask until..." are not
  * here: they are marks laid over one of these, since the item is in one of these anyway.
  */
-export type Situation = "me" | "them" | "system" | "doing" | "stuck" | "error" | "mine" | "dropped" | "fail" | "lost" | "slow" | "done";
+export type Situation = "me" | "them" | "system" | "doing" | "stuck" | "error" | "mine" | "dropped" | "fail" | "lost" | "slow" | "notstarted" | "done";
 
 export const SITUATION: Record<Situation, { tone: StatusTone; icon: string; name: string }> = {
   me: { tone: "warning", icon: "!", name: "在等你" },
@@ -27,6 +27,7 @@ export const SITUATION: Record<Situation, { tone: StatusTone; icon: string; name
   fail: { tone: "danger", icon: "×", name: "流程失败了" },
   lost: { tone: "warning", icon: "?", name: "流程断了" },
   slow: { tone: "warning", icon: "…", name: "可能卡住了" },
+  notstarted: { tone: "warning", icon: "?", name: "流程没起来" },
   done: { tone: "success", icon: "✓", name: "结束了" },
 };
 
@@ -188,7 +189,7 @@ export interface AskView {
 }
 
 export interface Mark {
-  kind: "stale" | "held" | "weak" | "wrong" | "notice" | "unread";
+  kind: "stale" | "held" | "weak" | "wrong" | "notice" | "unread" | "flow";
   line: string;
   since: string | null;
   until: string | null;
@@ -215,6 +216,9 @@ export interface LinkView {
 /** This plugin's own screen: where a flow's `affair` link points back to, and how a run is found to belong to an item (server/runs.ts). */
 export const HOME_SCREEN = { plugin: "reconcile", screen: "inbox" } as const;
 
+/** The orchestration plugin's page of one run: where a run's link goes. */
+export const RUN_SCREEN = { plugin: "orchestration-ui", screen: "runs" } as const;
+
 /** One run of a flow started for the item, read from the runtime's event files (server/runs.ts). */
 export interface RunView {
   runId: string;
@@ -227,7 +231,7 @@ export interface RunView {
    * How alive it is: the runtime's own reading (readRunState), mapped. "unreadable": a line of its record was too
    * long to read and nothing said what it was, so whether it went on, is stuck or is over is not known.
    */
-  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused" | "unreadable";
+  situation: "doing" | "me" | "fail" | "lost" | "slow" | "done" | "refused" | "unreadable" | "notstarted";
   /** Lines of its record too long to read whose head did not say what they were (0 for a record read whole). */
   unreadLines: number;
   outcome: string | null;
@@ -246,6 +250,25 @@ export interface RunView {
   agentId: string | null;
   link: { plugin: string; screen: string; params: Record<string, string> };
   retry: { round: number; estimateUsd: number | null } | null;
+  /**
+   * Whether this controller started it (it recorded the intent first): only such a run counts as the item's own
+   * condition. Absent: not known (a reader with no controller behind it), read as before.
+   */
+  own?: boolean;
+  /** For a run of its own: the round (a person's "run it again" adds one). */
+  round?: number;
+  /** A person set it aside: "mine" (they take it from here) or "fold" (not shown). It no longer counts as the item's condition. */
+  dismissed?: "mine" | "fold";
+  /** First time a break is seen: a machine asleep reads as one, so it is told as "may be asleep" before it is told as lost. */
+  maybeAsleep?: boolean;
+  /** Why a run that did not come to a result did not, in a sentence. */
+  why?: string | null;
+  /** What a person may do with it on the page now (the server decides): run it again, take it over, or fold it away. */
+  actions?: Array<"retry" | "mine" | "fold">;
+  /** The rule now gives another input for this run than the one it was run with (it is not run again for that). */
+  inputDrifted?: boolean;
+  /** A run still going that the rule's latest judgment no longer asks for (it is not stopped for that). */
+  unwanted?: boolean;
 }
 
 export interface Fact {

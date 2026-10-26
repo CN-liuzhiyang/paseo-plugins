@@ -2,7 +2,8 @@ import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, 
 import os from "node:os";
 import path from "node:path";
 import type { RunView } from "../shared/graph";
-import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe } from "../shared/liveness.mjs";
+import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
+import { FLOW_VALUE_BYTES } from "../shared/model";
 import { iso } from "./time";
 import { agentIdOf, cleanText, hasUnsafe } from "./untrusted";
 
@@ -100,7 +101,7 @@ interface RunRec {
   lastAt: number;
   /** Lines too long to read that were not known by their head: what they said is missing from everything above. */
   unread: number;
-  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null } | null;
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean } | null;
 }
 
 /** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
@@ -126,6 +127,18 @@ export function caseOfStart(start: Record<string, unknown>, affair: RunsDeps["af
   if (!caseId || caseId.length > 256 || hasUnsafe(caseId)) return null;
   const stage = str(params?.stage);
   return { caseId, stage: stage && stage.length <= 128 && !hasUnsafe(stage) ? stage : null };
+}
+
+/** A run's result as far as it is kept: the value, or that it was past FLOW_VALUE_BYTES. */
+function valueWithin(value: unknown): { value: unknown; dropped: boolean } {
+  if (value === null) return { value: null, dropped: false };
+  try {
+    const text = JSON.stringify(value);
+    if (text !== undefined && Buffer.byteLength(text, "utf8") <= FLOW_VALUE_BYTES) return { value: JSON.parse(text) as unknown, dropped: false };
+  } catch {
+    // not JSON-able: dropped like one that is too large
+  }
+  return { value: null, dropped: true };
 }
 
 function fold(run: RunRec, e: Record<string, unknown>) {
@@ -179,7 +192,10 @@ function fold(run: RunRec, e: Record<string, unknown>) {
     }
     case "run.end": {
       const stop = obj(e.stop);
-      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error) };
+      // What the flow returned is kept up to a bound (a rule is handed it); past that only that it was too large.
+      const value = e.value === undefined ? null : e.value;
+      const kept = valueWithin(value);
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped };
     }
   }
 }
@@ -203,7 +219,7 @@ interface ClaimRead {
 }
 
 /** Who holds the run: whoever the claim names; what it does not say (or a claim that cannot be read) falls back to run.start. */
-const holderOf = (body: ClaimRead["body"], run: RunRec): { pid?: unknown; hostname?: unknown } => ({
+const holderOf = (body: ClaimRead["body"], run: Pick<RunRec, "holder">): { pid?: unknown; hostname?: unknown } => ({
   pid: typeof body?.pid === "number" ? body.pid : run.holder.pid,
   hostname: typeof body?.hostname === "string" ? body.hostname : run.holder.hostname,
 });
@@ -300,9 +316,33 @@ interface FileRec {
   skipping: boolean;
 }
 
+/** What the runtime's files say of one run, by its id: its state in the runtime's own table, and what of it was read. */
+export interface RunProbe {
+  state: RunState;
+  /** The table's word on starting it again under the same id: true in one case only (nothing came of a start long enough ago). */
+  safeToRestart: boolean;
+  /** Why the runner refused the id, when it did. */
+  refused: string | null;
+  /** The run as the page shows it, once its run.start has been read; null before. */
+  view: RunView | null;
+  /** The run.end, when there is one. */
+  end: NonNullable<RunRec["end"]> | null;
+  /** What the calls that ended cost. */
+  costUsd: number;
+  /** A gate is open: it waits for a person. */
+  gate: boolean;
+  /** Long quiet for a run that is alive. */
+  slow: boolean;
+}
+
 export interface RunReader {
   /** The runs started for the item, newest first. */
   forCase(caseId: string): RunView[];
+  /**
+   * One run by its id, whoever it was started for: the runtime's table over its claim and events, with `spawnedAtMs`
+   * (when this controller started its process; null if it does not know) to tell "just started" from "never came up".
+   */
+  probe(runId: string, spawnedAtMs: number | null): RunProbe;
 }
 
 /** The first line of a file: its text, "wait" while it is not written to the end, "long" when it does not end within the head. */
@@ -367,7 +407,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
     }
     const at = Date.parse(m[1]!);
     run.lastAt = Math.max(run.lastAt, Number.isFinite(at) ? at : 0);
-    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null };
+    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null, value: null, valueDropped: true };
   }
 
   function readNew(file: string, rec: FileRec) {
@@ -482,6 +522,33 @@ export function createRunReader(deps: RunsDeps): RunReader {
   }
 
   return {
+    probe(runId, spawnedAtMs) {
+      scan();
+      const name = `${runId}.jsonl`;
+      const run = files.get(name)?.run ?? null;
+      const claim = run?.end ? null : claimOf(name);
+      const now = deps.now();
+      const verdict = run?.end
+        ? { state: "ended" as RunState, safeToRestart: false }
+        : classify({
+            claim: claim ? { ageMs: now - claim.mtimeMs, refused: typeof claim.body?.refused === "string", unreadable: claim.body === null } : null,
+            events: run ? "open" : "none",
+            pid: pidFact(holderOf(claim?.body ?? null, run ?? { holder: {} }), probe),
+            quietMs: run ? Math.max(0, now - run.lastAt) : 0,
+            spawnedAgoMs: spawnedAtMs === null ? null : now - spawnedAtMs,
+          });
+      const view = run ? viewOf(run, claim, deps, probe) : null;
+      return {
+        state: verdict.state,
+        safeToRestart: verdict.safeToRestart,
+        refused: typeof claim?.body?.refused === "string" ? cleanText(claim.body.refused, 300) : null,
+        view,
+        end: run?.end ?? null,
+        costUsd: view?.costUsd ?? 0,
+        gate: view?.gate != null,
+        slow: view?.situation === "slow",
+      };
+    },
     forCase(caseId) {
       scan();
       const out: RunView[] = [];

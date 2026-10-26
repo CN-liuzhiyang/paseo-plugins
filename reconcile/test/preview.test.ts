@@ -163,7 +163,7 @@ test("questions added, taken back and changed, and whether the breaker would hol
       put(candidate, "rules/mini.mjs", rule(true));
       const p = await look(w, candidate);
       assert.deepEqual(p.questions.map((q) => q.kind), ["new", "new", "new", "new"]);
-      assert.deepEqual(p.breaker, { changes: { newCommitments: 4, dropped: 0, changed: 0, reopened: 0 }, limit: 3 });
+      assert.deepEqual(p.breaker, { changes: { newCommitments: 4, dropped: 0, changed: 0, reopened: 0, flows: 0 }, limit: 3 });
       assert.match(previewText(p), /⚠ 这个改动一下子会新排 4 个要问的问题，超过了上限 3/);
     },
     { rules: { "mini.mjs": rule(false) }, items: [1, 2, 3, 4].map((id) => issue(id, { fields: { Release: "2026-10-16" } })) },

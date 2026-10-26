@@ -3,8 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { HOME_SCREEN } from "./shared/graph";
-import { answerRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
+import { HOME_SCREEN, RUN_SCREEN } from "./shared/graph";
+import { answerRpc, flowRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createCarrier } from "./server/carrier";
@@ -14,6 +14,7 @@ import { RULES_KEPT } from "./server/rules";
 import { exec } from "./server/exec";
 import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
+import { createLauncher } from "./server/flows";
 import { createRunReader, resolveRunsDir } from "./server/runs";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
 import { createCommandSource } from "./server/sources/command";
@@ -43,6 +44,13 @@ export function planText(status: EngineStatus): string {
     "",
     "## 这次检查打算做的",
     ...(status.plan.length === 0 ? ["（什么都不做）"] : status.plan.map((p) => `- [${PLAN_LABEL[p.kind]}] ${p.summary}`)),
+    ...(status.flows.length === 0
+      ? []
+      : [
+          "",
+          "## 流程（我们起的，没结束的和三天内结束的）",
+          ...status.flows.map((f) => `- ${f.caseId} 「${f.label}」${f.round > 0 ? `（第 ${f.round + 1} 轮）` : ""}${f.state}${f.costUsd > 0 ? `，花了 $${f.costUsd.toFixed(2)}` : ""}${f.why ? `：${f.why}` : ""}（${f.runId}）`),
+        ]),
     "",
     `## 在追踪的事项（热的 ${status.cases.length} 个；冷的 ${status.cold.length} 个不判断、不显示）`,
     ...status.cases.map((c) => `- ${c.caseId} ${c.assessment ? c.assessment.headline : "（还没判断）"}（热：${c.hot.join("；")}）${c.assessment?.notice ? `\n  - ⚠ ${c.assessment.notice}` : ""}${c.commitments.map((k) => `\n  - 要问的「${k.title}」${k.status}：${k.step}${k.answer ? `，回答 ${k.answer}` : ""}`).join("")}`),
@@ -179,7 +187,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       const conversation = paseo ? (agentId: string) => readConversation(paseo.agents.ref(agentId)) : null;
       // Flows started for an item show on its page: read from the runtime's event files, never written.
       const runsDir = resolveRunsDir();
-      const runReader = runsDir ? createRunReader({ runsDir, tz: config.policy.tz, now: Date.now, affair: HOME_SCREEN, view: { plugin: "orchestration-ui", screen: "runs" } }) : null;
+      const runReader = runsDir ? createRunReader({ runsDir, tz: config.policy.tz, now: Date.now, affair: HOME_SCREEN, view: RUN_SCREEN }) : null;
       const runs = runReader
         ? (caseId: string) => {
             try {
@@ -190,6 +198,8 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
             }
           }
         : null;
+      // Flows are started only where the config says how (flows.json) and the runs can be read back.
+      const flows = config.launcher && runReader ? { launcher: createLauncher(config.launcher), dir: path.join(dataDir, "flows"), probe: (runId: string, spawnedAtMs: number | null) => runReader.probe(runId, spawnedAtMs) } : null;
       engine = createEngine({
         store,
         config,
@@ -205,6 +215,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         conversation,
         rulesKeep: { dir: path.join(dataDir, RULES_KEPT), write: true },
         runs,
+        flows,
         now: Date.now,
         log,
         writeStatus: (status) => {
@@ -289,6 +300,14 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
     const result = engine.answerQuestion(commitmentId, round, { ...(option !== undefined ? { option } : {}), ...(text !== undefined ? { text } : {}) });
     // The card for it closes, or is cut down to what is still asked, in a reconcile of its own: not waited for here.
     if (result.ok && !engine.busy()) void engine.tick().catch((error: unknown) => log(`reconcile after an answer failed: ${(error as Error).message}`));
+    return result;
+  });
+
+  server.handle(flowRpc, async ({ runId, action }) => {
+    if (!engine) return { ok: false, detail: problem.detail || "控制器现在没在运行" };
+    const result = action === "retry" ? engine.retryFlow(runId, "page") : engine.dismissFlow(runId, action, "page");
+    // The run starts, or the page changes, in a reconcile of its own: not waited for here.
+    if (result.ok && !engine.busy()) void engine.tick().catch((error: unknown) => log(`reconcile after a flow action failed: ${(error as Error).message}`));
     return result;
   });
 

@@ -1,4 +1,4 @@
-import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, Item, Note, Observation, ObserveRequest, SourceHealth } from "../shared/model";
+import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, FlowEnd, FlowRec, Item, Note, Observation, ObserveRequest, SourceHealth } from "../shared/model";
 import type { Request } from "./requests";
 import type { RulesHeld } from "../shared/status";
 
@@ -19,7 +19,7 @@ export type EventBody =
   | { type: "rules.loaded"; fingerprint: string; files: string[] }
   | { type: "rules.changed"; from: string | null; to: string; diff: RulesDiff }
   // dropped / changed / reopened: absent in journals from before the breaker counted them.
-  | { type: "rules.held"; fingerprint: string; newCommitments: number; dropped?: number; changed?: number; reopened?: number }
+  | { type: "rules.held"; fingerprint: string; newCommitments: number; dropped?: number; changed?: number; reopened?: number; flows?: number }
   | { type: "rules.released"; fingerprint: string }
   /** A rule file that does not load: since when (kept while it stays broken), and the copy that runs instead (null: none). */
   | { type: "rules.broken"; file: string; error: string; fallback: string | null; since: string }
@@ -34,6 +34,18 @@ export type EventBody =
   | { type: "annotation.revoked"; id: string; said: string; by: string }
   /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
   | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string; why?: string }
+  /** The intent to start a flow for a case, written before the process is started (server/flows.ts). */
+  | { type: "flow.intent"; rec: FlowRec }
+  /** The process was started (its pid, when the system gave one). */
+  | { type: "flow.spawned"; runId: string; pid: number | null }
+  /** Starting the process itself failed (no such program, no right to): nothing ran. */
+  | { type: "flow.spawn-failed"; runId: string; error: string }
+  /** The run came to an end, or was found to never come to one; `at` of the end is the event's. */
+  | { type: "flow.ended"; runId: string; end: Omit<FlowEnd, "at"> }
+  /** A person set a run aside: "mine" (they take it from here) or "fold" (just not shown). By run, not by case. */
+  | { type: "flow.dismissed"; runId: string; how: "mine" | "fold"; by: string }
+  /** A person asked for a run again: the next round of the key, whose intent follows in the same batch. For the record. */
+  | { type: "flow.retry"; caseId: string; name: string; key: string; round: number; runId: string; by: string; estimateUsd: number }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
@@ -73,7 +85,14 @@ export interface State {
   requests: Record<string, { outcome: "applied" | "proposed" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string }>;
   /** By case: what its rule asks to have watched, and since when it asks that. Absent in states from before it was kept. */
   observing?: Record<string, { at: string; requests: ObserveRequest[] }>;
+  /** The runs of flows started for cases, by run id. Absent in states from before flows were. */
+  flows?: Record<string, FlowRec>;
+  /** By "case\0name\0key": the latest round asked for and its run id; what makes "asked for once" outlast the run. */
+  flowKeys?: Record<string, { round: number; runId: string }>;
 }
+
+/** The key under which the latest round of a flow request is kept (State.flowKeys). */
+export const flowKeyOf = (caseId: string, name: string, key: string) => `${caseId}\0${name}\0${key}`;
 
 export interface RuleBroken {
   error: string;
@@ -152,7 +171,7 @@ export function apply(state: State, event: JournalEvent): void {
       if (state.rules.held && state.rules.held.fingerprint !== event.to) state.rules.held = null;
       return;
     case "rules.held":
-      state.rules.held = { fingerprint: event.fingerprint, newCommitments: event.newCommitments, dropped: event.dropped ?? 0, changed: event.changed ?? 0, reopened: event.reopened ?? 0, at: event.at };
+      state.rules.held = { fingerprint: event.fingerprint, newCommitments: event.newCommitments, dropped: event.dropped ?? 0, changed: event.changed ?? 0, reopened: event.reopened ?? 0, ...(event.flows ? { flows: event.flows } : {}), at: event.at };
       return;
     case "rules.released":
       state.rules.released.push(event.fingerprint);
@@ -185,6 +204,38 @@ export function apply(state: State, event: JournalEvent): void {
     case "observe.set":
       if (event.requests.length === 0) delete (state.observing ??= {})[event.caseId];
       else (state.observing ??= {})[event.caseId] = { at: event.at, requests: event.requests };
+      return;
+    case "flow.intent": {
+      (state.flows ??= {})[event.rec.runId] = event.rec;
+      const at = flowKeyOf(event.rec.caseId, event.rec.name, event.rec.key);
+      const had = (state.flowKeys ??= {})[at];
+      if (!had || had.round <= event.rec.round) state.flowKeys[at] = { round: event.rec.round, runId: event.rec.runId };
+      return;
+    }
+    case "flow.spawned": {
+      const rec = state.flows?.[event.runId];
+      if (rec) Object.assign(rec, { spawnedAt: event.at, pid: event.pid, spawnTries: (rec.spawnTries ?? 0) + 1, spawnError: undefined });
+      return;
+    }
+    case "flow.spawn-failed": {
+      const rec = state.flows?.[event.runId];
+      if (rec) Object.assign(rec, { spawnTries: (rec.spawnTries ?? 0) + 1, spawnError: event.error });
+      return;
+    }
+    case "flow.ended": {
+      const rec = state.flows?.[event.runId];
+      if (!rec || rec.ended) return;
+      rec.ended = { at: event.at, ...event.end };
+      // A run that came to a result is not run again with this input; one that did not is, so it keeps it.
+      if (event.end.outcome === "done" || event.end.outcome === "stopped") rec.input = null;
+      return;
+    }
+    case "flow.dismissed": {
+      const rec = state.flows?.[event.runId];
+      if (rec && !rec.dismissed) rec.dismissed = { how: event.how, by: event.by, at: event.at };
+      return;
+    }
+    case "flow.retry":
       return;
     case "eval.candidate":
       state.evals += 1;

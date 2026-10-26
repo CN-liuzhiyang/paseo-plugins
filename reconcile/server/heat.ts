@@ -24,6 +24,8 @@ export interface HeatInputs {
   quiet?: boolean;
   /** The latest time another case woke this one, and why. */
   woken?: { at: string; reason: string } | null;
+  /** A flow started for it is still running: its result is judged when it comes. */
+  flowing?: boolean;
 }
 
 const DAY = 86_400_000;
@@ -40,6 +42,7 @@ export function heatOf(item: Pick<Item, "fields" | "lastHumanAt">, inputs: HeatI
   const reasons: string[] = [];
   if (inputs.open) reasons.push("有没问完的问题");
   if (inputs.watched) reasons.push("在关注列表里");
+  if (inputs.flowing) reasons.push("有流程在跑");
   if (inputs.quiet) return reasons;
   if (item.lastHumanAt && nowMs - Date.parse(item.lastHumanAt) <= policy.recentDays * DAY) reasons.push(`${item.lastHumanAt.slice(5, 10)} 有人改过`);
   const today = zoned(localParts(nowMs, tz).date, "12:00", tz);

@@ -7,7 +7,7 @@ import type { Assessment, Commitment, SourceHealth } from "./model";
 
 export interface PlanEntry {
   at: string;
-  kind: "card" | "deferred" | "commitment" | "skipped" | "note" | "held" | "expire" | "notice" | "said";
+  kind: "card" | "deferred" | "commitment" | "skipped" | "note" | "held" | "expire" | "notice" | "said" | "flow";
   person: string | null;
   summary: string;
 }
@@ -23,6 +23,7 @@ export const PLAN_LABEL: Record<PlanEntry["kind"], string> = {
   expire: "到期",
   notice: "提醒",
   said: "对话里说的",
+  flow: "流程",
 };
 
 /** A rules change the breaker held: how many commitments it would create, cancel, change and open again at once. */
@@ -32,17 +33,20 @@ export interface RulesHeld {
   dropped: number;
   changed: number;
   reopened: number;
+  /** Runs of flows it would start at once; absent in a hold from before they were counted. */
+  flows?: number;
   at: string;
 }
 
-export function describeChanges(c: Pick<RulesHeld, "newCommitments" | "dropped" | "changed" | "reopened">): string {
+export function describeChanges(c: Pick<RulesHeld, "newCommitments" | "dropped" | "changed" | "reopened"> & { flows?: number }): string {
   const parts = [
     c.newCommitments > 0 ? `新排 ${c.newCommitments}` : "",
     c.dropped > 0 ? `收回 ${c.dropped}` : "",
     c.changed > 0 ? `改动 ${c.changed}` : "",
     c.reopened > 0 ? `重新排上 ${c.reopened}` : "",
   ].filter(Boolean);
-  return `${parts.join("、") || "改动 0"} 个要问的问题`;
+  const asks = `${parts.join("、") || "改动 0"} 个要问的问题`;
+  return c.flows && c.flows > 0 ? `${parts.length > 0 ? `${asks}，` : ""}起 ${c.flows} 个流程（要花钱）` : asks;
 }
 
 export interface StatusSaid {
@@ -115,6 +119,8 @@ export interface Status {
   cold: Array<{ caseId: string; title: string; status: string; observedAt: string }>;
   openCommitments: number;
   plan: PlanEntry[];
+  /** The runs of flows started for items that are not over, and those over in the last three days. */
+  flows: Array<{ runId: string; caseId: string; label: string; round: number; state: string; intentAt: string; endedAt: string | null; costUsd: number; why: string | null }>;
   evals: number;
   pushesToday: Record<string, number>;
   /** Confirmation cards raised today, per admin; they have their own budget (policy.confirmPerDay). */

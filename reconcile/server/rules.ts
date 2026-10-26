@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import type { Assessment, Commitment, Item, Note, Observation } from "../shared/model";
+import type { Assessment, Commitment, FlowResult, Item, Note, Observation } from "../shared/model";
 import { normalizeStages, type StageMeta, type StageSpec } from "../shared/graph";
+import { parseDuration } from "../shared/liveness.mjs";
 import { flagOf, linksOf, type FlagLink, type Vocabulary } from "./links";
 import { addWorkdays, iso, workdaysBetween, zoned, type Calendar } from "./time";
 import type { Concluded } from "./observe";
@@ -90,6 +91,47 @@ const observe = z
   })
   .strict();
 
+/** What a flow's name looks like to the runtime (orchestration/runtime/resolve.mjs). */
+export const FLOW_NAME = /^[a-z][a-z0-9-]*$/;
+/** The most a run's input may be, as JSON. */
+export const RUN_INPUT_BYTES = 16 * 1024;
+/** The most runs a rule may ask for in one judgment. */
+export const RUNS_PER_JUDGMENT = 5;
+
+/**
+ * A flow this rule may have started for its items, under the rule's own name for it: the flow the
+ * runtime is asked to run (by name; where it lives is the runtime's), how long a run may take, the
+ * ceiling the day's budget counts one at while it runs (not enforced on the run), and whether the
+ * person is told in a message when it ends.
+ */
+const flowDecl = z
+  .object({
+    flow: z.string().regex(FLOW_NAME),
+    timeout: z.string().refine((t) => parseDuration(t) !== null, "not a duration such as 45m").optional(),
+    maxUsd: z.number().positive().max(1000),
+    notify: z.boolean().default(false),
+  })
+  .strict();
+
+export type FlowDecl = z.output<typeof flowDecl>;
+
+const flowsDecl = z.record(z.string().regex(/^[A-Za-z][A-Za-z0-9_-]{0,39}$/), flowDecl);
+
+/**
+ * A run of a declared flow to have started for the case: asked for once per key. The same key given
+ * again, however the run came out, is not run again (only a person's "run it again" adds a round).
+ * `owner`: whom the end of the run is told to (persons.json id); absent: the admin.
+ */
+const runRequest = z
+  .object({
+    flow: z.string().min(1),
+    key: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/).max(200),
+    input: z.record(z.string(), z.unknown()).default({}),
+    label: z.string().min(1).max(60),
+    owner: z.string().min(1).optional(),
+  })
+  .strict();
+
 const output = z
   .object({
     stage: z.string().min(1),
@@ -105,6 +147,7 @@ const output = z
     commitments: z.array(commitmentSpec),
     wake: z.array(wake).optional(),
     observe: z.array(observe).max(20).optional(),
+    run: z.array(runRequest).max(RUNS_PER_JUDGMENT).optional(),
     /** A statement for the owner when something looks wrong; not a question, nothing to answer. */
     notice: z.string().min(1).max(300).optional(),
     /**
@@ -157,6 +200,13 @@ export interface RuleContext {
   /** Whether the source has succeeded recently enough that silence in it means something. */
   fresh(sourceId: string): boolean;
   /**
+   * The run of a flow this rule asked for under `name` (its `flows`) and `key` (its `run` output),
+   * for this case: null when it was never asked for, else where it stands and, once there is one, its
+   * result (`value`, as the flow returned it). The latest round: a person's "run it again" is a new one.
+   * Not a source: reading it does not make the judgment depend on one.
+   */
+  run(name: string, key: string): FlowResult | null;
+  /**
    * What an observing source found for a key this rule (or another) asked it to watch, as the
    * controller takes it: `verdict` is the command's, except that "no-signal" is "insufficient-data"
    * until the window has been watched to its end on data read in time (`why` says what is missing).
@@ -184,6 +234,8 @@ export interface LoadedRule {
   /** What it says about them for the flow chart (labels, the usual route, detours, ends); absent on a rule made by hand in a test. */
   stageMeta?: StageMeta[];
   params: Record<string, unknown>;
+  /** The flows it may have started, by its own names for them (the module's `export const flows`); none when it declares none. */
+  flows?: Record<string, FlowDecl>;
   assess: RuleModule["assess"];
 }
 
@@ -225,7 +277,7 @@ export const sha256 = (text: string) => createHash("sha256").update(text).digest
 
 // Kept out of the bundler's sight: the host compiles this plugin to CommonJS, and a literal
 // import() there would be rewritten into a require that cannot load an .mjs file.
-const dynamicImport = new Function("url", "return import(url)") as (url: string) => Promise<{ default?: unknown }>;
+const dynamicImport = new Function("url", "return import(url)") as (url: string) => Promise<{ default?: unknown; flows?: unknown }>;
 
 export function fingerprintOf(dir: string): { fingerprint: string; files: Array<{ file: string; text: string }> } {
   const files = existsSync(dir)
@@ -270,9 +322,15 @@ async function loadOne(file: string, text: string, loaded: LoadedRule[]): Promis
     // What runs is the text read -- scanned and, for a copy, checked -- not the file read again: a
     // file changed on disk after it was read does not run. (A rule imports nothing: scanRule.)
     const url = `data:text/javascript;base64,${Buffer.from(text, "utf8").toString("base64")}`;
-    const parsed = moduleSchema.safeParse((await dynamicImport(url)).default);
+    const mod = await dynamicImport(url);
+    const parsed = moduleSchema.safeParse(mod.default);
     if (!parsed.success) return { error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") };
     const m = parsed.data;
+    // Flows are declared on the module (`export const flows = {...}`), beside the default export, not in it: said so
+    // rather than left out, as a `flows` inside the default export would otherwise be dropped without a word.
+    if (mod.default && typeof mod.default === "object" && "flows" in mod.default) return { error: "flows: declare them as `export const flows = {...}` beside the default export, not inside it" };
+    const declared = flowsDecl.safeParse(mod.flows ?? {});
+    if (!declared.success) return { error: `flows: ${declared.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` };
     let stageMeta: StageMeta[];
     try {
       stageMeta = normalizeStages(m.stages);
@@ -280,7 +338,7 @@ async function loadOne(file: string, text: string, loaded: LoadedRule[]): Promis
       return { error: `stages: ${(error as Error).message}` };
     }
     if (loaded.some((r) => r.name === m.name)) return { error: `a rule named "${m.name}" is already loaded` };
-    return { file, name: m.name, source: m.applies.source, stages: stageMeta.map((s) => s.id), stageMeta, params: m.params, assess: m.assess };
+    return { file, name: m.name, source: m.applies.source, stages: stageMeta.map((s) => s.id), stageMeta, params: m.params, flows: declared.data, assess: m.assess };
   } catch (error) {
     return { error: (error as Error).message };
   }
@@ -392,6 +450,8 @@ export interface ContextInputs {
   reads?: Set<string>;
   /** What an observation item comes to now (observe.ts); null: not an observing source's item. */
   observed?(itemKey: string): Concluded | null;
+  /** The run of a flow asked for by the case being judged (server/flows.ts); absent: none was. */
+  run?(name: string, key: string): FlowResult | null;
 }
 
 export function makeContext(inputs: ContextInputs, params: Record<string, unknown>): RuleContext {
@@ -450,6 +510,10 @@ export function makeContext(inputs: ContextInputs, params: Record<string, unknow
     at: (date: string, time: string) => iso(zoned(date, time, tz), tz),
     local: (instant: string) => iso(parseIso(instant), tz),
     fresh: (sourceId: string) => inputs.fresh(sourceId),
+    run: (name: string, key: string) => {
+      const found = inputs.run?.(name, key) ?? null;
+      return found ? copy(found) : null;
+    },
     observation: (sourceId: string, key: string) => {
       inputs.reads?.add(`${sourceId}:${key}`);
       const seen = inputs.observed?.(`${sourceId}:${key}`) ?? null;
@@ -496,6 +560,19 @@ export function judge(rule: LoadedRule, kase: Case, ctx: RuleContext, fingerprin
     if (Buffer.byteLength(JSON.stringify(o.params), "utf8") > OBSERVE_PARAMS_BYTES) return failed(`${rule.file}: observe ${o.key}: params over ${OBSERVE_PARAMS_BYTES} bytes`);
     if (keys.has(`${o.source}:${o.key}`)) return failed(`${rule.file}: observe ${o.key} asked twice`);
     keys.add(`${o.source}:${o.key}`);
+  }
+  const runs = new Set<string>();
+  for (const r of out.run ?? []) {
+    if (!rule.flows?.[r.flow]) return failed(`${rule.file}: run ${r.key}: "${r.flow}" is not a flow this rule declares (export const flows)`);
+    if (runs.has(`${r.flow}\0${r.key}`)) return failed(`${rule.file}: run ${r.key} asked twice`);
+    runs.add(`${r.flow}\0${r.key}`);
+    // The input is taken as its JSON from here on, like observe params: what is checked, kept and compared is one thing.
+    try {
+      r.input = JSON.parse(JSON.stringify(r.input)) as Record<string, unknown>;
+    } catch (error) {
+      return failed(`${rule.file}: run ${r.key}: input is not JSON (${(error as Error).message})`);
+    }
+    if (Buffer.byteLength(JSON.stringify(r.input), "utf8") > RUN_INPUT_BYTES) return failed(`${rule.file}: run ${r.key}: input over ${RUN_INPUT_BYTES} bytes`);
   }
   for (const spec of out.commitments) {
     for (const value of [spec.trigger.at, spec.backstop.at]) if (Number.isNaN(Date.parse(value))) return failed(`${rule.file}: not an instant: ${value}`);

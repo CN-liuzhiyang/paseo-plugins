@@ -4,7 +4,7 @@ import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { clockText, durationText, SITUATION, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
-import { answerRpc, graphRpc } from "../shared/rpc";
+import { answerRpc, flowRpc, graphRpc } from "../shared/rpc";
 import { BallChip, StageChart, StageRail } from "./chart";
 import { go, jumpOf } from "./jump";
 import { Banner, Button, Fold, openExternal, OpenAgent, ScreenLink, tint, useUi } from "./ui";
@@ -127,6 +127,52 @@ function Facts({ view }: { view: GraphView }) {
           <Text style={[ui.styles.small, { fontWeight: "600" }]}>{f.label}</Text>
           <Text style={{ color: ui.theme.colors.foreground, fontSize: 16, fontWeight: "700" }}>{f.value}</Text>
           <Text style={ui.styles.small}>{f.sub || " "}</Text>
+        </View>
+      ))}
+    </View>
+  );
+}
+
+// ---- a run in trouble: the way out ------------------------------------------------------------
+
+/** What a person may do with a flow that failed, broke or never started: run it again, take it over, or fold it away. */
+function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolean; text: string }): void }) {
+  const ui = useUi();
+  const flow = useRpc(flowRpc);
+  const [busy, setBusy] = useState(false);
+  const runs = view.runs.filter((r) => (r.actions?.length ?? 0) > 0);
+  if (runs.length === 0) return null;
+  const press = async (runId: string, action: "retry" | "mine" | "fold") => {
+    setBusy(true);
+    try {
+      const reply = await flow({ runId, action });
+      onDone({ ok: reply.ok, text: reply.detail });
+    } catch (error) {
+      onDone({ ok: false, text: String(error) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <View style={{ gap: 8 }}>
+      {runs.map((r) => (
+        <View key={r.runId} style={{ borderRadius: 10, borderWidth: 1, borderColor: ui.tone("warning"), backgroundColor: ui.theme.colors.surface1, padding: 10, gap: 6 }}>
+          <Text style={ui.styles.small} selectable>
+            流程「{r.flow}」{r.situation === "notstarted" ? "没起来" : r.situation === "lost" ? "断了" : r.situation === "slow" ? "可能卡住了" : "失败了"}
+            {r.why ? `：${r.why}` : ""}。不会自动重来。
+          </Text>
+          <View style={[ui.styles.row, { gap: 8, flexWrap: "wrap" }]}>
+            {r.actions!.includes("retry") ? (
+              <Button
+                icon="RotateCw"
+                label={r.situation === "notstarted" ? "重新跑一次（上次没花钱）" : `重新跑一次（会再花钱${r.retry?.estimateUsd ? `，上次花了 $${r.retry.estimateUsd.toFixed(2)}` : ""}）`}
+                disabled={busy}
+                onPress={() => void press(r.runId, "retry")}
+              />
+            ) : null}
+            <Button icon="User" label="我自己来" disabled={busy} onPress={() => void press(r.runId, "mine")} />
+            <Button icon="EyeOff" label="收起" disabled={busy} onPress={() => void press(r.runId, "fold")} />
+          </View>
         </View>
       ))}
     </View>
@@ -542,6 +588,14 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
           </Text>
         </Banner>
       ) : null}
+      <FlowWays
+        view={view}
+        onDone={(n) => {
+          setNote(n);
+          refresh();
+          onChanged();
+        }}
+      />
       {asks.map((a) => (
         <AskPanel
           key={`${a.commitmentId}:${a.round}`}

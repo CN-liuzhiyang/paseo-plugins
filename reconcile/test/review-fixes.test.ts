@@ -55,9 +55,13 @@ test("stale data is a badge on the row as well as a mark on the page", () =>
 
 // ---- N6-02 ------------------------------------------------------------------------------------------------
 
-/** A world whose items have the runs given for them (the runs are what a reader of the event files would return). */
-async function withRuns<T>(runs: Record<number, RunView[]>, fields: Record<number, Record<string, string>>, body: (w: Awaited<ReturnType<typeof makeWorld>>) => Promise<T>): Promise<T> {
-  const w = await makeWorld({ start: START, config: { rules: { "flow.mjs": FLOW } }, runs: (caseId) => runs[Number(caseId.split(":")[1])] ?? [] });
+/**
+ * A world whose items have the runs given for them (the runs are what a reader of the event files would return).
+ * `adopt`: the controller started them itself (it recorded their intent, and the end of those that are over), which is
+ * what makes a run say what the item is; without, they are runs that only name the item, listed on its page and no more.
+ */
+async function withRuns<T>(runs: Record<number, RunView[]>, fields: Record<number, Record<string, string>>, body: (w: Awaited<ReturnType<typeof makeWorld>>) => Promise<T>, adopt = true): Promise<T> {
+  const w = await makeWorld({ start: START, config: { rules: { "flow.mjs": FLOW } }, runs: (caseId) => runs[Number(caseId.split(":")[1])] ?? [], adopt });
   try {
     for (const [id, f] of Object.entries(fields)) {
       const item = w.items.get(`gcp-demo:${id}`) ?? issue(Number(id), { release: "2026-10-14" });
@@ -123,6 +127,7 @@ test("the page's history lists the runs started for the item: when one began and
       const all = view(w, 1).history;
       assert.deepEqual(all.map((h) => h.at), [...all.map((h) => h.at)].sort(), "in time order with everything else");
     },
+    false,
   ));
 
 // ---- N6R-02 -----------------------------------------------------------------------------------------------
@@ -236,7 +241,7 @@ test("sources with no label are counted, not named", async () => {
 
 test("a failed, lost or quiet flow asks to be looked at, not to be decided by a person who has nothing to decide it with", () =>
   withRuns(
-    { 1: [runView("fail", { stage: "draft", endedAt: "2026-10-13T09:55:00+08:00", quiet: null })], 2: [runView("lost", { stage: "draft" })], 3: [runView("slow", { stage: "draft" })] },
+    { 1: [runView("fail", { runId: "r-1", stage: "draft", endedAt: "2026-10-13T09:55:00+08:00", quiet: null })], 2: [runView("lost", { runId: "r-2", stage: "draft" })], 3: [runView("slow", { runId: "r-3", stage: "draft" })] },
     { 1: {}, 2: {}, 3: {} },
     async (w) => {
       for (const id of [1, 2, 3]) {

@@ -195,6 +195,12 @@ export interface Card {
   raisedAt: string;
   closedAt: string | null;
   reason: string | null;
+  /**
+   * What the card said when it was put up (a hash of its content) and when, and which runs of its items were over by
+   * then: a card whose words have changed since because another run of them ended is put up again with the new ones
+   * (engine.ts pruneCards). Absent on older cards; `ended` absent on those from before it was kept.
+   */
+  shown?: { at: string; hash: string; ended?: string[] };
   /** A card asking the admin to confirm words said in a conversation; absent on a card of questions. */
   kind?: "confirm";
   /** Cut down from this card (questions came off it): sent and counted already as that one. */
@@ -258,3 +264,83 @@ export interface SourceHealth {
 }
 
 export type EvalKind = "woke-noop" | "nag-ignored" | "commitment-expired" | "rule-breaker" | "source-down-long" | "budget-overflow" | "correction";
+
+// ---- flows the controller started for an item (server/flows.ts) ----------------------------------
+
+/** How a run came out: the runtime's own four, and the three the controller reaches when the runtime cannot say. */
+export type FlowOutcome = "done" | "stopped" | "failed" | "timeout" | "lost" | "not-started" | "refused";
+
+/** How a run ended, as the controller recorded it when it read or decided that. */
+export interface FlowEnd {
+  at: string;
+  outcome: FlowOutcome;
+  /** The flow's own one line (its `summarize`); null when it gave none, or the run has no result. */
+  summary: string | null;
+  /** The sum of the calls that ended; Claude-family only (the runtime's `run.end.cost.partial` says what is left out). */
+  costUsd: number;
+  /** What the flow returned, as the runtime wrote it; null when it has none, or `valueDropped`. */
+  value: unknown;
+  /** The result was too large to keep (more than FLOW_VALUE_BYTES): the rule gets the summary only. */
+  valueDropped: boolean;
+  /** Why, in words, when the run did not come to a result. */
+  why: string | null;
+}
+
+/** One run of a flow the controller meant to start for an item: the intent, written before the process was. */
+export interface FlowRec {
+  runId: string;
+  caseId: string;
+  /** The rule's own name for it (rules.ts `flows`), and the flow the runtime is asked to run. */
+  name: string;
+  flow: string;
+  key: string;
+  /** 0 for the first; a person's "run it again" adds one. */
+  round: number;
+  /** The item's stage when the run was asked for: where its failure counts as the item's condition. */
+  stage: string | null;
+  label: string;
+  /** What the run is called to the runtime (`affair.label`): the item, the stage and the label. */
+  affairLabel: string;
+  /** The person told when it ends (persons.json id); null: nobody. */
+  owner: string | null;
+  notify: boolean;
+  /** The ceiling the day's budget counts it at while it runs; not enforced on the run. */
+  maxUsd: number;
+  timeout: string | null;
+  /** What the flow is given; dropped once the run is done or stopped (a run that failed is run again with it). */
+  input: Record<string, unknown> | null;
+  inputHash: string;
+  /** The fingerprint of the rules that asked for it. */
+  rules: string;
+  intentAt: string;
+  spawnedAt?: string;
+  pid?: number | null;
+  /** Times the process was started for it (a start that failed counts), and why the last failed. */
+  spawnTries?: number;
+  spawnError?: string;
+  ended?: FlowEnd;
+  dismissed?: { how: "mine" | "fold"; by: string; at: string };
+}
+
+/** What a rule reads of a run (ctx.run). */
+export type FlowState = "queued" | "starting" | "running" | "gate" | "slow" | "done" | "stopped" | "failed" | "timeout" | "lost" | "not-started" | "refused" | "dismissed" | "deferred";
+
+export interface FlowResult {
+  state: FlowState;
+  /** Null when no run exists (state "deferred": asked for, held back). */
+  runId: string | null;
+  round: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  /** What the flow returned; null until it is done or stopped. */
+  value: unknown;
+  summary: string | null;
+  costUsd: number;
+  /** In words: why it did not come to a result, or why it was held back. */
+  why: string | null;
+  /** For a run a person set aside ("dismissed"): how it ended, or null when it has not. */
+  endedOutcome: FlowOutcome | null;
+}
+
+/** The most of a run's result the controller keeps and hands to a rule. */
+export const FLOW_VALUE_BYTES = 16 * 1024;

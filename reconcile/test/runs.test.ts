@@ -247,14 +247,14 @@ const RULE = `export default { name: "flow", description: "x", applies: { source
 
 test("a run's state decides where the item stands on the list and what the page says first", async () => {
   const states: Record<number, RunView> = {
-    1: runView("doing"),
-    2: runView("fail", { error: { name: "OutputMismatch", plain: "agent 的回答不合约定的格式，这一步没拿到结果", raw: "OutputMismatch: x" }, sideEffects: ["拷贝示例文件"], quiet: null }),
-    3: runView("lost"),
-    4: runView("slow", { quiet: { ms: 40 * MIN, limitMs: 35 * MIN } }),
-    5: runView("me", { gate: { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-13T09:40:00+08:00", kind: "provider", agentId: null } }),
-    6: runView("done", { quiet: null, outcome: "一共改了 3 处" }),
+    1: runView("doing", { runId: "r-1" }),
+    2: runView("fail", { runId: "r-2", error: { name: "OutputMismatch", plain: "agent 的回答不合约定的格式，这一步没拿到结果", raw: "OutputMismatch: x" }, sideEffects: ["拷贝示例文件"], quiet: null }),
+    3: runView("lost", { runId: "r-3" }),
+    4: runView("slow", { runId: "r-4", quiet: { ms: 40 * MIN, limitMs: 35 * MIN } }),
+    5: runView("me", { runId: "r-5", gate: { callId: "g1", summary: "把示例改动放进目录", since: "2026-10-13T09:40:00+08:00", kind: "provider", agentId: null } }),
+    6: runView("done", { runId: "r-6", quiet: null, outcome: "一共改了 3 处" }),
   };
-  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "flow.mjs": RULE } }, runs: (caseId) => [states[Number(caseId.split(":")[1])]].filter((r): r is RunView => !!r) });
+  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "flow.mjs": RULE } }, runs: (caseId) => [states[Number(caseId.split(":")[1])]].filter((r): r is RunView => !!r), adopt: true });
   try {
     for (const id of [1, 2, 3, 4, 5, 6]) w.items.set(`gcp-demo:${id}`, issue(id, { release: "2026-10-14" }));
     await w.run("2026-10-13 10:30");

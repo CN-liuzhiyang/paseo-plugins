@@ -49,6 +49,15 @@ export const answerRpc = defineRpc({
   output: z.object({ ok: z.boolean(), already: z.boolean(), detail: z.string() }),
 });
 
+// A flow's run set aside, or asked for again, by its id: on the item's page, where a run that failed, broke or never
+// started has its way out. "mine": the person takes it from here; "fold": just not shown; "retry": run it once more
+// (it costs again, and counts against the day's limits).
+export const flowRpc = defineRpc({
+  name: "reconcile.flow",
+  input: z.object({ runId: z.string().min(1).max(128), action: z.enum(["mine", "fold", "retry"]) }),
+  output: z.object({ ok: z.boolean(), detail: z.string() }),
+});
+
 export const releaseRulesRpc = defineRpc({
   name: "reconcile.rules.release",
   input: z.object({ fingerprint: z.string() }),

@@ -1,11 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config";
 import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine } from "../server/engine";
 import type { RunView } from "../shared/graph";
-import type { Card, Item } from "../shared/model";
+import type { Card, FlowRec, Item } from "../shared/model";
+import { recordingLauncher, type Launcher, type LaunchSpec } from "../server/flows";
+import type { RunProbe } from "../server/runs";
 import type { PollInput, Source } from "../server/sources/source";
 import type { Conversation, Receipt } from "../server/requests";
 import { openStore, type Store } from "../server/store";
@@ -125,6 +127,22 @@ export function issue(id: number, patch: Partial<Item> & { release?: string } = 
   };
 }
 
+/** What a test world gives the engine to start flows with: a launcher that only records, and a probe the test sets by run id. */
+export interface FlowsKit {
+  launcher: ReturnType<typeof recordingLauncher>;
+  dir: string;
+  /** How the runtime's files stand for a run, by id; a run not set here is "absent" (nothing of it on disk). */
+  probes: Map<string, Partial<RunProbe>>;
+  /** Runs the probe was asked about, in order. */
+  asked: string[];
+  /** The launcher fails this many starts, with this error. */
+  failStarts: { count: number; error: Error };
+  /** Called as the launcher is asked to start a run, before it answers (what the journal holds at that moment is the test's to look at). */
+  onStart: ((spec: LaunchSpec) => void) | null;
+}
+
+export const probeOf = (patch: Partial<RunProbe> = {}): RunProbe => ({ state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, gate: false, slow: false, ...patch });
+
 export interface World {
   dir: string;
   configDir: string;
@@ -153,6 +171,8 @@ export interface World {
   hold: Promise<void> | null;
   store: Store;
   engine: Engine;
+  /** The flows kit (option `flows`): what the launcher was asked to start, and the runtime's files as the test says they stand. */
+  flows: FlowsKit;
   logs: string[];
   statuses: unknown[];
   /** Conversations by agent id, as the host would show them to the engine. */
@@ -167,10 +187,26 @@ export interface World {
   /** Moves the clock and reconciles at each step. */
   run(untilLocal: string, stepMinutes?: number): Promise<void>;
   restart(mode?: "live" | "dry-run"): Promise<void>;
+  /** The process dies where it stands (no snapshot, the lock left behind) and a new one starts on what the journal holds. */
+  crash(mode?: "live" | "dry-run"): Promise<void>;
+  /** Every event in the journal on disk, in order. */
+  journal(): Array<Record<string, unknown> & { type: string; seq: number }>;
   close(): void;
 }
 
-export async function makeWorld(options: { start: string; mode?: "live" | "dry-run"; config?: Parameters<typeof writeConfig>[1]; deliver?: boolean; runs?: (caseId: string) => RunView[] }): Promise<World> {
+export async function makeWorld(options: {
+  start: string;
+  mode?: "live" | "dry-run";
+  config?: Parameters<typeof writeConfig>[1];
+  deliver?: boolean;
+  runs?: (caseId: string) => RunView[];
+  /** The runs `runs` returns are ones the controller itself started: it recorded their intent (and their end, for a run over). */
+  adopt?: boolean;
+  /** The journal's clock runs this far ahead of the engine's (as in life, where an event is written after the round began). */
+  storeSkewMs?: number;
+  /** The engine can start flows: true, a recording launcher and a probe the test sets (world.flows); or the launcher and probe to use, as they are. */
+  flows?: boolean | { launcher: Launcher; dir: string; probe(runId: string, spawnedAtMs: number | null): RunProbe };
+}): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
   const dataDir = path.join(dir, "data");
@@ -192,7 +228,8 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null } } as World;
+  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), asked: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -256,7 +293,7 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
 
   const boot = async (mode: "live" | "dry-run") => {
     mkdirSync(requestsDir, { recursive: true });
-    world.store = openStore({ dir: dataDir, now: () => clock.now });
+    world.store = openStore({ dir: dataDir, now: () => clock.now + (options.storeSkewMs ?? 0) });
     const config = loadConfig(configDir);
     world.engine = createEngine({
       store: world.store,
@@ -272,6 +309,27 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
       conversation: async (agentId) => conversations.get(agentId) ?? null,
       rulesKeep: { dir: path.join(dataDir, "rules-last-good"), write: true, now: () => clock.now },
       runs: options.runs ?? null,
+      flows: typeof options.flows === "object"
+        ? options.flows
+        : options.flows
+        ? {
+            dir: kit.dir,
+            launcher: {
+              async start(spec) {
+                kit.onStart?.(spec);
+                if (kit.failStarts.count > 0) {
+                  kit.failStarts.count--;
+                  throw kit.failStarts.error;
+                }
+                return kit.launcher.start(spec);
+              },
+            },
+            probe(runId) {
+              kit.asked.push(runId);
+              return probeOf(kit.probes.get(runId));
+            },
+          }
+        : null,
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),
@@ -303,9 +361,25 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
     const file = path.join(requestsDir, "done", `${id}.json`);
     return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Receipt) : null;
   };
+  /** The runs `runs` returns, written into the journal as the controller's own (what a controller that started them would have recorded). */
+  const adoptRuns = () => {
+    if (!options.adopt || !options.runs) return;
+    const events: Parameters<Store["append"]>[0] = [];
+    for (const caseId of items.keys()) {
+      for (const v of options.runs(caseId)) {
+        if (world.store.state.flows?.[v.runId]) continue;
+        const rec: FlowRec = { runId: v.runId, caseId, name: "adopted", flow: v.flow, key: v.runId, round: 0, stage: v.stage, label: v.flow, affairLabel: v.flow, owner: null, notify: false, maxUsd: 0, timeout: null, input: null, inputHash: "", rules: "", intentAt: v.startedAt, spawnedAt: v.startedAt };
+        events.push({ type: "flow.intent", rec });
+        const outcome = v.situation === "done" ? "done" : v.situation === "fail" ? "failed" : v.situation === "lost" ? "lost" : null;
+        if (outcome) events.push({ type: "flow.ended", runId: v.runId, end: { outcome, summary: v.outcome, costUsd: v.costUsd, value: null, valueDropped: false, why: null } });
+      }
+    }
+    if (events.length > 0) world.store.append(events);
+  };
   world.run = async (untilLocal, stepMinutes = 15) => {
     const end = at(untilLocal);
     while (clock.now <= end) {
+      adoptRuns();
       await world.engine.tick();
       // An observing command runs beside the rounds; here it is back before the clock moves on.
       await world.engine.settled();
@@ -316,6 +390,22 @@ export async function makeWorld(options: { start: string; mode?: "live" | "dry-r
   world.restart = async (mode = "live") => {
     world.store.close();
     await boot(mode);
+  };
+  world.crash = async (mode = "live") => {
+    world.store.abandon();
+    await boot(mode);
+  };
+  world.journal = () => {
+    const journalDir = path.join(dataDir, "journal");
+    return readdirSync(journalDir)
+      .filter((f) => /^\d{4}-\d{2}\.jsonl$/.test(f))
+      .sort()
+      .flatMap((f) =>
+        readFileSync(path.join(journalDir, f), "utf8")
+          .split(/\r?\n/)
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as Record<string, unknown> & { type: string; seq: number }),
+      );
   };
   world.close = () => {
     try {

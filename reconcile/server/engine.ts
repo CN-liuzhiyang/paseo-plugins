@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
-import type { RunView } from "../shared/graph";
-import type { Action, Annotation, Assessment, Card, Commitment, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
+import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
+import type { Action, Annotation, Assessment, Card, Commitment, FlowRec, FlowResult, Item, Observation, ObserveRequest, SourceHealth } from "../shared/model";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
 import { describeChanges, type PlanEntry, type Status } from "../shared/status";
@@ -10,10 +11,12 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type RuleOutput, type RuleSet } from "./rules";
+import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, type CommitmentSpec, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
-import type { EventBody, RulesDiff } from "./state";
+import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, type Launcher, type Live } from "./flows";
+import type { RunProbe } from "./runs";
+import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
 import type { Store } from "./store";
 import { addDays, addWorkdays, inWindow, iso, localParts, parseWindow, zoned } from "./time";
 
@@ -64,6 +67,11 @@ export interface EngineDeps {
   conversation?: ((agentId: string) => Promise<Conversation | null>) | null;
   /** The runs of flows started for an item (server/runs.ts); absent, an item has none. */
   runs?: ((caseId: string) => RunView[]) | null;
+  /**
+   * What it takes to start flows for items (server/flows.ts): the process to start them with, where their input and
+   * affair files go, and how a run is read by its id (server/runs.ts probe). Absent: this engine starts none.
+   */
+  flows?: { launcher: Launcher; dir: string | null; probe(runId: string, spawnedAtMs: number | null): RunProbe } | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
@@ -92,7 +100,7 @@ export const DROPPED = "你说不再追踪";
 /** One change a rules change makes this round, kept apart so that the breaker can hold it. */
 interface Gated {
   events: EventBody[];
-  kind: "create" | "cancel" | "change" | "reopen" | "fact";
+  kind: "create" | "cancel" | "change" | "reopen" | "fact" | "flow";
   person: string | null;
   /** What it does, for the plan: done, or held. */
   what: string;
@@ -572,6 +580,336 @@ export function createEngine(deps: EngineDeps) {
     return [...ids];
   }
 
+  // ---- flows started for items ------------------------------------------------------------
+
+  /** How each run in flight stands, as last read (not kept: every round reads them again). */
+  const liveOf = new Map<string, Live>();
+  /** Since when a doubtful state of a run has been seen (flows.ts actFor), by run id. */
+  const suspects = new Map<string, number>();
+  /** What was asked for and held back for now (a limit, no way to start one), by "case\0name\0key": why. Made again by every judgment. */
+  const deferred = new Map<string, string>();
+  /** What the last judgment of each case asked to have run: a person's "run it again" takes its input from here. */
+  const lastAsked = new Map<string, Array<{ name: string; key: string; input: Record<string, unknown> }>>();
+  /** Runs whose request now carries another input than they were made with (said on the page; nothing is run again for it). */
+  const drifted = new Set<string>();
+
+  const recs = (): FlowRec[] => Object.values(state.flows ?? {});
+  /** Runs whose end a judgment has read since this process began (after a restart each is read once more: a judgment is cheap, a result never read is not). */
+  const endRead = new Set<string>();
+  /** A run of the item is going, or ended and no judgment has had its result yet: either way the item is judged, however cold it would be. */
+  const hasOpenFlow = (caseId: string, nowMs: number) => recs().some((r) => r.caseId === caseId && (!r.ended || (!endRead.has(r.runId) && nowMs - Date.parse(r.ended.at) < 3 * DAY)));
+  const adminId = () => Object.values(config.persons).find((p) => p.admin)?.id ?? null;
+  /** A run that came to no result, so that a person may ask for it again (and none that did). */
+  const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
+
+  /** What a rule is told of a run it asked for; null for one it never did. */
+  function flowResultFor(caseId: string, name: string, key: string): FlowResult | null {
+    const at = flowKeyOf(caseId, name, key);
+    const latest = state.flowKeys?.[at];
+    if (!latest) {
+      const why = deferred.get(at);
+      return why ? deferredResult(why) : null;
+    }
+    const rec = state.flows?.[latest.runId];
+    return rec ? resultOf(rec, liveOf.get(rec.runId) ?? null) : null;
+  }
+
+  type RunAsk = NonNullable<RuleOutput["run"]>[number];
+
+  /**
+   * A rule asks for a run. Asked for once: a key that has an intent is not run again, however that run came
+   * out. A new one is held to the day's limits; if it may be started, its intent is what is queued (written
+   * with the rest of what this round decides, so that the breaker holds it as it holds the rest) and the
+   * process is started after, by flowsLaunch.
+   */
+  function askRun(item: Item, rule: LoadedRule, fingerprint: string, req: RunAsk, stage: string, nowMs: number, gated: Gated[], events: EventBody[], plan: PlanEntry[], ahead: FlowRec[]): void {
+    const decl = rule.flows?.[req.flow]!;
+    const at = flowKeyOf(item.key, req.flow, req.key);
+    const hash = inputHashOf(req.input);
+    const had = state.flowKeys?.[at];
+    if (had) {
+      const rec = state.flows?.[had.runId];
+      if (rec) {
+        if (rec.inputHash === hash) drifted.delete(rec.runId);
+        else drifted.add(rec.runId);
+      }
+      return;
+    }
+    const say = (kind: PlanEntry["kind"], summary: string) => plan.push({ at: nowIso(nowMs), kind, person: null, summary });
+    const tag = `「${req.label}」（${numberOf(item.key)}，${decl.flow}）`;
+    if (deps.mode === "dry-run") {
+      say("flow", `会起流程${tag}，按 $${decl.maxUsd} 算`);
+      return;
+    }
+    const hold = (why: string, kind: PlanEntry["kind"] = "skipped") => {
+      deferred.set(at, why);
+      say(kind, `没起流程${tag}：${why}`);
+    };
+    if (!deps.flows) return hold("这个实例没有配起流程的命令（flows.json）");
+    const blocked = limitWhy(recs(), ahead, config.policy.flows, { caseId: item.key, maxUsd: decl.maxUsd }, nowMs, tz);
+    if (blocked) {
+      hold(`${blocked.why}，${blocked.until === "tomorrow" ? "明天再起" : "等有空位再起"}`);
+      // Once a day for a request: a limit that keeps it from running is one to look at, not one to say every minute.
+      const evalKey = `eval:flow-limit:${at}:${localParts(nowMs, tz).date}`;
+      if (!state.ledger[evalKey]) {
+        events.push({ type: "eval.candidate", kind: "budget-overflow", subject: `${item.key} ${req.label}`, detail: blocked.why });
+        events.push({ type: "action", action: action(evalKey, "note.set", item.key, `记评测候选：流程额度不够（${blocked.why}）`, "done", null, nowMs) });
+      }
+      return;
+    }
+    const meta = rule.stageMeta?.find((m) => m.id === stage);
+    const rec: FlowRec = {
+      runId: runIdOf(deps.instanceId, item.key, req.flow, decl.flow, req.key, 0),
+      caseId: item.key,
+      name: req.flow,
+      flow: decl.flow,
+      key: req.key,
+      round: 0,
+      stage,
+      label: req.label,
+      affairLabel: `${numberOf(item.key)} · ${meta?.label ?? stage} · ${req.label}`,
+      owner: req.owner ?? adminId(),
+      notify: decl.notify,
+      maxUsd: decl.maxUsd,
+      timeout: decl.timeout ?? null,
+      input: req.input,
+      inputHash: hash,
+      rules: fingerprint,
+      intentAt: nowIso(nowMs),
+    };
+    ahead.push(rec);
+    gated.push({ kind: "flow", person: null, what: `起流程${tag}，最多按 $${decl.maxUsd} 算`, events: [{ type: "flow.intent", rec }] });
+  }
+
+  /**
+   * Reads every run that is not over (by the runtime's own table over its claim and events) and writes what ended;
+   * returns the runs to start, or to start again, under their same ids.
+   */
+  function flowsProgress(nowMs: number): string[] {
+    const probe = deps.flows?.probe;
+    if (!probe) return [];
+    const launch: string[] = [];
+    const events: EventBody[] = [];
+    for (const rec of recs()) {
+      if (rec.ended) continue;
+      const read = probe(rec.runId, rec.spawnedAt ? Date.parse(rec.spawnedAt) : null);
+      const { act, suspect } = actFor(rec, read, suspects.get(rec.runId) ?? null, nowMs);
+      if (suspect) suspects.set(rec.runId, suspects.get(rec.runId) ?? nowMs);
+      else suspects.delete(rec.runId);
+      if (act.kind === "end") {
+        events.push({ type: "flow.ended", runId: rec.runId, end: act.end });
+        liveOf.delete(rec.runId);
+        suspects.delete(rec.runId);
+      } else if (act.kind === "launch") launch.push(rec.runId);
+      else liveOf.set(rec.runId, act.live);
+    }
+    append(events);
+    return launch;
+  }
+
+  const writeAtomic = (file: string, text: string) => {
+    writeFileSync(`${file}.tmp`, text);
+    renameSync(`${file}.tmp`, file);
+  };
+
+  /** Starts the processes of the runs that are to be (again): files first, then the process, then the record that it was started. */
+  async function flowsLaunch(nowMs: number, plan: PlanEntry[]): Promise<void> {
+    const flows = deps.flows;
+    // No directory: nothing is written and nothing started (the preview's engines, which only record what they would do).
+    if (!flows || flows.dir === null || deps.mode !== "live" || stopped) return;
+    const dir = flows.dir;
+    for (const runId of flowsProgress(nowMs)) {
+      if (stopped) return;
+      const rec = state.flows?.[runId];
+      if (!rec || rec.ended || !rec.input) continue;
+      try {
+        mkdirSync(dir, { recursive: true });
+        const inputFile = path.join(dir, `${runId}.input.json`);
+        const affairFile = path.join(dir, `${runId}.affair.json`);
+        writeAtomic(inputFile, JSON.stringify(rec.input));
+        writeAtomic(affairFile, JSON.stringify(affairOf({ caseId: rec.caseId, stage: rec.stage, label: rec.affairLabel }, state.items[rec.caseId]?.url ?? null, HOME_SCREEN)));
+        const { pid } = await flows.launcher.start({ runId, flow: rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`) });
+        append([{ type: "flow.spawned", runId, pid }]);
+        plan.push({ at: nowIso(nowMs), kind: "flow", person: null, summary: `起了流程「${rec.label}」（${numberOf(rec.caseId)}，${rec.flow}）${(rec.spawnTries ?? 0) > 0 ? `，第 ${(rec.spawnTries ?? 0) + 1} 次起` : ""}` });
+      } catch (error) {
+        const message = (error as Error).message.slice(0, 300);
+        deps.log(`flow ${runId}: could not start it: ${message}`);
+        lastProblems.push(`起不了流程「${rec.label}」：${message}`);
+        const tries = (rec.spawnTries ?? 0) + 1;
+        append([{ type: "flow.spawn-failed", runId, error: message }]);
+        if (tries >= MAX_SPAWN_FAILURES) append([{ type: "flow.ended", runId, end: { outcome: "not-started", summary: null, costUsd: 0, value: null, valueDropped: false, why: `起不了进程（试了 ${tries} 次）：${message}` } }]);
+      }
+    }
+  }
+
+  /** How long after a run ended a message about it is still worth sending: past that it is left for the next card to carry. */
+  const FLOW_TELL_MS = 12 * 3_600_000;
+
+  /** A run that ended is told to the person it is for, in one message per channel: not in their quiet hours, and not when it is stale. */
+  async function tellFlows(nowMs: number, plan: PlanEntry[]): Promise<void> {
+    if (deps.mode === "dry-run" || !deps.deliver || stopped) return;
+    for (const rec of recs()) {
+      if (!rec.ended || !rec.notify || !rec.owner || rec.dismissed) continue;
+      const person = config.persons[rec.owner];
+      if (!person) continue;
+      const domain = config.sources.find((s) => state.items[rec.caseId]?.source === s.id)?.domain ?? "work";
+      for (const target of person.notify) {
+        const key = `flow-notify:${rec.runId}:${target.channel}:${target.to}`;
+        const before = state.ledger[key];
+        if (before?.status === "done" || before?.status === "suppressed") continue;
+        const tries = (before?.tries ?? 0) + 1;
+        if (tries > MAX_NOTIFY_TRIES) continue;
+        const summary = `发 ${labelOf(target)}：${rec.label}${rec.ended.outcome === "done" || rec.ended.outcome === "stopped" ? "好了" : "没跑完"}`;
+        // Told while it is news: past FLOW_TELL_MS it is left for the next card (the page has it), however it came to be late.
+        if (nowMs - Date.parse(rec.ended.at) > FLOW_TELL_MS) {
+          append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "suppressed", "结束得太久了，不单发，并进下一张卡", nowMs), tries: before?.tries ?? 0 } }]);
+          continue;
+        }
+        if (!mayReach(person, [domain], 0, nowMs, calendar).send) {
+          plan.push({ at: nowIso(nowMs), kind: "deferred", person: person.id, summary: `不打扰时段，先不发 ${labelOf(target)}：${rec.label} ${rec.ended.outcome === "done" ? "好了" : "没跑完"}` });
+          continue;
+        }
+        const message = endedMessage(rec, rec.ended);
+        try {
+          await deps.deliver(target.channel, { to: target.to, idempotencyKey: `${deps.instanceId}:${key}`, ...message });
+          append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "done", null, nowMs), tries } }]);
+        } catch (error) {
+          const why = (error as Error).message;
+          deps.log(`flow ${rec.runId}: sending to ${target.channel} failed (${tries}): ${why}`);
+          append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "failed", why.slice(0, 300), nowMs), tries } }]);
+        }
+      }
+    }
+  }
+
+  /** A run still going that the rule's latest judgment of its item did not ask for (an item not judged since the start is not one). */
+  const unwanted = (rec: FlowRec): boolean => {
+    const asked = lastAsked.get(rec.caseId);
+    return !!asked && !rec.ended && !asked.some((a) => a.name === rec.name && a.key === rec.key);
+  };
+
+  /** A run's page view: the reader's when it has read the run, else made from what the controller knows; with its place in the controller's own record. */
+  function viewOfRec(rec: FlowRec, read: RunView | undefined, currentStage: string | undefined): RunView {
+    const live = liveOf.get(rec.runId) ?? null;
+    const outcome = rec.ended?.outcome ?? null;
+    const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.key)]?.runId === rec.runId;
+    const situation: RunView["situation"] = rec.dismissed
+      ? "done"
+      : outcome === "done" || outcome === "stopped"
+        ? "done"
+        : outcome === "lost"
+          ? "lost"
+          : outcome === "not-started"
+            ? "notstarted"
+            : outcome !== null
+              ? "fail"
+              : live === "gate"
+                ? "me"
+                : live === "slow"
+                  ? "slow"
+                  : read?.situation === "unreadable" || read?.situation === "slow" || read?.situation === "me"
+                    ? read.situation
+                    : "doing";
+    // The way out is for a run in trouble in the stage the item is in; a stage it has left is history.
+    const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
+    const inTrouble = (outcome !== null && RETRYABLE.has(outcome)) || (outcome === null && situation === "slow");
+    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here ? [...(outcome !== null && latest ? (["retry"] as const) : []), "mine", "fold"] : [];
+    const base: RunView = read ?? {
+      runId: rec.runId,
+      stage: rec.stage,
+      flow: rec.flow,
+      startedAt: rec.spawnedAt ?? rec.intentAt,
+      endedAt: null,
+      situation: "doing",
+      unreadLines: 0,
+      outcome: null,
+      step: null,
+      steps: [],
+      costUsd: 0,
+      quiet: null,
+      gate: null,
+      error: null,
+      stopReason: null,
+      sideEffects: [],
+      agentId: null,
+      link: { plugin: RUN_SCREEN.plugin, screen: RUN_SCREEN.screen, params: { run: rec.runId } },
+      retry: null,
+    };
+    return {
+      ...base,
+      stage: rec.stage,
+      situation,
+      endedAt: rec.ended?.at ?? base.endedAt,
+      outcome: rec.ended ? (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome))) : base.outcome,
+      costUsd: rec.ended?.costUsd ?? base.costUsd,
+      own: true,
+      round: rec.round,
+      why: rec.ended?.why ?? null,
+      ...(rec.dismissed ? { dismissed: rec.dismissed.how } : {}),
+      ...(suspects.has(rec.runId) && situation !== "done" ? { maybeAsleep: true } : {}),
+      ...(drifted.has(rec.runId) ? { inputDrifted: true } : {}),
+      ...(unwanted(rec) ? { unwanted: true } : {}),
+      retry: outcome !== null && RETRYABLE.has(outcome) && latest ? { round: rec.round + 1, estimateUsd: rec.ended!.costUsd > 0 ? rec.ended!.costUsd : null } : null,
+      actions: actions,
+    };
+  }
+
+  /** The runs of an item for its page: its own (recorded here) as they stand, and any other run that names it, kept apart. */
+  function flowViews(caseId: string): RunView[] {
+    const read = new Map((deps.runs?.(caseId) ?? []).map((v) => [v.runId, v]));
+    const own = recs().filter((r) => r.caseId === caseId);
+    const ids = new Set(own.map((r) => r.runId));
+    const stage = state.assessments[caseId]?.stage;
+    const views = [...own.map((r) => viewOfRec(r, read.get(r.runId), stage)), ...[...read.values()].filter((v) => !ids.has(v.runId)).map((v) => ({ ...v, own: false }))];
+    return views.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
+  }
+
+  /** A person sets a run aside ("mine": they take it from here; "fold": just not shown). Only a run that is in trouble; by run id. */
+  function dismissFlow(runId: string, how: "mine" | "fold", by: string): { ok: boolean; detail: string } {
+    const rec = state.flows?.[runId];
+    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
+    if (rec.dismissed) return { ok: false, detail: "已经收起过了" };
+    const trouble = (rec.ended && RETRYABLE.has(rec.ended.outcome)) || (!rec.ended && liveOf.get(runId) === "slow");
+    if (!trouble) return { ok: false, detail: rec.ended ? "这个运行是正常结束的，不用收起" : "这个运行还在正常地跑，没有出问题" };
+    append([{ type: "flow.dismissed", runId, how, by }]);
+    return { ok: true, detail: how === "mine" ? "记下了：这件事你自己来，流程的失败不再算在事项头上" : "收起了" };
+  }
+
+  /** A person asks for a run again: the next round of its key, under the day's limits, with the input the rule asks with now (else the last one). */
+  function retryFlow(runId: string, by: string): { ok: boolean; detail: string } {
+    const nowMs = deps.now();
+    const rec = state.flows?.[runId];
+    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
+    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
+    if (!rec.ended || !RETRYABLE.has(rec.ended.outcome)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
+    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
+    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd }, nowMs, tz);
+    if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
+    const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.key === rec.key)?.input ?? rec.input;
+    if (!input) return { ok: false, detail: "上一轮的输入没留下，没法照样再跑" };
+    const next: FlowRec = {
+      ...rec,
+      runId: runIdOf(deps.instanceId, rec.caseId, rec.name, rec.flow, rec.key, rec.round + 1),
+      round: rec.round + 1,
+      input,
+      inputHash: inputHashOf(input),
+      intentAt: nowIso(nowMs),
+    };
+    delete next.spawnedAt;
+    delete next.pid;
+    delete next.spawnTries;
+    delete next.spawnError;
+    delete next.ended;
+    delete next.dismissed;
+    if (state.flows?.[next.runId]) return { ok: false, detail: "这一轮已经记过了" };
+    const estimate = rec.ended.costUsd > 0 ? rec.ended.costUsd : 0;
+    append([
+      { type: "flow.retry", caseId: rec.caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, by, estimateUsd: estimate },
+      { type: "flow.intent", rec: next },
+    ]);
+    return { ok: true, detail: `记下了，这就重新跑一次（第 ${next.round + 1} 轮）；上一轮花了 $${rec.ended.costUsd.toFixed(2)}` };
+  }
+
   // ---- hot and cold -----------------------------------------------------------------------
 
   const openCase = (caseId: string) => Object.values(state.commitments).some((c) => c.caseId === caseId && (c.status === "scheduled" || c.status === "waiting"));
@@ -586,7 +924,7 @@ export function createEngine(deps: EngineDeps) {
       .filter((n) => n.field.startsWith("woken."))
       .sort((a, b) => a.at.localeCompare(b.at))
       .pop();
-    return heatOf(item, { nowMs, tz, policy: config.policy.hot, open: openCase(item.key), watched: configWatched(item.key), quiet: quietTitle(item.title), flagChangedAt: changedAt, woken: woken ? { at: woken.at, reason: woken.value } : null });
+    return heatOf(item, { nowMs, tz, policy: config.policy.hot, open: openCase(item.key), watched: configWatched(item.key), quiet: quietTitle(item.title), flagChangedAt: changedAt, woken: woken ? { at: woken.at, reason: woken.value } : null, flowing: hasOpenFlow(item.key, nowMs) });
   }
 
   /** Per listed row: a full read for what is hot or about to be, a look at its history for what someone may have touched. */
@@ -1214,6 +1552,8 @@ export function createEngine(deps: EngineDeps) {
       observed: (key: string) => observed(key, nowMs),
     };
     const events: EventBody[] = [];
+    // The runs asked for earlier in this round, whose intents are not written yet: the limits count them.
+    const ahead: FlowRec[] = [];
     // What a held rules change may not do: change commitments and record facts. A change that
     // turns out to be wrong then leaves nothing behind but its judgments.
     const gated: Gated[] = [];
@@ -1260,22 +1600,27 @@ export function createEngine(deps: EngineDeps) {
       }
       // Cold: not judged; its last assessment stays as it was.
       if (!hot.has(item.key)) continue;
+      // Judged now, so what the runs of this item that have ended came to has been read by its rule.
+      for (const r of recs()) if (r.caseId === item.key && r.ended) endRead.add(r.runId);
       let reads = new Set([item.source, ...switchFiles]);
       const check = (out: RuleOutput) => {
         const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !knownNames.has(u) && !state.items[u]));
         if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
         const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => config.sources.find((s) => s.id === id)?.kind !== "command"))];
-        return notObserving.length > 0 ? `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）` : null;
+        if (notObserving.length > 0) return `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）`;
+        const strangers = [...new Set((out.run ?? []).map((r) => r.owner).filter((o): o is string => !!o && !config.persons[o]))];
+        return strangers.length > 0 ? `run 里的 owner ${strangers.map((u) => `"${u}"`).join("、")} 不是 persons.json 里的人` : null;
       };
       const kase = { id: item.key, primary: item, items: [item], flags };
-      let judged = judge(rule, kase, makeContext({ ...inputs, reads }, rule.params), set.fingerprint, check);
+      const run = (name: string, key: string) => flowResultFor(item.key, name, key);
+      let judged = judge(rule, kase, makeContext({ ...inputs, reads, run }, rule.params), set.fingerprint, check);
       let asked = askedOf(item.key, judged.output, nowMs);
       // It looked at what was read for a request it now asks for otherwise (another window, other
       // params): judged again, on that request, for which nothing is read yet.
       if (asked.some((a) => reads.has(`${a.source}:${a.key}`) && versionInForce(a.source, a.key) !== requestVersion(a))) {
         const asking = new Map(asked.map((a) => [`${a.source}:${a.key}`, a]));
         reads = new Set([item.source, ...switchFiles]);
-        judged = judge(rule, kase, makeContext({ ...inputs, reads, observed: (key: string) => observed(key, nowMs, asking, item.key) }, rule.params), set.fingerprint, check);
+        judged = judge(rule, kase, makeContext({ ...inputs, reads, run, observed: (key: string) => observed(key, nowMs, asking, item.key) }, rule.params), set.fingerprint, check);
         asked = askedOf(item.key, judged.output, nowMs);
       }
       // A request that changes round after round is never read: told, as a judgment that went wrong
@@ -1329,6 +1674,13 @@ export function createEngine(deps: EngineDeps) {
           events: [{ type: "observe.set", caseId: item.key, requests: asked }],
         });
       }
+      // What it asks to have run (asked for once: a key that has an intent is not run again).
+      lastAsked.set(item.key, judged.output.run?.map((r) => ({ name: r.flow, key: r.key, input: r.input })) ?? []);
+      // A run the rule no longer asks for has no input of the rule's to differ from.
+      for (const r of recs()) if (r.caseId === item.key && !judged.output.run?.some((a) => a.flow === r.name && a.key === r.key)) drifted.delete(r.runId);
+      // What was held back last round was read by this judgment as it stood; it is asked again now, or it is not asked any more.
+      for (const held of [...deferred.keys()]) if (held.startsWith(`${item.key}\0`)) deferred.delete(held);
+      for (const req of judged.output.run ?? []) askRun(item, rule, set.fingerprint, req, judged.output.stage, nowMs, gated, events, plan, ahead);
       // A wake is a note on the other case; it makes that case hot from the next round on.
       for (const w of judged.output.wake ?? []) {
         if (w.caseId === item.key || !state.items[w.caseId]) continue;
@@ -1424,10 +1776,11 @@ export function createEngine(deps: EngineDeps) {
       // The breaker counts every change to commitments the new rules make at once: a wrong
       // condition takes questions back as easily as it adds them.
       const count = (kind: Gated["kind"]) => gated.filter((g) => g.kind === kind).length;
-      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen") };
-      const total = changes.newCommitments + changes.dropped + changes.changed + changes.reopened;
+      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen"), flows: count("flow") };
+      // A run started is money spent, and cannot be taken back: it counts with the rest.
+      const total = changes.newCommitments + changes.dropped + changes.changed + changes.reopened + changes.flows;
       if (!firstLoad && total > config.policy.ruleBreakerChanges && !state.rules.released.includes(set.fingerprint)) {
-        events.push({ type: "rules.held", fingerprint: set.fingerprint, ...changes });
+        events.push({ type: "rules.held", fingerprint: set.fingerprint, ...changes, flows: changes.flows > 0 ? changes.flows : undefined });
         events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `判断方法改动会一下子${describeChanges(changes)}` });
       }
     }
@@ -1440,7 +1793,7 @@ export function createEngine(deps: EngineDeps) {
         continue;
       }
       done.push(...g.events);
-      plan.push({ at: nowIso(nowMs), kind: g.kind === "fact" ? "note" : "commitment", person: g.person, summary: g.what });
+      plan.push({ at: nowIso(nowMs), kind: g.kind === "fact" ? "note" : g.kind === "flow" ? "flow" : "commitment", person: g.person, summary: g.what });
     }
     append(done);
   }
@@ -1753,6 +2106,7 @@ export function createEngine(deps: EngineDeps) {
       reason: null,
       ...(confirm ? { kind: "confirm" as const } : {}),
     };
+    card.shown = shownOf(card, nowMs);
     plan.push({ at: nowIso(nowMs), kind: "card", person: personId, summary: `发${confirm ? "确认卡" : "问题卡"}给 ${person.name}：「${card.title}」（${all.length} 个问题${carried.length > 0 ? `，含 ${carried.length} 个上一张卡上没答的` : ""}）` });
     if (deps.mode === "dry-run") {
       for (const target of person.notify) plan.push({ at: nowIso(nowMs), kind: "card", person: personId, summary: `会发 ${labelOf(target)}：${card.title}` });
@@ -1764,6 +2118,31 @@ export function createEngine(deps: EngineDeps) {
     }
     if (nowMs < carrierRetryAt || stopped) return;
     await raise(card, dues, nowMs);
+  }
+
+  /** What a card was put up with: its words (a hash), when, and the runs of its items that were over by then. */
+  const shownOf = (card: Card, nowMs: number): NonNullable<Card["shown"]> => {
+    const cases = new Set(card.commitments.map(({ id }) => state.commitments[id]?.caseId).filter((id): id is string => !!id));
+    return { at: nowIso(nowMs), hash: contentHash(card), ended: recs().filter((r) => r.ended && cases.has(r.caseId)).map((r) => r.runId) };
+  };
+
+  /** What a card says, as one hash: the words of its questions, their options and the context above them. */
+  const contentHash = (card: Card): string => hash(JSON.stringify(contentOf(card))).slice(0, 16);
+
+  /**
+   * Whether a card's words are not the ones it was put up with, because a flow for one of its items has ended since:
+   * that, and nothing else, puts a card up again. (A rule that rewrote a word every round would otherwise change the
+   * card every round.) A card from before cards remembered their words is left alone.
+   */
+  function wordsChangedByFlow(card: Card): boolean {
+    if (!card.shown) return false;
+    const cases = new Set(card.commitments.map(({ id }) => state.commitments[id]?.caseId).filter((id): id is string => !!id));
+    // A run counts when it had not ended by the time the card was put up: by the runs the card recorded then, which no clock
+    // can mix up with the same round's (a card put up in the round a run ended in was written after it ended).
+    const had = card.shown.ended ? new Set(card.shown.ended) : null;
+    const shownMs = Date.parse(card.shown.at);
+    if (!recs().some((r) => cases.has(r.caseId) && r.ended && (had ? !had.has(r.runId) : Date.parse(r.ended.at) > shownMs))) return false;
+    return contentHash(card) !== card.shown.hash;
   }
 
   /**
@@ -1779,7 +2158,9 @@ export function createEngine(deps: EngineDeps) {
         return !!c && isOpen(c.status) && !!holdOver(c, nowMs);
       };
       const live = card.commitments.filter(({ id }) => isOpen(state.commitments[id]?.status) && !held(id));
-      if (live.length === card.commitments.length) continue;
+      // Nothing came off it, but what it says changed because a flow it waits on ended: put up again, with the new words.
+      const reworded = live.length === card.commitments.length && wordsChangedByFlow(card);
+      if (live.length === card.commitments.length && !reworded) continue;
       const anyHeld = card.commitments.some(({ id }) => held(id));
       if (live.length === 0) {
         append([{ type: "card.changed", id: card.id, patch: { status: "closed", reason: anyHeld ? "上面的问题先别问了" : "上面的事都结束了", closedAt: nowIso(nowMs) } }]);
@@ -1787,10 +2168,16 @@ export function createEngine(deps: EngineDeps) {
       }
       const title = cardTitle(live.map(({ id }) => state.commitments[id]!));
       const gone = card.commitments.length - live.length;
-      plan.push({ at: nowIso(nowMs), kind: "card", person: card.person, summary: `卡「${card.title}」上去掉 ${gone} 个${anyHeld ? "先别问或" : ""}已经结束的问题，剩下的换成「${title}」` });
+      plan.push({
+        at: nowIso(nowMs),
+        kind: "card",
+        person: card.person,
+        summary: reworded ? `卡「${card.title}」上的说明因为流程有了结局而变了，换成新卡（不再推渠道、不占额度）` : `卡「${card.title}」上去掉 ${gone} 个${anyHeld ? "先别问或" : ""}已经结束的问题，剩下的换成「${title}」`,
+      });
       // Without a carrier it is only a record: changed in place.
       if (card.status === "pending" && !card.agentId) {
-        append([{ type: "card.changed", id: card.id, patch: { commitments: live, title } }]);
+        const now: Card = { ...card, commitments: live, title };
+        append([{ type: "card.changed", id: card.id, patch: { commitments: live, title, shown: shownOf(now, nowMs) } }]);
         continue;
       }
       if (deps.mode === "dry-run") continue;
@@ -1807,9 +2194,10 @@ export function createEngine(deps: EngineDeps) {
         reason: null,
         cutFrom: card.id,
       };
+      cut.shown = shownOf(cut, nowMs);
       // The old one closes first: its carrier, archived at the end of this reconcile, then closes on nothing.
       append([
-        { type: "card.changed", id: card.id, patch: { status: "closed", reason: `去掉了 ${gone} 个问题，换成 ${cut.id}`, closedAt: nowIso(nowMs) } },
+        { type: "card.changed", id: card.id, patch: { status: "closed", reason: reworded ? `流程有了结局，说明变了，换成 ${cut.id}` : `去掉了 ${gone} 个问题，换成 ${cut.id}`, closedAt: nowIso(nowMs) } },
         { type: "card.created", card: cut },
       ]);
     }
@@ -2010,7 +2398,7 @@ export function createEngine(deps: EngineDeps) {
     reads: (caseId) => lastReads.get(caseId),
     step: stepOf,
     inForce: (caseId) => (["drop", "hold", "wrong"] as const).flatMap((kind) => inForce(caseId, kind, deps.now())),
-    runs: deps.runs ?? undefined,
+    runs: deps.runs || deps.flows ? flowViews : undefined,
     isConfirm,
   });
 
@@ -2058,7 +2446,11 @@ export function createEngine(deps: EngineDeps) {
         try {
           await pollSources(nowMs);
           if (!stopped) await ingest(nowMs, plan);
+          // Runs are read before judging, so that one that ended is in this round's judgment; the ones to start are started after it.
+          if (!stopped) flowsProgress(nowMs);
           if (!stopped) await judgeAll(nowMs, plan);
+          if (!stopped) await flowsLaunch(nowMs, plan);
+          if (!stopped) await tellFlows(nowMs, plan);
           if (!stopped) await askDue(nowMs, plan);
           if (!stopped) await archiveFinished();
         } catch (error) {
@@ -2236,6 +2628,15 @@ export function createEngine(deps: EngineDeps) {
       return { ok: true, already: false, detail: `已记下：${label}。接下来怎么追踪，下一次检查时决定` };
     },
 
+    /** A person sets a run aside, by its id (flows.ts): "mine" or "fold". */
+    dismissFlow,
+    /** A person asks for a run again, by the id of the one that did not come out. */
+    retryFlow,
+    /** The runs the controller started, as it keeps them (for tests and the status). */
+    flowRecs: (): FlowRec[] => structuredClone(recs()),
+    /** What a rule is told of a run it asked for (for tests). */
+    flowResult: flowResultFor,
+
     releaseRules(fingerprint: string): boolean {
       if (state.rules.held?.fingerprint !== fingerprint) return false;
       append([{ type: "rules.released", fingerprint }]);
@@ -2359,6 +2760,10 @@ export function createEngine(deps: EngineDeps) {
       cold,
       openCommitments: openCommitments.length,
       plan: lastPlan,
+      flows: recs()
+        .filter((r) => !r.ended || nowMs - Date.parse(r.ended.at) < 3 * DAY)
+        .sort((a, b) => b.intentAt.localeCompare(a.intentAt))
+        .map((r) => ({ runId: r.runId, caseId: r.caseId, label: r.label, round: r.round, state: resultOf(r, liveOf.get(r.runId) ?? null).state, intentAt: r.intentAt, endedAt: r.ended ? nowIso(Date.parse(r.ended.at)) : null, costUsd: r.ended?.costUsd ?? 0, why: r.ended?.why ?? null })),
       evals: state.evals,
       pushesToday: Object.fromEntries(Object.values(config.persons).map((p) => [p.name, cardsToday(Object.values(state.cards), p, nowMs)])),
       confirmsToday: Object.fromEntries(Object.values(config.persons).filter((p) => p.admin).map((p) => [p.name, confirmsToday(Object.values(state.cards), p, nowMs)])),

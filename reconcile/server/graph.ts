@@ -255,11 +255,14 @@ export function createGraph(deps: GraphDeps) {
   function decidingRuns(runs: RunView[], stage: string | undefined): RunView[] {
     const newest = new Map<string, RunView>();
     for (const r of runs) {
+      // Only a run the controller itself started is the item's condition (it recorded the intent first): a file somebody
+      // wrote that names the item is listed, not believed. And one a person set aside is theirs now, not the item's.
+      if (r.own === false || r.dismissed) continue;
       const key = r.stage ?? stage ?? "";
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }
-    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable") || (r.stage ?? stage) === stage);
+    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {
@@ -280,7 +283,7 @@ export function createGraph(deps: GraphDeps) {
     };
   }
 
-  const RUN_RANK: Array<RunView["situation"]> = ["me", "fail", "lost", "slow", "doing"];
+  const RUN_RANK: Array<RunView["situation"]> = ["me", "fail", "lost", "notstarted", "slow", "doing"];
 
   function situationOf(f: Facts): Situation {
     const { a } = f;
@@ -296,7 +299,7 @@ export function createGraph(deps: GraphDeps) {
     return a.next.actor === "me" ? "mine" : a.next.actor === "them" ? "them" : "system";
   }
 
-  const GROUP: Record<Situation, Group> = { me: "me", fail: "me", lost: "me", slow: "me", stuck: "me", error: "errors", them: "them", system: "system", doing: "system", mine: "mine", dropped: "done", done: "done" };
+  const GROUP: Record<Situation, Group> = { me: "me", fail: "me", lost: "me", notstarted: "me", slow: "me", stuck: "me", error: "errors", them: "them", system: "system", doing: "system", mine: "mine", dropped: "done", done: "done" };
 
   /** The other end of a link, in one line. */
   function peek(caseId: string): LinkView["state"] {
@@ -441,6 +444,12 @@ export function createGraph(deps: GraphDeps) {
     }
     if (a?.notice) marks.push({ kind: "notice", line: clip(a.notice, 300), since: null, until: null });
     for (const r of f.deciding) if (r.situation === "unreadable") marks.push({ kind: "unread", line: `流程「${r.flow}」的记录里有 ${r.unreadLines} 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 ${r.runId} 看`, since: null, until: null });
+    // A run of its own that the rule has moved on from: said, not acted on (nothing is stopped or run again for it).
+    for (const r of f.runs) {
+      if (r.dismissed || r.own === false) continue;
+      if (r.inputDrifted) marks.push({ kind: "flow", line: `流程「${r.flow}」${r.round ? `（第 ${r.round + 1} 轮）` : ""}起的时候给的输入，和判断方法现在给的不一样；不会为这个重跑`, since: null, until: null });
+      if (r.unwanted) marks.push({ kind: "flow", line: `流程「${r.flow}」还在跑，但判断方法已经不要它了；不会去停它，结果出来照样记`, since: null, until: null });
+    }
     if (hold) marks.push({ kind: "held", line: `${personName(hold.by)} ${clockText(hold.at)} 说「${clip(hold.said, 60)}」${hold.until ? ` · ${hold.until} 前不问` : ""} · 说一句就撤`, since: hold.at, until: hold.until });
     const wrong = f.said.find((s) => s.kind === "wrong");
     if (wrong) marks.push({ kind: "wrong", line: `${personName(wrong.by)} ${clockText(wrong.at)} 说这个判断错了：「${clip(wrong.said, 60)}」`, since: wrong.at, until: null });
@@ -482,9 +491,10 @@ export function createGraph(deps: GraphDeps) {
       case "fail":
       case "lost":
       case "slow":
-        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : "可能卡住了 · 看一眼";
-        line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? "出错了"}` : situation === "lost" ? "断了：之后再没有动静" : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
-        sub = lastRun ? `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。` : "";
+      case "notstarted":
+        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : "可能卡住了 · 看一眼";
+        line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
+        sub = lastRun ? (situation === "notstarted" ? `没花钱。${lastRun.retry ? "可以再跑一次，或者你自己来。" : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
         break;
       case "stuck":
         kicker = "卡住了 · 看一眼";
@@ -538,16 +548,16 @@ export function createGraph(deps: GraphDeps) {
       },
       {
         label: "要你做吗",
-        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" ? "看一眼" : "不用",
+        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" || situation === "notstarted" ? "看一眼" : "不用",
         sub: answerable ? "在下面选一个答案" : situation === "me" ? "批准只在审批卡上点" : situation === "stuck" ? "是顺延了还是漏了" : nextAsk?.at ? `${clockText(nextAsk.at)} 还没有变化才问你` : "",
-        hot: answerable || situation === "me" || situation === "stuck" || situation === "fail" || situation === "lost",
+        hot: answerable || situation === "me" || situation === "stuck" || situation === "fail" || situation === "lost" || situation === "notstarted",
       },
     ];
 
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
       { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : null }] : []),
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : null }] : []),
     ]);
     const history: HistoryLine[] = [
       ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),
