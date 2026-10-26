@@ -73,10 +73,11 @@ test("R7B-01: an intent that was written and not started goes to its own directo
   }));
 
 test("R7B-01: an engine that is not told the log directory starts nothing for money: the request waits, and says why", async () => {
+  const launcher = recordingLauncher();
   const w = await makeWorld({
     start: "2026-10-13 10:00",
     config: { rules: { "flow.mjs": RULE } },
-    flows: { launcher: recordingLauncher(), dir: path.join(os.tmpdir(), "reconcile-no-logdir-never-written"), probe: () => probeOf() },
+    flows: { launcher, dir: path.join(os.tmpdir(), "reconcile-no-logdir-never-written"), probe: () => probeOf() },
   });
   try {
     asks(w, 1, [req("a")]);
@@ -84,6 +85,17 @@ test("R7B-01: an engine that is not told the log directory starts nothing for mo
     assert.deepEqual(Object.keys(flowsOf(w)), [], "no intent: nothing to start");
     assert.match(w.engine.flowResult("gcp-demo:1", "triage", "a")!.why!, /日志目录/);
     assert.equal(w.engine.flowResult("gcp-demo:1", "triage", "a")!.state, "deferred");
+    // an intent that has no directory either (one from before intents kept it) is not started for want of one
+    const id = idFor(1, "legacy");
+    w.store.append([
+      {
+        type: "flow.intent",
+        rec: { runId: id, caseId: "gcp-demo:1", name: "triage", flow: "triage-flow", key: "legacy", round: 0, stage: "review", label: "初查", affairLabel: "x", owner: null, notify: false, maxUsd: 1, timeout: null, input: { n: 1 }, inputHash: "h", rules: "fp", intentAt: "2026-10-13T10:00:00+08:00" },
+      },
+    ]);
+    await look(w, 60);
+    assert.equal(launcher.started.length, 0);
+    assert.ok(w.engine.status().problems.some((p: string) => /不知道日志目录在哪，没有起/.test(p)), JSON.stringify(w.engine.status().problems));
   } finally {
     w.close();
   }
