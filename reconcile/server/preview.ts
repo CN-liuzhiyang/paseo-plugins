@@ -11,7 +11,7 @@ import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
 import { loadCapsules } from "./capsule";
 import { ACTOR, HEALTH } from "./replay";
-import { replayCapsules, replayDigest, replayEmpty, replayLines, replayWarnings, stops, type ReplayReport, type Stop } from "./replay-report";
+import { namesOf, replayCapsules, replayDigest, replayEmpty, replayLines, replayWarnings, stops, type ReplayReport, type Stop } from "./replay-report";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type RulesDiff, type State } from "./state";
@@ -150,6 +150,8 @@ export interface Preview {
   coldBoth: number;
   /** The capsules of past judgments asked of both sides (replay-report.ts). */
   replay: ReplayReport;
+  /** What of the replay stops an apply until it is named: each with every name that lets it through (a capsule, its cause, its item). */
+  stops: Array<Stop & { names: string[] }>;
   caveats: string[];
   empty: boolean;
 }
@@ -710,6 +712,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     flows,
     coldBoth,
     replay,
+    stops: stops(replay).map((s) => ({ ...s, names: namesOf(s) })),
     caveats,
     empty,
   };
@@ -864,7 +867,10 @@ function writeAll(dir: string, files: Array<[string, string]>, old: Map<string, 
 
 const sameFiles = (a: Map<string, string>, b: Map<string, string>) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
 
-/** What an apply stopped by the replay says: what stopped it, not what to write -- the ids are in the preview's ⚠ lines, for a person to read there and name. */
+/**
+ * What an apply stopped by the replay says: what stopped it, not what to write -- the names (a
+ * capsule, a cause, an item) are in the preview's ⚠ lines, for a person to read there and give.
+ */
 function stoppedMessage(unnamed: Stop[]): string {
   const of = (kind: Stop["kind"]) => unnamed.filter((x) => x.kind === kind);
   const part = (kind: Stop["kind"], what: string) => {
@@ -872,7 +878,9 @@ function stoppedMessage(unnamed: Stop[]): string {
     return some.length > 0 ? `${what} ${some.length} 处（${some.slice(0, 3).map((x) => x.label).join("、")}${some.length > 3 ? "…" : ""}）` : null;
   };
   const parts = [part("broken", "纠错又犯了"), part("unknown", "纠错核对不了"), part("error", "候选判断出错"), part("unreadable", "读不了的存档")].filter(Boolean);
-  return `重放有 ${unnamed.length} 处没过，没拷：${parts.join("；")}。确实要拷的话，自己对照预览里 ⚠ 的那几行，把认下的存档编号写进 --accept-regress（逗号隔开）`;
+  const causes = new Set(unnamed.map((x) => x.cause)).size;
+  const many = unnamed.length > causes ? `（它们只有 ${causes} 个原因：同一个原因的可以整组点名）` : "";
+  return `重放有 ${unnamed.length} 处没过，没拷：${parts.join("；")}${many}。确实要拷的话，自己对照预览里 ⚠ 的那几行，把认下的写进 --accept-regress（逗号隔开）：一份存档的编号，或一个原因（cause:…）、一个事项（item:…）的整组`;
 }
 
 /**
@@ -902,9 +910,9 @@ export async function applyCandidate(options: PreviewOptions & { expect: string;
     // fails where the rule in use does not, it goes only if each such thing is named.
     const stopped = stops(p.replay);
     const named = options.acceptRegress ?? [];
-    const stray = named.filter((n) => !stopped.some((x) => x.name === n));
-    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次重放拦下的：看预览里 ⚠ 那几行括号里的存档编号（读不了的存档写它在配置目录下的路径）`);
-    const unnamed = stopped.filter((x) => !named.includes(x.name));
+    const stray = named.filter((n) => !stopped.some((x) => namesOf(x).includes(n)));
+    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次重放拦下的：看预览里 ⚠ 那几行：括号里的存档编号，读不了的存档的路径，同一个原因的 cause:…，同一个事项的 item:…`);
+    const unnamed = stopped.filter((x) => !namesOf(x).some((n) => named.includes(n)));
     if (unnamed.length > 0) throw new PreviewError(stoppedMessage(unnamed));
     const stillParts = [...partsIn(options.candidateDir)].join() === [...parts].join();
     if (!stillParts || !sameFiles(partFiles(options.candidateDir, parts), candidate) || !sameFiles(partFiles(options.configDir, parts), inUse)) {

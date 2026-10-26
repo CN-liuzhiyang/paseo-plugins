@@ -42,7 +42,8 @@ const HELP = `用法：
   --id      存档的编号（k_ 加 16 位十六进制）
   --item    只列这个事项的存档（单号，或带来源的整个 key）
   --expect  apply：diff 给的编号（p_…）；cases keep、cases expect：expect 的 JSON 文件
-  --accept-regress  apply：认下的纠错又犯了，存档编号用逗号隔开
+  --accept-regress  apply：认下重放拦下的，用逗号隔开：一份存档的编号（或读不了的存档的路径）、一个原因（cause:…）、一个事项（item:…）
+  --candidate  diff、apply、replay：候选目录；cases backfill：用候选的判断方法补录
   --json    输出 JSON（给 agent 读）`;
 
 function fail(message, code = 2) {
@@ -178,8 +179,13 @@ try {
     const p = await preview(options);
     // Everything that went into the id, so that the line copied gives the same one.
     const where = ["config", "data", "days", "now"].filter((f) => flags[f] !== undefined).map((f) => `--${f} ${flags[f]} `).join("");
-    // A correction said again is named by whoever agrees to it, not suggested here.
-    const again = p.replay.expect.broken.length > 0 ? `\n（候选让 ${p.replay.expect.broken.length} 条纠错又犯了：拷的时候要加 --accept-regress，把认下的那几条的存档编号写进去）` : "";
+    // What stops an apply is named by whoever agrees to it, not suggested here (the names are in the ⚠ lines); what can be done about it is.
+    const withDirs = ["config", "data"].filter((f) => flags[f] !== undefined).map((f) => ` --${f} ${flags[f]}`).join("");
+    const lacking = p.stops.some((s) => s.kind === "unknown" || s.kind === "error");
+    const again =
+      p.stops.length > 0
+        ? `\n（重放拦下了 ${p.stops.length} 处，上面这条会被拒：认下的要写进 --accept-regress，存档编号、同一个原因的 cause:…、同一个事项的 item:… 都在预览的 ⚠ 里${lacking ? `；核对不了或出错是因为存档里没有候选读的东西的话，先用候选重新补录：reconcile-preview cases backfill${withDirs} --candidate ${flags.candidate} --replace，再 diff` : ""}）`
+        : "";
     process.stdout.write(flags.json ? `${JSON.stringify(p, null, 2)}\n` : `${previewText(p)}\n要拷回去：reconcile-preview apply ${where}--candidate ${flags.candidate} --expect ${p.id}${again}\n`);
     process.exit(0);
   }

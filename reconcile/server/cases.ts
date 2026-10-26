@@ -1,8 +1,7 @@
-import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { gzipSync } from "node:zlib";
 import { z } from "zod";
-import { capsuleFiles, expectSchema, loadCapsules, readCapsule, writeCapsule, type Capsule, type Expect } from "./capsule";
+import { capsuleFiles, expectSchema, loadCapsules, readCapsule, replaceExpect, writeCapsule, type Capsule, type Expect } from "./capsule";
 import { loadConfig } from "./config";
 import { checkDirs, PreviewError } from "./preview";
 import { refOf, replayCapsules, type CapsuleRef, type ReplayReport } from "./replay-report";
@@ -111,18 +110,6 @@ export function keepCase(options: CasesOptions & { id: string; expect?: Expect }
 export function setExpect(options: { configDir: string; id: string; expect: Expect }): string {
   const here = find(casesIn(options.configDir), options.id);
   if (!here) throw new PreviewError(`${casesIn(options.configDir)} 里没有 ${options.id}：先 cases keep`);
-  for (const file of here.all) {
-    const read = readCapsule(file);
-    if (!("capsule" in read)) continue;
-    const next: Capsule = { ...read.capsule, expect: options.expect };
-    const tmp = `${file}.tmp`;
-    try {
-      writeFileSync(tmp, file.endsWith(".gz") ? gzipSync(JSON.stringify(next)) : `${JSON.stringify(next, null, 2)}\n`);
-      renameSync(tmp, file);
-    } catch (error) {
-      rmSync(tmp, { force: true });
-      throw error;
-    }
-  }
+  for (const file of here.all) replaceExpect(file, options.expect);
   return here.file;
 }

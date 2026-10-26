@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Capsule } from "./capsule";
 import { canonical } from "./observe";
@@ -11,7 +12,8 @@ import type { LoadedRule } from "./rules";
 // The rule of the gate: where it cannot tell, it says so and stops (a ⚠ and no apply unless named),
 // never lets the candidate through for want of an answer. What it cannot tell: a correction when a
 // side asked for what the capsule never saw or no rule judges the item, a judgment that failed,
-// a capsule that cannot be read.
+// a capsule that cannot be read and may hold what a person wrote. What the candidate cannot have
+// changed it does not stop for: a rule it leaves as it is judges the same for both sides.
 
 /** Which capsule, for a person: the item, when, and why it was kept. */
 export interface CapsuleRef {
@@ -29,14 +31,18 @@ export interface ExpectLine extends CapsuleRef {
   said: string | null;
   /** unknown: why it cannot be told. */
   why?: string;
+  /** unknown: the cause itself, the same for every capsule it holds for (what was asked for that the capsule lacks, or no rule). */
+  because?: string;
 }
 
 export interface UnreadableCapsule {
   file: string;
   error: string;
-  /** In the config's cases/: a person's, who may have written an expectation in it. */
+  /** Whether what could be read of it says an expectation: true or false, or null when none of it could be read (peekExpect). */
+  holds: boolean | null;
+  /** It says an expectation, or may: one a person wrote (or, unreadable, in the config's cases/ outside the backfill's directory) is not to be left out of the gate unsaid. */
   kept: boolean;
-  /** What apply is told to let it pass: its path under the config directory. */
+  /** What apply is told to let it pass: its path under the config directory (the full path for one outside). */
   name: string;
 }
 
@@ -44,6 +50,8 @@ export interface ReplayReport {
   /** Capsules read, and those some rule judges the item of. */
   capsules: number;
   applicable: number;
+  /** Of those, the ones whose rule the candidate leaves as it is: both sides judge the same, so nothing was compared. */
+  unchanged: number;
   unreadable: UnreadableCapsule[];
   /** run: the candidate was asked too; none: only the rules in use were (nothing to compare to); broken: the candidate does not load. */
   candidate: "run" | "none" | "broken";
@@ -69,9 +77,9 @@ export function refOf(c: Capsule): CapsuleRef {
 }
 
 export interface ReplayOptions {
-  unreadable?: Array<{ file: string; error: string }>;
+  unreadable?: Array<{ file: string; error: string; holds?: boolean | null }>;
   broken?: boolean;
-  /** The config's cases/ directory: what is unreadable inside it is a person's. */
+  /** The config's cases/ directory: what is unreadable inside it, and may say an expectation, is a person's. */
   casesRoot?: string;
 }
 
@@ -79,6 +87,13 @@ const inside = (root: string, file: string): boolean => {
   const rel = path.relative(root, file);
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 };
+
+/** The two are the very same rule (the same text, so the same params): on a capsule they cannot judge differently. */
+const sameRule = (a: LoadedRule, b: LoadedRule): boolean => !!a.sha256 && a.sha256 === b.sha256;
+
+/** An unreadable file is held to the gate when it says an expectation, or, if it cannot be read at all, when it is where a person keeps theirs (not the backfill's directory, which is the machine's). */
+const holdsWhatAPersonWrote = (u: { file: string; holds?: boolean | null }, casesRoot: string | undefined): boolean =>
+  u.holds === true || (u.holds !== false && !!casesRoot && inside(casesRoot, u.file) && !inside(path.join(casesRoot, "backfill"), u.file));
 
 /**
  * Every capsule asked of the rules in use and of the candidate (absent: only of the rules in use,
@@ -89,10 +104,14 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
   const report: ReplayReport = {
     capsules: capsules.length,
     applicable: 0,
-    unreadable: (options.unreadable ?? []).map((u) => {
-      const kept = !!options.casesRoot && inside(options.casesRoot, u.file);
-      return { ...u, kept, name: kept ? path.relative(path.dirname(options.casesRoot!), u.file).split(path.sep).join("/") : u.file };
-    }),
+    unchanged: 0,
+    unreadable: (options.unreadable ?? []).map((u) => ({
+      file: u.file,
+      error: u.error,
+      holds: u.holds ?? null,
+      kept: holdsWhatAPersonWrote(u, options.casesRoot),
+      name: options.casesRoot && inside(options.casesRoot, u.file) ? path.relative(path.dirname(options.casesRoot), u.file).split(path.sep).join("/") : u.file,
+    })),
     candidate: options.broken ? "broken" : candidate ? "run" : "none",
     changed: [],
     missing: [],
@@ -110,7 +129,10 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
     report.applicable++;
     const ref = refOf(c);
     const runA = a ? replayOn(c, a) : null;
-    const runB = candidate ? (b ? replayOn(c, b) : null) : runA;
+    // The candidate leaves the rule as it is: it judges what the rule in use judges, whatever the tape lacks, so nothing is compared (what the capsule lacks is the tape's, not the candidate's).
+    const same = !!candidate && !!a && !!b && sameRule(a, b);
+    if (same) report.unchanged++;
+    const runB = candidate ? (b ? (same ? runA : replayOn(c, b)) : null) : runA;
     if (candidate && (!a || !b)) report.noRule.push({ ...ref, side: a ? "candidate" : "inUse", correction: c.correction !== null, expect: c.expect !== null });
 
     // The rule that made it, asked again of what it was given, has to give what it gave.
@@ -124,7 +146,7 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
       }
     }
 
-    if (candidate && runA && runB) {
+    if (candidate && runA && runB && !same) {
       const lacking: Array<"inUse" | "candidate"> = [...(runA.missing.length > 0 ? (["inUse"] as const) : []), ...(runB.missing.length > 0 ? (["candidate"] as const) : [])];
       const diff = diffOutcomes(runA.outcome, runB.outcome);
       // A judgment that failed is an answer even when the rule also asked for what the capsule lacks
@@ -138,7 +160,7 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
     }
 
     if (c.correction && !c.expect) report.expect.pending.push(ref);
-    if (c.expect) holdToExpect(report, c, ref, runA, candidate ? runB : null, candidate !== null);
+    if (c.expect) holdToExpect(report, c, ref, runA, candidate ? runB : null, candidate !== null, same);
   }
   return report;
 }
@@ -152,26 +174,36 @@ const texts = (list: Unmet[]) => list.map((u) => u.text);
  * another broken is that too). Where a side's answer cannot be held to it, it goes to `unknown`,
  * which stops as `broken` does.
  */
-function holdToExpect(report: ReplayReport, c: Capsule, ref: CapsuleRef, runA: ReplayRun | null, runB: ReplayRun | null, compared: boolean): void {
+function holdToExpect(report: ReplayReport, c: Capsule, ref: CapsuleRef, runA: ReplayRun | null, runB: ReplayRun | null, compared: boolean, same: boolean): void {
   const expect = c.expect!;
   const said = c.correction?.said ?? null;
-  const line = (unmet: Unmet[], why?: string): ExpectLine => ({ ...ref, unmet: texts(unmet), said, ...(why ? { why } : {}) });
+  const line = (unmet: Unmet[], because?: string, why?: string): ExpectLine => ({ ...ref, unmet: texts(unmet), said, ...(why ? { why } : {}), ...(because ? { because } : {}) });
   const sa = standingOf(expect, runA);
+  if (same) {
+    // The candidate leaves this rule as it is: it cannot have said it again, put it right, or made it harder to tell. Only what is still wrong is listed.
+    if (sa.verdict === "unmet") report.expect.stillBroken.push(line(sa.unmet));
+    return;
+  }
   if (!compared) {
     // Only the rules in use were asked: nothing to compare to, only whether the correction is met.
     if (sa.verdict === "unmet") report.expect.stillBroken.push(line(sa.unmet));
-    else if (sa.verdict === "unknown") report.expect.unknown.push(line(sa.unmet, `在用的判断方法读了存档里没有的：${callsOf(runA)}`));
+    else if (sa.verdict === "unknown") report.expect.unknown.push(line(sa.unmet, `在用的判断方法读了存档里没有的：${callsOf(runA)}`, `在用的判断方法读了存档里没有的：${callsOf(runA)}`));
     return;
   }
   const sb = standingOf(expect, runB);
   if (sb.verdict === "none") {
-    report.expect.unknown.push(line([], "候选没有判断方法管这个事项，核对不了"));
+    const because = "候选没有判断方法管这个事项";
+    report.expect.unknown.push(line([], because, `${because}，核对不了`));
   } else if (sb.verdict === "unknown") {
     const partial = sb.unmet.length > 0 ? `拿存档里有的算，候选的答案已经不满足这几处` : "拿存档里有的算，候选的答案还满足";
-    report.expect.unknown.push(line(sb.unmet, `候选读了存档里没有的（${callsOf(runB)}），${partial}；用候选重新补录一份存档才核对得了`));
+    const because = `候选读了存档里没有的（${callsOf(runB)}）`;
+    report.expect.unknown.push(line(sb.unmet, because, `${because}，${partial}；用候选重新补录一份存档才核对得了（cases backfill --candidate … --replace）`));
   } else if (sa.verdict === "unknown") {
     // The candidate's answer is whole; the rule in use's is not, so what was met before cannot be told.
-    if (sb.verdict === "unmet") report.expect.unknown.push(line(sb.unmet, `在用的判断方法读了存档里没有的（${callsOf(runA)}），分不清候选不满足的这几处是不是本来就不满足`));
+    if (sb.verdict === "unmet") {
+      const because = `在用的判断方法读了存档里没有的（${callsOf(runA)}）`;
+      report.expect.unknown.push(line(sb.unmet, because, `${because}，分不清候选不满足的这几处是不是本来就不满足`));
+    }
   } else if (sa.verdict === "none") {
     if (sb.verdict === "unmet") report.expect.stillBroken.push(line(sb.unmet));
   } else {
@@ -205,22 +237,52 @@ export const replayEmpty = (r: ReplayReport): boolean =>
 
 /** One thing that stops an apply until a person names it. */
 export interface Stop {
-  /** What `--accept-regress` is given for it: a capsule's id, or an unreadable capsule's path under the config. */
+  /** One capsule's id, or an unreadable capsule's path under the config (the full path for one outside it). */
   name: string;
   kind: "broken" | "unknown" | "error" | "unreadable";
   label: string;
+  /** Why, in words: the same for every stop with the same cause (not the capsule, not the path). */
+  reason: string;
+  /** The cause: naming it (`cause:<8 hex>`) lets every stop of this kind with this reason pass. */
+  cause: string;
+  /** The item the capsule is of ("" for a file that could not be read): naming `item:<it>` lets all of the item's stops pass. */
+  item: string;
 }
 
-const when = (c: CapsuleRef) => c.at.slice(5, 16).replace("T", " ");
+/** Every name by which a stop can be let through. */
+export const namesOf = (s: Stop): string[] => [s.name, s.cause, ...(s.item ? [`item:${s.item}`] : [])];
 
-/** Everything the gate stops an apply for: a correction said again or not to be told, a candidate that fails where the rule in use does not, a person's capsule that cannot be read. */
+const when = (c: CapsuleRef) => c.at.slice(5, 16).replace("T", " ");
+const causeOf = (kind: Stop["kind"], reason: string) => `cause:${createHash("sha256").update(`${kind}\n${reason}`).digest("hex").slice(0, 8)}`;
+
+/** Everything the gate stops an apply for: a correction said again or not to be told, a candidate that fails where the rule in use does not, a capsule that cannot be read and may say one. */
 export function stops(r: ReplayReport): Stop[] {
+  const stop = (kind: Stop["kind"], name: string, label: string, reason: string, item: string): Stop => ({ name, kind, label, reason, cause: causeOf(kind, reason), item });
   return [
-    ...r.expect.broken.map((e): Stop => ({ name: e.id, kind: "broken", label: `${e.label} ${when(e)}` })),
-    ...r.expect.unknown.map((e): Stop => ({ name: e.id, kind: "unknown", label: `${e.label} ${when(e)}` })),
-    ...r.errors.filter((e) => e.side === "candidate").map((e): Stop => ({ name: e.id, kind: "error", label: `${e.label} ${when(e)}` })),
-    ...r.unreadable.filter((u) => u.kept).map((u): Stop => ({ name: u.name, kind: "unreadable", label: u.name })),
+    ...r.expect.broken.map((e) => stop("broken", e.id, `${e.label} ${when(e)}`, `纠错又犯了：${e.unmet.join("；")}`, e.caseId)),
+    ...r.expect.unknown.map((e) => stop("unknown", e.id, `${e.label} ${when(e)}`, `纠错核对不了：${e.because ?? e.why ?? ""}`, e.caseId)),
+    ...r.errors.filter((e) => e.side === "candidate").map((e) => stop("error", e.id, `${e.label} ${when(e)}`, `候选判断出错：${e.error}${e.calls.length > 0 ? `（候选还读了存档里没有的：${e.calls.join("、")}）` : ""}`, e.caseId)),
+    ...r.unreadable.filter((u) => u.kept).map((u) => stop("unreadable", u.name, u.name, `读不了的存档：${u.error}`, "")),
   ];
+}
+
+/** Of what stops, the causes that more than one stop has, and the items that have more than one: what can be let through in one name. */
+export function stopGroups(r: ReplayReport): { causes: Array<{ cause: string; kind: Stop["kind"]; reason: string; count: number }>; items: Array<{ item: string; label: string; count: number }> } {
+  const all = stops(r);
+  const causes = new Map<string, { cause: string; kind: Stop["kind"]; reason: string; count: number }>();
+  const items = new Map<string, { item: string; label: string; count: number }>();
+  const labels = new Map([...r.expect.broken, ...r.expect.unknown, ...r.errors].map((e) => [e.caseId, e.label.split(" ")[0] ?? e.caseId] as const));
+  for (const s of all) {
+    const c = causes.get(s.cause) ?? { cause: s.cause, kind: s.kind, reason: s.reason, count: 0 };
+    c.count++;
+    causes.set(s.cause, c);
+    if (s.item) {
+      const i = items.get(s.item) ?? { item: s.item, label: labels.get(s.item) ?? s.item, count: 0 };
+      i.count++;
+      items.set(s.item, i);
+    }
+  }
+  return { causes: [...causes.values()].filter((c) => c.count > 1), items: [...items.values()].filter((i) => i.count > 1) };
 }
 
 const WHY: Record<string, string> = { first: "第一次判断", stage: "换阶段", questions: "要问的变了", notice: "提醒变了", error: "判断出错", sample: "每天的样本", wrong: "说判断错了" };
@@ -264,18 +326,34 @@ export function replayWarnings(r: ReplayReport): string[] {
     (s) => `⚠ 存档复现不了：${s.label} ${when(s)}，在用的判断方法和存下它时是同一版，拿存档里的数据再判断一遍，结果却不一样（${s.fields.join("、")}）：重放不可信，先查原因`,
     (n) => `⚠ 还有 ${n} 份存档复现不了`,
   );
-  // Unreadable: a person's stop an apply; the controller's are told, not stopped on.
+  // Unreadable: one that says an expectation (or may: it cannot be read at all and is where a person keeps theirs) stops an apply; the rest are told, not stopped on.
   cut(
     r.unreadable.filter((u) => u.kept),
     5,
-    (u) => `⚠ 读不了配置目录里留下的存档，它里面写的纠错没有拿来核对：${u.name}（${clip(u.error, 100)}）：修好它，或者删掉；不修也要拷的话，把这个路径写进 --accept-regress`,
-    (n) => `⚠ 还有 ${n} 份配置目录里的存档读不了`,
+    (u) =>
+      `⚠ 读不了的存档，${u.holds === true ? "里面写着 expect" : "看不出里面有没有 expect（它在配置目录的 cases/ 里，按有算）"}，它的纠错没有拿来核对：${u.name}（${clip(u.error, 100)}）：修好它，或者删掉；不修也要拷的话，把这个路径写进 --accept-regress`,
+    (n) => `⚠ 还有 ${n} 份写着 expect 的存档读不了`,
   );
   cut(
     r.unreadable.filter((u) => !u.kept),
     3,
-    (u) => `⚠ 读不了数据目录里的存档：${u.file.split(/[\\/]/).slice(-2).join("/")}（${clip(u.error, 100)}）`,
-    (n) => `⚠ 还有 ${n} 份数据目录里的存档读不了`,
+    (u) => `⚠ 读不了的存档，${u.holds === false ? "里面没有 expect" : "读不出内容，在机器写的目录里"}（只是没读进来，不拦）：${u.file.split(/[\\/]/).slice(-2).join("/")}（${clip(u.error, 100)}）`,
+    (n) => `⚠ 还有 ${n} 份没写 expect 的存档读不了`,
+  );
+  // What stops in one name: a cause that more than one stop has (the same candidate failing the same way on many capsules), an item that has more.
+  const groups = stopGroups(r);
+  const kindWords: Record<Stop["kind"], string> = { broken: "纠错又犯了", unknown: "纠错核对不了", error: "候选判断出错", unreadable: "读不了的存档" };
+  cut(
+    groups.causes,
+    5,
+    (g) => `⚠ ${g.count} 处拦截是同一个原因（${kindWords[g.kind]}：${clip(g.reason.slice(g.reason.indexOf("：") + 1), 80)}），认下的话整组点名：${g.cause}`,
+    (n) => `⚠ 还有 ${n} 组同一个原因的拦截（全部在 diff --json 的 stops 里）`,
+  );
+  cut(
+    groups.items,
+    5,
+    (g) => `⚠ 事项 ${g.label} 有 ${g.count} 处拦截，认下整个事项的话点名：item:${g.item}`,
+    (n) => `⚠ 还有 ${n} 个事项有不止一处拦截`,
   );
   return out;
 }
@@ -294,7 +372,8 @@ export function replayLines(r: ReplayReport): string[] {
       ? "没有一份是在用的这一版判断方法存下的（存下它们的判断方法后来改过），存档里记的答案没拿来核对。"
       : `其中 ${r.selfChecked} 份是在用的这一版判断方法存下的，拿存档再判断一遍：${r.selfCheck.length > 0 ? `${r.selfCheck.length} 份和存下的不一样（见 ⚠）` : "答案和存下的一样"}。`,
   );
-  if (r.missing.length > 0) out.push(`其中 ${r.missing.length} 份有一边读了存档里没有的东西（回放缺数据）：这几份的差异只作参考；判断方法多读了东西，要用候选重新补录才比得准。`);
+  if (r.unchanged > 0) out.push(`其中 ${r.unchanged} 份存档的判断方法候选没有改（文本一样），两边必然判断得一样，没有比。`);
+  if (r.missing.length > 0) out.push(`其中 ${r.missing.length} 份有一边读了存档里没有的东西（回放缺数据）：这几份的差异只作参考；判断方法多读了东西，要用候选重新补录才比得准（cases backfill --candidate <候选目录> --replace）。`);
   const first = <T>(xs: T[], n: number) => xs.slice(0, n);
   const list = (xs: CapsuleRef[], n = 5) => `${first(xs, n).map((e) => `${e.label} ${when(e)}`).join("、")}${xs.length > n ? "…" : ""}`;
   if (r.expect.fixed.length > 0) out.push(`修好了 ${r.expect.fixed.length} 条纠错：${list(r.expect.fixed)}`);
@@ -324,6 +403,11 @@ export function replayLines(r: ReplayReport): string[] {
   for (const m of first(r.missing, 5)) {
     const sides = m.sides.map((s) => (s === "inUse" ? "在用" : "候选")).join("、");
     out.push(`回放缺数据（${sides}读了存档里没有的：${m.calls.join("、")}）：${m.label} ${when(m)}，结果只作参考${m.diff ? `（两边${m.diff.judgment.length > 0 ? "判断不同" : "只差记账和文字"}）` : ""}`);
+    // The judgment that differs, field by field, though only for reference: it is the very thing a change to what is read is most often meant to change.
+    if (m.diff) {
+      for (const d of first(m.diff.judgment, 3)) out.push(`  （仅参考）${d.field}：${clip(d.before, 60)} → ${clip(d.after, 60)}`);
+      if (m.diff.judgment.length > 3) out.push(`  …还有 ${m.diff.judgment.length - 3} 处判断不同`);
+    }
   }
   if (r.missing.length > 5) out.push(`…还有 ${r.missing.length - 5} 份缺数据`);
   if (replayEmpty(r) && r.candidate !== "none") out.push(r.applicable === 0 ? "没有判断方法管这些存档，没有重放。" : "没有差异：每份存档在两版下得到同样的判断。");

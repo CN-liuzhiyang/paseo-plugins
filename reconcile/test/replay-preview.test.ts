@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { capsuleFiles, loadCapsules, readCapsule, writeCapsule, type Capsule, type Expect } from "../server/capsule";
+import { capsuleFiles, capsuleId, loadCapsules, readCapsule, writeCapsule, type Capsule, type Expect } from "../server/capsule";
 import { keepCase, listCases, readExpect, replayOnly, setExpect } from "../server/cases";
 import { applyCandidate, copyConfig, preview, previewText, PreviewError, type Preview } from "../server/preview";
 import { replayCapsules, replayDigest, replayLines } from "../server/replay-report";
@@ -383,7 +383,7 @@ test("capsules are read from the data directory and from the config's cases/; on
     assert.equal(p.replay.capsules, 2);
     assert.equal(p.replay.changed.length, 2);
     assert.equal(p.replay.unreadable.length, 1);
-    assert.match(previewText(p), /⚠ 读不了数据目录里的存档：gcp-demo_1\/broken\.json\.gz/);
+    assert.match(previewText(p), /⚠ 读不了的存档，读不出内容，在机器写的目录里（只是没读进来，不拦）：gcp-demo_1\/broken\.json\.gz/);
     // Narrowed on purpose (a different place to read from).
     const narrowed = await preview({ configDir: t.w.configDir, candidateDir: t.candidate, dataDir: t.w.dataDir, nowMs: t.w.clock.now, casesDirs: [path.join(t.w.configDir, "cases")] });
     assert.equal(narrowed.replay.capsules, 1);
@@ -519,7 +519,7 @@ test("the command: replay, cases list/keep/expect, and apply with --accept-regre
 
     const diff = run("diff", ...base, "--candidate", t.candidate, "--now", now);
     assert.equal(diff.status, 0, diff.stderr);
-    assert.match(diff.stdout, /拷的时候要加 --accept-regress/);
+    assert.match(diff.stdout, /重放拦下了 1 处，上面这条会被拒：认下的要写进 --accept-regress/);
     const id = (JSON.parse(run("diff", ...base, "--candidate", t.candidate, "--now", now, "--json").stdout) as Preview).id;
     const blocked = run("apply", ...base, "--candidate", t.candidate, "--now", now, "--expect", id);
     assert.equal(blocked.status, 2);
@@ -573,6 +573,7 @@ test("a candidate that reads what the capsule lacks and no longer keeps a correc
     assert.ok(p.replay.expect.unknown[0]!.unmet.some((u) => u.includes("外放")), "what its answer from what the capsule holds does not meet");
     const lines = warnings(p);
     assert.match(lines.find((l) => l.startsWith("⚠ 纠错核对不了")) ?? "", new RegExp(`${a.id}.*候选读了存档里没有的（item\\("gcp-demo:99"\\)）.*已经不满足这几处.*用候选重新补录一份存档才核对得了`));
+    assert.ok(!lines.some((l) => l.includes("处拦截")), "one stop is not a group: no cause or item to name for it");
     assert.equal(p.empty, false);
     await assert.rejects(applyCandidate(named(t, p.id, [])), (e: Error) => e instanceof PreviewError && /重放有 1 处没过，没拷：纠错核对不了 1 处/.test(e.message));
     assert.deepEqual((await applyCandidate(named(t, p.id, [a.id]))).applied, [RULE_FILE], "named, it goes");
@@ -650,7 +651,7 @@ test("a capsule among the config's cases that cannot be read stops apply (a typo
     assert.equal(p.replay.unreadable[0]!.kept, true);
     const name = p.replay.unreadable[0]!.name;
     assert.match(name, /^cases\/gcp-demo_1\/.+\.json$/);
-    assert.ok(warnings(p).some((l) => l.startsWith("⚠ 读不了配置目录里留下的存档") && l.includes(name) && l.includes("headlines")), warnings(p).join("\n"));
+    assert.ok(warnings(p).some((l) => l.startsWith("⚠ 读不了的存档，里面写着 expect") && l.includes(name) && l.includes("headlines")), warnings(p).join("\n"));
     assert.notEqual(p.id, control.id, "told in the id (it was the id of there being no such capsule)");
     // What is wrong with the file is in the id too: the same capsule gone, for another reason, is another preview.
     writeFileSync(file, "{ not json");
@@ -772,4 +773,210 @@ test("cases list: a directory beside cases/ whose name starts with it is not the
     const c = await t.keep("2026-10-13 10:00", {}, { to: old });
     const rows = listCases({ configDir: t.w.configDir, dataDir: t.w.dataDir, casesDirs: [old] });
     assert.deepEqual(rows.map((r) => [r.id, r.where]), [[c.id, "data"]]);
+  }));
+
+// ---- the second review: what the candidate leaves as it is, what an unreadable file says, one cause named once (R2, R3, R4, R5, R6, R7) ----
+
+test("a candidate that leaves a rule as it is is not stopped by what an old capsule lacks for it: nothing of that rule is compared (a policy.json change next to a stale tape)", () =>
+  withDemo(
+    async (t) => {
+      // Made by a rule that read less than the one in use does.
+      const a = await t.keep("2026-10-13 10:00", {}, { correction: true, expect: { stage: "open" } });
+      writeFileSync(path.join(t.candidate, "policy.json"), JSON.stringify({ ...TEST_POLICY, ruleBreakerChanges: 9 }));
+      const p = await t.look();
+      assert.deepEqual(p.changedFiles, ["policy.json"]);
+      assert.deepEqual([p.replay.unchanged, p.replay.applicable], [1, 1]);
+      assert.deepEqual(p.replay.expect.unknown, []);
+      assert.deepEqual(p.replay.missing, []);
+      assert.deepEqual(p.stops, []);
+      assert.match(replayLines(p.replay).join("\n"), /其中 1 份存档的判断方法候选没有改（文本一样），两边必然判断得一样，没有比/);
+      assert.deepEqual((await applyCandidate(named(t, p.id, []))).applied, ["policy.json"]);
+      // Control: a candidate that does change that rule is still not told by the stale tape.
+      t.candidateRule({ peek: "gcp-demo:99", verb: "上线" });
+      const changed = await t.look();
+      assert.deepEqual(changed.replay.expect.unknown.map((e) => e.id), [a.id]);
+      assert.equal(changed.replay.unchanged, 0);
+    },
+    { inUse: demoRuleText({ peek: "gcp-demo:99" }) },
+  ));
+
+test("a rule left as it is does not hide a correction that is still wrong, and does not make one up", () =>
+  withDemo(async (t) => {
+    const wrong = await t.keep("2026-10-13 10:00", {}, { correction: true, expect: { headline: { has: ["从来不会有"] } } });
+    await t.keep("2026-10-13 11:00", {}, { correction: true, expect: { headline: { has: ["外放"] } } });
+    writeFileSync(path.join(t.candidate, "policy.json"), JSON.stringify({ ...TEST_POLICY, ruleBreakerChanges: 9 }));
+    const p = await t.look();
+    assert.equal(p.replay.unchanged, 2);
+    assert.deepEqual(p.replay.expect.stillBroken.map((e) => e.id), [wrong.id], "still wrong, and said so");
+    assert.deepEqual([p.replay.expect.broken, p.replay.expect.fixed, p.replay.expect.unknown], [[], [], []]);
+    assert.deepEqual(p.stops, []);
+  }));
+
+// ---- an unreadable file is held to the gate by what it says, not by where it is ----
+
+test("an unreadable capsule stops apply when it says an expectation, wherever it is; one that does not, or that cannot be read in the machine's directory, is only told", () =>
+  withDemo(async (t) => {
+    const [data, cases] = [path.join(t.w.dataDir, "capsules"), path.join(t.w.configDir, "cases")];
+    const typo = (s: string) => s.replace(/("expect": \{\s*)"headline"/, '$1"headlines"');
+    const future = (s: string) => s.replace('"v": 1', '"v": 7');
+    const rows: Array<{ name: string; where: string; expect: boolean; change: (s: string) => string; stops: boolean; holds: boolean | null }> = [
+      { name: "data dir, expect mistyped", where: data, expect: true, change: typo, stops: true, holds: true },
+      { name: "cases/backfill, expect mistyped (a person wrote it there)", where: path.join(cases, "backfill"), expect: true, change: typo, stops: true, holds: true },
+      { name: "cases/, a version not known, with an expect", where: cases, expect: true, change: future, stops: true, holds: true },
+      { name: "cases/backfill, a version not known, no expect", where: path.join(cases, "backfill"), expect: false, change: future, stops: false, holds: false },
+      { name: "cases/, a version not known, no expect", where: cases, expect: false, change: future, stops: false, holds: false },
+      { name: "cases/backfill, not JSON at all", where: path.join(cases, "backfill"), expect: false, change: () => "{ not json", stops: false, holds: null },
+      { name: "cases/, not JSON at all (a person's: it may say one)", where: cases, expect: false, change: () => "{ not json", stops: true, holds: null },
+      { name: "data dir, not JSON at all", where: data, expect: false, change: () => "{ not json", stops: false, holds: null },
+    ];
+    t.candidateRule({ verb: "上线" });
+    for (const row of rows) {
+      rmSync(data, { recursive: true, force: true });
+      rmSync(cases, { recursive: true, force: true });
+      await t.keep("2026-10-13 10:00", {}, { correction: true, ...(row.expect ? { expect: { headline: { has: ["外放"] } } } : {}), to: row.where, plain: true });
+      const file = capsuleFiles(row.where)[0]!;
+      writeFileSync(file, row.change(readFileSync(file, "utf8")));
+      const p = await t.look();
+      const u = p.replay.unreadable;
+      assert.equal(u.length, 1, row.name);
+      assert.deepEqual([u[0]!.holds, u[0]!.kept], [row.holds, row.stops], row.name);
+      assert.deepEqual(p.stops.filter((s) => s.kind === "unreadable").length, row.stops ? 1 : 0, row.name);
+      if (!row.stops) continue;
+      const name = p.stops[0]!.name;
+      assert.equal(name, path.relative(t.w.configDir, file).split(path.sep).join("/").startsWith("cases/") ? path.relative(t.w.configDir, file).split(path.sep).join("/") : file, `named by its path under the config, or in full outside it (${row.name})`);
+      await assert.rejects(applyCandidate(named(t, p.id, [])), (e: Error) => e instanceof PreviewError && /读不了的存档 1 处/.test(e.message), row.name);
+      assert.deepEqual((await applyCandidate(named(t, p.id, [name]))).applied, [RULE_FILE], row.name);
+      writeFileSync(path.join(t.w.configDir, RULE_FILE), demoRuleText());
+    }
+  }));
+
+test("a capsule a person renamed by a slip (.JSON) is told, with its expect, and stops apply: it does not just vanish from the replay", () =>
+  withDemo(async (t) => {
+    const cases = path.join(t.w.configDir, "cases");
+    const c = await t.keep("2026-10-13 10:00", {}, { correction: true, expect: { headline: { has: ["外放"] } }, to: cases, plain: true });
+    t.candidateRule({ verb: "上线" });
+    assert.deepEqual((await t.look()).replay.expect.broken.map((e) => e.id), [c.id], "control: read, it is said again");
+    const file = capsuleFiles(cases)[0]!;
+    renameSync(file, file.replace(/\.json$/, ".JSON"));
+    assert.equal(capsuleFiles(cases).length, 0);
+    const p = await t.look();
+    assert.equal(p.replay.unreadable.length, 1);
+    assert.match(p.replay.unreadable[0]!.error, /文件名不对/);
+    assert.deepEqual([p.replay.unreadable[0]!.holds, p.replay.unreadable[0]!.kept], [true, true]);
+    assert.ok(warnings(p).some((l) => l.startsWith("⚠ 读不了的存档，里面写着 expect") && l.includes("文件名不对") && l.includes(".JSON")), warnings(p).join("\n"));
+    await assert.rejects(applyCandidate(named(t, p.id, [])), PreviewError);
+    assert.equal(p.replay.capsules, 0);
+    assert.match(previewText(p), /一份存档也没读成：1 份读不了/);
+  }));
+
+// ---- one cause is named once (R4) ----
+
+const failing = () => demoRuleText().replace("const peek = p.peek ? ctx.item(p.peek) : null;", 'const peek = ctx.item("gcp-demo:99"); peek.status;');
+/** The same capsule as another item's: the key in the case, the item and every call that carries it. */
+const asItem = (c: Capsule, n: number): Capsule => {
+  const moved = JSON.parse(JSON.stringify(c).replaceAll('"gcp-demo:1"', `"gcp-demo:${n}"`)) as Capsule;
+  return { ...moved, id: capsuleId(moved) };
+};
+
+test("capsules a candidate fails on for one cause are let through in one name: the cause, or the item; the refusal does not write the names, the warnings do", () =>
+  withDemo(async (t) => {
+    const rule = await loadDemo(demoRuleText());
+    const times = ["10:00", "10:30", "11:00", "11:30", "12:00", "12:30"];
+    const mine = times.map((h) => capture(rule, `2026-10-13 ${h}`));
+    for (const c of mine) writeCapsule(path.join(t.w.dataDir, "capsules"), c, { gzip: false });
+    for (const c of mine.slice(0, 2)) writeCapsule(path.join(t.w.dataDir, "capsules"), asItem(c, 2), { gzip: false });
+    t.candidateRule(undefined, failing());
+    const p = await t.look();
+    assert.equal(p.stops.length, 8);
+    assert.equal(new Set(p.stops.map((s) => s.cause)).size, 1, "one cause: the same failure with the same extra read");
+    assert.deepEqual(new Set(p.stops.map((s) => s.item)), new Set(["gcp-demo:1", "gcp-demo:2"]));
+    const cause = p.stops[0]!.cause;
+    assert.match(cause, /^cause:[0-9a-f]{8}$/);
+    for (const s of p.stops) assert.deepEqual(s.names, [s.name, cause, `item:${s.item}`]);
+    // The warnings list the capsules (the first ten), and say what can be named in one.
+    const lines = warnings(p);
+    assert.equal(lines.filter((l) => l.startsWith("⚠ 候选在这份存档上判断出错")).length, 8);
+    assert.ok(lines.some((l) => l.startsWith("⚠ 8 处拦截是同一个原因（候选判断出错：") && l.endsWith(`整组点名：${cause}`)), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("事项 #1") && l.includes("有 6 处拦截") && l.endsWith("item:gcp-demo:1")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("事项 #2") && l.includes("有 2 处拦截") && l.endsWith("item:gcp-demo:2")), lines.join("\n"));
+    // The refusal says how many and what, and that they are one cause, but not the names.
+    let message = "";
+    await assert.rejects(applyCandidate(named(t, p.id, [])), (e: Error) => ((message = e.message), e instanceof PreviewError && /候选判断出错 8 处/.test(e.message)));
+    assert.match(message, /它们只有 1 个原因：同一个原因的可以整组点名/);
+    assert.doesNotMatch(message, /cause:[0-9a-f]{8}|k_[0-9a-f]{16}|item:gcp/);
+    // An item alone leaves the other item's stopping; a name that is nothing it stopped is refused; the cause lets all through.
+    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:1"])), (e: Error) => e instanceof PreviewError && /候选判断出错 2 处/.test(e.message));
+    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:3"])), (e: Error) => e instanceof PreviewError && /item:gcp-demo:3 不是这次重放拦下的/.test(e.message));
+    await assert.rejects(applyCandidate(named(t, p.id, ["cause:00000000"])), (e: Error) => e instanceof PreviewError && /cause:00000000 不是这次重放拦下的/.test(e.message));
+    assert.deepEqual((await applyCandidate(named(t, p.id, ["item:gcp-demo:1", "item:gcp-demo:2"]))).applied, [RULE_FILE]);
+    writeFileSync(path.join(t.w.configDir, RULE_FILE), demoRuleText());
+    assert.deepEqual((await applyCandidate(named(t, p.id, [cause]))).applied, [RULE_FILE], "the cause alone");
+    writeFileSync(path.join(t.w.configDir, RULE_FILE), demoRuleText());
+    // One capsule by its id is still a way, and a mix is too.
+    await assert.rejects(applyCandidate(named(t, p.id, [...mine.slice(2).map((c) => c.id), "item:gcp-demo:2", mine[0]!.id])), (e: Error) => e instanceof PreviewError && /候选判断出错 1 处/.test(e.message), "one of them is left out");
+    assert.deepEqual((await applyCandidate(named(t, p.id, [...mine.slice(1).map((c) => c.id), "item:gcp-demo:2", mine[0]!.id]))).applied, [RULE_FILE]);
+  }));
+
+test("a cause lets through only the stops that have it: another kind of stop with it unnamed still stops", () =>
+  withDemo(async (t) => {
+    const rule = await loadDemo(demoRuleText());
+    for (const h of ["10:00", "10:30"]) writeCapsule(path.join(t.w.dataDir, "capsules"), capture(rule, `2026-10-13 ${h}`), { gzip: false });
+    const a = await t.keep("2026-10-13 12:00", {}, { correction: true, expect: { headline: { has: ["外放"] } } });
+    t.candidateRule(undefined, failing());
+    const p = await t.look();
+    const errors = p.stops.filter((s) => s.kind === "error");
+    assert.ok(errors.length >= 2);
+    assert.ok(p.stops.some((s) => s.kind !== "error"), "and something that is not a failure stops as well");
+    const cause = errors[0]!.cause;
+    assert.ok(errors.every((s) => s.cause === cause));
+    // The failures are let through by their cause; the correction that could not be told for the same candidate is another stop, with another cause.
+    await assert.rejects(
+      applyCandidate(named(t, p.id, [cause])),
+      (e: Error) => e instanceof PreviewError && /没拷：纠错核对不了 1 处/.test(e.message) && !/候选判断出错/.test(e.message),
+    );
+    assert.deepEqual((await applyCandidate(named(t, p.id, [cause, a.id]))).applied, [RULE_FILE]);
+  }));
+
+test("diff says how to go on for every kind of stop, not only for a correction said again", () =>
+  withDemo(async (t) => {
+    await t.keep("2026-10-13 10:00", {}, { correction: true, expect: { headline: { has: ["外放"] } } });
+    t.candidateRule({ verb: "上线", peek: "gcp-demo:99" });
+    const env = { ...process.env, PASEO_HOME: path.join(t.w.dir, "no-home") };
+    const base = ["--config", t.w.configDir, "--data", t.w.dataDir];
+    const diff = spawnSync(process.execPath, [BIN, "diff", ...base, "--candidate", t.candidate, "--now", new Date(t.w.clock.now).toISOString()], { encoding: "utf8", env });
+    assert.equal(diff.status, 0, diff.stderr);
+    assert.match(diff.stdout, /重放拦下了 1 处，上面这条会被拒/);
+    assert.match(diff.stdout, /cause:…、同一个事项的 item:…/);
+    assert.ok(diff.stdout.includes(`reconcile-preview cases backfill --config ${t.w.configDir} --data ${t.w.dataDir} --candidate ${t.candidate} --replace`), diff.stdout.slice(-700));
+    // The names are in the warnings and in the JSON, not in the hint.
+    assert.doesNotMatch(diff.stdout.split("\n").slice(-3).join("\n"), /k_[0-9a-f]{16}|cause:[0-9a-f]{8}/);
+    const json = JSON.parse(spawnSync(process.execPath, [BIN, "diff", ...base, "--candidate", t.candidate, "--now", new Date(t.w.clock.now).toISOString(), "--json"], { encoding: "utf8", env }).stdout) as Preview;
+    assert.equal(json.stops.length, 1);
+    assert.deepEqual(json.stops[0]!.names.length, 3);
+    // Without a stop there is no hint.
+    t.candidateRule({});
+    const quiet = spawnSync(process.execPath, [BIN, "diff", ...base, "--candidate", t.candidate, "--now", new Date(t.w.clock.now).toISOString()], { encoding: "utf8", env });
+    assert.doesNotMatch(quiet.stdout, /重放拦下了/);
+  }));
+
+// ---- a side that read what the capsule lacks: what differs in its judgment is shown by field, for reference (R7) ----
+
+test("a capsule one side read more for shows its judgment differences by field, marked for reference only", () =>
+  withDemo(async (t) => {
+    await t.keep("2026-10-13 10:00");
+    // It reads one thing more, and says another stage (the peer is closed in the capsule: the rule in use says waiting).
+    t.candidateRule(undefined, demoRuleText({ peek: "gcp-demo:99" }).replace('peer && peer.closed ? "waiting" : "open"', '"open"'));
+    const p = await t.look();
+    assert.equal(p.replay.missing.length, 1);
+    assert.ok(p.replay.missing[0]!.diff!.judgment.length > 0, "the judgment does differ");
+    const lines = replayLines(p.replay);
+    const at = lines.findIndex((l) => l.startsWith("回放缺数据（候选读了存档里没有的"));
+    assert.ok(at >= 0, lines.join("\n"));
+    assert.match(lines[at]!, /结果只作参考（两边判断不同）/);
+    const fields = lines.slice(at + 1).filter((l) => l.startsWith("  （仅参考）"));
+    assert.ok(fields.length > 0, lines.join("\n"));
+    assert.ok(fields.some((l) => /（仅参考）(阶段|现状|下一步|问题 [^：]+：[^：]+)：/.test(l)), fields.join("\n"));
+    assert.ok(fields.length <= 3 || lines.slice(at + 1).some((l) => /^ {2}…还有 \d+ 处判断不同/.test(l)));
+    // The count above says it too, and where the way on is.
+    assert.ok(lines.some((l) => /回放缺数据\）：这几份的差异只作参考；.*cases backfill --candidate <候选目录> --replace/.test(l)), lines.join("\n"));
   }));

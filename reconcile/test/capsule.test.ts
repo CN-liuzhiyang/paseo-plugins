@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
 import { gzipSync } from "node:zlib";
-import { capsuleFile, capsuleId, expectSchema, loadCapsules, parseCapsule, readCapsule, writeCapsule, type Capsule } from "../server/capsule";
+import { capsuleFile, capsuleId, capsuleScan, expectSchema, loadCapsules, parseCapsule, peekExpect, readCapsule, replaceExpect, writeCapsule, type Capsule } from "../server/capsule";
 import { CTX_KIND, makeContext, recordingContext } from "../server/rules";
 import { createCalendar } from "../server/time";
 import { cleanDemos, capture, demoRuleText, loadDemo } from "./replay-helpers";
@@ -131,11 +131,116 @@ test("loading goes through the roots in order: a later root's capsule of the sam
     const loaded = loadCapsules([controller, kept, path.join(controller, "nowhere")]);
     assert.deepEqual(loaded.capsules.map((c) => [c.capsule.at.slice(0, 10), c.capsule.expect !== null]), [["2026-10-21", true], ["2026-10-22", false]]);
     assert.equal(loaded.capsules[0]!.file.startsWith(kept), true);
-    assert.deepEqual(loaded.unreadable.map((u) => path.basename(u.file)), ["broken.json"]);
+    // One that cannot be parsed, and a hidden one (it was dropped without a word): both are told. A file that is not a capsule by its name (notes.txt) is not.
+    assert.deepEqual(loaded.unreadable.map((u) => path.basename(u.file)), ["broken.json", ".hidden.json"]);
     assert.equal(existsSync(path.join(controller, "gcp-demo_1")), true);
   } finally {
     rmSync(kept, { recursive: true, force: true });
     rmSync(controller, { recursive: true, force: true });
+  }
+});
+
+// ---- files that look like a capsule and are not read; whether a file not read says an expectation (re-review R3, R6) ----
+
+test("a file that looks like a capsule and is not read is told, with why, and does not just vanish; one that is not a capsule is let be", async () => {
+  const c = capture(await loadDemo(demoRuleText()), "2026-10-13 10:00");
+  const root = tmp();
+  try {
+    const file = writeCapsule(root, c, { gzip: false });
+    const dir = path.dirname(file);
+    const text = readFileSync(file, "utf8");
+    writeFileSync(path.join(dir, "renamed.JSON"), text);
+    writeFileSync(path.join(dir, "old.json.bak"), text);
+    writeFileSync(path.join(dir, ".hidden.json"), text);
+    writeFileSync(path.join(dir, "half.json.tmp"), "{");
+    writeFileSync(path.join(dir, "README.md"), "notes");
+    const deep = path.join(dir, "a", "b", "c", "d");
+    mkdirSync(deep, { recursive: true });
+    writeFileSync(path.join(deep, "deep.json"), text);
+    let linked = false;
+    try {
+      symlinkSync(file, path.join(dir, "link.json"));
+      linked = true;
+    } catch {
+      // No right to make a link here (Windows without developer mode): the rest is still checked.
+    }
+    const scan = capsuleScan(root);
+    assert.deepEqual(scan.files, [file]);
+    const told = new Map(scan.stray.map((s) => [path.basename(s.file), s.error] as const));
+    assert.deepEqual([...told.keys()].sort(), [".hidden.json", "deep.json", ...(linked ? ["link.json"] : []), "old.json.bak", "renamed.JSON"].sort());
+    assert.match(told.get("renamed.JSON")!, /文件名不对/);
+    assert.match(told.get("old.json.bak")!, /文件名不对/);
+    assert.match(told.get(".hidden.json")!, /隐藏文件/);
+    assert.match(told.get("deep.json")!, /套得太深/);
+    if (linked) assert.match(told.get("link.json")!, /符号链接/);
+    // They come out of a load as unreadable, so that a preview says so: and a half-written file and a note are not among them.
+    const loaded = loadCapsules([root]);
+    assert.equal(loaded.capsules.length, 1);
+    assert.deepEqual(loaded.unreadable.map((u) => path.basename(u.file)).sort(), [...told.keys()].sort());
+    // What they say of an expectation can be told from them anyway (a capsule renamed by a slip is still a person's expect).
+    assert.ok(loaded.unreadable.every((u) => u.holds === false || path.basename(u.file) === "link.json"), "a copy of a capsule without an expect holds none");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("whether a file that is not read as a capsule says an expectation: by what it holds, a mistyped key counted; only a file that cannot be parsed at all is not known", async () => {
+  const c = capture(await loadDemo(demoRuleText()), "2026-10-13 10:00", { expect: { stage: "open" } });
+  const root = tmp();
+  try {
+    const dir = path.join(root, "gcp-demo_1");
+    mkdirSync(dir);
+    const put = (name: string, value: unknown) => writeFileSync(path.join(dir, name), typeof value === "string" ? value : JSON.stringify(value));
+    put("typo-inside.json", { ...c, expect: { stages: "open" } });
+    // The key itself mistyped, and the right one not there at all (with it there the capsule's own key would speak for it).
+    const { expect: _gone, ...without } = c;
+    void _gone;
+    put("typo-key.json", { ...without, expects: { stage: "open" } });
+    put("future.json", { ...c, v: 7 });
+    put("none.json", { ...c, v: 7, expect: null });
+    put("garbage.json", "{ not json");
+    put("zipped.json.gz", "not gzip");
+    writeFileSync(path.join(dir, "zipped-typo.json.gz"), gzipSync(JSON.stringify({ ...c, expect: { stages: "open" } })));
+    put("renamed.JSON", { ...c, expect: { stage: "open" } });
+    const by = Object.fromEntries(loadCapsules([root]).unreadable.map((u) => [path.basename(u.file), u.holds]));
+    assert.deepEqual(by, {
+      "typo-inside.json": true,
+      "typo-key.json": true,
+      "future.json": true,
+      "none.json": false,
+      "garbage.json": null,
+      "zipped.json.gz": null,
+      "zipped-typo.json.gz": true,
+      "renamed.JSON": true,
+    });
+    assert.equal(peekExpect(path.join(dir, "none.json")), false);
+    assert.equal(peekExpect(path.join(dir, "nowhere.json")), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an expect is written into a capsule file where it is, in the form it has, and the capsule stays the same capsule", async () => {
+  const c = capture(await loadDemo(demoRuleText()), "2026-10-13 10:00");
+  const root = tmp();
+  try {
+    const plain = writeCapsule(path.join(root, "p"), c, { gzip: false });
+    const zipped = writeCapsule(path.join(root, "z"), c, { gzip: true });
+    for (const file of [plain, zipped]) {
+      replaceExpect(file, { stage: "open" });
+      const read = readCapsule(file) as { capsule: Capsule };
+      assert.deepEqual(read.capsule.expect, { stage: "open" });
+      assert.equal(read.capsule.id, c.id);
+      assert.deepEqual(read.capsule.calls, c.calls);
+      replaceExpect(file, null);
+      assert.equal((readCapsule(file) as { capsule: Capsule }).capsule.expect, null);
+    }
+    assert.ok(readFileSync(plain, "utf8").startsWith("{\n"), "plain stays plain");
+    assert.equal(readFileSync(zipped)[0], 0x1f, "compressed stays compressed");
+    assert.throws(() => replaceExpect(path.join(root, "nowhere.json"), { stage: "open" }), /读不了/);
+    assert.deepEqual(readdirSync(path.dirname(plain)), [path.basename(plain)], "no temporary file is left");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

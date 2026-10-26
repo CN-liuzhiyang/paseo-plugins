@@ -236,27 +236,89 @@ export function readCapsule(file: string): { capsule: Capsule } | { error: strin
   }
 }
 
-/** The capsule files under a directory, in order; a link, a hidden file or a half-written one is not one. */
-export function capsuleFiles(root: string): string[] {
-  const out: string[] = [];
+/** Capsules sit at most this deep under a root; a file deeper than that is not read (and is told, not dropped). */
+const MAX_DEPTH = 3;
+const LOOKS_LIKE_ONE = /\.json/i;
+
+/** What `capsuleScan` found that looks like a capsule and is not read. */
+export interface StrayFile {
+  file: string;
+  error: string;
+}
+
+/**
+ * The capsule files under a directory, in order, and the files that look like one and are not read
+ * (a name that is not `.json` or `.json.gz` exactly, a link, a hidden file, one too deep): a
+ * person's capsule renamed by a slip, or a link to it, must not just vanish. A half-written one
+ * (`.tmp`) is neither.
+ */
+export function capsuleScan(root: string): { files: string[]; stray: StrayFile[] } {
+  const files: string[] = [];
+  const stray: StrayFile[] = [];
+  const looksLikeOne = (name: string) => LOOKS_LIKE_ONE.test(name) && !name.endsWith(".tmp");
   const walk = (dir: string, depth: number) => {
-    if (depth > 3 || !existsSync(dir)) return;
+    if (depth > MAX_DEPTH + 3 || !existsSync(dir)) return;
     for (const name of readdirSync(dir).sort()) {
-      if (name.startsWith(".")) continue;
       const full = path.join(dir, name);
       const stat = lstatSync(full);
-      if (stat.isSymbolicLink()) continue;
+      if (name.startsWith(".")) {
+        if (!stat.isDirectory() && looksLikeOne(name)) stray.push({ file: full, error: "隐藏文件（名字以 . 开头），没读" });
+        continue;
+      }
+      if (stat.isSymbolicLink()) {
+        if (looksLikeOne(name)) stray.push({ file: full, error: "符号链接，没读" });
+        continue;
+      }
       if (stat.isDirectory()) walk(full, depth + 1);
-      else if (stat.isFile() && FILE.test(name)) out.push(full);
+      else if (stat.isFile() && FILE.test(name)) (depth > MAX_DEPTH ? stray.push({ file: full, error: `目录套得太深（超过 ${MAX_DEPTH} 层），没读` }) : files.push(full));
+      else if (stat.isFile() && looksLikeOne(name)) stray.push({ file: full, error: "文件名不对（要以 .json 或 .json.gz 结尾，小写），没读" });
     }
   };
   walk(root, 0);
-  return out;
+  return { files, stray };
+}
+
+/** The capsule files under a directory, in order. */
+export const capsuleFiles = (root: string): string[] => capsuleScan(root).files;
+
+/**
+ * Whether a file that is not read as a capsule says an expectation: true or false when it parses as
+ * JSON and has (or has not) a key that starts with `expect` that is not empty -- a key mistyped
+ * counts, it is what a person meant; null when it cannot even be parsed.
+ */
+export function peekExpect(file: string): boolean | null {
+  try {
+    const stat = lstatSync(file);
+    if (!stat.isFile() || stat.size > CAPSULE_FILE_BYTES) return null;
+    const raw = readFileSync(file);
+    const text = /\.gz$/i.test(file) ? gunzipSync(raw, { maxOutputLength: CAPSULE_TEXT_BYTES }).toString("utf8") : raw.toString("utf8");
+    const value: unknown = JSON.parse(text);
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    return Object.entries(value).some(([key, v]) => /^expect/i.test(key) && v !== null && v !== undefined);
+  } catch {
+    return null;
+  }
+}
+
+/** Writes `expect` into a capsule file where it is, in the form the file has (compressed or plain), through a temporary file. */
+export function replaceExpect(file: string, expect: Expect | null): void {
+  const read = readCapsule(file);
+  if (!("capsule" in read)) throw new Error(`${file} 读不了：${read.error}`);
+  const next: Capsule = { ...read.capsule, expect };
+  const tmp = `${file}.tmp`;
+  try {
+    writeFileSync(tmp, file.endsWith(".gz") ? gzipSync(JSON.stringify(next)) : `${JSON.stringify(next, null, 2)}\n`);
+    renameSync(tmp, file);
+  } catch (error) {
+    rmSync(tmp, { force: true });
+    throw error;
+  }
 }
 
 export interface LoadedCapsules {
   capsules: Array<{ file: string; capsule: Capsule }>;
-  unreadable: Array<{ file: string; error: string }>;
+  /** Not read: why, and whether it says an expectation (peekExpect). */
+  unreadable: Array<{ file: string; error: string; holds: boolean | null }>;
 }
 
 /**
@@ -267,11 +329,13 @@ export function loadCapsules(roots: string[]): LoadedCapsules {
   const byId = new Map<string, { file: string; capsule: Capsule }>();
   const unreadable: LoadedCapsules["unreadable"] = [];
   for (const root of roots) {
-    for (const file of capsuleFiles(root)) {
+    const { files, stray } = capsuleScan(root);
+    for (const file of files) {
       const read = readCapsule(file);
-      if ("error" in read) unreadable.push({ file, error: read.error });
+      if ("error" in read) unreadable.push({ file, error: read.error, holds: peekExpect(file) });
       else byId.set(read.capsule.id, { file, capsule: read.capsule });
     }
+    for (const s of stray) unreadable.push({ ...s, holds: peekExpect(s.file) });
   }
   const capsules = [...byId.values()].sort((a, b) => Date.parse(a.capsule.at) - Date.parse(b.capsule.at) || a.capsule.case.localeCompare(b.capsule.case) || a.capsule.id.localeCompare(b.capsule.id));
   return { capsules, unreadable };
