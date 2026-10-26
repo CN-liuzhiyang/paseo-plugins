@@ -11,7 +11,8 @@ import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, 
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
-import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, type CommitmentSpec, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
+import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, recordingContext, type CommitmentSpec, type ContextInputs, type CtxCall, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
+import type { CaptureInput } from "./capsule";
 import { clip, clipMd, finishRequest, KIND_LABEL, mentions, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type Receipt, type Request, type SayRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
@@ -81,6 +82,11 @@ export interface EngineDeps {
     /** What the run printed when it got to its end (the runner's output file, the controller's own): the evidence the runtime's log directory cannot take away. */
     readOut?(runId: string): RunProbe | null;
   } | null;
+  /**
+   * Offered every judgment a rule makes, with what it read (capsule.ts keeps it): for the tools
+   * that keep judgments. Absent, nothing is taped and nothing about a judgment changes.
+   */
+  capture?: ((judgment: Omit<CaptureInput, "trigger" | "origin">) => void) | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
@@ -1705,15 +1711,38 @@ export function createEngine(deps: EngineDeps) {
       };
       const kase = { id: item.key, primary: item, items: [item], flags };
       const run = (name: string, key: string) => flowResultFor(item.key, name, key);
-      let judged = judge(rule, kase, makeContext({ ...inputs, reads, run }, rule.params), set.fingerprint, check);
+      // What the rule reads is taped when a tool wants the judgment kept (deps.capture).
+      const taped: { calls: (() => CtxCall[]) | null } = { calls: null };
+      const judgeOnce = (more: { observed?: ContextInputs["observed"] }) => {
+        const ctx = makeContext({ ...inputs, reads, run, ...more }, rule.params);
+        const recorder = deps.capture ? recordingContext(ctx) : null;
+        taped.calls = recorder ? recorder.calls : null;
+        return judge(rule, kase, recorder ? recorder.ctx : ctx, set.fingerprint, check);
+      };
+      let judged = judgeOnce({});
       let asked = askedOf(item.key, judged.output, nowMs);
       // It looked at what was read for a request it now asks for otherwise (another window, other
       // params): judged again, on that request, for which nothing is read yet.
       if (asked.some((a) => reads.has(`${a.source}:${a.key}`) && versionInForce(a.source, a.key) !== requestVersion(a))) {
         const asking = new Map(asked.map((a) => [`${a.source}:${a.key}`, a]));
         reads = new Set([item.source, ...switchFiles]);
-        judged = judge(rule, kase, makeContext({ ...inputs, reads, run, observed: (key: string) => observed(key, nowMs, asking, item.key) }, rule.params), set.fingerprint, check);
+        judged = judgeOnce({ observed: (key: string) => observed(key, nowMs, asking, item.key) });
         asked = askedOf(item.key, judged.output, nowMs);
+      }
+      // The rule's own answer is kept, not what the controller makes of it below.
+      if (deps.capture && taped.calls) {
+        deps.capture({
+          kase,
+          calls: taped.calls(),
+          judged,
+          rule,
+          fingerprint: set.fingerprint,
+          now: nowIso(nowMs),
+          tz,
+          calendar: config.calendarTables,
+          names: { known: knownNames, items: Object.keys(state.items), observing: config.sources.filter((s) => s.kind === "command").map((s) => s.id) },
+          seq: state.seq,
+        });
       }
       // A request that changes round after round is never read: told, as a judgment that went wrong
       // (what was asked before stays, as for any judgment that fails).

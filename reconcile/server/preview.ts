@@ -6,7 +6,7 @@ import { clockText, GROUP_LABEL, type ListRow, type StageMeta } from "../shared/
 import { describeChanges } from "../shared/status";
 import type { Assessment, Card, Commitment } from "../shared/model";
 import { loadConfig, type Config } from "./config";
-import { createEngine, RULES_BROKEN_MS, type Carrier, type Deliver } from "./engine";
+import { createEngine, RULES_BROKEN_MS, type Carrier, type Deliver, type EngineDeps } from "./engine";
 import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
@@ -239,7 +239,7 @@ function checkDirs(configDir: string, candidateDir: string): void {
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** One engine on a copy of the state, with a carrier and channels that only record. */
-function shadow(state: State, dataDir: string, config: Config, clock: { ms: number }, rulesKeep: KeepRules | null) {
+export function shadow(state: State, dataDir: string, config: Config, clock: { ms: number }, rulesKeep: KeepRules | null, capture: EngineDeps["capture"] = null) {
   const store = memoryStore(state, () => clock.ms, dataDir);
   let raised = 0;
   const carrier: Carrier = {
@@ -257,7 +257,7 @@ function shadow(state: State, dataDir: string, config: Config, clock: { ms: numb
   // none ever comes to an end (the run is "waiting to start", which still counts as open against the day's limit).
   const waiting: RunProbe = { state: "pending", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: true, gate: false, slow: false };
   const flows = { launcher: recordingLauncher(), dir: null, probe: () => waiting };
-  const engine = createEngine({ store, config, sources: [], carrier, mode: "live", instanceId: "preview", home: "", tickSeconds: 60, deliver, requestsDir: null, conversation: null, rulesKeep, flows, now: () => clock.ms, log: () => {}, writeStatus: () => {} });
+  const engine = createEngine({ store, config, sources: [], carrier, mode: "live", instanceId: "preview", home: "", tickSeconds: 60, deliver, requestsDir: null, conversation: null, rulesKeep, flows, capture, now: () => clock.ms, log: () => {}, writeStatus: () => {} });
   /** Every source as just read, with nothing new: the preview runs on the data as it is. */
   const freshen = () =>
     store.append(

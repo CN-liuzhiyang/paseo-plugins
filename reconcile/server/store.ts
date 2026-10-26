@@ -98,6 +98,24 @@ export function readState(dir: string): { state: State; skipped: number; snapsho
   return { state, skipped, snapshotIgnored };
 }
 
+/** Every event in a data directory's journal, in order; a line that does not parse is left out, as the store does. */
+export function readEvents(dir: string): JournalEvent[] {
+  const journalDir = path.join(dir, "journal");
+  const files = existsSync(journalDir) ? readdirSync(journalDir).filter((f) => JOURNAL_FILE.test(f)).sort() : [];
+  const events: JournalEvent[] = [];
+  for (const file of files) {
+    for (const line of readFileSync(path.join(journalDir, file), "utf8").split("\n")) {
+      if (line.trim() === "") continue;
+      try {
+        events.push(JSON.parse(line) as JournalEvent);
+      } catch {
+        // A torn line.
+      }
+    }
+  }
+  return events;
+}
+
 /**
  * A store that keeps its journal in memory, over a copy of a state: for an engine that only
  * rehearses (the preview's), whose events go nowhere but `events`. `journal`: the data directory

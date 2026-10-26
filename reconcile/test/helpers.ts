@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config";
-import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine } from "../server/engine";
+import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine, type EngineDeps } from "../server/engine";
 import type { RunView } from "../shared/graph";
 import type { Card, FlowRec, Item } from "../shared/model";
 import { recordingLauncher, type Launcher, type LaunchSpec } from "../server/flows";
@@ -211,6 +211,8 @@ export async function makeWorld(options: {
   storeSkewMs?: number;
   /** The engine can start flows: true, a recording launcher and a probe the test sets (world.flows); or the launcher and probe to use, as they are. */
   flows?: boolean | { launcher: Launcher; dir: string; logDir?: string | null; probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe };
+  /** Offered every judgment the engine makes (EngineDeps.capture). */
+  capture?: EngineDeps["capture"];
 }): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
@@ -345,6 +347,7 @@ export async function makeWorld(options: {
             },
           }
         : null,
+      capture: options.capture ?? null,
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),
