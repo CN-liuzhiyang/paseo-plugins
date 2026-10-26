@@ -14,13 +14,22 @@ const HELP = `用法：
   reconcile-preview copy --to <目录>
       把在用的判断方法和配置（rules/、policy.json、persons.json、calendar/）复制一份出来，在那里改
   reconcile-preview diff --candidate <目录>
-      预览候选和在用的差异：现在，和往后几个工作日（不改任何在用的东西）
-  reconcile-preview apply --candidate <目录> --expect <编号>
+      预览候选和在用的差异：现在，往后几个工作日，和拿过去的判断时刻（存档）重放的结果（不改任何在用的东西）
+  reconcile-preview apply --candidate <目录> --expect <编号> [--accept-regress <存档编号,…>]
       把候选读一份再预览一次，差异还是 diff 给的那个编号、预览期间候选和在用的都没变，
-      才把这份里改了的文件拷回在用的配置目录（要么全拷上，要么一个不动）
+      才把这份里改了的文件拷回在用的配置目录（要么全拷上，要么一个不动）；
+      候选让说过判断错了的纠错又犯了，要把那几条的存档编号写进 --accept-regress，否则不拷
 
+  reconcile-preview replay [--candidate <目录>]
+      只做重放：存档拿在用的判断方法判断一遍，看和存下的一样不一样；给了候选就再拿候选判断，比这两遍
   reconcile-preview cases backfill [--to <目录>]
       从日志补录一批存档（拿在用的判断方法，在日志里每个值得留的时刻重判一遍）；缺省放进 <配置目录>/cases/backfill
+  reconcile-preview cases list [--item <单号>]
+      列出存档：在哪、为什么留、有没有写 expect
+  reconcile-preview cases keep --id <存档编号> [--expect <文件>]
+      把数据目录里的一份存档留进配置目录的 cases/（明文 JSON，进 git）；可以同时给 expect
+  reconcile-preview cases expect --id <存档编号> --expect <文件>
+      给 cases/ 里的一份存档写（或换掉）expect：对这个时刻，判断应当是什么样
 
 选项：
   --config  在用的配置目录（缺省读插件设置里的 configDir）
@@ -28,6 +37,10 @@ const HELP = `用法：
   --days    往后推演几个工作日，0 到 30（缺省 7；apply 至少 7，要和 diff 用的一样）
   --now     从哪个时刻算起（ISO 时间，缺省现在）
   --to      copy 复制到哪、cases backfill 存档写到哪
+  --id      存档的编号（k_ 加 16 位十六进制）
+  --item    只列这个事项的存档（单号，或带来源的整个 key）
+  --expect  apply：diff 给的编号（p_…）；cases keep、cases expect：expect 的 JSON 文件
+  --accept-regress  apply：认下的纠错又犯了，存档编号用逗号隔开
   --json    输出 JSON（给 agent 读）`;
 
 function fail(message, code = 2) {
@@ -43,8 +56,12 @@ if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
 const KNOWN = {
   copy: ["to", "config"],
   diff: ["candidate", "config", "data", "days", "now", "json"],
-  apply: ["candidate", "expect", "config", "data", "days", "now", "json"],
+  apply: ["candidate", "expect", "accept-regress", "config", "data", "days", "now", "json"],
+  replay: ["candidate", "config", "data", "json"],
   "cases backfill": ["to", "config", "data", "json"],
+  "cases list": ["item", "config", "data", "json"],
+  "cases keep": ["id", "expect", "config", "data", "json"],
+  "cases expect": ["id", "expect", "config", "json"],
 };
 // `cases` has a subcommand of its own.
 const sub = cmd === "cases" ? `cases ${args[0] ?? ""}`.trim() : cmd;
@@ -91,6 +108,8 @@ const load = async (file) => {
 const { applyCandidate, copyConfig, preview, previewText, PreviewError } = await load("../server/preview.ts");
 const { ConfigError } = await load("../server/config.ts");
 const { backfill, BackfillError } = await load("../server/backfill.ts");
+const { keepCase, listCases, readExpect, replayOnly, setExpect } = await load("../server/cases.ts");
+const { replayLines, replayWarnings } = await load("../server/replay-report.ts");
 
 try {
   if (cmd === "copy") {
@@ -113,6 +132,30 @@ try {
     process.stdout.write(`${lines.join("\n")}\n`);
     process.exit(0);
   }
+  if (sub === "cases list") {
+    const rows = listCases({ configDir, dataDir, item: flags.item });
+    if (flags.json) {
+      process.stdout.write(`${JSON.stringify(rows, null, 2)}\n`);
+      process.exit(0);
+    }
+    const lines = [`存档 ${rows.length} 份：`];
+    for (const r of rows) lines.push(`- ${r.id} ${r.label} ${r.at.slice(0, 16).replace("T", " ")} ${r.trigger.join("+")}${r.origin === "backfill" ? "（补录）" : ""}  ${r.where === "cases" ? "cases/" : "数据目录"}${r.correction ? "  纠错" : ""}${r.expect ? "  有 expect" : ""}`);
+    process.stdout.write(`${lines.join("\n")}\n`);
+    process.exit(0);
+  }
+  if (sub === "cases keep" || sub === "cases expect") {
+    if (!flags.id) fail("要用 --id 给出存档的编号（cases list 看得到）");
+    if (sub === "cases expect" && !flags.expect) fail("要用 --expect 给出 expect 的 JSON 文件");
+    const expect = flags.expect ? readExpect(flags.expect) : undefined;
+    const file = sub === "cases keep" ? keepCase({ configDir, dataDir, id: flags.id, expect }) : setExpect({ configDir, id: flags.id, expect });
+    process.stdout.write(flags.json ? `${JSON.stringify({ file })}\n` : `${sub === "cases keep" ? "留下了" : "expect 写进了"} ${file}\n配置目录在 git 里的话，记得提交。\n`);
+    process.exit(0);
+  }
+  if (cmd === "replay") {
+    const report = await replayOnly({ configDir, dataDir, candidateDir: flags.candidate });
+    process.stdout.write(flags.json ? `${JSON.stringify(report, null, 2)}\n` : `${[...replayWarnings(report), ...replayLines(report)].join("\n")}\n`);
+    process.exit(0);
+  }
   if (!flags.candidate) fail("要用 --candidate 给出候选目录");
   const workdays = flags.days === undefined ? 7 : Number(flags.days);
   if (!Number.isInteger(workdays) || workdays < 0 || workdays > 30) fail("--days 要是 0 到 30 的整数");
@@ -123,18 +166,21 @@ try {
     const p = await preview(options);
     // Everything that went into the id, so that the line copied gives the same one.
     const where = ["config", "data", "days", "now"].filter((f) => flags[f] !== undefined).map((f) => `--${f} ${flags[f]} `).join("");
-    process.stdout.write(flags.json ? `${JSON.stringify(p, null, 2)}\n` : `${previewText(p)}\n要拷回去：reconcile-preview apply ${where}--candidate ${flags.candidate} --expect ${p.id}\n`);
+    // A correction said again is named by whoever agrees to it, not suggested here.
+    const again = p.replay.expect.broken.length > 0 ? `\n（候选让 ${p.replay.expect.broken.length} 条纠错又犯了：拷的时候要加 --accept-regress，把认下的那几条的存档编号写进去）` : "";
+    process.stdout.write(flags.json ? `${JSON.stringify(p, null, 2)}\n` : `${previewText(p)}\n要拷回去：reconcile-preview apply ${where}--candidate ${flags.candidate} --expect ${p.id}${again}\n`);
     process.exit(0);
   }
   if (!flags.expect) fail("要用 --expect 给出 diff 给的编号（p_…）");
-  const { applied, preview: p } = await applyCandidate({ ...options, expect: flags.expect });
+  const acceptRegress = flags["accept-regress"] ? flags["accept-regress"].split(",").map((s) => s.trim()).filter(Boolean) : undefined;
+  const { applied, preview: p } = await applyCandidate({ ...options, expect: flags.expect, acceptRegress });
   if (flags.json) {
     process.stdout.write(`${JSON.stringify({ applied, same: p.id === flags.expect, preview: p }, null, 2)}\n`);
     process.exit(p.id === flags.expect ? 0 : 1);
   }
   if (p.id !== flags.expect) {
     process.stdout.write(
-      `差异变了（现在是 ${p.id}，不是 ${flags.expect}），没拷。可能是：数据、在用的配置或者候选变了；--days、--now 和 diff 时不一样；中间过了一个要问、追问的时刻，或者过了一天。新的预览：\n\n${previewText(p)}`,
+      `差异变了（现在是 ${p.id}，不是 ${flags.expect}），没拷。可能是：数据、在用的配置或者候选变了；存档多了或少了；--days、--now 和 diff 时不一样；中间过了一个要问、追问的时刻，或者过了一天。新的预览：\n\n${previewText(p)}`,
     );
     process.exit(1);
   }

@@ -9,6 +9,9 @@ import { loadConfig, type Config } from "./config";
 import { createEngine, RULES_BROKEN_MS, type Carrier, type Deliver, type EngineDeps } from "./engine";
 import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
+import { loadCapsules } from "./capsule";
+import { ACTOR, HEALTH } from "./replay";
+import { regressions, replayCapsules, replayDigest, replayEmpty, replayLines, replayWarnings, type ReplayReport } from "./replay-report";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type RulesDiff, type State } from "./state";
@@ -33,8 +36,6 @@ export const WORKDAYS = 7;
 /** The parts of a config a candidate may change, as they lie in a config directory. */
 const PARTS = ["rules", "policy.json", "persons.json", "calendar"] as const;
 const DIR_PART: Record<string, RegExp> = { rules: /\.mjs$/, calendar: /^\d{4}\.json$/ };
-
-const HEALTH: Record<string, string> = { "on-track": "在走", waiting: "在等", stalled: "停住了", blocked: "卡住", conflict: "对不上", done: "结束" };
 
 export interface Look {
   stage: string;
@@ -147,6 +148,8 @@ export interface Preview {
   flows: FlowChange[];
   /** Items both sides judge that are cold now on both: not judged, so a change to them is not seen. */
   coldBoth: number;
+  /** The capsules of past judgments asked of both sides (replay-report.ts). */
+  replay: ReplayReport;
   caveats: string[];
   empty: boolean;
 }
@@ -161,6 +164,8 @@ export interface PreviewOptions {
   nowMs: number;
   /** How many workdays after today to run on through. */
   workdays?: number;
+  /** Where the capsules are read from; absent: the data directory's capsules/ and the config directory's cases/. */
+  casesDirs?: string[];
 }
 
 export class PreviewError extends Error {}
@@ -228,7 +233,7 @@ const isLink = (p: string) => {
   }
 };
 
-function checkDirs(configDir: string, candidateDir: string): void {
+export function checkDirs(configDir: string, candidateDir: string): void {
   if (!existsSync(candidateDir)) throw new PreviewError(`候选目录不存在：${candidateDir}`);
   outside(configDir, candidateDir);
   noLinks(candidateDir);
@@ -283,7 +288,6 @@ export function shadow(state: State, dataDir: string, config: Config, clock: { m
 
 const lookOf = (a: Assessment | undefined): Look | null =>
   a ? { stage: a.stage, health: a.health, headline: a.headline, actor: a.next.actor, what: a.next.what, notice: a.notice ?? null, error: a.error } : null;
-const ACTOR: Record<string, string> = { me: "你", them: "别人", system: "系统", nobody: "没有人" };
 /** A judgment's fields as people read them: every one that differs is shown, and nothing else counts. */
 const LOOK_FIELDS: Array<[string, (l: Look) => string]> = [
   ["阶段", (l) => l.stage],
@@ -437,6 +441,10 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   // The stages each side's rules declare, for their names and for what the page shows of them.
   const known = Object.fromEntries(Object.entries(state.rules.kept ?? {}).map(([file, k]) => [file, k.sha256]));
   const ruleSets = [await loadRules(inUseConfig.rulesDir, { ...kept, known }), await loadRules(candidateConfig.rulesDir, null)];
+  // The capsules of past judgments asked of both sides. A candidate that does not load is not asked.
+  const loadedCapsules = loadCapsules(options.casesDirs ?? [path.join(dataDir, "capsules"), path.join(configDir, "cases")]);
+  const candidateBroken = ruleSets[1]!.errors.length > 0;
+  const replay = replayCapsules(loadedCapsules.capsules.map((c) => c.capsule), ruleSets[0]!.rules, candidateBroken ? null : ruleSets[1]!.rules, { unreadable: loadedCapsules.unreadable, broken: candidateBroken });
   const ruleFor = (i: number, caseId: string): LoadedRule | undefined => {
     const item = base.store.state.items[caseId] ?? cand.store.state.items[caseId];
     return item ? ruleSets[i]!.rules.find((r) => r.source === item.source) : undefined;
@@ -656,6 +664,11 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   ];
   if (flows.length > 0 || bi.size + ci.size > 0) caveats.push("推演里流程只记下「要起」，不真起，也没有一个会跑完：判断方法等流程结果的，推演里就一直在等；每天的上限（次数、花费、同时在跑的个数）按这样算。");
   if (flows.length > 0 && !inUseConfig.launcher) caveats.push("在用的配置里没有起流程的命令（flows.json）：改动拷过去以后，这些流程在这个实例上起不来，计划里会写「没起」。");
+  caveats.push(
+    "重放只跑判断方法本身，用的是存档里的数据和节假日表：候选改了 calendar/、policy.json 的冷热，重放里看不到（往后推演里看得到）；数据过时的标记、熔断、冷热这些控制器在判断方法外面做的事也不在里面。",
+    "重放里每份存档的答案是在用、候选各判断一遍的结果，不是存档里记的结果；存档里记的只用来查「在用的判断方法拿存档再判断一遍，是不是还给出同样的答案」。",
+  );
+  if (loadedCapsules.capsules.some((c) => c.capsule.origin === "backfill")) caveats.push("补录的存档（cases backfill）是拿补录时在用的判断方法在日志里的时刻重判的，不是当时那一版判断方法给的，当时的配置也是现在的。");
   if (coldBoth > 0) caveats.push(`现在有 ${coldBoth} 个事项两边都是冷的：冷的不判断，它们在候选下会怎样，要等变热才看得到。`);
   const stale = inUseConfig.sources.filter((s) => {
     const h = state.sources[s.id]?.health;
@@ -673,10 +686,10 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   // and what an ask made this minute changes is left out -- the cards sent now, the list's rows
   // (they follow from the questions, the asks and each day's cards, which are in it, and from the
   // files; who may be reached this minute is not).
-  const body = { changedFiles, inUse: statusNow[0]!.rules.fingerprint, candidate: statusNow[1]!.rules.fingerprint, breaker, cases, heat, judged, questions, flows, later: { asks: asksDue, expiries, cardsPerDay, cases: laterCases }, stages };
+  const body = { changedFiles, inUse: statusNow[0]!.rules.fingerprint, candidate: statusNow[1]!.rules.fingerprint, breaker, cases, heat, judged, questions, flows, later: { asks: asksDue, expiries, cardsPerDay, cases: laterCases }, stages, replay: replayDigest(replay) };
   const id = `p_${hash(JSON.stringify({ files: [...inUseFiles], candidate: [...candidateFiles], workdays, body })).slice(0, 10)}`;
   const empty =
-    cases.length + heat.length + judged.onlyInUse.length + judged.onlyCandidate.length + questions.length + flows.length + asks.length + expiries.length + cardsPerDay.length + laterCases.length + rows.length + stages.length === 0 && !cardsNow;
+    cases.length + heat.length + judged.onlyInUse.length + judged.onlyCandidate.length + questions.length + flows.length + asks.length + expiries.length + cardsPerDay.length + laterCases.length + rows.length + stages.length === 0 && !cardsNow && replayEmpty(replay);
   return {
     id,
     now: iso(nowMs, tz),
@@ -696,6 +709,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     page,
     flows,
     coldBoth,
+    replay,
     caveats,
     empty,
   };
@@ -725,6 +739,7 @@ export function previewText(p: Preview): string {
     // The words the controller's own hold uses (status.ts), so that this and the card say the same.
     lines.push(`⚠ 这个改动一下子会${describeChanges(p.breaker.changes)}，超过了上限 ${p.breaker.limit}：拷过去以后，daemon 会先停着它，要在「事项追踪」页面上放行才生效。下面是放行以后的样子。`);
   }
+  lines.push(...replayWarnings(p.replay));
   if (p.empty) {
     lines.push("", `没有差异：现在和往后这几个工作日，两版对事项的判断、要问的问题、发卡、页面上看到的都一样。${p.coldBoth > 0 ? `（${p.coldBoth} 个事项两边都是冷的，没判断）` : ""}`);
   } else {
@@ -788,6 +803,7 @@ export function previewText(p: Preview): string {
       }
     }
   }
+  lines.push("", ...replayLines(p.replay));
   lines.push("", "推演的局限：", ...p.caveats.map((c) => `- ${c}`));
   return lines.join("\n") + "\n";
 }
@@ -855,7 +871,7 @@ const sameFiles = (a: Map<string, string>, b: Map<string, string>) => a.size ===
  * config in use that changed meanwhile stops it. A file the candidate leaves out of a directory it
  * has is not deleted: that is for a person to do. Looks on no shorter than WORKDAYS.
  */
-export async function applyCandidate(options: PreviewOptions & { expect: string }): Promise<{ applied: string[]; preview: Preview }> {
+export async function applyCandidate(options: PreviewOptions & { expect: string; acceptRegress?: string[] }): Promise<{ applied: string[]; preview: Preview }> {
   const workdays = options.workdays ?? WORKDAYS;
   if (workdays < WORKDAYS) throw new PreviewError(`拷之前至少要往后推演 ${WORKDAYS} 个工作日（这次是 ${workdays}）：看得太短，后面的差别看不到`);
   checkDirs(options.configDir, options.candidateDir);
@@ -871,6 +887,15 @@ export async function applyCandidate(options: PreviewOptions & { expect: string 
     const p = await preview({ ...options, candidateDir: snapshot, workdays });
     if (p.candidate.errors.length > 0) throw new PreviewError(`候选的判断方法加载出错，不拷：${p.candidate.errors.map((e) => `${e.file}（${clip(e.error, 80)}）`).join("、")}`);
     if (p.id !== options.expect) return { applied: [], preview: p };
+    // A correction said again is a person's word against the candidate: it goes only if named.
+    const again = regressions(p.replay);
+    const named = options.acceptRegress ?? [];
+    const stray = named.filter((id) => !again.includes(id));
+    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次纠错又犯了的存档：看 diff 里 ⚠ 纠错又犯了 那几行括号里的编号`);
+    const unnamed = p.replay.expect.broken.filter((e) => !named.includes(e.id));
+    if (unnamed.length > 0) {
+      throw new PreviewError(`候选让 ${unnamed.length} 条纠错又犯了，没拷：${unnamed.map((e) => `${e.label} ${e.at.slice(5, 16).replace("T", " ")}（${e.id}）`).join("、")}。确实要拷的话，把这几条点名放行：--accept-regress ${unnamed.map((e) => e.id).join(",")}`);
+    }
     const stillParts = [...partsIn(options.candidateDir)].join() === [...parts].join();
     if (!stillParts || !sameFiles(partFiles(options.candidateDir, parts), candidate) || !sameFiles(partFiles(options.configDir, parts), inUse)) {
       throw new PreviewError("预览的这几秒里，候选或者在用的文件变了，没拷：再 diff 一次，看改过以后的样子");

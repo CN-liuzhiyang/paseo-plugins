@@ -431,7 +431,8 @@ export async function makeWorld(options: {
     } catch {
       // Already closed.
     }
-    rmSync(dir, { recursive: true, force: true });
+    // On Windows a scanner can hold a file just written for a moment (EBUSY seen once in the preview's apply tests).
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   };
   return world;
 }
