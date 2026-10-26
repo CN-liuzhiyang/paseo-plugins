@@ -892,29 +892,29 @@ test("capsules a candidate fails on for one cause are let through in one name: t
     assert.deepEqual(new Set(p.stops.map((s) => s.item)), new Set(["gcp-demo:1", "gcp-demo:2"]));
     const cause = p.stops[0]!.cause;
     assert.match(cause, /^cause:[0-9a-f]{8}$/);
-    for (const s of p.stops) assert.deepEqual(s.names, [s.name, cause, `item:${s.item}`]);
+    for (const s of p.stops) assert.deepEqual(s.names, [s.name, cause, `item:${s.item}@${s.kind}`]);
     // The warnings list the capsules (the first ten), and say what can be named in one.
     const lines = warnings(p);
     assert.equal(lines.filter((l) => l.startsWith("⚠ 候选在这份存档上判断出错")).length, 8);
     assert.ok(lines.some((l) => l.startsWith("⚠ 8 处拦截是同一个原因（候选判断出错：") && l.endsWith(`整组点名：${cause}`)), lines.join("\n"));
-    assert.ok(lines.some((l) => l.includes("事项 #1") && l.includes("有 6 处拦截") && l.endsWith("item:gcp-demo:1")), lines.join("\n"));
-    assert.ok(lines.some((l) => l.includes("事项 #2") && l.includes("有 2 处拦截") && l.endsWith("item:gcp-demo:2")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("事项 #1") && l.includes("有 6 处候选判断出错的拦截") && l.includes("item:gcp-demo:1@error")), lines.join("\n"));
+    assert.ok(lines.some((l) => l.includes("事项 #2") && l.includes("有 2 处候选判断出错的拦截") && l.includes("item:gcp-demo:2@error")), lines.join("\n"));
     // The refusal says how many and what, and that they are one cause, but not the names.
     let message = "";
     await assert.rejects(applyCandidate(named(t, p.id, [])), (e: Error) => ((message = e.message), e instanceof PreviewError && /候选判断出错 8 处/.test(e.message)));
     assert.match(message, /它们只有 1 个原因：同一个原因的可以整组点名/);
     assert.doesNotMatch(message, /cause:[0-9a-f]{8}|k_[0-9a-f]{16}|item:gcp/);
     // An item alone leaves the other item's stopping; a name that is nothing it stopped is refused; the cause lets all through.
-    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:1"])), (e: Error) => e instanceof PreviewError && /候选判断出错 2 处/.test(e.message));
-    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:3"])), (e: Error) => e instanceof PreviewError && /item:gcp-demo:3 不是这次重放拦下的/.test(e.message));
+    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:1@error"])), (e: Error) => e instanceof PreviewError && /候选判断出错 2 处/.test(e.message));
+    await assert.rejects(applyCandidate(named(t, p.id, ["item:gcp-demo:3@error"])), (e: Error) => e instanceof PreviewError && /item:gcp-demo:3@error 不是这次重放拦下的/.test(e.message));
     await assert.rejects(applyCandidate(named(t, p.id, ["cause:00000000"])), (e: Error) => e instanceof PreviewError && /cause:00000000 不是这次重放拦下的/.test(e.message));
-    assert.deepEqual((await applyCandidate(named(t, p.id, ["item:gcp-demo:1", "item:gcp-demo:2"]))).applied, [RULE_FILE]);
+    assert.deepEqual((await applyCandidate(named(t, p.id, ["item:gcp-demo:1@error", "item:gcp-demo:2@error"]))).applied, [RULE_FILE]);
     writeFileSync(path.join(t.w.configDir, RULE_FILE), demoRuleText());
     assert.deepEqual((await applyCandidate(named(t, p.id, [cause]))).applied, [RULE_FILE], "the cause alone");
     writeFileSync(path.join(t.w.configDir, RULE_FILE), demoRuleText());
     // One capsule by its id is still a way, and a mix is too.
-    await assert.rejects(applyCandidate(named(t, p.id, [...mine.slice(2).map((c) => c.id), "item:gcp-demo:2", mine[0]!.id])), (e: Error) => e instanceof PreviewError && /候选判断出错 1 处/.test(e.message), "one of them is left out");
-    assert.deepEqual((await applyCandidate(named(t, p.id, [...mine.slice(1).map((c) => c.id), "item:gcp-demo:2", mine[0]!.id]))).applied, [RULE_FILE]);
+    await assert.rejects(applyCandidate(named(t, p.id, [...mine.slice(2).map((c) => c.id), "item:gcp-demo:2@error", mine[0]!.id])), (e: Error) => e instanceof PreviewError && /候选判断出错 1 处/.test(e.message), "one of them is left out");
+    assert.deepEqual((await applyCandidate(named(t, p.id, [...mine.slice(1).map((c) => c.id), "item:gcp-demo:2@error", mine[0]!.id]))).applied, [RULE_FILE]);
   }));
 
 test("a cause lets through only the stops that have it: another kind of stop with it unnamed still stops", () =>
@@ -937,6 +937,50 @@ test("a cause lets through only the stops that have it: another kind of stop wit
     assert.deepEqual((await applyCandidate(named(t, p.id, [cause, a.id]))).applied, [RULE_FILE]);
   }));
 
+test("an item's name lets through its stops of one kind and no other: a candidate that fails on an item is not a correction of it said again (T5)", () =>
+  withDemo(async (t) => {
+    const rule = await loadDemo(demoRuleText());
+    for (const h of ["10:00", "10:30"]) writeCapsule(path.join(t.w.dataDir, "capsules"), capture(rule, `2026-10-13 ${h}`), { gzip: false });
+    const a = await t.keep("2026-10-13 12:00", {}, { correction: true, expect: { headline: { has: ["外放"] } } });
+    t.candidateRule(undefined, failing());
+    const p = await t.look();
+    const item = "gcp-demo:1";
+    assert.deepEqual([...new Set(p.stops.map((s) => s.kind))].sort(), ["error", "unknown"]);
+    assert.deepEqual([...new Set(p.stops.map((s) => s.item))], [item], "all of them are of one item");
+    for (const s of p.stops) assert.deepEqual(s.names.filter((n) => n.startsWith("item:")), [`item:${item}@${s.kind}`]);
+    // The warning says what the name lets through, and that the item's other stops are not let through with it.
+    const line = warnings(p).find((l) => l.startsWith("⚠ 事项 #1 有 3 处候选判断出错的拦截"));
+    assert.ok(line?.includes(`item:${item}@error`) && line.includes("别种拦截不跟着放行"), warnings(p).join("\n"));
+    // The failures' name leaves the correction stopping; the correction's leaves the failures.
+    await assert.rejects(applyCandidate(named(t, p.id, [`item:${item}@error`])), (e: Error) => e instanceof PreviewError && /没拷：纠错核对不了 1 处/.test(e.message) && !/候选判断出错/.test(e.message));
+    await assert.rejects(applyCandidate(named(t, p.id, [`item:${item}@unknown`])), (e: Error) => e instanceof PreviewError && /候选判断出错 3 处/.test(e.message) && !/纠错核对不了/.test(e.message));
+    // A name without a kind is not one of them.
+    await assert.rejects(applyCandidate(named(t, p.id, [`item:${item}`])), (e: Error) => e instanceof PreviewError && /item:gcp-demo:1 不是这次重放拦下的/.test(e.message));
+    assert.deepEqual((await applyCandidate(named(t, p.id, [`item:${item}@error`, `item:${item}@unknown`]))).applied, [RULE_FILE]);
+    void a;
+  }));
+
+test("a candidate that starts another flow shows in the preview from the capsules alone, with what differs, and the preview's id changes with it", () =>
+  withDemo(
+    async (t) => {
+      const flows = { review: { flow: "review-flow", maxUsd: 1 } };
+      await t.keep("2026-10-13 10:00", { run: { key: "k1", input: { n: 1 }, label: "初查" } });
+      const same = await t.look();
+      assert.equal(same.replay.changed.length, 0);
+      t.candidateRule(undefined, demoRuleText({ run: { key: "k1", input: { n: 2 }, label: "初查" } }, flows));
+      const input = await t.look();
+      assert.deepEqual(input.replay.changed[0]!.diff.flows.map((d) => d.field), ["流程 review:k1：输入"]);
+      assert.match(previewText(input), /要起的流程不同（1 份）：流程 review:k1：输入\n- #1 示例单 1 10-13 10:00\n {2}流程 review:k1：输入：\{"n":1\} → \{"n":2\}/);
+      t.candidateRule(undefined, demoRuleText({ run: { key: "k1", input: { n: 1 }, label: "初查" } }, { review: { flow: "review-flow-2", maxUsd: 1 } }));
+      const decl = await t.look();
+      assert.deepEqual(decl.replay.changed[0]!.diff.flows.map((d) => d.field), ["流程 review：起的是哪个流程"]);
+      assert.notEqual(decl.id, input.id);
+      assert.notEqual(input.id, same.id);
+      assert.equal(input.empty, false);
+    },
+    { inUse: demoRuleText({ run: { key: "k1", input: { n: 1 }, label: "初查" } }, { review: { flow: "review-flow", maxUsd: 1 } }) },
+  ));
+
 test("diff says how to go on for every kind of stop, not only for a correction said again", () =>
   withDemo(async (t) => {
     await t.keep("2026-10-13 10:00", {}, { correction: true, expect: { headline: { has: ["外放"] } } });
@@ -946,7 +990,7 @@ test("diff says how to go on for every kind of stop, not only for a correction s
     const diff = spawnSync(process.execPath, [BIN, "diff", ...base, "--candidate", t.candidate, "--now", new Date(t.w.clock.now).toISOString()], { encoding: "utf8", env });
     assert.equal(diff.status, 0, diff.stderr);
     assert.match(diff.stdout, /重放拦下了 1 处，上面这条会被拒/);
-    assert.match(diff.stdout, /cause:…、同一个事项的 item:…/);
+    assert.match(diff.stdout, /cause:…、同一个事项同一种拦截的 item:…@种类/);
     assert.ok(diff.stdout.includes(`reconcile-preview cases backfill --config ${t.w.configDir} --data ${t.w.dataDir} --candidate ${t.candidate} --replace`), diff.stdout.slice(-700));
     // The names are in the warnings and in the JSON, not in the hint.
     assert.doesNotMatch(diff.stdout.split("\n").slice(-3).join("\n"), /k_[0-9a-f]{16}|cause:[0-9a-f]{8}/);

@@ -1702,13 +1702,7 @@ export function createEngine(deps: EngineDeps) {
       // Judged now, so what the runs of this item that have ended came to has been read by its rule.
       for (const r of recs()) if (r.caseId === item.key && r.ended) endRead.add(r.runId);
       let reads = new Set([item.source, ...switchFiles]);
-      const outputOk = outputCheck({ known: (name) => knownNames.has(name), item: (key) => !!state.items[key], observing: (id) => config.sources.find((s) => s.id === id)?.kind === "command" });
-      const check = (out: RuleOutput) => {
-        const wrong = outputOk(out);
-        if (wrong) return wrong;
-        const strangers = [...new Set((out.run ?? []).map((r) => r.owner).filter((o): o is string => !!o && !config.persons[o]))];
-        return strangers.length > 0 ? `run 里的 owner ${strangers.map((u) => `"${u}"`).join("、")} 不是 persons.json 里的人` : null;
-      };
+      const check = outputCheck({ known: (name) => knownNames.has(name), item: (key) => !!state.items[key], observing: (id) => config.sources.find((s) => s.id === id)?.kind === "command", person: (id) => !!config.persons[id] });
       const kase = { id: item.key, primary: item, items: [item], flags };
       const run = (name: string, key: string) => flowResultFor(item.key, name, key);
       // What the rule reads is taped when a tool wants the judgment kept (deps.capture).
@@ -1740,7 +1734,7 @@ export function createEngine(deps: EngineDeps) {
           now: nowIso(nowMs),
           tz,
           calendar: config.calendarTables,
-          names: { known: knownNames, items: Object.keys(state.items), observing: config.sources.filter((s) => s.kind === "command").map((s) => s.id) },
+          names: { known: knownNames, items: Object.keys(state.items), observing: config.sources.filter((s) => s.kind === "command").map((s) => s.id), persons: Object.keys(config.persons) },
           seq: state.seq,
         });
       }

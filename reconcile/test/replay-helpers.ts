@@ -25,10 +25,14 @@ export interface DemoParams {
   badStage?: boolean;
   /** What the question rests on besides its own source. */
   uses?: string[];
+  /** Ask for a flow (the rule declares one named "review" with `demoRuleText`'s second argument). */
+  run?: { key: string; input?: Record<string, unknown>; label?: string; owner?: string };
+  /** Read what the flow "review" asked for under this key stands at, and say it in a fact. */
+  readRun?: string;
 }
 
 /** A rule file's text that reads a bit of everything and says what it saw in a fact. */
-export function demoRuleText(params: DemoParams = {}): string {
+export function demoRuleText(params: DemoParams = {}, flows?: Record<string, { flow: string; maxUsd: number; timeout?: string; notify?: boolean }>): string {
   const p = JSON.stringify({ grace: 1, verb: "外放", ask: true, watch: false, ...params });
   return [
     "export default {",
@@ -55,6 +59,7 @@ export function demoRuleText(params: DemoParams = {}): string {
     '      "at=" + ctx.at("2026-10-23", "09:30"), "local=" + ctx.local(due),',
     '    ].join(" ");',
     '    const facts = [{ field: "seen", value: seen, evidence: "what the rule read" }, { field: "plan", value: notes.plan ? notes.plan.value : "none", evidence: "notes" }];',
+    '    if (p.readRun) facts.push({ field: "run", value: String(ctx.run("review", p.readRun)?.state ?? "none"), evidence: "the flow" });',
     '    const asks = !p.ask ? [] : [{',
     '      key: "ask:" + item.key + ":" + due.slice(0, 10), title: item.title + " " + p.verb + "了吗？", domain: "work", owner: "owner",',
     "      trigger: { at: due }, backstop: { at: ctx.addWorkdays(due, 5, \"10:00\") },",
@@ -68,9 +73,11 @@ export function demoRuleText(params: DemoParams = {}): string {
     '      stage: p.badStage ? "nowhere" : peer && peer.closed ? "waiting" : "open",',
     '      health: "on-track", headline: item.title + "：" + p.verb, next: { actor: "system", what: "wait" },',
     "      facts, commitments: asks, observe,",
+    '      ...(p.run ? { run: [{ flow: "review", key: p.run.key, input: p.run.input ?? {}, label: p.run.label ?? "review", ...(p.run.owner ? { owner: p.run.owner } : {}) }] } : {}),',
     "    };",
     "  },",
     "};",
+    ...(flows ? [`export const flows = ${JSON.stringify(flows)};`] : []),
     "",
   ].join("\n");
 }
@@ -123,8 +130,8 @@ export function capture(rule: LoadedRule, nowLocal: string, world: World0 = {}):
   const recorded = recordingContext(ctx);
   const primary = items["gcp-demo:1"]!;
   const kase = { id: primary.key, primary, items: [primary], flags: [] };
-  const names = { known: ["gcp-demo", "flags-demo", "flags-demo:outer"], items: Object.keys(items), observing: ["watch-demo"] };
-  const check = outputCheck({ known: (n) => names.known.includes(n), item: (k) => names.items.includes(k), observing: (id) => names.observing.includes(id) });
+  const names = { known: ["gcp-demo", "flags-demo", "flags-demo:outer"], items: Object.keys(items), observing: ["watch-demo"], persons: ["owner"] };
+  const check = outputCheck({ known: (n) => names.known.includes(n), item: (k) => names.items.includes(k), observing: (id) => names.observing.includes(id), person: (id) => names.persons.includes(id) });
   const judged = judge(rule, kase, recorded.ctx, "fp-live", check);
   return buildCapsule({
     kase,

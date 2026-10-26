@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Capsule } from "./capsule";
 import { canonical } from "./observe";
-import { clip, diffOutcomes, noDiff, replayOn, standingOf, type Diff, type ReplayRun, type Unmet } from "./replay";
+import { clip, diffFlowDecls, diffOutcomes, noDiff, replayOn, standingOf, type Diff, type ReplayRun, type Unmet } from "./replay";
 import type { LoadedRule } from "./rules";
 
 // A set of capsules asked of the rules in use and of a candidate: what differs between the two,
@@ -141,7 +141,7 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
       if (runA.missing.length > 0) report.selfCheck.push({ ...ref, fields: [`读了存档里没有的：${runA.missing.slice(0, 3).join("、")}`] });
       else if (canonical(c.outcome) !== canonical(runA.outcome)) {
         const d = diffOutcomes(c.outcome, runA.outcome);
-        const fields = [...new Set([...d.judgment, ...d.facts, ...d.observe, ...d.text].map((x) => x.field))].slice(0, 5);
+        const fields = [...new Set([...d.judgment, ...d.flows, ...d.facts, ...d.observe, ...d.text].map((x) => x.field))].slice(0, 5);
         report.selfCheck.push({ ...ref, fields: fields.length > 0 ? fields : ["其余的字段"] });
       }
     }
@@ -149,6 +149,7 @@ export function replayCapsules(capsules: Capsule[], inUse: LoadedRule[], candida
     if (candidate && runA && runB && !same) {
       const lacking: Array<"inUse" | "candidate"> = [...(runA.missing.length > 0 ? (["inUse"] as const) : []), ...(runB.missing.length > 0 ? (["candidate"] as const) : [])];
       const diff = diffOutcomes(runA.outcome, runB.outcome);
+      diff.flows.push(...diffFlowDecls(a!, b!, runA.outcome.output, runB.outcome.output));
       // A judgment that failed is an answer even when the rule also asked for what the capsule lacks
       // (the failure may be that; the person is told so, not that there was nothing to judge).
       if ((runA.outcome.output === null) !== (runB.outcome.output === null)) {
@@ -245,12 +246,15 @@ export interface Stop {
   reason: string;
   /** The cause: naming it (`cause:<8 hex>`) lets every stop of this kind with this reason pass. */
   cause: string;
-  /** The item the capsule is of ("" for a file that could not be read): naming `item:<it>` lets all of the item's stops pass. */
+  /** The item the capsule is of ("" for a file that could not be read): naming `item:<it>@<kind>` lets the item's stops of that kind pass, and no other. */
   item: string;
 }
 
 /** Every name by which a stop can be let through. */
-export const namesOf = (s: Stop): string[] => [s.name, s.cause, ...(s.item ? [`item:${s.item}`] : [])];
+export const namesOf = (s: Stop): string[] => [s.name, s.cause, ...(s.item ? [itemName(s.item, s.kind)] : [])];
+
+/** An item's stops of one kind, in one name: not the item's others (a candidate that fails on an item is not the same as a correction of it said again). */
+export const itemName = (item: string, kind: Stop["kind"]) => `item:${item}@${kind}`;
 
 const when = (c: CapsuleRef) => c.at.slice(5, 16).replace("T", " ");
 const causeOf = (kind: Stop["kind"], reason: string) => `cause:${createHash("sha256").update(`${kind}\n${reason}`).digest("hex").slice(0, 8)}`;
@@ -267,19 +271,19 @@ export function stops(r: ReplayReport): Stop[] {
 }
 
 /** Of what stops, the causes that more than one stop has, and the items that have more than one: what can be let through in one name. */
-export function stopGroups(r: ReplayReport): { causes: Array<{ cause: string; kind: Stop["kind"]; reason: string; count: number }>; items: Array<{ item: string; label: string; count: number }> } {
+export function stopGroups(r: ReplayReport): { causes: Array<{ cause: string; kind: Stop["kind"]; reason: string; count: number }>; items: Array<{ item: string; kind: Stop["kind"]; label: string; count: number }> } {
   const all = stops(r);
   const causes = new Map<string, { cause: string; kind: Stop["kind"]; reason: string; count: number }>();
-  const items = new Map<string, { item: string; label: string; count: number }>();
+  const items = new Map<string, { item: string; kind: Stop["kind"]; label: string; count: number }>();
   const labels = new Map([...r.expect.broken, ...r.expect.unknown, ...r.errors].map((e) => [e.caseId, e.label.split(" ")[0] ?? e.caseId] as const));
   for (const s of all) {
     const c = causes.get(s.cause) ?? { cause: s.cause, kind: s.kind, reason: s.reason, count: 0 };
     c.count++;
     causes.set(s.cause, c);
     if (s.item) {
-      const i = items.get(s.item) ?? { item: s.item, label: labels.get(s.item) ?? s.item, count: 0 };
+      const i = items.get(itemName(s.item, s.kind)) ?? { item: s.item, kind: s.kind, label: labels.get(s.item) ?? s.item, count: 0 };
       i.count++;
-      items.set(s.item, i);
+      items.set(itemName(s.item, s.kind), i);
     }
   }
   return { causes: [...causes.values()].filter((c) => c.count > 1), items: [...items.values()].filter((i) => i.count > 1) };
@@ -352,8 +356,8 @@ export function replayWarnings(r: ReplayReport): string[] {
   cut(
     groups.items,
     5,
-    (g) => `⚠ 事项 ${g.label} 有 ${g.count} 处拦截，认下整个事项的话点名：item:${g.item}`,
-    (n) => `⚠ 还有 ${n} 个事项有不止一处拦截`,
+    (g) => `⚠ 事项 ${g.label} 有 ${g.count} 处${kindWords[g.kind]}的拦截，认下这一种的话点名：${itemName(g.item, g.kind)}（该事项别种拦截不跟着放行）`,
+    (n) => `⚠ 还有 ${n} 组事项有不止一处同一种拦截`,
   );
   return out;
 }
@@ -389,24 +393,26 @@ export function replayLines(r: ReplayReport): string[] {
     }
     if (judgment.length > 15) out.push(`…还有 ${judgment.length - 15} 份`);
   }
-  const kinds: Array<[keyof Diff, string]> = [["facts", "记下的事实不同"], ["observe", "要观察的不同"], ["text", "只差文字"]];
+  const kinds: Array<[keyof Diff, string]> = [["flows", "要起的流程不同"], ["facts", "记下的事实不同"], ["observe", "要观察的不同"], ["text", "只差文字"]];
   for (const [kind, title] of kinds) {
     const some = r.changed.filter((c) => c.diff[kind].length > 0);
     if (some.length === 0) continue;
     const fields = new Map<string, number>();
     for (const c of some) for (const f of new Set(c.diff[kind].map((d) => d.field.replace(/^问题 [^：]+：/, "问题：")))) fields.set(f, (fields.get(f) ?? 0) + 1);
     out.push(`${title}（${some.length} 份）：${first([...fields], 8).map(([f, n]) => `${f}${n > 1 ? `×${n}` : ""}`).join("、")}${fields.size > 8 ? "…" : ""}`);
-    if (kind === "observe") for (const c of first(some, 5)) out.push(`- ${c.label} ${when(c)}`, ...c.diff.observe.map((d) => `  ${d.field}：${clip(d.before, 60)} → ${clip(d.after, 60)}`));
+    // A flow costs money and a watch costs reads: which ones are told, not only that they differ.
+    if (kind === "observe" || kind === "flows") for (const c of first(some, 5)) out.push(`- ${c.label} ${when(c)}`, ...first(c.diff[kind], 6).map((d) => `  ${d.field}：${clip(d.before, 60)} → ${clip(d.after, 60)}`));
   }
   for (const e of first(r.errors.filter((x) => x.side === "inUse"), 5)) out.push(`在用的在这份存档上判断出错、候选不出错：${e.label} ${when(e)}：${e.error}`);
   for (const n of first(r.noRule, 5)) out.push(`${n.side === "candidate" ? "候选不判断它" : "在用的不判断它，候选判断"}：${n.label} ${when(n)}`);
   for (const m of first(r.missing, 5)) {
     const sides = m.sides.map((s) => (s === "inUse" ? "在用" : "候选")).join("、");
-    out.push(`回放缺数据（${sides}读了存档里没有的：${m.calls.join("、")}）：${m.label} ${when(m)}，结果只作参考${m.diff ? `（两边${m.diff.judgment.length > 0 ? "判断不同" : "只差记账和文字"}）` : ""}`);
+    out.push(`回放缺数据（${sides}读了存档里没有的：${m.calls.join("、")}）：${m.label} ${when(m)}，结果只作参考${m.diff ? `（两边${m.diff.judgment.length > 0 ? "判断不同" : m.diff.flows.length > 0 ? "要起的流程不同" : "只差记账和文字"}）` : ""}`);
     // The judgment that differs, field by field, though only for reference: it is the very thing a change to what is read is most often meant to change.
     if (m.diff) {
-      for (const d of first(m.diff.judgment, 3)) out.push(`  （仅参考）${d.field}：${clip(d.before, 60)} → ${clip(d.after, 60)}`);
-      if (m.diff.judgment.length > 3) out.push(`  …还有 ${m.diff.judgment.length - 3} 处判断不同`);
+      const shown = [...m.diff.judgment, ...m.diff.flows];
+      for (const d of first(shown, 3)) out.push(`  （仅参考）${d.field}：${clip(d.before, 60)} → ${clip(d.after, 60)}`);
+      if (shown.length > 3) out.push(`  …还有 ${shown.length - 3} 处判断${m.diff.flows.length > 0 ? "或要起的流程" : ""}不同`);
     }
   }
   if (r.missing.length > 5) out.push(`…还有 ${r.missing.length - 5} 份缺数据`);

@@ -5,8 +5,8 @@ import { buildCapsule, capsulePath, loadCapsules, replaceExpect, writeCapsule, t
 import { loadConfig } from "./config";
 import { canonical } from "./observe";
 import { checkDirs, shadow } from "./preview";
-import { loadRules, RULES_KEPT } from "./rules";
-import { apply, emptyState, type JournalEvent } from "./state";
+import { loadRules, RULES_KEPT, type CtxCall, type LoadedRule } from "./rules";
+import { apply, emptyState, flowKeyOf, type JournalEvent, type State } from "./state";
 import { readEvents } from "./store";
 
 // Capsules made after the fact, from the journal: the moments a controller would have kept a
@@ -85,6 +85,23 @@ export function backfillPoints(events: JournalEvent[]): BackfillPoint[] {
   return [...points.values()].sort((a, b) => a.start - b.start || Date.parse(a.at) - Date.parse(b.at) || a.caseId.localeCompare(b.caseId));
 }
 
+/**
+ * Whether what `ctx.run(name, key)` gave in the preview's engine is what the controller was told at
+ * that moment. The record of a run the journal holds an end for is; so is a request never made. A
+ * run still going is not: how it stood (running, waiting, at a gate) was read from the runtime's
+ * files, which a backfill has not got -- the engine in the preview says "waiting to start" of every
+ * one. (A request held back for room, which the journal does not hold either, is taken as not made.)
+ */
+function runKnown(state: State, rule: LoadedRule, caseId: string, name: string, key: string): boolean {
+  const flow = rule.flows?.[name]?.flow;
+  if (flow === undefined) return true;
+  const latest = state.flowKeys?.[flowKeyOf(caseId, name, flow, key)];
+  const rec = latest ? state.flows?.[latest.runId] : undefined;
+  return !rec || !!rec.ended || !!rec.dismissed;
+}
+
+const callText = (c: CtxCall) => `${c.m}(${c.args.map((a) => JSON.stringify(a)).join(", ")})`;
+
 export interface BackfillResult {
   points: number;
   /** Written now. */
@@ -101,6 +118,8 @@ export interface BackfillResult {
   blocked: Array<{ file: string; capsule: Capsule }>;
   /** Moments the rules in use do not judge the item at (it is cold, dropped, or no rule is for it). */
   skipped: Array<{ caseId: string; at: string; why: string[] }>;
+  /** Flows' states a rule read that a backfill cannot know (the run was still going): not taped, so a replay takes them as what the capsule lacks. */
+  unknowable: Array<{ caseId: string; at: string; calls: string[] }>;
 }
 
 export interface BackfillOptions {
@@ -140,7 +159,7 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
   const state = emptyState();
   let cursor = 0;
   let instance: string | null = null;
-  const result: BackfillResult = { points: points.length, made: [], existing: [], superseded: [], blocked: [], skipped: [] };
+  const result: BackfillResult = { points: points.length, made: [], existing: [], superseded: [], blocked: [], skipped: [], unknowable: [] };
   // What an earlier backfill left in `to`, by what it holds and by the moment it is of.
   const there = loadCapsules([options.to]).capsules;
   const byId = new Map(there.map((c) => [c.capsule.id, c] as const));
@@ -154,17 +173,21 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
       if (e.type === "started") instance = e.instanceId;
     }
     const clock = { ms: Date.parse(at) };
-    const judged = new Map<string, Omit<CaptureInput, "trigger" | "origin">>();
+    const judged = new Map<string, { input: Omit<CaptureInput, "trigger" | "origin">; dropped: string[] }>();
     // A candidate's rules are read from where they are (no last-good copy stands in for one that does not load: that was checked above).
-    const side = shadow(state, options.dataDir, config, clock, options.candidateDir ? null : { dir: path.join(options.dataDir, RULES_KEPT), write: false }, (judgment) => judged.set(judgment.kase.id, judgment));
+    const side = shadow(state, options.dataDir, config, clock, options.candidateDir ? null : { dir: path.join(options.dataDir, RULES_KEPT), write: false }, (judgment) => {
+      const known = (c: CtxCall) => c.m !== "run" || runKnown(state, judgment.rule, judgment.kase.id, String(c.args[0]), String(c.args[1]));
+      judged.set(judgment.kase.id, { input: { ...judgment, calls: judgment.calls.filter(known) }, dropped: judgment.calls.filter((c) => !known(c)).map(callText) });
+    });
     await side.engine.tick();
     await side.engine.stop();
     for (const p of round) {
-      const input = judged.get(p.caseId);
+      const { input, dropped } = judged.get(p.caseId) ?? {};
       if (!input) {
         result.skipped.push({ caseId: p.caseId, at: p.at, why: [...p.why] });
         continue;
       }
+      if (dropped && dropped.length > 0) result.unknowable.push({ caseId: p.caseId, at: p.at, calls: dropped });
       const shown = state.assessments[p.caseId];
       const capsule = buildCapsule({
         ...input,

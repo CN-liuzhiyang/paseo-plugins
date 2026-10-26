@@ -76,8 +76,8 @@ export interface Capsule {
   origin: "live" | "backfill";
   rule: { name: string; file: string; sha256: string | null; fingerprint: string };
   clock: { now: string; tz: string; calendar: Record<string, CalendarYear> };
-  /** What a check of the output (outputCheck) asks about. */
-  names: { known: string[]; items: string[]; observing: string[] };
+  /** What a check of the output (outputCheck) asks about. `persons`: absent in a capsule made before it was kept, which cannot say whether a run's owner is a person. */
+  names: { known: string[]; items: string[]; observing: string[]; persons?: string[] };
   kase: Case;
   calls: CtxCall[];
   outcome: CapsuleOutcome;
@@ -104,7 +104,7 @@ const capsuleSchema = z
     origin: z.enum(["live", "backfill"]),
     rule: z.object({ name: z.string(), file: z.string(), sha256: z.string().nullable(), fingerprint: z.string() }).strict(),
     clock: z.object({ now: z.string().refine((v) => !Number.isNaN(Date.parse(v)), "not an instant"), tz: z.string().min(1), calendar: z.record(z.string(), year) }).strict(),
-    names: z.object({ known: z.array(z.string()), items: z.array(z.string()), observing: z.array(z.string()) }).strict(),
+    names: z.object({ known: z.array(z.string()), items: z.array(z.string()), observing: z.array(z.string()), persons: z.array(z.string()).optional() }).strict(),
     kase: z.object({ id: z.string(), primary: z.looseObject({ key: z.string(), source: z.string() }), items: z.array(z.unknown()), flags: z.array(z.unknown()) }).strict(),
     calls: z.array(z.object({ m: z.string(), args: z.array(z.unknown()), result: z.unknown() }).strict()),
     outcome: z.object({ output: ruleOutputSchema.nullable(), error: z.string().nullable() }).strict(),
@@ -137,7 +137,7 @@ export interface CaptureInput {
   now: string;
   tz: string;
   calendar: Record<string, CalendarYear>;
-  names: { known: Iterable<string>; items: Iterable<string>; observing: Iterable<string> };
+  names: { known: Iterable<string>; items: Iterable<string>; observing: Iterable<string>; persons: Iterable<string> };
   trigger: string[];
   origin: Capsule["origin"];
   seq?: number | null;
@@ -156,7 +156,7 @@ export function buildCapsule(input: CaptureInput): Capsule {
   const body = {
     case: input.kase.id,
     clock: { now: input.now, tz: input.tz, calendar: asJson(input.calendar) },
-    names: { known: sorted(input.names.known), items: sorted(input.names.items), observing: sorted(input.names.observing) },
+    names: { known: sorted(input.names.known), items: sorted(input.names.items), observing: sorted(input.names.observing), persons: sorted(input.names.persons) },
     kase: asJson(input.kase),
     calls: asJson(input.calls),
   };

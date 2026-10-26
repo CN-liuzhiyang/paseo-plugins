@@ -880,7 +880,7 @@ function stoppedMessage(unnamed: Stop[]): string {
   const parts = [part("broken", "纠错又犯了"), part("unknown", "纠错核对不了"), part("error", "候选判断出错"), part("unreadable", "读不了的存档")].filter(Boolean);
   const causes = new Set(unnamed.map((x) => x.cause)).size;
   const many = unnamed.length > causes ? `（它们只有 ${causes} 个原因：同一个原因的可以整组点名）` : "";
-  return `重放有 ${unnamed.length} 处没过，没拷：${parts.join("；")}${many}。确实要拷的话，自己对照预览里 ⚠ 的那几行，把认下的写进 --accept-regress（逗号隔开）：一份存档的编号，或一个原因（cause:…）、一个事项（item:…）的整组`;
+  return `重放有 ${unnamed.length} 处没过，没拷：${parts.join("；")}${many}。确实要拷的话，自己对照预览里 ⚠ 的那几行，把认下的写进 --accept-regress（逗号隔开）：一份存档的编号，或一个原因（cause:…）、一个事项的某一种拦截（item:…@种类）的整组`;
 }
 
 /**
@@ -911,7 +911,7 @@ export async function applyCandidate(options: PreviewOptions & { expect: string;
     const stopped = stops(p.replay);
     const named = options.acceptRegress ?? [];
     const stray = named.filter((n) => !stopped.some((x) => namesOf(x).includes(n)));
-    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次重放拦下的：看预览里 ⚠ 那几行：括号里的存档编号，读不了的存档的路径，同一个原因的 cause:…，同一个事项的 item:…`);
+    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次重放拦下的：看预览里 ⚠ 那几行：括号里的存档编号，读不了的存档的路径，同一个原因的 cause:…，同一个事项同一种拦截的 item:…@种类`);
     const unnamed = stopped.filter((x) => !namesOf(x).some((n) => named.includes(n)));
     if (unnamed.length > 0) throw new PreviewError(stoppedMessage(unnamed));
     const stillParts = [...partsIn(options.candidateDir)].join() === [...parts].join();

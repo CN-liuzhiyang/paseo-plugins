@@ -596,6 +596,8 @@ export interface OutputNames {
   item(key: string): boolean;
   /** A configured observing source (kind "command"). */
   observing(sourceId: string): boolean;
+  /** A person of persons.json: whom a run's end is told to. */
+  person(id: string): boolean;
 }
 
 /** What the controller knows that the schema does not: names an output refers to must exist. An error string fails the judgment. */
@@ -604,7 +606,9 @@ export function outputCheck(names: OutputNames): (out: RuleOutput) => string | n
     const unknown = out.commitments.flatMap((spec) => (spec.uses ?? []).filter((u) => !names.known(u) && !names.item(u)));
     if (unknown.length > 0) return `uses 里的 ${unknown.map((u) => `"${u}"`).join("、")} 不是配置里的来源、文件或已有的数据项`;
     const notObserving = [...new Set((out.observe ?? []).map((o) => o.source).filter((id) => !names.observing(id)))];
-    return notObserving.length > 0 ? `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）` : null;
+    if (notObserving.length > 0) return `observe 里的 ${notObserving.map((u) => `"${u}"`).join("、")} 不是配置里的观察来源（kind: command）`;
+    const strangers = [...new Set((out.run ?? []).map((r) => r.owner).filter((o): o is string => !!o && !names.person(o)))];
+    return strangers.length > 0 ? `run 里的 owner ${strangers.map((u) => `"${u}"`).join("、")} 不是 persons.json 里的人` : null;
   };
 }
 

@@ -56,13 +56,24 @@ export function replayOn(capsule: Capsule, rule: LoadedRule): ReplayRun {
     // Nothing was read for it that this capsule knows: not read yet, which is what a rule is told then.
     observation: taped("observation", () => conclude(null, null, null, { everyMs: 60_000, graceMs: 0, maxLagMs: 0, nowMs, tz })),
   } satisfies Record<keyof RuleContext, unknown>;
-  const names = { known: new Set(capsule.names.known), items: new Set(capsule.names.items), observing: new Set(capsule.names.observing) };
+  const names = { known: new Set(capsule.names.known), items: new Set(capsule.names.items), observing: new Set(capsule.names.observing), persons: capsule.names.persons ? new Set(capsule.names.persons) : null };
   const judged = judge(
     rule,
     capsule.kase,
     Object.freeze(members) as unknown as RuleContext,
     capsule.rule.fingerprint,
-    outputCheck({ known: (n) => names.known.has(n), item: (k) => names.items.has(k), observing: (id) => names.observing.has(id) }),
+    outputCheck({
+      known: (n) => names.known.has(n),
+      item: (k) => names.items.has(k),
+      observing: (id) => names.observing.has(id),
+      // A capsule made before the persons were kept cannot say who was one: told as read-and-not-there, and let by.
+      person: (id) => {
+        if (names.persons) return names.persons.has(id);
+        const call = `persons.json 里有没有 ${JSON.stringify(id)}`;
+        if (!missing.includes(call)) missing.push(call);
+        return true;
+      },
+    }),
   );
   return { outcome: judged.output ? { output: JSON.parse(JSON.stringify(judged.output)) as RuleOutput, error: null } : { output: null, error: judged.assessment.error ?? "判断出错" }, missing };
 }
@@ -77,18 +88,21 @@ export interface Delta {
 }
 
 /**
- * The differences between two answers to the same capsule, in four kinds in the order they
+ * The differences between two answers to the same capsule, in five kinds in the order they
  * matter: the judgment (what is decided: stage, who has the ball, which questions are asked of
- * whom and when), the facts a rule writes down, what it asks to have watched, and wording.
+ * whom and when), the flows it asks to have started (which, with what input, whom the end is
+ * told to: a replay never starts one), the facts a rule writes down, what it asks to have
+ * watched, and wording.
  */
 export interface Diff {
   judgment: Delta[];
+  flows: Delta[];
   facts: Delta[];
   observe: Delta[];
   text: Delta[];
 }
 
-export const noDiff = (d: Diff): boolean => d.judgment.length + d.facts.length + d.observe.length + d.text.length === 0;
+export const noDiff = (d: Diff): boolean => d.judgment.length + d.flows.length + d.facts.length + d.observe.length + d.text.length === 0;
 
 export const clip = (text: string, n = 200): string => {
   const one = text.replace(/\s+/g, " ").trim();
@@ -99,7 +113,7 @@ export const clip = (text: string, n = 200): string => {
 const sameAt = (a: string, b: string) => a === b || (Date.parse(a) === Date.parse(b) && !Number.isNaN(Date.parse(a)));
 
 export function diffOutcomes(a: CapsuleOutcome, b: CapsuleOutcome): Diff {
-  const d: Diff = { judgment: [], facts: [], observe: [], text: [] };
+  const d: Diff = { judgment: [], flows: [], facts: [], observe: [], text: [] };
   const x = a.output;
   const y = b.output;
   if (!x || !y) {
@@ -153,6 +167,19 @@ export function diffOutcomes(a: CapsuleOutcome, b: CapsuleOutcome): Diff {
     if (wx.has(id) && wy.has(id)) put("text", `叫醒 ${id} 的话`, wx.get(id)!, wy.get(id)!);
   }
 
+  // The flows asked to have started: by the rule's name for the flow and the key (an intent is made once per pair).
+  const rx = new Map((x.run ?? []).map((r) => [`${r.flow}:${r.key}`, r]));
+  const ry = new Map((y.run ?? []).map((r) => [`${r.flow}:${r.key}`, r]));
+  for (const id of [...new Set([...rx.keys(), ...ry.keys()])].sort()) {
+    const p = rx.get(id);
+    const q = ry.get(id);
+    put("flows", `流程 ${id}`, p ? "要起" : "不起", q ? "要起" : "不起");
+    if (!p || !q) continue;
+    put("flows", `流程 ${id}：输入`, canonical(p.input), canonical(q.input));
+    put("flows", `流程 ${id}：结果告诉谁`, p.owner ?? "管理员", q.owner ?? "管理员");
+    put("text", `流程 ${id}：名字`, p.label, q.label);
+  }
+
   const fx = new Map(x.facts.map((f) => [f.field, f]));
   const fy = new Map(y.facts.map((f) => [f.field, f]));
   for (const field of [...new Set([...fx.keys(), ...fy.keys()])].sort()) {
@@ -172,6 +199,28 @@ export function diffOutcomes(a: CapsuleOutcome, b: CapsuleOutcome): Diff {
     put("observe", `观察 ${key}：参数`, canonical(p.params), canonical(q.params));
   }
   return d;
+}
+
+/**
+ * What a rule's own name for a flow stands for, on the flows an answer asks for: the flow it is,
+ * the most a run may cost, how long it may take, whether the person is told when it ends. A rule
+ * can start another flow under the same name and ask for it in the same words.
+ */
+export function diffFlowDecls(a: LoadedRule, b: LoadedRule, x: RuleOutput | null, y: RuleOutput | null): Delta[] {
+  const out: Delta[] = [];
+  const names = [...new Set([...(x?.run ?? []), ...(y?.run ?? [])].map((r) => r.flow))].sort();
+  for (const name of names) {
+    const p = a.flows?.[name];
+    const q = b.flows?.[name];
+    const say = (field: string, before: string, after: string) => {
+      if (before !== after) out.push({ field: `流程 ${name}：${field}`, before: clip(before), after: clip(after) });
+    };
+    say("起的是哪个流程", p?.flow ?? "（没声明）", q?.flow ?? "（没声明）");
+    say("花费上限", p ? `$${p.maxUsd}` : "（没声明）", q ? `$${q.maxUsd}` : "（没声明）");
+    say("超时", p?.timeout ?? "（默认）", q?.timeout ?? "（默认）");
+    say("结束时告诉人", p ? String(p.notify) : "（没声明）", q ? String(q.notify) : "（没声明）");
+  }
+  return out;
 }
 
 // ---- what a person said is right ------------------------------------------------------------

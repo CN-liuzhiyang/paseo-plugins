@@ -43,7 +43,7 @@ const HELP = `用法：
   --id      存档的编号（k_ 加 16 位十六进制）
   --item    只列这个事项的存档（单号，或带来源的整个 key）
   --expect  apply：diff 给的编号（p_…）；cases keep、cases expect：expect 的 JSON 文件
-  --accept-regress  apply：认下重放拦下的，用逗号隔开：一份存档的编号（或读不了的存档的路径）、一个原因（cause:…）、一个事项（item:…）
+  --accept-regress  apply：认下重放拦下的，用逗号隔开：一份存档的编号（或读不了的存档的路径）、一个原因（cause:…）、一个事项的某一种拦截（item:…@种类）
   --candidate  diff、apply、replay：候选目录；cases backfill：用候选的判断方法补录
   --json    输出 JSON（给 agent 读）`;
 
@@ -132,7 +132,7 @@ try {
       const existing = result.existing.map((m) => row(m.capsule, m.file));
       const superseded = result.superseded.map((m) => ({ ...row(m.capsule, m.file), by: m.by, removed: m.removed, carried: m.carried, kept: m.kept, expect: m.capsule.expect !== null }));
       const blocked = result.blocked.map((m) => row(m.capsule, m.file));
-      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, existing, superseded, blocked, skipped: result.skipped }, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, existing, superseded, blocked, skipped: result.skipped, unknowable: result.unknowable }, null, 2)}\n`);
       process.exit(0);
     }
     const lines = [
@@ -142,6 +142,12 @@ try {
         : "补录的存档用的是在用的判断方法，不是当时那一版；配置是现在的，冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的，也不是当时的。",
     ];
     for (const m of result.made) lines.push(`- ${m.capsule.case} ${m.capsule.at.slice(0, 16).replace("T", " ")} ${m.capsule.trigger.join("+")}  ${path.relative(to, m.file)}`);
+    // A flow still going cannot be read back from the journal: said, not guessed.
+    if (result.unknowable.length > 0) {
+      const calls = [...new Set(result.unknowable.flatMap((u) => u.calls))];
+      lines.push(`流程的状态补录时不可知：${result.unknowable.length} 份存档里，判断方法读了还在跑的流程（${calls.slice(0, 3).join("、")}${calls.length > 3 ? "…" : ""}），日志里只有它起了、没有它当时跑到哪一步（那是运行时的文件，补录读不到）：这几处没有录进存档，重放时当「存档里没有」（回放缺数据）。已经跑完的流程、没起过的，照常录。`);
+      for (const u of result.unknowable) lines.push(`- 不可知：${u.caseId} ${u.at.slice(0, 16).replace("T", " ")}  ${u.calls.slice(0, 3).join("、")}`);
+    }
     for (const b of result.blocked) lines.push(`- 没写：${b.capsule.case} ${b.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, b.file)}：同名的文件在，读不了，没覆盖（里面可能有人写的东西）；修好它或者删掉，再补录一次`);
     for (const s of result.superseded) {
       const moment = `${s.capsule.case} ${s.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, s.file)}`;
@@ -196,7 +202,7 @@ try {
     const lacking = p.stops.some((s) => s.kind === "unknown" || s.kind === "error");
     const again =
       p.stops.length > 0
-        ? `\n（重放拦下了 ${p.stops.length} 处，上面这条会被拒：认下的要写进 --accept-regress，存档编号、同一个原因的 cause:…、同一个事项的 item:… 都在预览的 ⚠ 里${lacking ? `；核对不了或出错是因为存档里没有候选读的东西的话，先用候选重新补录：reconcile-preview cases backfill${withDirs} --candidate ${flags.candidate} --replace，再 diff` : ""}）`
+        ? `\n（重放拦下了 ${p.stops.length} 处，上面这条会被拒：认下的要写进 --accept-regress，存档编号、同一个原因的 cause:…、同一个事项同一种拦截的 item:…@种类 都在预览的 ⚠ 里${lacking ? `；核对不了或出错是因为存档里没有候选读的东西的话，先用候选重新补录：reconcile-preview cases backfill${withDirs} --candidate ${flags.candidate} --replace，再 diff` : ""}）`
         : "";
     process.stdout.write(flags.json ? `${JSON.stringify(p, null, 2)}\n` : `${previewText(p)}\n要拷回去：reconcile-preview apply ${where}--candidate ${flags.candidate} --expect ${p.id}${again}\n`);
     process.exit(0);
