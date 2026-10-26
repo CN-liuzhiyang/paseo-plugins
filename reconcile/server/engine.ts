@@ -1505,7 +1505,10 @@ export function createEngine(deps: EngineDeps) {
         const c = state.commitments[id];
         if (!c || !isOpen(c.status)) return null;
         const asked = round > 1 ? `（第 ${round} 次问，前面没有回答）` : "";
-        return `### ${headers.get(c.id)}：${c.title}${asked}\n\n${c.brief}`;
+        // A title that already starts with the header is not said twice.
+        const header = headers.get(c.id)!;
+        const heading = c.title.startsWith(header) ? c.title : `${header}：${c.title}`;
+        return `### ${heading}${asked}\n\n${c.brief}`;
       })
       .filter((b): b is string => !!b);
     return { title: card.title, brief: briefs.join("\n\n"), questions };

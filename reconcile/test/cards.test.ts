@@ -141,6 +141,20 @@ test("two questions with the same header on one card are told apart, and one ans
     assert.equal(commitment(w, 2).status, "waiting");
   }));
 
+test("the brief's heading is the header and the title, but only the title when the title already starts with the header", async () => {
+  await withMini({ header: "Q" }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    await w.run("2026-10-14 18:30");
+    assert.match(w.cards[0]!.content.brief, /^### Q：q gcp-demo:1\n\n/);
+  });
+  await withMini({ header: "q gcp-demo:", withId: true }, async (w) => {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    await w.run("2026-10-14 18:30");
+    assert.equal(w.cards[0]!.content.questions[0]!.header, "q gcp-demo:1");
+    assert.match(w.cards[0]!.content.brief, /^### q gcp-demo:1\n\n/);
+  });
+});
+
 test("the page lists a case waiting on you before one that is fine, and plan.md says what each step is in words", () =>
   withMini({}, async (w) => {
     w.items.set("gcp-demo:1", issue(1, { release: "2026-10-20" }));
