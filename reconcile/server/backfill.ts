@@ -1,10 +1,11 @@
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import type { Annotation, Assessment } from "../shared/model";
-import { buildCapsule, capsulePath, loadCapsules, writeCapsule, type Capsule, type CaptureInput, type ShownJudgment } from "./capsule";
+import { buildCapsule, capsulePath, loadCapsules, replaceExpect, writeCapsule, type Capsule, type CaptureInput, type ShownJudgment } from "./capsule";
 import { loadConfig } from "./config";
-import { shadow } from "./preview";
-import { RULES_KEPT } from "./rules";
+import { canonical } from "./observe";
+import { checkDirs, shadow } from "./preview";
+import { loadRules, RULES_KEPT } from "./rules";
 import { apply, emptyState, type JournalEvent } from "./state";
 import { readEvents } from "./store";
 
@@ -90,8 +91,14 @@ export interface BackfillResult {
   made: Array<{ file: string; capsule: Capsule }>;
   /** Already there, with the very same inputs (a capsule is its inputs): left as it is. */
   existing: Array<{ file: string; capsule: Capsule }>;
-  /** Made earlier here for the same item and moment from other inputs (the rules in use then were others): left, or taken away with `replace`. */
-  superseded: Array<{ file: string; capsule: Capsule; by: string; removed: boolean }>;
+  /**
+   * Made earlier here for the same item and moment from other inputs (the rules in use then were
+   * others): left, or taken away with `replace` -- and what a person wrote on it (`expect`) goes
+   * to the new one first (carried), unless the new one already says another (kept: it is not taken away).
+   */
+  superseded: Array<{ file: string; capsule: Capsule; by: string; removed: boolean; carried: boolean; kept: "expect" | null }>;
+  /** A capsule that could not be written because a file of its name is there and cannot be read: not overwritten (it may hold what a person wrote). */
+  blocked: Array<{ file: string; capsule: Capsule }>;
   /** Moments the rules in use do not judge the item at (it is cold, dropped, or no rule is for it). */
   skipped: Array<{ caseId: string; at: string; why: string[] }>;
 }
@@ -107,10 +114,17 @@ export interface BackfillOptions {
   gzip?: boolean;
   /** Take away what an earlier backfill into `to` made for the same moments from other inputs. */
   replace?: boolean;
+  /** Ask the rules of this candidate (a directory laid out like the config's parts) instead of the rules in use: the capsules then hold what the candidate reads. */
+  candidateDir?: string;
 }
 
 export async function backfill(options: BackfillOptions): Promise<BackfillResult> {
-  const config = loadConfig(options.configDir);
+  if (options.candidateDir) {
+    checkDirs(options.configDir, options.candidateDir);
+    const errors = (await loadRules(loadConfig(options.configDir, options.candidateDir).rulesDir, null)).errors;
+    if (errors.length > 0) throw new BackfillError(`候选的判断方法加载不上，补不了：${errors.map((e) => `${e.file}（${e.error.slice(0, 80)}）`).join("、")}`);
+  }
+  const config = loadConfig(options.configDir, options.candidateDir);
   const events = readEvents(options.dataDir);
   if (events.length === 0) throw new BackfillError(`数据目录里没有日志：${options.dataDir}`);
   // Folded from the start: a journal that begins later cannot say what the state was.
@@ -126,10 +140,10 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
   const state = emptyState();
   let cursor = 0;
   let instance: string | null = null;
-  const result: BackfillResult = { points: points.length, made: [], existing: [], superseded: [], skipped: [] };
+  const result: BackfillResult = { points: points.length, made: [], existing: [], superseded: [], blocked: [], skipped: [] };
   // What an earlier backfill left in `to`, by what it holds and by the moment it is of.
   const there = loadCapsules([options.to]).capsules;
-  const byId = new Map(there.map((c) => [c.capsule.id, c.file] as const));
+  const byId = new Map(there.map((c) => [c.capsule.id, c] as const));
   const ofMoment = new Map<string, typeof there>();
   for (const c of there) if (c.capsule.origin === "backfill") ofMoment.set(`${c.capsule.case}|${c.capsule.at}`, [...(ofMoment.get(`${c.capsule.case}|${c.capsule.at}`) ?? []), c]);
   for (const round of [...rounds.values()].sort((a, b) => a[0]!.start - b[0]!.start)) {
@@ -141,7 +155,8 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
     }
     const clock = { ms: Date.parse(at) };
     const judged = new Map<string, Omit<CaptureInput, "trigger" | "origin">>();
-    const side = shadow(state, options.dataDir, config, clock, { dir: path.join(options.dataDir, RULES_KEPT), write: false }, (judgment) => judged.set(judgment.kase.id, judgment));
+    // A candidate's rules are read from where they are (no last-good copy stands in for one that does not load: that was checked above).
+    const side = shadow(state, options.dataDir, config, clock, options.candidateDir ? null : { dir: path.join(options.dataDir, RULES_KEPT), write: false }, (judgment) => judged.set(judgment.kase.id, judgment));
     await side.engine.tick();
     await side.engine.stop();
     for (const p of round) {
@@ -165,16 +180,36 @@ export async function backfill(options: BackfillOptions): Promise<BackfillResult
           : {}),
       });
       const gzip = options.gzip ?? false;
-      const had = byId.get(capsule.id);
-      if (had) result.existing.push({ file: had, capsule });
+      // Where this moment's capsule is now: already there, written now, or nowhere (a file of its name that cannot be read is in the way).
+      let target = byId.get(capsule.id) ?? null;
+      if (target) result.existing.push({ file: target.file, capsule: target.capsule });
       else {
-        result.made.push({ file: writeCapsule(options.to, capsule, { gzip }), capsule });
-        byId.set(capsule.id, capsulePath(options.to, capsule, gzip));
+        const file = capsulePath(options.to, capsule, gzip);
+        if (existsSync(file)) result.blocked.push({ file, capsule });
+        else {
+          result.made.push({ file: writeCapsule(options.to, capsule, { gzip }), capsule });
+          target = { file, capsule };
+          byId.set(capsule.id, target);
+        }
       }
+      if (!target) continue;
       for (const old of ofMoment.get(`${capsule.case}|${capsule.at}`) ?? []) {
         if (old.capsule.id === capsule.id || result.superseded.some((x) => x.file === old.file)) continue;
-        if (options.replace) rmSync(old.file, { force: true });
-        result.superseded.push({ file: old.file, capsule: old.capsule, by: capsule.id, removed: !!options.replace });
+        // What a person wrote on the old one goes to the new one before the old one is taken away; if
+        // the new one already says another, the old one stays.
+        let [removed, carried, kept] = [false, false, null as "expect" | null];
+        if (options.replace) {
+          const said = old.capsule.expect;
+          if (!said) removed = true;
+          else if (!target.capsule.expect) {
+            replaceExpect(target.file, said);
+            target.capsule.expect = said;
+            [removed, carried] = [true, true];
+          } else if (canonical(target.capsule.expect) === canonical(said)) removed = true;
+          else kept = "expect";
+          if (removed) rmSync(old.file, { force: true });
+        }
+        result.superseded.push({ file: old.file, capsule: old.capsule, by: capsule.id, removed, carried, kept });
       }
     }
   }

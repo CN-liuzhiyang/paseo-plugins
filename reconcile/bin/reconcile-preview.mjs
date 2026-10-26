@@ -22,10 +22,11 @@ const HELP = `用法：
 
   reconcile-preview replay [--candidate <目录>]
       只做重放：存档拿在用的判断方法判断一遍，看和存下的一样不一样；给了候选就再拿候选判断，比这两遍
-  reconcile-preview cases backfill [--to <目录>] [--gzip] [--replace]
-      从日志补录一批存档（拿在用的判断方法，在日志里每个值得留的时刻重判一遍）；缺省放进 <配置目录>/cases/backfill，
+  reconcile-preview cases backfill [--to <目录>] [--candidate <候选目录>] [--gzip] [--replace]
+      从日志补录一批存档（拿在用的判断方法，在日志里每个值得留的时刻重判一遍；给了 --candidate 就拿候选的，
+      存档里就有候选读的东西，是 diff 说"核对不了"之后的出路）；缺省放进 <配置目录>/cases/backfill，
       明文 JSON（进 git 看得出改了什么），--gzip 压缩；同样的输入已经有的不重写，同一时刻早先补录过别的输入的，
-      缺省留着，--replace 删掉它们（只删这个目录里补录出的旧存档）
+      缺省留着，--replace 删掉它们（只删这个目录里补录出的旧存档；旧存档上人写的 expect 先搬到新的那份上）
   reconcile-preview cases list [--item <单号>]
       列出存档：在哪、为什么留、有没有写 expect
   reconcile-preview cases keep --id <存档编号> [--expect <文件>]
@@ -61,7 +62,7 @@ const KNOWN = {
   diff: ["candidate", "config", "data", "days", "now", "json"],
   apply: ["candidate", "expect", "accept-regress", "config", "data", "days", "now", "json"],
   replay: ["candidate", "config", "data", "json"],
-  "cases backfill": ["to", "gzip", "replace", "config", "data", "json"],
+  "cases backfill": ["to", "candidate", "gzip", "replace", "config", "data", "json"],
   "cases list": ["item", "config", "data", "json"],
   "cases keep": ["id", "expect", "config", "data", "json"],
   "cases expect": ["id", "expect", "config", "json"],
@@ -124,22 +125,33 @@ try {
   }
   if (sub === "cases backfill") {
     const to = flags.to || path.join(configDir, "cases", "backfill");
-    const result = await backfill({ configDir, dataDir, to, gzip: !!flags.gzip, replace: !!flags.replace });
+    const result = await backfill({ configDir, dataDir, to, gzip: !!flags.gzip, replace: !!flags.replace, candidateDir: flags.candidate });
     if (flags.json) {
       const row = (c, file) => ({ file, id: c.id, case: c.case, at: c.at, trigger: c.trigger });
       const made = result.made.map((m) => row(m.capsule, m.file));
       const existing = result.existing.map((m) => row(m.capsule, m.file));
-      const superseded = result.superseded.map((m) => ({ ...row(m.capsule, m.file), by: m.by, removed: m.removed }));
-      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, existing, superseded, skipped: result.skipped }, null, 2)}\n`);
+      const superseded = result.superseded.map((m) => ({ ...row(m.capsule, m.file), by: m.by, removed: m.removed, carried: m.carried, kept: m.kept, expect: m.capsule.expect !== null }));
+      const blocked = result.blocked.map((m) => row(m.capsule, m.file));
+      process.stdout.write(`${JSON.stringify({ to, points: result.points, made, existing, superseded, blocked, skipped: result.skipped }, null, 2)}\n`);
       process.exit(0);
     }
     const lines = [
-      `日志里值得留的时刻 ${result.points} 个，新补录了 ${result.made.length} 份存档到 ${to}，${result.existing.length} 份是同样的输入、早就有了，没动。`,
-      "补录的存档用的是在用的判断方法，不是当时那一版；配置是现在的，冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的，也不是当时的。",
+      `日志里值得留的时刻 ${result.points} 个，新补录了 ${result.made.length} 份存档到 ${to}，${result.existing.length} 份是同样的输入、早就有了，没动。${result.blocked.length > 0 ? `${result.blocked.length} 份没能写（见下）。` : ""}`,
+      flags.candidate
+        ? `补录的存档用的是候选（${flags.candidate}）的判断方法，不是当时那一版，更不是在用的：存档里有候选读的东西，拿它 diff 才比得准；配置是现在的，冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的，也不是当时的。`
+        : "补录的存档用的是在用的判断方法，不是当时那一版；配置是现在的，冷热、关联、来源是否过时是按折叠出来的状态和现在的配置重算的，也不是当时的。",
     ];
     for (const m of result.made) lines.push(`- ${m.capsule.case} ${m.capsule.at.slice(0, 16).replace("T", " ")} ${m.capsule.trigger.join("+")}  ${path.relative(to, m.file)}`);
+    for (const b of result.blocked) lines.push(`- 没写：${b.capsule.case} ${b.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, b.file)}：同名的文件在，读不了，没覆盖（里面可能有人写的东西）；修好它或者删掉，再补录一次`);
     for (const s of result.superseded) {
-      lines.push(`- 同一时刻早先补录过另一份（输入不同，用的是别的判断方法）：${s.capsule.case} ${s.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, s.file)}${s.removed ? "  已删掉（--replace）" : "  没动，两份都会进重放；要换掉旧的，加 --replace（只删这个目录里补录出的旧存档）"}`);
+      const moment = `${s.capsule.case} ${s.capsule.at.slice(0, 16).replace("T", " ")}  ${path.relative(to, s.file)}`;
+      const had = s.capsule.expect !== null;
+      const tail = s.removed
+        ? `  已删掉（--replace）${s.carried ? "，它上面的 expect 搬到新的那份上了" : ""}`
+        : s.kept
+          ? "  没删：它带着 expect，新的那份已经有一份不一样的 expect，要人自己看（cases list）"
+          : `  没动，两份都会进重放；要换掉旧的，加 --replace（只删这个目录里补录出的旧存档${had ? "；它带着 expect，会搬到新的那份上，不会丢" : ""}）`;
+      lines.push(`- 同一时刻早先补录过另一份（输入不同，用的是别的判断方法）：${moment}${tail}`);
     }
     for (const s of result.skipped) lines.push(`- 没补：${s.caseId} ${s.at.slice(0, 16).replace("T", " ")} ${s.why.join("+")}（在用的判断方法这一刻不判断它：冷的、不再追踪的，或没有判断方法管它）`);
     process.stdout.write(`${lines.join("\n")}\n`);

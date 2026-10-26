@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { backfill, backfillPoints, BackfillError } from "../server/backfill";
-import { buildCapsule, loadCapsules, readCapsule, writeCapsule, type Capsule, type CaptureInput } from "../server/capsule";
+import { buildCapsule, loadCapsules, readCapsule, replaceExpect, writeCapsule, type Capsule, type CaptureInput } from "../server/capsule";
+import { listCases, setExpect } from "../server/cases";
+import { applyCandidate, copyConfig, preview, PreviewError } from "../server/preview";
 import { loadRules, type LoadedRule } from "../server/rules";
 import { replayOn } from "../server/replay";
 import type { JournalEvent } from "../server/state";
@@ -462,6 +465,218 @@ test("a journal with a hole in the middle is refused: the state folded over it w
     } finally {
       rmSync(data, { recursive: true, force: true });
       rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---- what a person wrote on a capsule is not lost when it is replaced; a file in the way; the candidate's rules (re-review R1, R3, R5) ----
+
+/** The rule in use read one thing more (another version of it): a backfill of it is other capsules for the same moments. */
+const readsMore = (dir: string, item = "gcp-demo:98") => {
+  const ruleFile = path.join(dir, "rules", readdirSync(path.join(dir, "rules"))[0]!);
+  writeFileSync(ruleFile, readFileSync(ruleFile, "utf8").replace("assess(kase, ctx) {", `assess(kase, ctx) {\n    ctx.item("${item}");`));
+};
+const expectOf = (file: string) => (readCapsule(file) as { capsule: Capsule }).capsule.expect;
+const SAID = { headline: { has: ["示例"] } };
+
+test("--replace carries what a person wrote on an old backfill capsule to the new one before it takes the old one away", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const [a, b] = [tmp(), tmp()];
+    try {
+      // Replaced at once: the new one is written with what the old one had.
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: a });
+      const mine = first.made[0]!;
+      replaceExpect(mine.file, SAID);
+      readsMore(w.configDir);
+      const second = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: a, replace: true });
+      assert.equal(second.made.length, first.made.length);
+      const moved = second.superseded.find((s) => s.capsule.id === mine.capsule.id)!;
+      assert.deepEqual([moved.removed, moved.carried, moved.kept], [true, true, null]);
+      assert.equal(existsSync(mine.file), false, "the old one is gone");
+      const there = second.made.find((m) => m.capsule.case === mine.capsule.case && m.capsule.at === mine.capsule.at)!;
+      assert.deepEqual(expectOf(there.file), SAID, "and what was said is on the new one, in its file");
+      assert.deepEqual(there.capsule.expect, SAID, "and in what is returned");
+      assert.equal(second.superseded.filter((s) => s.carried).length, 1, "only the one that had something");
+      assert.ok(second.superseded.filter((s) => s.capsule.id !== mine.capsule.id).every((s) => s.removed && !s.carried));
+      assert.equal(loadCapsules([a]).capsules.filter((c) => c.capsule.expect !== null).length, 1, "one expect before, one after");
+
+      // Replaced later, the new capsules being there already (an earlier backfill without --replace): it is written into the file that is there.
+      const base = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: b });
+      replaceExpect(base.made[0]!.file, SAID);
+      readsMore(w.configDir, "gcp-demo:97");
+      const left = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: b });
+      const old = left.superseded.find((s) => s.capsule.id === base.made[0]!.capsule.id)!;
+      assert.deepEqual([old.removed, old.carried], [false, false], "without --replace nothing is taken away, and nothing is moved");
+      assert.ok(old.capsule.expect, "and the old one still has it");
+      const now = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: b, replace: true });
+      assert.deepEqual(now.made, [], "the new ones were there");
+      const moved2 = now.superseded.find((s) => s.capsule.id === base.made[0]!.capsule.id)!;
+      assert.deepEqual([moved2.removed, moved2.carried], [true, true]);
+      const target = now.existing.find((m) => m.capsule.case === base.made[0]!.capsule.case && m.capsule.at === base.made[0]!.capsule.at)!;
+      assert.deepEqual(expectOf(target.file), SAID, "in the file already there");
+    } finally {
+      for (const d of [a, b]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+test("--replace does not take away an old backfill capsule whose expect the new one contradicts; the same expect on both is not a conflict", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const to = tmp();
+    try {
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      const [one, two] = [first.made[0]!, first.made[1]!];
+      replaceExpect(one.file, SAID);
+      replaceExpect(two.file, SAID);
+      readsMore(w.configDir);
+      await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      // The new capsule of the first moment says another thing; of the second, the same.
+      const fresh = loadCapsules([to]).capsules.filter((c) => c.capsule.expect === null);
+      const ofMoment = (m: { capsule: Capsule }) => fresh.find((c) => c.capsule.case === m.capsule.case && c.capsule.at === m.capsule.at)!;
+      replaceExpect(ofMoment(one).file, { stage: "finished" });
+      replaceExpect(ofMoment(two).file, SAID);
+      const result = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to, replace: true });
+      const s1 = result.superseded.find((s) => s.capsule.id === one.capsule.id)!;
+      const s2 = result.superseded.find((s) => s.capsule.id === two.capsule.id)!;
+      assert.deepEqual([s1.removed, s1.carried, s1.kept], [false, false, "expect"], "kept, and said so");
+      assert.equal(existsSync(one.file), true);
+      assert.deepEqual(expectOf(one.file), SAID, "what the person wrote is where they wrote it");
+      assert.deepEqual([s2.removed, s2.carried, s2.kept], [true, false, null], "the same on both: the old one goes, nothing to carry");
+      assert.equal(existsSync(two.file), false);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the command says what --replace did with what a person wrote, and what it would do without", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const to = tmp();
+    try {
+      const run = (...args: string[]) => spawnSync(process.execPath, [BIN, "cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to, ...args], { encoding: "utf8" });
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      replaceExpect(first.made[0]!.file, SAID);
+      readsMore(w.configDir);
+      const left = run();
+      assert.match(left.stdout, /没动，两份都会进重放；要换掉旧的，加 --replace（只删这个目录里补录出的旧存档；它带着 expect，会搬到新的那份上，不会丢）/);
+      const moved = JSON.parse(run("--replace", "--json").stdout) as { superseded: Array<{ carried: boolean; removed: boolean; kept: string | null; expect: boolean }> };
+      assert.equal(moved.superseded.filter((s) => s.carried && s.removed && s.kept === null && s.expect).length, 1);
+      // And the text, with one that is kept: the new one says another.
+      const base = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      assert.deepEqual(base.superseded, [], "nothing left over now");
+      assert.equal(base.existing.length, first.made.length);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a file of the capsule's name that cannot be read is not written over and not counted as made: the backfill says it could not write", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const to = tmp();
+    try {
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      const victim = first.made[0]!;
+      writeFileSync(victim.file, '{ "v": 7 }');
+      const again = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to });
+      assert.deepEqual(again.made, [], "nothing was written");
+      assert.deepEqual(again.blocked.map((b) => [b.file, b.capsule.id]), [[victim.file, victim.capsule.id]]);
+      assert.equal(again.existing.length, first.made.length - 1);
+      assert.equal(readFileSync(victim.file, "utf8"), '{ "v": 7 }', "the file is as it was");
+      const args = [BIN, "cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", to];
+      const run = spawnSync(process.execPath, args, { encoding: "utf8" });
+      assert.match(run.stdout, /新补录了 0 份/);
+      assert.match(run.stdout, /1 份没能写/);
+      assert.match(run.stdout, /没写：gcp-demo:1 .*同名的文件在，读不了，没覆盖/);
+      const json = JSON.parse(spawnSync(process.execPath, [...args, "--json"], { encoding: "utf8" }).stdout) as { made: unknown[]; blocked: Array<{ id: string }> };
+      assert.deepEqual([json.made.length, json.blocked.map((b) => b.id)], [0, [victim.capsule.id]]);
+    } finally {
+      rmSync(to, { recursive: true, force: true });
+    }
+  });
+});
+
+test("a backfill with a candidate asks the candidate's rules, so the capsules hold what it reads; one that does not load, or is not outside the config, is refused", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const [inUseTo, candTo, cand] = [tmp(), tmp(), tmp()];
+    try {
+      rmSync(cand, { recursive: true });
+      copyConfig(w.configDir, cand);
+      readsMore(cand);
+      const candFile = path.join(cand, "rules", readdirSync(path.join(cand, "rules"))[0]!);
+      const candText = readFileSync(candFile, "utf8");
+      const mine = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: inUseTo });
+      const theirs = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: candTo, candidateDir: cand });
+      const reads98 = (c: Capsule) => c.calls.some((x) => x.m === "item" && JSON.stringify(x.args) === JSON.stringify(["gcp-demo:98"]));
+      assert.ok(mine.made.length > 0 && mine.made.every((m) => !reads98(m.capsule)), "the rule in use does not read it");
+      assert.equal(theirs.made.length, mine.made.length);
+      assert.ok(theirs.made.every((m) => reads98(m.capsule)), "the candidate's capsules hold the read");
+      assert.ok(theirs.made.every((m) => m.capsule.rule.sha256 === createHash("sha256").update(candText).digest("hex")), "and say whose rule made them");
+      assert.ok(theirs.made.every((m, i) => m.capsule.id !== mine.made[i]!.capsule.id), "they are other capsules");
+      // The candidate with a rule that does not load: no last-good copy of the rule in use stands in for it.
+      writeFileSync(candFile, "export default {");
+      const to3 = tmp();
+      try {
+        await assert.rejects(backfill({ configDir: w.configDir, dataDir: w.dataDir, to: to3, candidateDir: cand }), (e: Error) => e instanceof BackfillError && /候选的判断方法加载不上，补不了/.test(e.message));
+        assert.deepEqual(readdirSync(to3), []);
+        const inside = path.join(w.configDir, "inside");
+        mkdirSync(inside);
+        await assert.rejects(backfill({ configDir: w.configDir, dataDir: w.dataDir, to: to3, candidateDir: inside }), PreviewError);
+      } finally {
+        rmSync(to3, { recursive: true, force: true });
+      }
+      // The command says whose rules it asked.
+      writeFileSync(candFile, candText);
+      const run = spawnSync(process.execPath, [BIN, "cases", "backfill", "--config", w.configDir, "--data", w.dataDir, "--to", candTo, "--candidate", cand], { encoding: "utf8" });
+      assert.equal(run.status, 0, run.stderr);
+      assert.match(run.stdout, /用的是候选（.*）的判断方法/);
+      assert.match(run.stdout, /新补录了 0 份/);
+    } finally {
+      for (const d of [inUseTo, candTo, cand]) rmSync(d, { recursive: true, force: true });
+    }
+  });
+});
+
+test("the way out of 'cannot be told': a backfill of the candidate's rules with --replace carries the correction over, and then it is put right, or not, for real", async () => {
+  await inWorld(SCENARIOS[0]![1], async (w) => {
+    await SCENARIOS[0]![2](w);
+    const cand = tmp();
+    try {
+      rmSync(cand, { recursive: true });
+      const cases = path.join(w.configDir, "cases", "backfill");
+      const first = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: cases });
+      const mine = first.made[first.made.length - 1]!.capsule;
+      assert.ok(!mine.outcome.output!.headline.includes("已核对"));
+      setExpect({ configDir: w.configDir, id: mine.id, expect: { headline: { has: ["已核对"] } } });
+      // The candidate says it ("已核对"), and reads one thing more to do so: the capsule cannot tell.
+      copyConfig(w.configDir, cand);
+      const ruleFile = path.join(cand, "rules", readdirSync(path.join(cand, "rules"))[0]!);
+      writeFileSync(ruleFile, readFileSync(ruleFile, "utf8").replace("assess(kase, ctx) {", 'assess(kase, ctx) {\n    ctx.item("gcp-demo:98");').replace("`${headline}${headTail}`", "`${headline}（已核对）${headTail}`"));
+      const options = { configDir: w.configDir, candidateDir: cand, dataDir: w.dataDir, nowMs: w.clock.now };
+      const stuck = await preview(options);
+      assert.deepEqual(stuck.replay.expect.unknown.map((e) => e.id), [mine.id], "cannot be told");
+      assert.deepEqual(stuck.replay.expect.fixed, []);
+      await assert.rejects(applyCandidate({ ...options, expect: stuck.id }), (e: Error) => e instanceof PreviewError && /纠错核对不了 1 处/.test(e.message));
+
+      // The way out the preview points at: the capsules again, with the candidate's rules, the correction going to the new one.
+      const result = await backfill({ configDir: w.configDir, dataDir: w.dataDir, to: cases, candidateDir: cand, replace: true });
+      assert.equal(result.superseded.filter((s) => s.carried).length, 1);
+      const rows = listCases({ configDir: w.configDir, dataDir: w.dataDir });
+      assert.equal(rows.filter((r) => r.expect).length, 1, "the correction is still held, once");
+      assert.notEqual(rows.find((r) => r.expect)!.id, mine.id, "on the capsule that holds what the candidate reads");
+
+      const now = await preview(options);
+      assert.deepEqual(now.replay.expect.unknown, [], "told for real now");
+      assert.deepEqual(now.replay.expect.fixed.map((e) => e.id), [rows.find((r) => r.expect)!.id], "and it is put right");
+      assert.deepEqual(now.stops, []);
+      assert.deepEqual((await applyCandidate({ ...options, expect: now.id })).applied, [`rules/${path.basename(ruleFile)}`]);
+    } finally {
+      rmSync(cand, { recursive: true, force: true });
     }
   });
 });
