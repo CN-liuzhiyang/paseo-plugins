@@ -1879,7 +1879,12 @@ export function createEngine(deps: EngineDeps) {
       // The breaker counts every change to commitments the new rules make at once: a wrong
       // condition takes questions back as easily as it adds them.
       const count = (kind: Gated["kind"]) => gated.filter((g) => g.kind === kind).length;
-      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen"), flows: count("flow") + count("flow-later") };
+      // Requests counted for the version held until now (and not let through) whose items were not judged this round (cold ones are not):
+      // this change ends that hold, and what it held is owed to the new version with the rest, or the hold would lift with it. They are
+      // counted here, and stamped with the new version so that they are not counted again for ever once it has been counted.
+      const owed = state.rules.held ? [...deferred].filter(([, d]) => d.countedUnder === state.rules.held!.fingerprint) : [];
+      for (const [at, d] of owed) deferred.set(at, { ...d, countedUnder: set.fingerprint });
+      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen"), flows: count("flow") + count("flow-later") + owed.length };
       diff.flowRequests = changes.flows;
       events.push(firstLoad ? { type: "rules.loaded", fingerprint: set.fingerprint, files: set.files } : { type: "rules.changed", from: state.rules.fingerprint, to: set.fingerprint, diff });
       // A run started is money spent, and cannot be taken back: it counts with the rest.

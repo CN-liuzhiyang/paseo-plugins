@@ -258,3 +258,74 @@ test("N7C-06: a summary that is a good news goes through the same on its way to 
     },
     { persons: OWNER() },
   ));
+
+// ---- N7D-01: an item that is cold when the rules are saved still owes the count for the held version -------------------------
+
+test("N7D-01: requests of items that are cold when the rules are saved were counted for the held version, and are counted again with the new one: the hold does not lift, whether the items are hot again by the time room frees or not", async () => {
+  const w = await makeWorld({ start: "2026-10-13 10:00", flows: true, config: { rules: { "flow.mjs": RULE }, policy: POLICY2 } });
+  try {
+    eight(w);
+    await first(w);
+    const four = QUICK("1234");
+    await save(w, four);
+    assert.equal(heldFlows(w), 4, "four new requests, over the limit of three: held");
+    // 3 and 4 only have queued requests (no run) and a quiet title: cold (heat.ts), so the rules do not judge them
+    const cool = (n: number, cold: boolean) => {
+      const key = `gcp-demo:${n}`;
+      const item = w.items.get(key)!;
+      w.items.set(key, { ...item, title: cold ? `长期维护 ${n}` : `issue ${n}`, fields: { ...item.fields, Release: cold ? "2027-03-01" : "2026-10-14" }, sourceUpdatedAt: cold ? "2026-10-13T10:05:00+08:00" : "2026-10-13T10:07:00+08:00" });
+    };
+    cool(3, true);
+    cool(4, true);
+    await advance(w, 30);
+    await look(w, 60);
+    assert.deepEqual(w.engine.status().cold.map((c) => c.caseId).filter((id) => /:[34]$/.test(id)).sort(), ["gcp-demo:3", "gcp-demo:4"], "cold: not judged by the next save");
+    const heldFor = w.store.state.rules.held!.fingerprint;
+    // the person changes a word while they are cold: nobody let anything through
+    await save(w, `// a word\n${four}`);
+    assert.equal(heldFlows(w), 4, "the two cold ones are owed to the new version with the two that were judged: still held");
+    assert.notEqual(w.store.state.rules.held!.fingerprint, heldFor);
+    // and once more while they are still cold: they are owed to the version that holds now, not only to the first
+    await save(w, `// another word\n${four}`);
+    assert.equal(heldFlows(w), 4, "still held after the next save");
+    // they are hot again and judged: nothing changes
+    cool(3, false);
+    cool(4, false);
+    await advance(w, 30);
+    await look(w, 60);
+    assert.equal(heldFlows(w), 4, "still held");
+    await endAll(w);
+    await endAll(w);
+    assert.equal(started(w).length, 2, JSON.stringify(started(w)));
+    // a person lets it through: now they start
+    assert.equal(w.engine.releaseRules(w.store.state.rules.held!.fingerprint), true);
+    await endAll(w);
+    await endAll(w);
+    assert.ok(started(w).includes("quick-flow"), JSON.stringify(started(w)));
+  } finally {
+    w.close();
+  }
+});
+
+test("N7D-01: a cold item's queued requests owed to a held version, when the new version is not over the limit, are counted and let go (not owed for ever)", async () => {
+  const w = await makeWorld({ start: "2026-10-13 10:00", flows: true, config: { rules: { "flow.mjs": RULE }, policy: POLICY2 } });
+  try {
+    eight(w);
+    await first(w);
+    await save(w, QUICK("1234"));
+    assert.equal(heldFlows(w), 4);
+    const key = "gcp-demo:3";
+    const item = w.items.get(key)!;
+    w.items.set(key, { ...item, title: "长期维护 3", fields: { ...item.fields, Release: "2027-03-01" }, sourceUpdatedAt: "2026-10-13T10:05:00+08:00" });
+    await advance(w, 30);
+    await look(w, 60);
+    // the person puts it right so that the new version asks for two (cases 1 and 2); case 3 is cold and owes its one: three, not over
+    await save(w, QUICK("12"));
+    assert.equal(w.store.state.rules.held, null, "counted: 2 judged + 1 cold that was held = 3, not over the limit of 3");
+    // and the cold one is not owed any more: a word saved after is not held
+    await save(w, `// a word\n${QUICK("12")}`);
+    assert.equal(w.store.state.rules.held, null);
+  } finally {
+    w.close();
+  }
+});
