@@ -208,7 +208,7 @@ test("run it again is a person's: a new round under a new id with the rule's inp
       assert.match(w.engine.retryFlow(r0, "owner").detail, /已经有更新的一轮了/);
       const views = w.engine.graph("gcp-demo:1")!.runs;
       assert.deepEqual(views.map((v) => [v.runId, v.round]).sort(), [[r0, 0], [r1, 1]].sort());
-      assert.deepEqual(views.find((v) => v.runId === r0)!.actions, ["mine", "fold"], "the old round can no longer be run again, only set aside");
+      assert.deepEqual(views.find((v) => v.runId === r0)!.actions, [], "an earlier round is history: the request is what a person sets aside, not each round of it");
       // it fails again: and again a person's
       w.flows.probes.set(r1, failedProbe());
       await advance(w, 10);

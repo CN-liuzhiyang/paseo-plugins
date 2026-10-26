@@ -252,19 +252,21 @@ export function createGraph(deps: GraphDeps) {
    * was run again is the second one; two requests in one stage are two, and the success of one does not hide the failure of
    * the other), and no break of a stage the item has left (a failure, a run that went silent or one that cannot be read
    * there is history, the item went on). A run with no stage is of the current one. A run that is not known by a request
-   * (the reader of a run that was not started here) is its stage's alone.
+   * (the reader of a run that was not started here) is its stage's alone. The newest round is found first and set aside after:
+   * a person who took the newest round over (or folded it away) has set the request aside, and the round before it does not
+   * come back as the request's condition.
    */
   function decidingRuns(runs: RunView[], stage: string | undefined): RunView[] {
     const newest = new Map<string, RunView>();
     for (const r of runs) {
       // Only a run the controller itself started is the item's condition (it recorded the intent first): a file somebody
-      // wrote that names the item is listed, not believed. And one a person set aside is theirs now, not the item's.
-      if (r.own === false || r.dismissed) continue;
+      // wrote that names the item is listed, not believed.
+      if (r.own === false) continue;
       const key = r.request ?? `stage:${r.stage ?? stage ?? ""}`;
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }
-    return [...newest.values()].filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted" && r.situation !== "unchecked") || (r.stage ?? stage) === stage);
+    return [...newest.values()].filter((r) => !r.dismissed).filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted" && r.situation !== "unchecked") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {

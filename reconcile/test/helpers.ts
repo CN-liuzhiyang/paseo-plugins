@@ -133,6 +133,8 @@ export interface FlowsKit {
   dir: string;
   /** How the runtime's files stand for a run, by id (or by "<id>@<log directory>" for one read from that directory only); a run not set here is "absent" (nothing of it on disk). */
   probes: Map<string, Partial<RunProbe>>;
+  /** What a run printed when it got to its end (the controller's own output file for it), by id; a run not set here printed nothing. */
+  outs: Map<string, Partial<RunProbe>>;
   /** Runs the probe was asked about, in order. */
   asked: string[];
   /** The log directory new runs go to (the engine's `flows.logDir`), and the ones the probe was asked to read from, in order. */
@@ -231,7 +233,7 @@ export async function makeWorld(options: {
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
+  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), outs: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
   const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
 
   const source: Source = {
@@ -329,6 +331,10 @@ export async function makeWorld(options: {
             },
             get logDir() {
               return kit.logDir;
+            },
+            readOut(runId) {
+              const out = kit.outs.get(runId);
+              return out ? probeOf(out) : null;
             },
             probe(runId, _spawnedAtMs, logDir) {
               kit.asked.push(runId);

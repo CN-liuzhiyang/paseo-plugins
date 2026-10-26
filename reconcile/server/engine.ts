@@ -73,7 +73,14 @@ export interface EngineDeps {
    * `logDir`: the runtime's log directory (absolute) that new runs are meant to go to; each intent keeps the one it was made under,
    * the process is told it and the run is read from it, so a config that changes later cannot put one run id in two places.
    */
-  flows?: { launcher: Launcher; dir: string | null; logDir?: string | null; probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe } | null;
+  flows?: {
+    launcher: Launcher;
+    dir: string | null;
+    logDir?: string | null;
+    probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe;
+    /** What the run printed when it got to its end (the runner's output file, the controller's own): the evidence the runtime's log directory cannot take away. */
+    readOut?(runId: string): RunProbe | null;
+  } | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
@@ -591,6 +598,8 @@ export function createEngine(deps: EngineDeps) {
   const suspects = new Map<string, number>();
   /** What was asked for and held back for now (a limit, no way to start one), by "case\0name\0key": why. Made again by every judgment. */
   const deferred = new Map<string, { why: string; caseId: string; label: string; flow: string; maxUsd: number }>();
+  /** Requests another engine had held back for room before this one began (see adoptHeldFlows): taken as waiting by the first judgment of their item. */
+  const adopted = new Set<string>();
   /** What the last judgment of each case asked to have run: a person's "run it again" takes its input from here. */
   const lastAsked = new Map<string, Array<{ name: string; flow: string; key: string; input: Record<string, unknown> }>>();
   /** Runs whose request now carries another input than they were made with (said on the page; nothing is run again for it). */
@@ -639,7 +648,7 @@ export function createEngine(deps: EngineDeps) {
    * with the rest of what this round decides, so that the breaker holds it as it holds the rest) and the
    * process is started after, by flowsLaunch.
    */
-  function askRun(item: Item, rule: LoadedRule, fingerprint: string, req: RunAsk, stage: string, nowMs: number, gated: Gated[], events: EventBody[], plan: PlanEntry[], ahead: FlowRec[]): void {
+  function askRun(item: Item, rule: LoadedRule, fingerprint: string, req: RunAsk, stage: string, nowMs: number, gated: Gated[], events: EventBody[], plan: PlanEntry[], ahead: FlowRec[], waited: ReadonlySet<string>): void {
     const decl = rule.flows?.[req.flow]!;
     const at = flowKeyOf(item.key, req.flow, decl.flow, req.key);
     const hash = inputHashOf(req.input);
@@ -665,7 +674,7 @@ export function createEngine(deps: EngineDeps) {
     if (!deps.flows) return hold("这个实例没有配起流程的命令（flows.json）");
     // A run is started under a log directory the intent fixes (else a config that changed meanwhile could put one id in two places):
     // none to fix, none started. (A rehearsal starts nothing, so needs none.)
-    if (deps.flows.dir !== null && !deps.flows.logDir) return hold("不知道运行时的日志目录在哪，不敢起（起了没法保证以后在同一个地方读到它）");
+    if (deps.flows.dir !== null && !deps.flows.logDir) return hold("不知道运行时的日志目录在哪（这台机器的编排配置读不了），不敢起：起了没法保证以后在同一个地方读到它");
     const blocked = limitWhy(recs(), ahead, config.policy.flows, { caseId: item.key, maxUsd: decl.maxUsd }, nowMs, tz);
     if (blocked) {
       hold(`${blocked.why}，${blocked.until === "tomorrow" ? "明天再起" : "等有空位再起"}`);
@@ -676,8 +685,10 @@ export function createEngine(deps: EngineDeps) {
         events.push({ type: "action", action: action(evalKey, "note.set", item.key, `记评测候选：流程额度不够（${blocked.why}）`, "done", null, nowMs) });
       }
       // A run that waits for room is still one the change of rules asks for: the breaker counts it with the rest (else a change
-      // that asks for many would start them a few at a time, each round under the limit, and never be held).
-      gated.push({ kind: "flow-later", person: null, what: `起流程${tag}（现在挡着：${blocked.why}）`, events: [] });
+      // that asks for many would start them a few at a time, each round under the limit, and never be held). One that was already
+      // waiting before this judgment is not this change's: asked for in an earlier round, it was counted then, and is not counted by
+      // every change of the rules after (a word of a headline would hold the rules for as long as the queue is longer than the limit).
+      if (!waited.has(at)) gated.push({ kind: "flow-later", person: null, what: `起流程${tag}（现在挡着：${blocked.why}）`, events: [] });
       return;
     }
     const meta = rule.stageMeta?.find((m) => m.id === stage);
@@ -718,7 +729,10 @@ export function createEngine(deps: EngineDeps) {
     for (const rec of recs()) {
       if (rec.ended) continue;
       const mine = unrecorded.get(rec.runId);
-      const read = probe(rec.runId, rec.spawnedAt ? Date.parse(rec.spawnedAt) : (mine?.atMs ?? null), logDirOf(rec));
+      let read = probe(rec.runId, rec.spawnedAt ? Date.parse(rec.spawnedAt) : (mine?.atMs ?? null), logDirOf(rec));
+      // Started, and nothing of it in the runtime's files: they may be gone (cleaned, moved) and not never written. A run that printed its
+      // result got to its end, and is told as what it came to, not started again under the same id (that would be paid for twice).
+      if (read.state === "absent" && rec.spawnedAt) read = deps.flows?.readOut?.(rec.runId) ?? read;
       if (!read.reachable) unreadable.add(logDirOf(rec) ?? "（默认的日志目录）");
       // The process is there but the journal never heard of it (the write of its start failed): this process remembers having started
       // it, and after a restart the runtime's own files say so. Either way the start is written now, and the run goes on as one started.
@@ -800,6 +814,12 @@ export function createEngine(deps: EngineDeps) {
 
   /** How long after a run ended a message about it is still worth sending: past that it is left for the next card to carry. */
   const FLOW_TELL_MS = 12 * 3_600_000;
+  /**
+   * The same for a run that came to no result (it broke, or said it did not get done what it was for): the one message is the only
+   * way the person hears it needs them, and it is told when they may be reached -- after a night, or a weekend (a run that ended on Friday
+   * evening is told on Monday morning) -- so it is worth sending for longer than good news is.
+   */
+  const FLOW_TELL_BAD_MS = 3 * DAY;
 
   /** A run that ended is told to the person it is for, in one message per channel: not in their quiet hours, and not when it is stale. */
   async function tellFlows(nowMs: number, plan: PlanEntry[]): Promise<void> {
@@ -818,7 +838,7 @@ export function createEngine(deps: EngineDeps) {
         const came = (rec.ended.outcome === "done" || rec.ended.outcome === "stopped") && unfinishedWhy(rec.ended) === null;
         const summary = `发 ${labelOf(target)}：${rec.label}${came ? "好了" : "没跑完"}`;
         // Told while it is news: past FLOW_TELL_MS it is left for the next card (the page has it), however it came to be late.
-        if (nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > FLOW_TELL_MS) {
+        if (nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > (came ? FLOW_TELL_MS : FLOW_TELL_BAD_MS)) {
           append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "suppressed", "结束得太久了，不单发，并进下一张卡", nowMs), tries: before?.tries ?? 0 } }]);
           continue;
         }
@@ -874,7 +894,8 @@ export function createEngine(deps: EngineDeps) {
     // The way out is for a run in trouble in the stage the item is in; a stage it has left is history.
     const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
     const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
-    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here ? [...(outcome !== null && latest ? (["retry"] as const) : []), "mine", "fold"] : [];
+    // Only for the newest round of its request: an earlier one is history (the request is the person's to set aside, not each round of it).
+    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest ? [...(outcome !== null ? (["retry"] as const) : []), "mine", "fold"] : [];
     const base: RunView = read ?? {
       runId: rec.runId,
       stage: rec.stage,
@@ -1745,8 +1766,14 @@ export function createEngine(deps: EngineDeps) {
       // A run the rule no longer asks for has no input of the rule's to differ from.
       for (const r of recs()) if (r.caseId === item.key && !askedRuns.some((a) => a.name === r.name && a.flow === r.flow && a.key === r.key)) drifted.delete(r.runId);
       // What was held back last round was read by this judgment as it stood; it is asked again now, or it is not asked any more.
-      for (const held of [...deferred.keys()]) if (held.startsWith(`${item.key}\0`)) deferred.delete(held);
-      for (const req of judged.output.run ?? []) askRun(item, rule, set.fingerprint, req, judged.output.stage, nowMs, gated, events, plan, ahead);
+      const waited = new Set<string>();
+      for (const held of [...deferred.keys(), ...adopted]) {
+        if (!held.startsWith(`${item.key}\0`)) continue;
+        waited.add(held);
+        deferred.delete(held);
+        adopted.delete(held);
+      }
+      for (const req of judged.output.run ?? []) askRun(item, rule, set.fingerprint, req, judged.output.stage, nowMs, gated, events, plan, ahead, waited);
       // A wake is a note on the other case; it makes that case hot from the next round on.
       for (const w of judged.output.wake ?? []) {
         if (w.caseId === item.key || !state.items[w.caseId]) continue;
@@ -2712,6 +2739,14 @@ export function createEngine(deps: EngineDeps) {
     flowResult: flowResultFor,
     /** The runs asked for that a limit holds back now, as the last judgments left them (for the preview). */
     heldFlows: () => [...deferred.entries()].map(([at, d]) => ({ at, ...d })),
+    /**
+     * Requests a limit was holding back before this engine began, as another engine (the rules in use) has them: for a preview, whose
+     * candidate engine is a new one that would otherwise count every queued request as one its rules newly ask for. They count as
+     * waiting only for the breaker, and only for the first judgment of their item; what a rule is told of them is its own engine's.
+     */
+    adoptHeldFlows: (held: Array<{ at: string }>) => {
+      for (const { at } of held) adopted.add(at);
+    },
 
     releaseRules(fingerprint: string): boolean {
       if (state.rules.held?.fingerprint !== fingerprint) return false;

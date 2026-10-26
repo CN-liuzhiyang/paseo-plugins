@@ -599,8 +599,14 @@ export function createRunReader(deps: RunsDeps): RunReader {
  * now: `forDir` makes the reader of a directory once, and `current` is the one the page lists runs from.
  */
 export function createRunReaders(base: Omit<RunsDeps, "runsDir">, currentLogDir: string): { current: RunReader; forDir(logDir: string): RunReader } {
+  const forDir = readersOf(base);
+  return { current: forDir(currentLogDir), forDir };
+}
+
+/** One reader for each log directory asked for, made when first asked for. */
+function readersOf(base: Omit<RunsDeps, "runsDir">): (logDir: string) => RunReader {
   const readers = new Map<string, RunReader>();
-  const forDir = (logDir: string): RunReader => {
+  return (logDir) => {
     const key = path.resolve(logDir);
     let reader = readers.get(key);
     if (!reader) {
@@ -609,32 +615,105 @@ export function createRunReaders(base: Omit<RunsDeps, "runsDir">, currentLogDir:
     }
     return reader;
   };
-  return { current: forDir(currentLogDir), forDir };
+}
+
+/** A run that cannot be looked for because no directory is known to look in: nothing is seen, and nothing may be concluded from that. */
+const NOWHERE: RunProbe = { state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: false, gate: false, slow: false };
+
+// ---- what the runner printed --------------------------------------------------------------------
+
+/** How much of a runner's output file is read: its result is one JSON object, the value in it already as large as the flow made it. */
+const OUT_READ_BYTES = 1024 * 1024;
+const OUT_RESULT = /(?:^|\n)\{\s*\n\s*"ok":/g;
+const OUT_HEAD = /^\{\s*"ok":\s*(?:true|false),\s*"outcome":\s*"(done|stopped|failed|timeout)"/;
+
+/**
+ * `orch.mjs run` prints its result to stdout as one JSON object when the run is over, and the launcher keeps that in the controller's
+ * own `<runId>.out`. It is evidence the run went to its end that the runtime's log directory cannot take away (cleaned, moved, on a
+ * disk that is not there): a run whose files are gone but that printed its result is not one that never ran, and is not run again.
+ * Null when the text holds no result (a refusal's message, a process killed before it printed, nothing at all).
+ */
+export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe | null {
+  // A run started more than once under one id has more than one attempt in the file: the last result printed is the run's.
+  const found = [...text.matchAll(OUT_RESULT)];
+  const last = found[found.length - 1];
+  if (!last) return null;
+  const body = text.slice(last.index! + (text[last.index!] === "\n" ? 1 : 0));
+  let result: Record<string, unknown> | null = null;
+  try {
+    result = obj(JSON.parse(body) as unknown);
+  } catch {
+    result = null;
+  }
+  const outcome = result ? cleanText(result.outcome, 40) : (OUT_HEAD.exec(body.slice(0, 300))?.[1] ?? null);
+  if (outcome !== "done" && outcome !== "stopped" && outcome !== "failed" && outcome !== "timeout") return null;
+  const at = Number.isFinite(mtimeMs) ? mtimeMs : 0;
+  // Unreadable (cut short, or a later attempt's words after it): that it ended, and how, is all there is; what it cost is not known.
+  let end: NonNullable<RunProbe["end"]> = { at, outcome, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null };
+  let costUsd = 0;
+  let costKnown = false;
+  if (result) {
+    const kept = valueWithin(result.value === undefined ? null : result.value);
+    const cost = obj(result.cost);
+    const total = cost?.totalUsd;
+    const usd = typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null;
+    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd };
+    // No `cost` at all is a run in which no agent was asked anything: nothing was spent.
+    costUsd = usd ?? 0;
+    costKnown = usd !== null || cost === null;
+  }
+  return { state: "ended", safeToRestart: false, refused: null, view: null, end, costUsd, costKnown, unread: 0, reachable: true, gate: false, slow: false };
+}
+
+/** The result a run printed, read from the runner's output file in `dir` (<runId>.out); null when there is none to be read. */
+export function createOutReader(dir: string): (runId: string) => RunProbe | null {
+  return (runId) => {
+    let fd: number;
+    try {
+      fd = openSync(path.join(dir, `${runId}.out`), "r");
+    } catch {
+      return null;
+    }
+    try {
+      const stat = fstatSync(fd);
+      const buffer = Buffer.alloc(Math.min(stat.size, OUT_READ_BYTES));
+      readSync(fd, buffer, 0, buffer.length, 0);
+      return probeFromRunnerOutput(buffer.toString("utf8"), stat.mtimeMs);
+    } catch {
+      return null;
+    } finally {
+      closeSync(fd);
+    }
+  };
 }
 
 /**
  * What the plugin gives the engine to show and start flows, made once when it loads from the machine's config: the log directory (absolute,
  * for new runs), the runs of an item for its page (from that directory), and a probe that reads one run by its id from the directory its
- * intent fixed. Null when the config names no log directory that can be found.
+ * intent fixed. When the config names no log directory that can be found (it cannot be read), `logDir` is null: no run is started, the
+ * page shows no runs of the current directory, and the runs already going are still read, each from the directory its intent fixed.
  */
 export function createRunsWiring(opts: { tz: string; now(): number; log(message: string): void; env?: NodeJS.ProcessEnv; home?: string }): {
-  logDir: string;
+  logDir: string | null;
   runs(caseId: string): RunView[];
   probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe;
-} | null {
+} {
   const logDir = resolveLogDir(opts.env, opts.home);
-  if (logDir === null) return null;
-  const readers = createRunReaders({ tz: opts.tz, now: opts.now, affair: HOME_SCREEN, view: RUN_SCREEN }, logDir);
+  const forDir = readersOf({ tz: opts.tz, now: opts.now, affair: HOME_SCREEN, view: RUN_SCREEN });
   return {
     logDir,
     runs: (caseId) => {
+      if (logDir === null) return [];
       try {
-        return readers.current.forCase(caseId);
+        return forDir(logDir).forCase(caseId);
       } catch (error) {
         opts.log(`reading the runs of ${caseId} failed: ${(error as Error).message}`);
         return [];
       }
     },
-    probe: (runId, spawnedAtMs, runLogDir) => readers.forDir(runLogDir ?? logDir).probe(runId, spawnedAtMs),
+    probe: (runId, spawnedAtMs, runLogDir) => {
+      const dir = runLogDir ?? logDir;
+      return dir === null ? NOWHERE : forDir(dir).probe(runId, spawnedAtMs);
+    },
   };
 }

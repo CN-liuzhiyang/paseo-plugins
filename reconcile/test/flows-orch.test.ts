@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOME_SCREEN, RUN_SCREEN } from "../shared/graph";
 import { createLauncher, runIdOf } from "../server/flows";
-import { createRunReaders } from "../server/runs";
+import { createOutReader, createRunReaders } from "../server/runs";
 import { makeWorld, TEST_POLICY, TZ, type World } from "./helpers";
 import { set } from "./item-flow";
 
@@ -63,7 +63,7 @@ interface Rig {
   logDir: string;
   runsDir: string;
   /** What the engine is given to start flows with: the test may change its `logDir`, as a plugin that comes back to another config has. */
-  flowsDeps: { logDir: string | null };
+  flowsDeps: { logDir: string | null; dir: string };
   /** How many processes the launcher was asked to start. */
   starts: number[];
   /** Moves the engine's clock (and the reader's) on without waiting. */
@@ -106,6 +106,7 @@ async function withRig(body: (rig: Rig) => Promise<void>, options: { envDir?: st
     dir: path.join(base, "flows-out"),
     logDir: logDir as string | null,
     probe: (runId: string, spawnedAtMs: number | null, dir: string | null) => readers.forDir(dir ?? logDir).probe(runId, spawnedAtMs),
+    readOut: createOutReader(path.join(base, "flows-out")),
   };
   const local = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 16).replace("T", " ");
   const w = await makeWorld({
@@ -313,6 +314,18 @@ const ended = (dir: string, id: string) => {
   const file = path.join(dir, "runs", `${id}.jsonl`);
   return existsSync(file) && readFileSync(file, "utf8").includes('"kind":"run.end"');
 };
+/** The runner has printed its result (the process is over): the controller's own output file for the run holds it. */
+const printed = (outDir: string, id: string) => {
+  const file = path.join(outDir, `${id}.out`);
+  return existsSync(file) && readFileSync(file, "utf8").includes('"outcome"');
+};
+const waitFor = async (done: () => boolean, what: string) => {
+  const deadline = Date.now() + 20_000;
+  while (!done()) {
+    if (Date.now() > deadline) throw new Error(`gave up waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+};
 
 test("R7B-01: the config points to another log directory between a run and the controller reading its end: the run is read where it ran, and it does not run again", () =>
   withRig(async ({ w, logDir, flowsDeps, starts, skew, tick }) => {
@@ -354,3 +367,25 @@ test("R7B-01: the process is told the log directory the intent fixed, not left t
     },
     { envDir: "elsewhere" },
   ));
+
+test("N7B-01: the runtime's files for a run are gone (cleaned) before the controller read its end: it is not run again, and it is told as what it printed", () =>
+  withRig(async ({ w, logDir, runsDir, flowsDeps, starts, skew, tick }) => {
+    const id = ids(1, "demo", "k1");
+    ask(w, 1, [run("k1", { word: "once", waitMs: 0 })], "demo:k1");
+    await tick();
+    assert.equal(starts.length, 1);
+    // the run ends while the controller is not looking, and the runtime's log directory is cleaned out
+    await waitFor(() => ended(logDir, id) && printed(flowsDeps.dir, id), "the run to end and print its result");
+    rmSync(runsDir, { recursive: true, force: true });
+    assert.equal(existsSync(runsDir), false);
+    await w.crash();
+    skew.ms += 120_000;
+    await tick();
+    await tick();
+    const rec = flowsOf(w)[id]!;
+    assert.equal(starts.length, 1, "not started a second time under the same id: that would be a second run, and a second payment");
+    assert.deepEqual([rec.ended?.outcome, rec.ended?.summary, rec.ended?.value, rec.ended?.valueDropped], ["done", "got once", { word: "once", found: 2, pad: "" }, false]);
+    assert.deepEqual(Object.keys(flowsOf(w)), [id]);
+    await tick();
+    assert.match(headline(w, 1), /^r demo:k1=done\{"word":"once"/);
+  }));

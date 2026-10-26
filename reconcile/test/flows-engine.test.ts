@@ -323,4 +323,3 @@ test("an item that has gone cold is judged while a run for it is going, so that 
     await advance(w, 30);
     assert.equal(w.engine.status().cases.some((c) => c.caseId === "gcp-demo:1"), false, "cold again once it is over");
   }));
-

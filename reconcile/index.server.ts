@@ -14,7 +14,7 @@ import { exec } from "./server/exec";
 import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
 import { createLauncher } from "./server/flows";
-import { createRunsWiring } from "./server/runs";
+import { createOutReader, createRunsWiring } from "./server/runs";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
 import { createCommandSource } from "./server/sources/command";
 import { createGcpSource } from "./server/sources/gcp";
@@ -188,9 +188,11 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       // The log directory is fixed here, for the life of this plugin: new runs are started under it (the process is told it) and each
       // intent keeps it, so a run is read from where it was started even after the config points elsewhere.
       const wiring = createRunsWiring({ tz: config.policy.tz, now: Date.now, log });
-      const runs = wiring ? wiring.runs : null;
-      // Flows are started only where the config says how (flows.json) and the runs can be read back.
-      const flows = config.launcher && wiring ? { launcher: createLauncher(config.launcher), dir: path.join(dataDir, "flows"), logDir: wiring.logDir, probe: wiring.probe } : null;
+      const runs = wiring.runs;
+      if (wiring.logDir === null) log("flows: the machine's orchestration config could not be read, so there is no log directory to start runs under: none is started (the ones already going are still read)");
+      // Flows are started only where the config says how (flows.json); a run is started only when the runs can be read back (a log directory is known).
+      const flowsDir = path.join(dataDir, "flows");
+      const flows = config.launcher ? { launcher: createLauncher(config.launcher), dir: flowsDir, logDir: wiring.logDir, probe: wiring.probe, readOut: createOutReader(flowsDir) } : null;
       engine = createEngine({
         store,
         config,

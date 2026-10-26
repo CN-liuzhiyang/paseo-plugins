@@ -14,11 +14,11 @@ import { set } from "./item-flow";
 /** The kit's rule that asks for nothing: what is in use before the change. */
 const QUIET = RULE.replace("if (f.Runs) out.run = JSON.parse(f.Runs);", "");
 
-async function withPreview(body: (w: World, candidate: string) => Promise<void>, options: { inUse?: string; policy?: unknown; flows?: boolean } = {}) {
+async function withPreview(body: (w: World, candidate: string) => Promise<void>, options: { inUse?: string; policy?: unknown; flows?: boolean; items?: number } = {}) {
   const w = await makeWorld({ start: "2026-10-13 09:50", flows: options.flows ?? false, config: { rules: { "flow.mjs": options.inUse ?? QUIET }, ...(options.policy ? { policy: options.policy } : {}) } });
   const candidate = mkdtempSync(path.join(os.tmpdir(), "reconcile-candidate-"));
   try {
-    for (let n = 1; n <= 4; n++) asks(w, n, [req("k1")], { Watch: "triage:k1" });
+    for (let n = 1; n <= (options.items ?? 4); n++) asks(w, n, [req("k1")], { Watch: "triage:k1" });
     await w.run("2026-10-13 10:00", 5);
     rmSync(candidate, { recursive: true });
     copyConfig(w.configDir, candidate);
@@ -119,4 +119,25 @@ test("the id of a preview follows the runs it lists", () =>
       assert.ok(b.flows.some((f) => f.caseId === "gcp-demo:2" && f.candidate));
     },
     { policy: POLICY({}) },
+  ));
+
+test("N7B-02: the requests the rules in use already hold back for room are not ones the change asks for: a change that asks for nothing more is not held, one that adds three is three", () =>
+  withPreview(
+    async (w, candidate) => {
+      assert.equal(w.flows.launcher.started.length, 2, "two at once is the default: six wait");
+      writeFileSync(path.join(candidate, "rules", "flow.mjs"), `// a note\n${RULE}`);
+      const same = await look(w, candidate);
+      assert.equal(same.breaker, null, "six wait already, and the change asks for nothing more");
+      assert.deepEqual(same.flows, []);
+      const three = RULE.replace("if (f.Runs) out.run = JSON.parse(f.Runs);", 'if (f.Runs) out.run = JSON.parse(f.Runs).concat(/:[123]$/.test(kase.id) ? [{ flow: "quick", key: "x", input: { n: 1 }, label: "快查" }] : []);');
+      writeFileSync(path.join(candidate, "rules", "flow.mjs"), three);
+      const more = await look(w, candidate);
+      assert.equal(more.flows.length, 3, "three requests of its own, waiting with the rest");
+      assert.equal(more.breaker, null, "three is not over the limit of three: the six already waiting are not counted with them");
+      const four = three.replace("[123]", "[1234]");
+      writeFileSync(path.join(candidate, "rules", "flow.mjs"), four);
+      const over = await look(w, candidate);
+      assert.equal(over.breaker?.changes.flows, 4);
+    },
+    { inUse: RULE, flows: true, policy: POLICY({ concurrent: 2 }), items: 8 },
   ));

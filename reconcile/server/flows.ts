@@ -179,8 +179,17 @@ export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value">): string |
   if (end.outcome !== "stopped") return null;
   const value = end.value;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return cleanText((value as Record<string, unknown>).why, 300);
+  const why = cleanText((value as Record<string, unknown>).why, 300);
+  // Only marks ("。", "...") is no sentence: it says nothing, so it is not a reason to call the run unfinished.
+  return why !== null && /[\p{L}\p{N}]/u.test(why) ? why : null;
 }
+
+/**
+ * A sentence of the flow's for a place that may draw Markdown or tags (a message): what makes a link, a tag or code is put in its
+ * full-width form, so that it reads the same and is not drawn as one (a backslash would show as it is where nothing is drawn).
+ */
+const plainForMessage = (text: string): string =>
+  text.replace(/[\[\]<>`]/g, (c) => ({ "[": "［", "]": "］", "<": "＜", ">": "＞", "`": "｀" })[c]!);
 
 /** What a rule is told of a run. */
 export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
@@ -232,7 +241,7 @@ export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEn
   const number = `#${rec.caseId.slice(rec.caseId.lastIndexOf(":") + 1)}`;
   const unfinished = unfinishedWhy(end);
   // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done".
-  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。详情在「事项追踪」里。`, status: "failed" };
+  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainForMessage(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。详情在「事项追踪」里。`, status: "failed" };
   if (end.outcome === "done" || end.outcome === "stopped") {
     return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${end.summary ?? (end.outcome === "done" ? "完成了" : "中止了")}。详情在「事项追踪」里。`, status: "succeeded" };
   }

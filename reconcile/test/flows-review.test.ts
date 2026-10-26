@@ -279,10 +279,15 @@ test("R7B-01: what the plugin wires up: the log directory is found once and abso
     assert.equal(wiring.probe("rc-x", null, a).state, "absent");
     assert.equal(wiring.probe("rc-x", null, null).state, "absent", "none fixed: the current one");
     assert.deepEqual(wiring.runs("gcp-demo:1"), [], "the page lists from the current directory only");
-    // a config that cannot be read is not guessed around
+    // a config that cannot be read is not guessed around: no log directory to start under -- and the runs already going are still read
     const bad = path.join(base, "bad.json");
     writeFileSync(bad, "{not json");
-    assert.equal(createRunsWiring({ tz: TZ, now: () => now, log: () => {}, env: { ORCH_CONFIG: bad } }), null);
+    const blind = createRunsWiring({ tz: TZ, now: () => now, log: () => {}, env: { ORCH_CONFIG: bad } });
+    assert.equal(blind.logDir, null);
+    assert.deepEqual(blind.runs("gcp-demo:1"), []);
+    assert.equal(blind.probe("rc-x", null, b).state, "ended", "a run whose intent fixed a directory is read from it all the same");
+    const nowhere = blind.probe("rc-x", null, null);
+    assert.deepEqual([nowhere.state, nowhere.reachable, nowhere.safeToRestart], ["absent", false, false], "with none to look in, nothing is concluded from not seeing it");
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

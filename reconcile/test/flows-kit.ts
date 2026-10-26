@@ -89,4 +89,3 @@ export const POLICY = (flows: { perDay?: number; usdPerDay?: number; perCasePerD
 export const OWNER = (extra: Record<string, unknown> = {}) => ({ owner: { name: "测试用户", admin: true, tz: TZ, quiet: { work: "workdays 09:30-20:00" }, pushPerDay: 8, notify: [{ channel: "chat", to: "u1" }], ...extra } });
 /** The probe of a run that failed after spending $0.30. */
 export const failedProbe = () => finished(null, { outcome: "failed", error: { name: "OutputMismatch", message: "m", headline: "回答不合格式", plain: "x", raw: "x" } as never }, 0.3);
-

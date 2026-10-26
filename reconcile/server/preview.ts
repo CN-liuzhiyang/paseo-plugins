@@ -391,6 +391,9 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
     clock.ms = at;
     for (const [i, side] of sides.entries()) {
       side.freshen();
+      // The requests the rules in use already hold back for room are waiting in the real controller too, before any change of rules:
+      // they are not this change's (else a trivial edit would be shown holding the rules for as long as the queue is long).
+      if (i === 1 && step === 0) side.engine.adoptHeldFlows(sides[0]!.engine.heldFlows());
       await side.engine.tick();
       marks[i]!.push(side.store.events.length);
       if (step === 0) {
