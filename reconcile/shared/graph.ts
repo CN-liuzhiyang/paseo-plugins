@@ -255,6 +255,8 @@ export interface RunView {
    * condition. Absent: not known (a reader with no controller behind it), read as before.
    */
   own?: boolean;
+  /** The request this run is a round of (the case, the rule's name, the flow and the key): runs of one request are rounds of the same ask, runs of two are two asks. */
+  request?: string;
   /** For a run of its own: the round (a person's "run it again" adds one). */
   round?: number;
   /** A person set it aside: "mine" (they take it from here) or "fold" (not shown). It no longer counts as the item's condition. */

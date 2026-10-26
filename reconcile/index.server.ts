@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { HOME_SCREEN, RUN_SCREEN } from "./shared/graph";
 import { answerRpc, flowRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
@@ -15,7 +14,7 @@ import { exec } from "./server/exec";
 import { clipMd, readConversation, REQUEST_ID } from "./server/requests";
 import { createInboxProvider } from "./server/inbox";
 import { createLauncher } from "./server/flows";
-import { createRunReader, resolveRunsDir } from "./server/runs";
+import { createRunsWiring } from "./server/runs";
 import { createFlagsSource, fetchText } from "./server/sources/flags";
 import { createCommandSource } from "./server/sources/command";
 import { createGcpSource } from "./server/sources/gcp";
@@ -186,20 +185,12 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       mkdirSync(requestsDir, { recursive: true });
       const conversation = paseo ? (agentId: string) => readConversation(paseo.agents.ref(agentId)) : null;
       // Flows started for an item show on its page: read from the runtime's event files, never written.
-      const runsDir = resolveRunsDir();
-      const runReader = runsDir ? createRunReader({ runsDir, tz: config.policy.tz, now: Date.now, affair: HOME_SCREEN, view: RUN_SCREEN }) : null;
-      const runs = runReader
-        ? (caseId: string) => {
-            try {
-              return runReader.forCase(caseId);
-            } catch (error) {
-              log(`reading the runs of ${caseId} failed: ${(error as Error).message}`);
-              return [];
-            }
-          }
-        : null;
+      // The log directory is fixed here, for the life of this plugin: new runs are started under it (the process is told it) and each
+      // intent keeps it, so a run is read from where it was started even after the config points elsewhere.
+      const wiring = createRunsWiring({ tz: config.policy.tz, now: Date.now, log });
+      const runs = wiring ? wiring.runs : null;
       // Flows are started only where the config says how (flows.json) and the runs can be read back.
-      const flows = config.launcher && runReader ? { launcher: createLauncher(config.launcher), dir: path.join(dataDir, "flows"), probe: (runId: string, spawnedAtMs: number | null) => runReader.probe(runId, spawnedAtMs) } : null;
+      const flows = config.launcher && wiring ? { launcher: createLauncher(config.launcher), dir: path.join(dataDir, "flows"), logDir: wiring.logDir, probe: wiring.probe } : null;
       engine = createEngine({
         store,
         config,

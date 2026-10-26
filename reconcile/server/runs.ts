@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { RunView } from "../shared/graph";
+import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
 import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
 import { FLOW_VALUE_BYTES } from "../shared/model";
 import { iso } from "./time";
@@ -52,22 +52,29 @@ export interface RunsDeps {
 
 const localProbe = (): Probe => ({ hostname: os.hostname(), kill: (pid, signal) => process.kill(pid, signal) });
 
-/** The same order the runtime and orchestration-ui use: ORCH_LOG_DIR, then the config file's logDir, then the default. */
-export function resolveRunsDir(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): string | null {
-  const dir = (logDir: string) => path.join(logDir, "runs");
-  if (env.ORCH_LOG_DIR) return dir(env.ORCH_LOG_DIR);
+/**
+ * The log directory, in the same order the runtime and orchestration-ui use: ORCH_LOG_DIR, then the config file's logDir, then
+ * the default. Absolute: a run started under it is read from it later, whatever this process's working directory is then.
+ */
+export function resolveLogDir(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): string | null {
+  if (env.ORCH_LOG_DIR) return path.resolve(env.ORCH_LOG_DIR);
   const configHome = path.join(home, ".paseo-orchestration");
   const file = env.ORCH_CONFIG ?? path.join(configHome, "config.json");
   if (existsSync(file)) {
     try {
       const text = readFileSync(file, "utf8");
       const value = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) as { logDir?: unknown };
-      if (typeof value.logDir === "string" && value.logDir !== "") return dir(value.logDir);
+      if (typeof value.logDir === "string" && value.logDir !== "") return path.resolve(value.logDir);
     } catch {
       return null;
     }
   }
-  return dir(path.join(configHome, "logs"));
+  return path.join(configHome, "logs");
+}
+
+export function resolveRunsDir(env: NodeJS.ProcessEnv = process.env, home: string = os.homedir()): string | null {
+  const logDir = resolveLogDir(env, home);
+  return logDir === null ? null : path.join(logDir, "runs");
 }
 
 // ---- reading the events ---------------------------------------------------------------------------
@@ -101,7 +108,10 @@ interface RunRec {
   lastAt: number;
   /** Lines too long to read that were not known by their head: what they said is missing from everything above. */
   unread: number;
-  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean } | null;
+  /** Calls that began after as many were kept as are (MAX_CALLS): their cost is missing from the sum. */
+  skipped: number;
+  /** `totalUsd` is the run.end's own sum of what the run cost (cost.totalUsd), null when the line did not give one or was not read. */
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null } | null;
 }
 
 /** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
@@ -154,7 +164,11 @@ function fold(run: RunRec, e: Record<string, unknown>) {
     case "call.start": {
       const id = str(e.callId);
       const type = e.type === "ask" || e.type === "do" || e.type === "gate" ? e.type : null;
-      if (!id || !type || id.length > 128 || (!run.calls.has(id) && run.calls.size >= MAX_CALLS)) return;
+      if (!id || !type || id.length > 128) return;
+      if (!run.calls.has(id) && run.calls.size >= MAX_CALLS) {
+        run.skipped += 1;
+        return;
+      }
       run.calls.set(id, {
         id,
         type,
@@ -195,7 +209,8 @@ function fold(run: RunRec, e: Record<string, unknown>) {
       // What the flow returned is kept up to a bound (a rule is handed it); past that only that it was too large.
       const value = e.value === undefined ? null : e.value;
       const kept = valueWithin(value);
-      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped };
+      const total = obj(e.cost)?.totalUsd;
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null };
     }
   }
 }
@@ -327,8 +342,17 @@ export interface RunProbe {
   view: RunView | null;
   /** The run.end, when there is one. */
   end: NonNullable<RunRec["end"]> | null;
-  /** What the calls that ended cost. */
+  /** What the run cost: the run.end's own total when it gave one, else what the calls that ended cost. */
   costUsd: number;
+  /**
+   * Whether `costUsd` is all of it: not when lines of the events were too long to read, or calls were past the number kept, and the
+   * run.end gave no total to go by. The money is spent either way; a budget must not count it as nothing.
+   */
+  costKnown: boolean;
+  /** Lines of the run's events that were too long to read: what they said (a call's cost, a gate) is not in what was read. */
+  unread: number;
+  /** The directory the runs are read from could be listed (a directory that is not there yet is nothing to list, not trouble). */
+  reachable: boolean;
   /** A gate is open: it waits for a person. */
   gate: boolean;
   /** Long quiet for a run that is alive. */
@@ -359,6 +383,8 @@ export function createRunReader(deps: RunsDeps): RunReader {
   const files = new Map<string, FileRec>();
   const probe = deps.probe ?? localProbe();
   let scannedAt = -Infinity;
+  /** Whether the last look at the directory could list it: a missing directory can (it has no runs), an unreadable one cannot. */
+  let reachable = true;
 
   function startOf(file: string, rec: FileRec, line: string) {
     let e: Record<string, unknown>;
@@ -388,6 +414,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
       calls: new Map(),
       lastAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
       unread: 0,
+      skipped: 0,
       end: null,
     };
   }
@@ -407,7 +434,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
     }
     const at = Date.parse(m[1]!);
     run.lastAt = Math.max(run.lastAt, Number.isFinite(at) ? at : 0);
-    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null, value: null, valueDropped: true };
+    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null };
   }
 
   function readNew(file: string, rec: FileRec) {
@@ -481,7 +508,9 @@ export function createRunReader(deps: RunsDeps): RunReader {
     let names: string[];
     try {
       names = readdirSync(deps.runsDir).filter((n) => n.endsWith(".jsonl"));
-    } catch {
+      reachable = true;
+    } catch (error) {
+      reachable = (error as NodeJS.ErrnoException).code === "ENOENT";
       return;
     }
     const present = new Set(names);
@@ -544,7 +573,11 @@ export function createRunReader(deps: RunsDeps): RunReader {
         refused: typeof claim?.body?.refused === "string" ? cleanText(claim.body.refused, 300) : null,
         view,
         end: run?.end ?? null,
-        costUsd: view?.costUsd ?? 0,
+        // What the runtime itself added up when it ended is the surest figure; the calls that were read are the least that was spent.
+        costUsd: Math.max(run?.end?.totalUsd ?? 0, view?.costUsd ?? 0),
+        costKnown: !run || run.end?.totalUsd != null || (run.unread === 0 && run.skipped === 0),
+        unread: run?.unread ?? 0,
+        reachable,
         gate: view?.gate != null,
         slow: view?.situation === "slow",
       };
@@ -558,5 +591,50 @@ export function createRunReader(deps: RunsDeps): RunReader {
       }
       return out.sort((a, b) => Date.parse(b.startedAt) - Date.parse(a.startedAt));
     },
+  };
+}
+
+/**
+ * Readers by log directory. A run is read where it was started (the directory its intent fixed), not where the config points
+ * now: `forDir` makes the reader of a directory once, and `current` is the one the page lists runs from.
+ */
+export function createRunReaders(base: Omit<RunsDeps, "runsDir">, currentLogDir: string): { current: RunReader; forDir(logDir: string): RunReader } {
+  const readers = new Map<string, RunReader>();
+  const forDir = (logDir: string): RunReader => {
+    const key = path.resolve(logDir);
+    let reader = readers.get(key);
+    if (!reader) {
+      reader = createRunReader({ ...base, runsDir: path.join(key, "runs") });
+      readers.set(key, reader);
+    }
+    return reader;
+  };
+  return { current: forDir(currentLogDir), forDir };
+}
+
+/**
+ * What the plugin gives the engine to show and start flows, made once when it loads from the machine's config: the log directory (absolute,
+ * for new runs), the runs of an item for its page (from that directory), and a probe that reads one run by its id from the directory its
+ * intent fixed. Null when the config names no log directory that can be found.
+ */
+export function createRunsWiring(opts: { tz: string; now(): number; log(message: string): void; env?: NodeJS.ProcessEnv; home?: string }): {
+  logDir: string;
+  runs(caseId: string): RunView[];
+  probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe;
+} | null {
+  const logDir = resolveLogDir(opts.env, opts.home);
+  if (logDir === null) return null;
+  const readers = createRunReaders({ tz: opts.tz, now: opts.now, affair: HOME_SCREEN, view: RUN_SCREEN }, logDir);
+  return {
+    logDir,
+    runs: (caseId) => {
+      try {
+        return readers.current.forCase(caseId);
+      } catch (error) {
+        opts.log(`reading the runs of ${caseId} failed: ${(error as Error).message}`);
+        return [];
+      }
+    },
+    probe: (runId, spawnedAtMs, runLogDir) => readers.forDir(runLogDir ?? logDir).probe(runId, spawnedAtMs),
   };
 }

@@ -70,8 +70,10 @@ export interface EngineDeps {
   /**
    * What it takes to start flows for items (server/flows.ts): the process to start them with, where their input and
    * affair files go, and how a run is read by its id (server/runs.ts probe). Absent: this engine starts none.
+   * `logDir`: the runtime's log directory (absolute) that new runs are meant to go to; each intent keeps the one it was made under,
+   * the process is told it and the run is read from it, so a config that changes later cannot put one run id in two places.
    */
-  flows?: { launcher: Launcher; dir: string | null; probe(runId: string, spawnedAtMs: number | null): RunProbe } | null;
+  flows?: { launcher: Launcher; dir: string | null; logDir?: string | null; probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe } | null;
   now(): number;
   log(message: string): void;
   writeStatus(status: unknown): void;
@@ -100,7 +102,8 @@ export const DROPPED = "你说不再追踪";
 /** One change a rules change makes this round, kept apart so that the breaker can hold it. */
 interface Gated {
   events: EventBody[];
-  kind: "create" | "cancel" | "change" | "reopen" | "fact" | "flow";
+  /** "flow-later": a run asked for that a limit holds back for now: nothing to write, but the breaker counts it. */
+  kind: "create" | "cancel" | "change" | "reopen" | "fact" | "flow" | "flow-later";
   person: string | null;
   /** What it does, for the plan: done, or held. */
   what: string;
@@ -587,11 +590,15 @@ export function createEngine(deps: EngineDeps) {
   /** Since when a doubtful state of a run has been seen (flows.ts actFor), by run id. */
   const suspects = new Map<string, number>();
   /** What was asked for and held back for now (a limit, no way to start one), by "case\0name\0key": why. Made again by every judgment. */
-  const deferred = new Map<string, string>();
+  const deferred = new Map<string, { why: string; caseId: string; label: string; flow: string; maxUsd: number }>();
   /** What the last judgment of each case asked to have run: a person's "run it again" takes its input from here. */
-  const lastAsked = new Map<string, Array<{ name: string; key: string; input: Record<string, unknown> }>>();
+  const lastAsked = new Map<string, Array<{ name: string; flow: string; key: string; input: Record<string, unknown> }>>();
   /** Runs whose request now carries another input than they were made with (said on the page; nothing is run again for it). */
   const drifted = new Set<string>();
+  /** Processes started by this one whose record (flow.spawned) could not be written: the process is there, the journal does not know yet. By run id. */
+  const unrecorded = new Map<string, { pid: number | null; atMs: number }>();
+  /** The log directory a run is started under and read from: the one its intent fixed (an intent from before that was kept has none: the current one). */
+  const logDirOf = (rec: FlowRec): string | null => rec.logDir ?? deps.flows?.logDir ?? null;
 
   const recs = (): FlowRec[] => Object.values(state.flows ?? {});
   /** Runs whose end a judgment has read since this process began (after a restart each is read once more: a judgment is cheap, a result never read is not). */
@@ -602,13 +609,21 @@ export function createEngine(deps: EngineDeps) {
   /** A run that came to no result, so that a person may ask for it again (and none that did). */
   const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
-  /** What a rule is told of a run it asked for; null for one it never did. */
+  /** The flow a rule's name for one stands for now (rules.ts `flows`); null for a name the item's rule does not declare. */
+  const declaredFlow = (caseId: string, name: string): string | null => {
+    const source = state.items[caseId]?.source;
+    return ruleset?.rules.find((r) => r.source === source)?.flows?.[name]?.flow ?? null;
+  };
+
+  /** What a rule is told of a run it asked for, by its name for it and the key; null for one it never did (or under another flow: that is another request). */
   function flowResultFor(caseId: string, name: string, key: string): FlowResult | null {
-    const at = flowKeyOf(caseId, name, key);
+    const flow = declaredFlow(caseId, name);
+    if (flow === null) return null;
+    const at = flowKeyOf(caseId, name, flow, key);
     const latest = state.flowKeys?.[at];
     if (!latest) {
-      const why = deferred.get(at);
-      return why ? deferredResult(why) : null;
+      const held = deferred.get(at);
+      return held ? deferredResult(held.why) : null;
     }
     const rec = state.flows?.[latest.runId];
     return rec ? resultOf(rec, liveOf.get(rec.runId) ?? null) : null;
@@ -624,7 +639,7 @@ export function createEngine(deps: EngineDeps) {
    */
   function askRun(item: Item, rule: LoadedRule, fingerprint: string, req: RunAsk, stage: string, nowMs: number, gated: Gated[], events: EventBody[], plan: PlanEntry[], ahead: FlowRec[]): void {
     const decl = rule.flows?.[req.flow]!;
-    const at = flowKeyOf(item.key, req.flow, req.key);
+    const at = flowKeyOf(item.key, req.flow, decl.flow, req.key);
     const hash = inputHashOf(req.input);
     const had = state.flowKeys?.[at];
     if (had) {
@@ -642,10 +657,13 @@ export function createEngine(deps: EngineDeps) {
       return;
     }
     const hold = (why: string, kind: PlanEntry["kind"] = "skipped") => {
-      deferred.set(at, why);
+      deferred.set(at, { why, caseId: item.key, label: req.label, flow: decl.flow, maxUsd: decl.maxUsd });
       say(kind, `没起流程${tag}：${why}`);
     };
     if (!deps.flows) return hold("这个实例没有配起流程的命令（flows.json）");
+    // A run is started under a log directory the intent fixes (else a config that changed meanwhile could put one id in two places):
+    // none to fix, none started. (A rehearsal starts nothing, so needs none.)
+    if (deps.flows.dir !== null && !deps.flows.logDir) return hold("不知道运行时的日志目录在哪，不敢起（起了没法保证以后在同一个地方读到它）");
     const blocked = limitWhy(recs(), ahead, config.policy.flows, { caseId: item.key, maxUsd: decl.maxUsd }, nowMs, tz);
     if (blocked) {
       hold(`${blocked.why}，${blocked.until === "tomorrow" ? "明天再起" : "等有空位再起"}`);
@@ -655,6 +673,9 @@ export function createEngine(deps: EngineDeps) {
         events.push({ type: "eval.candidate", kind: "budget-overflow", subject: `${item.key} ${req.label}`, detail: blocked.why });
         events.push({ type: "action", action: action(evalKey, "note.set", item.key, `记评测候选：流程额度不够（${blocked.why}）`, "done", null, nowMs) });
       }
+      // A run that waits for room is still one the change of rules asks for: the breaker counts it with the rest (else a change
+      // that asks for many would start them a few at a time, each round under the limit, and never be held).
+      gated.push({ kind: "flow-later", person: null, what: `起流程${tag}（现在挡着：${blocked.why}）`, events: [] });
       return;
     }
     const meta = rule.stageMeta?.find((m) => m.id === stage);
@@ -675,6 +696,7 @@ export function createEngine(deps: EngineDeps) {
       input: req.input,
       inputHash: hash,
       rules: fingerprint,
+      ...(deps.flows.logDir ? { logDir: deps.flows.logDir } : {}),
       intentAt: nowIso(nowMs),
     };
     ahead.push(rec);
@@ -690,10 +712,21 @@ export function createEngine(deps: EngineDeps) {
     if (!probe) return [];
     const launch: string[] = [];
     const events: EventBody[] = [];
+    const unreadable = new Set<string>();
     for (const rec of recs()) {
       if (rec.ended) continue;
-      const read = probe(rec.runId, rec.spawnedAt ? Date.parse(rec.spawnedAt) : null);
-      const { act, suspect } = actFor(rec, read, suspects.get(rec.runId) ?? null, nowMs);
+      const mine = unrecorded.get(rec.runId);
+      const read = probe(rec.runId, rec.spawnedAt ? Date.parse(rec.spawnedAt) : (mine?.atMs ?? null), logDirOf(rec));
+      if (!read.reachable) unreadable.add(logDirOf(rec) ?? "（默认的日志目录）");
+      // The process is there but the journal never heard of it (the write of its start failed): this process remembers having started
+      // it, and after a restart the runtime's own files say so. Either way the start is written now, and the run goes on as one started.
+      let seen = rec;
+      if (!rec.spawnedAt && (mine || read.state === "pending" || read.state === "starting" || read.state === "running" || read.state === "unreadable")) {
+        events.push({ type: "flow.spawned", runId: rec.runId, pid: mine?.pid ?? null });
+        unrecorded.delete(rec.runId);
+        seen = { ...rec, spawnedAt: nowIso(mine?.atMs ?? nowMs), spawnTries: (rec.spawnTries ?? 0) + 1 };
+      }
+      const { act, suspect } = actFor(seen, read, suspects.get(rec.runId) ?? null, nowMs);
       if (suspect) suspects.set(rec.runId, suspects.get(rec.runId) ?? nowMs);
       else suspects.delete(rec.runId);
       if (act.kind === "end") {
@@ -702,6 +735,10 @@ export function createEngine(deps: EngineDeps) {
         suspects.delete(rec.runId);
       } else if (act.kind === "launch") launch.push(rec.runId);
       else liveOf.set(rec.runId, act.live);
+    }
+    for (const dir of unreadable) {
+      const problem = `读不到流程的日志目录 ${dir}：里面的流程现在看不到，也不会因此重起`;
+      if (!lastProblems.includes(problem)) lastProblems.push(problem);
     }
     append(events);
     return launch;
@@ -722,15 +759,19 @@ export function createEngine(deps: EngineDeps) {
       if (stopped) return;
       const rec = state.flows?.[runId];
       if (!rec || rec.ended || !rec.input) continue;
+      const logDir = logDirOf(rec);
+      if (logDir === null) {
+        lastProblems.push(`流程「${rec.label}」不知道日志目录在哪，没有起`);
+        continue;
+      }
+      let pid: number | null;
       try {
         mkdirSync(dir, { recursive: true });
         const inputFile = path.join(dir, `${runId}.input.json`);
         const affairFile = path.join(dir, `${runId}.affair.json`);
         writeAtomic(inputFile, JSON.stringify(rec.input));
         writeAtomic(affairFile, JSON.stringify(affairOf({ caseId: rec.caseId, stage: rec.stage, label: rec.affairLabel }, state.items[rec.caseId]?.url ?? null, HOME_SCREEN)));
-        const { pid } = await flows.launcher.start({ runId, flow: rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`) });
-        append([{ type: "flow.spawned", runId, pid }]);
-        plan.push({ at: nowIso(nowMs), kind: "flow", person: null, summary: `起了流程「${rec.label}」（${numberOf(rec.caseId)}，${rec.flow}）${(rec.spawnTries ?? 0) > 0 ? `，第 ${(rec.spawnTries ?? 0) + 1} 次起` : ""}` });
+        ({ pid } = await flows.launcher.start({ runId, flow: rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`), logDir }));
       } catch (error) {
         const message = (error as Error).message.slice(0, 300);
         deps.log(`flow ${runId}: could not start it: ${message}`);
@@ -738,6 +779,19 @@ export function createEngine(deps: EngineDeps) {
         const tries = (rec.spawnTries ?? 0) + 1;
         append([{ type: "flow.spawn-failed", runId, error: message }]);
         if (tries >= MAX_SPAWN_FAILURES) append([{ type: "flow.ended", runId, end: { outcome: "not-started", summary: null, costUsd: 0, value: null, valueDropped: false, why: `起不了进程（试了 ${tries} 次）：${message}` } }]);
+        continue;
+      }
+      // The process exists from here on. A record of it that cannot be written is not a start that failed (that would say a run
+      // that is going was never started, and start it again): it is kept here and written when the journal takes it.
+      unrecorded.set(runId, { pid, atMs: nowMs });
+      try {
+        append([{ type: "flow.spawned", runId, pid }]);
+        unrecorded.delete(runId);
+        plan.push({ at: nowIso(nowMs), kind: "flow", person: null, summary: `起了流程「${rec.label}」（${numberOf(rec.caseId)}，${rec.flow}）${(rec.spawnTries ?? 0) > 0 ? `，第 ${(rec.spawnTries ?? 0) + 1} 次起` : ""}` });
+      } catch (error) {
+        const message = (error as Error).message.slice(0, 300);
+        deps.log(`flow ${runId}: it was started but writing that down failed: ${message}`);
+        lastProblems.push(`流程「${rec.label}」起来了，但记不下来：${message}`);
       }
     }
   }
@@ -761,7 +815,7 @@ export function createEngine(deps: EngineDeps) {
         if (tries > MAX_NOTIFY_TRIES) continue;
         const summary = `发 ${labelOf(target)}：${rec.label}${rec.ended.outcome === "done" || rec.ended.outcome === "stopped" ? "好了" : "没跑完"}`;
         // Told while it is news: past FLOW_TELL_MS it is left for the next card (the page has it), however it came to be late.
-        if (nowMs - Date.parse(rec.ended.at) > FLOW_TELL_MS) {
+        if (nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > FLOW_TELL_MS) {
           append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "suppressed", "结束得太久了，不单发，并进下一张卡", nowMs), tries: before?.tries ?? 0 } }]);
           continue;
         }
@@ -785,14 +839,14 @@ export function createEngine(deps: EngineDeps) {
   /** A run still going that the rule's latest judgment of its item did not ask for (an item not judged since the start is not one). */
   const unwanted = (rec: FlowRec): boolean => {
     const asked = lastAsked.get(rec.caseId);
-    return !!asked && !rec.ended && !asked.some((a) => a.name === rec.name && a.key === rec.key);
+    return !!asked && !rec.ended && !asked.some((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key);
   };
 
   /** A run's page view: the reader's when it has read the run, else made from what the controller knows; with its place in the controller's own record. */
   function viewOfRec(rec: FlowRec, read: RunView | undefined, currentStage: string | undefined): RunView {
     const live = liveOf.get(rec.runId) ?? null;
     const outcome = rec.ended?.outcome ?? null;
-    const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.key)]?.runId === rec.runId;
+    const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId === rec.runId;
     const situation: RunView["situation"] = rec.dismissed
       ? "done"
       : outcome === "done" || outcome === "stopped"
@@ -839,7 +893,8 @@ export function createEngine(deps: EngineDeps) {
       ...base,
       stage: rec.stage,
       situation,
-      endedAt: rec.ended?.at ?? base.endedAt,
+      endedAt: rec.ended ? (rec.ended.completedAt ?? rec.ended.at) : base.endedAt,
+      request: flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key),
       outcome: rec.ended ? (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome))) : base.outcome,
       costUsd: rec.ended?.costUsd ?? base.costUsd,
       own: true,
@@ -880,12 +935,12 @@ export function createEngine(deps: EngineDeps) {
     const nowMs = deps.now();
     const rec = state.flows?.[runId];
     if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
-    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
+    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
     if (!rec.ended || !RETRYABLE.has(rec.ended.outcome)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
     if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
     const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd }, nowMs, tz);
     if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
-    const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.key === rec.key)?.input ?? rec.input;
+    const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key)?.input ?? rec.input;
     if (!input) return { ok: false, detail: "上一轮的输入没留下，没法照样再跑" };
     const next: FlowRec = {
       ...rec,
@@ -901,6 +956,9 @@ export function createEngine(deps: EngineDeps) {
     delete next.spawnError;
     delete next.ended;
     delete next.dismissed;
+    // A new round is made under the directory of now: its id is new, and nothing of it is anywhere yet.
+    delete next.logDir;
+    if (deps.flows.logDir) next.logDir = deps.flows.logDir;
     if (state.flows?.[next.runId]) return { ok: false, detail: "这一轮已经记过了" };
     const estimate = rec.ended.costUsd > 0 ? rec.ended.costUsd : 0;
     append([
@@ -1675,9 +1733,10 @@ export function createEngine(deps: EngineDeps) {
         });
       }
       // What it asks to have run (asked for once: a key that has an intent is not run again).
-      lastAsked.set(item.key, judged.output.run?.map((r) => ({ name: r.flow, key: r.key, input: r.input })) ?? []);
+      const askedRuns = (judged.output.run ?? []).flatMap((r) => (rule.flows?.[r.flow] ? [{ name: r.flow, flow: rule.flows[r.flow]!.flow, key: r.key, input: r.input }] : []));
+      lastAsked.set(item.key, askedRuns);
       // A run the rule no longer asks for has no input of the rule's to differ from.
-      for (const r of recs()) if (r.caseId === item.key && !judged.output.run?.some((a) => a.flow === r.name && a.key === r.key)) drifted.delete(r.runId);
+      for (const r of recs()) if (r.caseId === item.key && !askedRuns.some((a) => a.name === r.name && a.flow === r.flow && a.key === r.key)) drifted.delete(r.runId);
       // What was held back last round was read by this judgment as it stood; it is asked again now, or it is not asked any more.
       for (const held of [...deferred.keys()]) if (held.startsWith(`${item.key}\0`)) deferred.delete(held);
       for (const req of judged.output.run ?? []) askRun(item, rule, set.fingerprint, req, judged.output.stage, nowMs, gated, events, plan, ahead);
@@ -1772,11 +1831,12 @@ export function createEngine(deps: EngineDeps) {
     }
     diff.newCommitments = creations.map((c) => c.key);
     if (changed) {
-      events.push(firstLoad ? { type: "rules.loaded", fingerprint: set.fingerprint, files: set.files } : { type: "rules.changed", from: state.rules.fingerprint, to: set.fingerprint, diff });
       // The breaker counts every change to commitments the new rules make at once: a wrong
       // condition takes questions back as easily as it adds them.
       const count = (kind: Gated["kind"]) => gated.filter((g) => g.kind === kind).length;
-      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen"), flows: count("flow") };
+      const changes = { newCommitments: count("create"), dropped: count("cancel"), changed: count("change"), reopened: count("reopen"), flows: count("flow") + count("flow-later") };
+      diff.flowRequests = changes.flows;
+      events.push(firstLoad ? { type: "rules.loaded", fingerprint: set.fingerprint, files: set.files } : { type: "rules.changed", from: state.rules.fingerprint, to: set.fingerprint, diff });
       // A run started is money spent, and cannot be taken back: it counts with the rest.
       const total = changes.newCommitments + changes.dropped + changes.changed + changes.reopened + changes.flows;
       if (!firstLoad && total > config.policy.ruleBreakerChanges && !state.rules.released.includes(set.fingerprint)) {
@@ -1788,6 +1848,7 @@ export function createEngine(deps: EngineDeps) {
     const held = state.rules.held?.fingerprint === set.fingerprint;
     const done: EventBody[] = [];
     for (const g of gated) {
+      if (g.kind === "flow-later") continue;
       if (held) {
         plan.push({ at: nowIso(nowMs), kind: "held", person: g.person, summary: `判断方法改了先停着，没做：${g.what}` });
         continue;
@@ -2133,6 +2194,9 @@ export function createEngine(deps: EngineDeps) {
    * Whether a card's words are not the ones it was put up with, because a flow for one of its items has ended since:
    * that, and nothing else, puts a card up again. (A rule that rewrote a word every round would otherwise change the
    * card every round.) A card from before cards remembered their words is left alone.
+   *
+   * A run that ended counts once: the first look at the card after it. If its words did not change then, the run is written down on the
+   * card as seen (`shown.ended`), so that a change of words long after, for any other reason, is not taken for the run's.
    */
   function wordsChangedByFlow(card: Card): boolean {
     if (!card.shown) return false;
@@ -2141,8 +2205,11 @@ export function createEngine(deps: EngineDeps) {
     // can mix up with the same round's (a card put up in the round a run ended in was written after it ended).
     const had = card.shown.ended ? new Set(card.shown.ended) : null;
     const shownMs = Date.parse(card.shown.at);
-    if (!recs().some((r) => cases.has(r.caseId) && r.ended && (had ? !had.has(r.runId) : Date.parse(r.ended.at) > shownMs))) return false;
-    return contentHash(card) !== card.shown.hash;
+    const news = recs().filter((r) => cases.has(r.caseId) && r.ended && (had ? !had.has(r.runId) : Date.parse(r.ended.at) > shownMs));
+    if (news.length === 0) return false;
+    if (contentHash(card) !== card.shown.hash) return true;
+    append([{ type: "card.changed", id: card.id, patch: { shown: { ...card.shown, ended: [...(card.shown.ended ?? []), ...news.map((r) => r.runId)] } } }]);
+    return false;
   }
 
   /**
@@ -2636,6 +2703,8 @@ export function createEngine(deps: EngineDeps) {
     flowRecs: (): FlowRec[] => structuredClone(recs()),
     /** What a rule is told of a run it asked for (for tests). */
     flowResult: flowResultFor,
+    /** The runs asked for that a limit holds back now, as the last judgments left them (for the preview). */
+    heldFlows: () => [...deferred.entries()].map(([at, d]) => ({ at, ...d })),
 
     releaseRules(fingerprint: string): boolean {
       if (state.rules.held?.fingerprint !== fingerprint) return false;
@@ -2763,7 +2832,7 @@ export function createEngine(deps: EngineDeps) {
       flows: recs()
         .filter((r) => !r.ended || nowMs - Date.parse(r.ended.at) < 3 * DAY)
         .sort((a, b) => b.intentAt.localeCompare(a.intentAt))
-        .map((r) => ({ runId: r.runId, caseId: r.caseId, label: r.label, round: r.round, state: resultOf(r, liveOf.get(r.runId) ?? null).state, intentAt: r.intentAt, endedAt: r.ended ? nowIso(Date.parse(r.ended.at)) : null, costUsd: r.ended?.costUsd ?? 0, why: r.ended?.why ?? null })),
+        .map((r) => ({ runId: r.runId, caseId: r.caseId, label: r.label, round: r.round, state: resultOf(r, liveOf.get(r.runId) ?? null).state, intentAt: r.intentAt, endedAt: r.ended ? nowIso(Date.parse(r.ended.completedAt ?? r.ended.at)) : null, costUsd: r.ended?.costUsd ?? 0, why: r.ended?.why ?? null })),
       evals: state.evals,
       pushesToday: Object.fromEntries(Object.values(config.persons).map((p) => [p.name, cardsToday(Object.values(state.cards), p, nowMs)])),
       confirmsToday: Object.fromEntries(Object.values(config.persons).filter((p) => p.admin).map((p) => [p.name, confirmsToday(Object.values(state.cards), p, nowMs)])),

@@ -157,9 +157,9 @@ test("the table: a state that may be a pause is looked at again after a while be
 
 test("the table: what the runtime wrote is what the run came to, and a refusal is not a run", () => {
   const ended = (end: Partial<NonNullable<ReturnType<typeof probeOf>["end"]>>, costUsd = 0.5) =>
-    actFor(spawned(), probeOf({ state: "ended", costUsd, end: { at: T0, outcome: "done", summary: "找到 2 处", stop: null, error: null, value: { n: 2 }, valueDropped: false, ...end } }), null, T0).act;
+    actFor(spawned(), probeOf({ state: "ended", costUsd, end: { at: T0, outcome: "done", summary: "找到 2 处", stop: null, error: null, value: { n: 2 }, valueDropped: false, totalUsd: null, ...end } }), null, T0).act;
   const done = ended({});
-  assert.deepEqual(done, { kind: "end", end: { outcome: "done", summary: "找到 2 处", costUsd: 0.5, value: { n: 2 }, valueDropped: false, why: null } });
+  assert.deepEqual(done, { kind: "end", end: { outcome: "done", summary: "找到 2 处", costUsd: 0.5, completedAt: new Date(T0).toISOString(), value: { n: 2 }, valueDropped: false, why: null } });
   const stopped = ended({ outcome: "stopped", stop: "取不到数据", value: { why: "x" } });
   assert.equal(stopped.kind === "end" && stopped.end.outcome, "stopped");
   assert.equal(stopped.kind === "end" && stopped.end.why, "取不到数据");

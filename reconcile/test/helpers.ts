@@ -131,17 +131,20 @@ export function issue(id: number, patch: Partial<Item> & { release?: string } = 
 export interface FlowsKit {
   launcher: ReturnType<typeof recordingLauncher>;
   dir: string;
-  /** How the runtime's files stand for a run, by id; a run not set here is "absent" (nothing of it on disk). */
+  /** How the runtime's files stand for a run, by id (or by "<id>@<log directory>" for one read from that directory only); a run not set here is "absent" (nothing of it on disk). */
   probes: Map<string, Partial<RunProbe>>;
   /** Runs the probe was asked about, in order. */
   asked: string[];
+  /** The log directory new runs go to (the engine's `flows.logDir`), and the ones the probe was asked to read from, in order. */
+  logDir: string | null;
+  askedDirs: Array<string | null>;
   /** The launcher fails this many starts, with this error. */
   failStarts: { count: number; error: Error };
   /** Called as the launcher is asked to start a run, before it answers (what the journal holds at that moment is the test's to look at). */
   onStart: ((spec: LaunchSpec) => void) | null;
 }
 
-export const probeOf = (patch: Partial<RunProbe> = {}): RunProbe => ({ state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, gate: false, slow: false, ...patch });
+export const probeOf = (patch: Partial<RunProbe> = {}): RunProbe => ({ state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: true, gate: false, slow: false, ...patch });
 
 export interface World {
   dir: string;
@@ -205,7 +208,7 @@ export async function makeWorld(options: {
   /** The journal's clock runs this far ahead of the engine's (as in life, where an event is written after the round began). */
   storeSkewMs?: number;
   /** The engine can start flows: true, a recording launcher and a probe the test sets (world.flows); or the launcher and probe to use, as they are. */
-  flows?: boolean | { launcher: Launcher; dir: string; probe(runId: string, spawnedAtMs: number | null): RunProbe };
+  flows?: boolean | { launcher: Launcher; dir: string; logDir?: string | null; probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe };
 }): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
@@ -228,7 +231,7 @@ export async function makeWorld(options: {
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), asked: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
+  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
   const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
 
   const source: Source = {
@@ -324,9 +327,15 @@ export async function makeWorld(options: {
                 return kit.launcher.start(spec);
               },
             },
-            probe(runId) {
+            get logDir() {
+              return kit.logDir;
+            },
+            probe(runId, _spawnedAtMs, logDir) {
               kit.asked.push(runId);
-              return probeOf(kit.probes.get(runId));
+              kit.askedDirs.push(logDir);
+              const p = probeOf(kit.probes.get(`${runId}@${logDir}`) ?? kit.probes.get(runId));
+              // A run that ended "now": the end the test wrote down has no time of its own, the clock's is taken.
+              return p.end && p.end.at === 0 ? { ...p, end: { ...p.end, at: clock.now } } : p;
             },
           }
         : null,
@@ -368,7 +377,7 @@ export async function makeWorld(options: {
     for (const caseId of items.keys()) {
       for (const v of options.runs(caseId)) {
         if (world.store.state.flows?.[v.runId]) continue;
-        const rec: FlowRec = { runId: v.runId, caseId, name: "adopted", flow: v.flow, key: v.runId, round: 0, stage: v.stage, label: v.flow, affairLabel: v.flow, owner: null, notify: false, maxUsd: 0, timeout: null, input: null, inputHash: "", rules: "", intentAt: v.startedAt, spawnedAt: v.startedAt };
+        const rec: FlowRec = { runId: v.runId, caseId, name: "adopted", flow: v.flow, key: v.stage ?? "", round: 0, stage: v.stage, label: v.flow, affairLabel: v.flow, owner: null, notify: false, maxUsd: 0, timeout: null, input: null, inputHash: "", rules: "", intentAt: v.startedAt, spawnedAt: v.startedAt };
         events.push({ type: "flow.intent", rec });
         const outcome = v.situation === "done" ? "done" : v.situation === "fail" ? "failed" : v.situation === "lost" ? "lost" : null;
         if (outcome) events.push({ type: "flow.ended", runId: v.runId, end: { outcome, summary: v.outcome, costUsd: v.costUsd, value: null, valueDropped: false, why: null } });

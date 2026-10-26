@@ -75,7 +75,7 @@ export const headline = (w: World, n: number) => w.store.state.assessments[`gcp-
 export const kinds = (w: World) => w.journal().filter((e) => e.type.startsWith("flow.")).map((e) => e.type);
 export const running = (patch: Partial<RunProbe> = {}) => probeOf({ state: "running", ...patch });
 export const finished = (value: unknown, over: Partial<NonNullable<RunProbe["end"]>> = {}, costUsd = 0.5) =>
-  probeOf({ state: "ended", costUsd, end: { at: 0, outcome: "done", summary: "找到 2 处", stop: null, error: null, value, valueDropped: false, ...over } });
+  probeOf({ state: "ended", costUsd, end: { at: 0, outcome: "done", summary: "找到 2 处", stop: null, error: null, value, valueDropped: false, totalUsd: null, ...over } });
 
 /** The clock moves on by some seconds and the engine reconciles once. */
 export const look = async (w: World, seconds: number) => {

@@ -248,9 +248,11 @@ export function createGraph(deps: GraphDeps) {
   }
 
   /**
-   * Of the runs of an item, the ones that count for what it is now: the newest of each stage (a run that
-   * failed and was run again is the second one), and no break of a stage the item has left (a failure, a run
-   * that went silent or one that cannot be read there is history, the item went on). A run with no stage is of the current one.
+   * Of the runs of an item, the ones that count for what it is now: the newest of each request (a run that failed and
+   * was run again is the second one; two requests in one stage are two, and the success of one does not hide the failure of
+   * the other), and no break of a stage the item has left (a failure, a run that went silent or one that cannot be read
+   * there is history, the item went on). A run with no stage is of the current one. A run that is not known by a request
+   * (the reader of a run that was not started here) is its stage's alone.
    */
   function decidingRuns(runs: RunView[], stage: string | undefined): RunView[] {
     const newest = new Map<string, RunView>();
@@ -258,7 +260,7 @@ export function createGraph(deps: GraphDeps) {
       // Only a run the controller itself started is the item's condition (it recorded the intent first): a file somebody
       // wrote that names the item is listed, not believed. And one a person set aside is theirs now, not the item's.
       if (r.own === false || r.dismissed) continue;
-      const key = r.stage ?? stage ?? "";
+      const key = r.request ?? `stage:${r.stage ?? stage ?? ""}`;
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }

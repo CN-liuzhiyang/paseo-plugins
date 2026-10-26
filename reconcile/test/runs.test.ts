@@ -227,12 +227,14 @@ test("a runs directory that is not there is no runs, not an error", () => {
 test("the runs directory is found in the runtime's order: ORCH_LOG_DIR, the config file's logDir, the default", () => {
   const home = mkdtempSync(path.join(os.tmpdir(), "reconcile-home-"));
   try {
-    assert.equal(resolveRunsDir({ ORCH_LOG_DIR: "/logs" }, home), path.join("/logs", "runs"));
+    // Always absolute: a run is read from where it was started whatever the working directory is by then.
+    assert.equal(resolveRunsDir({ ORCH_LOG_DIR: "/logs" }, home), path.join(path.resolve("/logs"), "runs"));
+    assert.equal(resolveRunsDir({ ORCH_LOG_DIR: "relative-logs" }, home), path.join(path.resolve("relative-logs"), "runs"));
     assert.equal(resolveRunsDir({}, home), path.join(home, ".paseo-orchestration", "logs", "runs"));
     mkdirSync(path.join(home, ".paseo-orchestration"));
     writeFileSync(path.join(home, ".paseo-orchestration", "config.json"), JSON.stringify({ logDir: "/elsewhere" }));
-    assert.equal(resolveRunsDir({}, home), path.join("/elsewhere", "runs"));
-    assert.equal(resolveRunsDir({ ORCH_LOG_DIR: "/logs" }, home), path.join("/logs", "runs"), "the environment still comes first");
+    assert.equal(resolveRunsDir({}, home), path.join(path.resolve("/elsewhere"), "runs"));
+    assert.equal(resolveRunsDir({ ORCH_LOG_DIR: "/logs" }, home), path.join(path.resolve("/logs"), "runs"), "the environment still comes first");
     writeFileSync(path.join(home, ".paseo-orchestration", "config.json"), "{not json");
     assert.equal(resolveRunsDir({}, home), null, "a config that cannot be read is not guessed around");
   } finally {

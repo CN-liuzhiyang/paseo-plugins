@@ -11,7 +11,7 @@ import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
 import type { RunProbe } from "./runs";
-import type { RulesDiff, State } from "./state";
+import { flowKeyOf, type RulesDiff, type State } from "./state";
 import { memoryStore, readState } from "./store";
 import { addWorkdays, inWindow, iso, localParts, nextInWindow } from "./time";
 
@@ -60,10 +60,12 @@ export interface FlowChange {
   request: string;
   flow: string;
   maxUsd: number;
-  /** When the side that would start it asks for it ("现在", or a time). */
+  /** When the side that would start it asks for it ("现在", or a time; "等有空位" for one a limit holds back). */
   from: string;
   inUse: boolean;
   candidate: boolean;
+  /** Why a limit holds it back at the end of the run on (the side that shows it): it would be started once there is room, not now. */
+  later?: string;
 }
 
 export interface CaseChange {
@@ -253,7 +255,7 @@ function shadow(state: State, dataDir: string, config: Config, clock: { ms: numb
   };
   // A flow asked for is an intent in the copy of the journal and nothing more: no directory to write into, nothing started, and
   // none ever comes to an end (the run is "waiting to start", which still counts as open against the day's limit).
-  const waiting: RunProbe = { state: "pending", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, gate: false, slow: false };
+  const waiting: RunProbe = { state: "pending", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: true, gate: false, slow: false };
   const flows = { launcher: recordingLauncher(), dir: null, probe: () => waiting };
   const engine = createEngine({ store, config, sources: [], carrier, mode: "live", instanceId: "preview", home: "", tickSeconds: 60, deliver, requestsDir: null, conversation: null, rulesKeep, flows, now: () => clock.ms, log: () => {}, writeStatus: () => {} });
   /** Every source as just read, with nothing new: the preview runs on the data as it is. */
@@ -609,15 +611,26 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
 
   // ---- flows ------------------------------------------------------------------------------
   // What each side asked to have run over the whole way: a run both ask for is no difference, one only a side asks for is.
-  const intentsOf = (i: number) => new Map(sides[i]!.store.events.flatMap((e) => (e.type === "flow.intent" ? [[e.rec.runId, e.rec] as const] : [])));
-  const [bi, ci] = [intentsOf(0), intentsOf(1)];
+  // A request is the case, the rule's name for it, the flow and the key. Of each side: the ones it started (an intent) and the ones a
+  // limit still holds back at the end of the run on (they would be started as room comes, one after another, all the same).
+  type Asked = { caseId: string; request: string; flow: string; maxUsd: number; from: string; later?: string };
+  const askedOf = (i: number) => {
+    const out = new Map<string, Asked>();
+    for (const e of sides[i]!.store.events) {
+      if (e.type === "flow.intent") out.set(flowKeyOf(e.rec.caseId, e.rec.name, e.rec.flow, e.rec.key), { caseId: e.rec.caseId, request: e.rec.label, flow: e.rec.flow, maxUsd: e.rec.maxUsd, from: when(Date.parse(e.rec.intentAt)) });
+    }
+    for (const h of sides[i]!.engine.heldFlows()) if (!out.has(h.at)) out.set(h.at, { caseId: h.caseId, request: h.label, flow: h.flow, maxUsd: h.maxUsd, from: "等有空位", later: h.why });
+    return out;
+  };
+  const [bi, ci] = [askedOf(0), askedOf(1)];
   const flows: FlowChange[] = [];
   for (const id of new Set([...bi.keys(), ...ci.keys()])) {
     if (bi.has(id) === ci.has(id)) continue;
-    const rec = (bi.get(id) ?? ci.get(id))!;
-    flows.push({ caseId: rec.caseId, label: label(rec.caseId), request: rec.label, flow: rec.flow, maxUsd: rec.maxUsd, from: when(Date.parse(rec.intentAt)), inUse: bi.has(id), candidate: ci.has(id) });
+    const a = (bi.get(id) ?? ci.get(id))!;
+    flows.push({ caseId: a.caseId, label: label(a.caseId), request: a.request, flow: a.flow, maxUsd: a.maxUsd, from: a.from, inUse: bi.has(id), candidate: ci.has(id), ...(a.later ? { later: a.later } : {}) });
   }
-  flows.sort((x, y) => x.from.localeCompare(y.from) || x.label.localeCompare(y.label) || x.request.localeCompare(y.request));
+  // The ones that would start come first, by when; the ones that wait for room after them.
+  flows.sort((x, y) => Number(!!x.later) - Number(!!y.later) || x.from.localeCompare(y.from) || x.label.localeCompare(y.label) || x.request.localeCompare(y.request));
 
   // ---- the breaker, and what cannot be seen -----------------------------------------------
   const changed = nowEvents(1).find((e): e is Extract<typeof e, { type: "rules.changed" }> => e.type === "rules.changed");
@@ -625,7 +638,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   if (changed && state.rules.fingerprint !== null && !released) {
     const d: RulesDiff = changed.diff;
     // Flows count with the rest, as the controller counts them: the ones the first round after the change asks for.
-    const changes = { newCommitments: d.newCommitments.length, dropped: d.droppedCommitments.length, changed: d.changedCommitments?.length ?? 0, reopened: d.reopenedCommitments?.length ?? 0, flows: nowEvents(1).filter((e) => e.type === "flow.intent").length };
+    const changes = { newCommitments: d.newCommitments.length, dropped: d.droppedCommitments.length, changed: d.changedCommitments?.length ?? 0, reopened: d.reopenedCommitments?.length ?? 0, flows: d.flowRequests ?? nowEvents(1).filter((e) => e.type === "flow.intent").length };
     const limit = inUseConfig.policy.ruleBreakerChanges;
     if (changes.newCommitments + changes.dropped + changes.changed + changes.reopened + changes.flows > limit) breaker = { changes, limit };
   }
@@ -739,7 +752,7 @@ export function previewText(p: Preview): string {
     if (p.cases.length + p.heat.length + p.judged.onlyInUse.length + p.judged.onlyCandidate.length + p.questions.length === 0 && !p.cardsNow) lines.push("（现在没有差异）");
     if (p.flows.length > 0) {
       lines.push("", "## 会起的流程（起了要花钱，也计进熔断）");
-      for (const f of p.flows) lines.push(`- ${f.label}「${f.request}」（${f.flow}，按 $${f.maxUsd} 算）：${f.candidate ? "候选会起" : "在用会起、候选不起"}，${f.from === "现在" ? "现在" : `从 ${f.from} 起`}`);
+      for (const f of p.flows) lines.push(`- ${f.label}「${f.request}」（${f.flow}，按 $${f.maxUsd} 算）：${f.candidate ? "候选会起" : "在用会起、候选不起"}，${f.later ? `等有空位再起（现在挡着：${f.later}）` : f.from === "现在" ? "现在" : `从 ${f.from} 起`}`);
     }
     const l = p.later;
     lines.push("", `## 往后 ${p.workdays} 个工作日`);

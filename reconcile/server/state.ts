@@ -49,6 +49,8 @@ export type EventBody =
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
+  /** The runs of flows the change of rules asks for in its first round, those a limit holds back for now too (the breaker counts them all). */
+  flowRequests?: number;
   changed: Array<{ caseId: string; before: string | null; after: string }>;
   newCommitments: string[];
   droppedCommitments: string[];
@@ -91,8 +93,11 @@ export interface State {
   flowKeys?: Record<string, { round: number; runId: string }>;
 }
 
-/** The key under which the latest round of a flow request is kept (State.flowKeys). */
-export const flowKeyOf = (caseId: string, name: string, key: string) => `${caseId}\0${name}\0${key}`;
+/**
+ * The key under which the latest round of a flow request is kept (State.flowKeys). A request is the rule's name for it, the flow
+ * that name stands for and its key: a name that is made to stand for another flow is another request, not the old one's result.
+ */
+export const flowKeyOf = (caseId: string, name: string, flow: string, key: string) => `${caseId}\0${name}\0${flow}\0${key}`;
 
 export interface RuleBroken {
   error: string;
@@ -207,7 +212,7 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     case "flow.intent": {
       (state.flows ??= {})[event.rec.runId] = event.rec;
-      const at = flowKeyOf(event.rec.caseId, event.rec.name, event.rec.key);
+      const at = flowKeyOf(event.rec.caseId, event.rec.name, event.rec.flow, event.rec.key);
       const had = (state.flowKeys ??= {})[at];
       if (!had || had.round <= event.rec.round) state.flowKeys[at] = { round: event.rec.round, runId: event.rec.runId };
       return;

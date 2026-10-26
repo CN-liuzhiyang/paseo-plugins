@@ -56,10 +56,15 @@ export type FlowLimits = Policy["flows"];
 /** The day of an instant in the instance's zone. */
 const dayOf = (iso: string, tz: string) => localParts(Date.parse(iso), tz).date;
 
+/** What a finished run counts for in a budget: what it cost, and at least its ceiling when what it cost is not all known. */
+export const costOf = (end: Pick<FlowEnd, "costUsd" | "costUnknown">, maxUsd: number): number => (end.costUnknown ? Math.max(end.costUsd, maxUsd) : end.costUsd);
+
 /**
  * Why one more run may not be started now, in words; null when it may. `recs`: every run the controller knows,
- * `ahead`: the ones asked for earlier in this round whose intents are not written yet. A day's counts are by
- * the instance's local date; the next day's start empty. Concurrency is not a day's matter: it frees as runs end.
+ * `ahead`: the ones asked for earlier in this round whose intents are not written yet. The number of runs in a day is by the
+ * instance's local date of their intents. What a day spent is what it was told: a run not over holds its ceiling whichever day it
+ * began, and one that ended counts for the day it was recorded to have (when its cost became known), so a run that crosses midnight
+ * is never counted as nothing. Concurrency is not a day's matter either: it frees as runs end.
  */
 export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later" } | null {
   const today = localParts(nowMs, tz).date;
@@ -68,8 +73,8 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
   if (mine.length >= limits.perDay) return { why: `今天流程已经起了 ${mine.length} 次（上限 ${limits.perDay}）`, until: "tomorrow" };
   const ofCase = mine.filter((r) => r.caseId === ask.caseId).length;
   if (ofCase >= limits.perCasePerDay) return { why: `这个事项今天流程已经起了 ${ofCase} 次（上限 ${limits.perCasePerDay}）`, until: "tomorrow" };
-  // Finished at what they cost, the others at the most they were counted at.
-  const spent = mine.reduce((sum, r) => sum + (r.ended ? r.ended.costUsd : r.maxUsd), 0);
+  // Finished (today) at what they cost, the others at the most they were counted at.
+  const spent = all.reduce((sum, r) => sum + (r.ended ? (dayOf(r.ended.at, tz) === today ? costOf(r.ended, r.maxUsd) : 0) : r.maxUsd), 0);
   if (spent + ask.maxUsd > limits.usdPerDay) return { why: `今天流程花费已到 $${spent.toFixed(2)}（上限 $${limits.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow" };
   const open = all.filter((r) => !r.ended).length;
   if (open >= limits.concurrent) return { why: `同时在跑的流程已经有 ${open} 个（上限 ${limits.concurrent}）`, until: "later" };
@@ -80,6 +85,8 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
 
 /** How long a state that may be a pause (a machine asleep) is looked at before it is taken for what it says. */
 export const SUSPECT_MS = 30_000;
+/** A run that stopped beating and wrote lines that could not be read is looked at this long before it is told as lost: what it says is not all there. */
+export const UNREAD_SUSPECT_MS = 15 * 60_000;
 /** A run id is started again (nothing came of the first start) at most this many extra times. */
 export const MAX_RESTARTS = 2;
 /** A failed start (the program did not run at all) is tried again at most this many times in all. */
@@ -95,7 +102,7 @@ export type Act =
   /** It is over, or will never be: the record to write. */
   | { kind: "end"; end: Omit<FlowEnd, "at"> };
 
-const endOf = (outcome: FlowEnd["outcome"], why: string, costUsd = 0): Act => ({ kind: "end", end: { outcome, summary: null, costUsd, value: null, valueDropped: false, why } });
+const endOf = (outcome: FlowEnd["outcome"], why: string, costUsd = 0, costKnown = true): Act => ({ kind: "end", end: { outcome, summary: null, costUsd, ...(costKnown ? {} : { costUnknown: true }), value: null, valueDropped: false, why } });
 
 /**
  * The table: given a run the controller meant to start and what the runtime's files say of it, what to do.
@@ -105,14 +112,27 @@ const endOf = (outcome: FlowEnd["outcome"], why: string, costUsd = 0): Act => ({
  */
 export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | null, nowMs: number): { act: Act; suspect: boolean } {
   const calm = (act: Act) => ({ act, suspect: false });
-  const sure = suspectSince !== null && nowMs - suspectSince >= SUSPECT_MS;
+  const sureAfter = (ms: number) => suspectSince !== null && nowMs - suspectSince >= ms;
+  const sure = sureAfter(SUSPECT_MS);
   const started = rec.spawnedAt !== undefined;
   switch (probe.state) {
     case "ended": {
       const end = probe.end!;
       const outcome = end.outcome === "done" || end.outcome === "stopped" || end.outcome === "timeout" ? end.outcome : "failed";
       const why = outcome === "done" ? null : outcome === "stopped" ? (end.stop ?? "中止了") : outcome === "timeout" ? "超过了这次流程的总时限" : (end.error ? `${end.error.name}：${end.error.headline || end.error.message}`.slice(0, 300) : "失败了");
-      return calm({ kind: "end", end: { outcome, summary: end.summary, costUsd: probe.costUsd, value: end.value, valueDropped: end.valueDropped, why } });
+      return calm({
+        kind: "end",
+        end: {
+          outcome,
+          summary: end.summary,
+          costUsd: probe.costUsd,
+          ...(probe.costKnown ? {} : { costUnknown: true }),
+          ...(Number.isFinite(end.at) && end.at > 0 ? { completedAt: new Date(end.at).toISOString() } : {}),
+          value: end.value,
+          valueDropped: end.valueDropped,
+          why,
+        },
+      });
     }
     case "refused":
       return calm(endOf("refused", `运行时拒绝了：${probe.refused ?? "没有说原因"}`));
@@ -122,6 +142,8 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
       // Not started yet (the intent is written, the process was not): start it. Started, and nothing has come of it
       // for long enough: start it again under the same id, which the runtime lets only one process hold.
       if (!started) return calm({ kind: "launch" });
+      // Nothing is to be seen because the directory cannot be read, not because nothing ran: not a reason to start it again.
+      if (!probe.reachable) return calm({ kind: "wait", live: "slow" });
       if (!probe.safeToRestart) return calm({ kind: "wait", live: "starting" });
       const restarts = (rec.spawnTries ?? 1) - 1;
       return restarts < MAX_RESTARTS ? calm({ kind: "launch" }) : calm(endOf("not-started", `起了 ${restarts + 1} 次，运行时一直没有出现`));
@@ -133,8 +155,14 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
     case "stalled-before-start":
       // Nothing was spent, and the runtime does not say it is safe to start again: it may have been asleep. Seen twice, then it is told.
       return sure ? calm(endOf("not-started", "运行时没走到开跑，占位就过期了；没有花钱")) : { act: { kind: "wait", live: "starting" }, suspect: true };
-    case "lost":
-      return sure ? calm(endOf("lost", `失联：心跳停了，之后再没有动静${probe.costUsd > 0 ? `；已花 $${probe.costUsd.toFixed(2)}` : ""}`, probe.costUsd)) : { act: { kind: "wait", live: "slow" }, suspect: true };
+    case "lost": {
+      // Lines it wrote could not be read: the silence may be a run that finished or went on in them, and what it spent is not all known.
+      // A longer look, and then told as it is: broken, with its cost taken as at least the ceiling it was given.
+      const partial = probe.unread > 0;
+      if (!sureAfter(partial ? UNREAD_SUSPECT_MS : SUSPECT_MS)) return { act: { kind: "wait", live: "slow" }, suspect: true };
+      const spent = probe.costUsd > 0 ? `；已花 $${probe.costUsd.toFixed(2)}${probe.costKnown ? "" : "（读到的部分）"}` : "";
+      return calm(endOf("lost", `失联：心跳停了，之后再没有动静${partial ? "；它写的事件里有读不全的行，花了多少不知道" : ""}${spent}`, probe.costUsd, probe.costKnown));
+    }
     case "running":
       return calm({ kind: "wait", live: probe.gate ? "gate" : probe.slow ? "slow" : "running" });
   }
@@ -143,13 +171,14 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
 /** What a rule is told of a run. */
 export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
   const ended = rec.ended;
-  const state: FlowState = rec.dismissed ? "dismissed" : ended ? ended.outcome : !rec.spawnedAt ? "queued" : (live ?? "starting");
+  // What the runtime's files say it is wins over the record of the start (which a failed write may have left out).
+  const state: FlowState = rec.dismissed ? "dismissed" : ended ? ended.outcome : (live ?? (rec.spawnedAt ? "starting" : "queued"));
   return {
     state,
     runId: rec.runId,
     round: rec.round,
     startedAt: rec.spawnedAt ?? null,
-    endedAt: ended?.at ?? null,
+    endedAt: ended ? (ended.completedAt ?? ended.at) : null,
     value: ended?.outcome === "done" || ended?.outcome === "stopped" ? ended.value : null,
     summary: ended?.summary ?? null,
     costUsd: ended?.costUsd ?? 0,
@@ -215,6 +244,8 @@ export interface LaunchSpec {
   inputFile: string;
   affairFile: string;
   outFile: string;
+  /** The runtime's log directory the process is told to use (ORCH_LOG_DIR), the one the run is read back from; null or absent: whatever it resolves itself. */
+  logDir?: string | null;
 }
 
 export interface Launcher {
@@ -241,7 +272,10 @@ export function createLauncher(config: LauncherConfig): Launcher {
         }
         let child: ReturnType<typeof spawn>;
         try {
-          child = spawn(file!, args, { shell: false, windowsHide: true, detached: true, stdio: ["ignore", out, out], ...(config.cwd ? { cwd: config.cwd } : {}) });
+          // The log directory is told, not left to be resolved again by the process: the run's id is taken in a directory, and
+          // the controller reads that one (a config that changed between would put the same id in two places).
+          const env = spec.logDir ? { ...process.env, ORCH_LOG_DIR: spec.logDir } : process.env;
+          child = spawn(file!, args, { shell: false, windowsHide: true, detached: true, stdio: ["ignore", out, out], env, ...(config.cwd ? { cwd: config.cwd } : {}) });
         } catch (error) {
           closeSync(out);
           reject(error);

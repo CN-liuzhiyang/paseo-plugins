@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOME_SCREEN, RUN_SCREEN } from "../shared/graph";
 import { createLauncher, runIdOf } from "../server/flows";
-import { createRunReader } from "../server/runs";
+import { createRunReaders } from "../server/runs";
 import { makeWorld, TEST_POLICY, TZ, type World } from "./helpers";
 import { set } from "./item-flow";
 
@@ -62,6 +62,10 @@ interface Rig {
   w: World;
   logDir: string;
   runsDir: string;
+  /** What the engine is given to start flows with: the test may change its `logDir`, as a plugin that comes back to another config has. */
+  flowsDeps: { logDir: string | null };
+  /** How many processes the launcher was asked to start. */
+  starts: number[];
   /** Moves the engine's clock (and the reader's) on without waiting. */
   skew: { ms: number };
   tick(): Promise<void>;
@@ -72,7 +76,7 @@ interface Rig {
 /** The day's limits wide open: these tests start several runs at once. */
 const WIDE = { ...TEST_POLICY, flows: { perDay: 20, usdPerDay: 50, perCasePerDay: 9, concurrent: 9 } };
 
-async function withRig(body: (rig: Rig) => Promise<void>) {
+async function withRig(body: (rig: Rig) => Promise<void>, options: { envDir?: string } = {}) {
   const base = mkdtempSync(path.join(os.tmpdir(), "reconcile-orch-"));
   const flowsDir = path.join(base, "flows");
   const logDir = path.join(base, "logs");
@@ -84,17 +88,31 @@ async function withRig(body: (rig: Rig) => Promise<void>) {
   const env = { ...process.env, ORCH_CONFIG: configFile, ORCH_LOG_DIR: logDir };
   // the processes the launcher starts inherit this; the test's own process is put back afterwards
   const saved = { ORCH_CONFIG: process.env.ORCH_CONFIG, ORCH_LOG_DIR: process.env.ORCH_LOG_DIR };
-  Object.assign(process.env, { ORCH_CONFIG: env.ORCH_CONFIG, ORCH_LOG_DIR: env.ORCH_LOG_DIR });
+  // what the process would resolve for itself, when it is not told: a test may make that something else than the directory the engine uses
+  Object.assign(process.env, { ORCH_CONFIG: env.ORCH_CONFIG, ORCH_LOG_DIR: options.envDir ? path.join(base, options.envDir) : env.ORCH_LOG_DIR });
   const skew = { ms: 0 };
   const now = () => Date.now() + skew.ms;
   const runsDir = path.join(logDir, "runs");
-  const reader = createRunReader({ runsDir, tz: TZ, now, affair: HOME_SCREEN, view: RUN_SCREEN });
+  const readers = createRunReaders({ tz: TZ, now, affair: HOME_SCREEN, view: RUN_SCREEN }, logDir);
+  const real = createLauncher({ command: [process.execPath, ORCH] });
+  const starts: number[] = [];
+  const flowsDeps = {
+    launcher: {
+      start: (spec: Parameters<typeof real.start>[0]) => {
+        starts.push(Date.now());
+        return real.start(spec);
+      },
+    },
+    dir: path.join(base, "flows-out"),
+    logDir: logDir as string | null,
+    probe: (runId: string, spawnedAtMs: number | null, dir: string | null) => readers.forDir(dir ?? logDir).probe(runId, spawnedAtMs),
+  };
   const local = new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 16).replace("T", " ");
   const w = await makeWorld({
     start: local,
     config: { rules: { "orch.mjs": RULE }, policy: WIDE },
-    runs: (caseId) => reader.forCase(caseId),
-    flows: { launcher: createLauncher({ command: [process.execPath, ORCH] }), dir: path.join(base, "flows-out"), probe: (runId, spawnedAtMs) => reader.probe(runId, spawnedAtMs) },
+    runs: (caseId) => readers.current.forCase(caseId),
+    flows: flowsDeps,
   });
   const tick = async () => {
     w.clock.now = now();
@@ -110,7 +128,7 @@ async function withRig(body: (rig: Rig) => Promise<void>) {
     }
   };
   try {
-    await body({ w, logDir, runsDir, skew, tick, until });
+    await body({ w, logDir, runsDir, flowsDeps, starts, skew, tick, until });
   } finally {
     w.close();
     for (const [k, v] of Object.entries(saved)) {
@@ -288,3 +306,51 @@ test("the same key asked for in every round, by the real rule, starts one run ho
     assert.equal(readdirSync(runsDir).filter((f) => f.endsWith(".jsonl")).length, 1);
     assert.equal(existsSync(path.join(runsDir, `${ids(1, "demo", "k1")}.claim`)), true);
   }));
+
+// ---- the log directory is part of what a run is (R7B-01) ------------------------------------------------------
+
+const ended = (dir: string, id: string) => {
+  const file = path.join(dir, "runs", `${id}.jsonl`);
+  return existsSync(file) && readFileSync(file, "utf8").includes('"kind":"run.end"');
+};
+
+test("R7B-01: the config points to another log directory between a run and the controller reading its end: the run is read where it ran, and it does not run again", () =>
+  withRig(async ({ w, logDir, flowsDeps, starts, skew, tick }) => {
+    const id = ids(1, "demo", "k1");
+    ask(w, 1, [run("k1", { word: "once", waitMs: 0 })], "demo:k1");
+    await tick();
+    assert.equal(starts.length, 1);
+    // the run ends, in the first directory, while the controller is not looking
+    const deadline = Date.now() + 20_000;
+    while (!ended(logDir, id)) {
+      if (Date.now() > deadline) throw new Error("the run did not end");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    // the machine's config says another directory now, and the plugin comes back with that (as a reload does)
+    const other = path.join(path.dirname(logDir), "logs-b");
+    process.env.ORCH_LOG_DIR = other;
+    flowsDeps.logDir = other;
+    await w.crash();
+    skew.ms += 120_000;
+    await tick();
+    await tick();
+    assert.equal(flowsOf(w)[id]!.ended?.outcome, "done", "its end is read from where it was written");
+    assert.equal(starts.length, 1, "and the run is not started a second time under the same id in the new directory");
+    assert.equal(existsSync(other), false, "nothing of it was written there");
+    assert.deepEqual(Object.keys(flowsOf(w)), [id]);
+  }));
+
+test("R7B-01: the process is told the log directory the intent fixed, not left to find its own", () =>
+  withRig(
+    async ({ w, runsDir, logDir, tick, until }) => {
+      const id = ids(1, "demo", "k1");
+      ask(w, 1, [run("k1", { word: "told", waitMs: 0 })], "demo:k1");
+      await tick();
+      await until(() => !!flowsOf(w)[id]!.ended);
+      assert.equal(flowsOf(w)[id]!.logDir, logDir);
+      assert.ok(existsSync(path.join(runsDir, `${id}.jsonl`)), "the run is where the intent said");
+      // the directory the process would have found for itself has nothing in it
+      assert.equal(existsSync(path.join(path.dirname(logDir), "elsewhere")), false);
+    },
+    { envDir: "elsewhere" },
+  ));

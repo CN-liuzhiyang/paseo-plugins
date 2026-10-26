@@ -150,7 +150,7 @@ test("the events a run leaves fold into what the controller knows of it, and onl
   const s = emptyState();
   ev(s, { type: "flow.intent", rec: rec() });
   assert.deepEqual(Object.keys(s.flows!), ["rc-x-1"]);
-  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "k")], { round: 0, runId: "rc-x-1" });
+  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "triage-flow", "k")], { round: 0, runId: "rc-x-1" });
   ev(s, { type: "flow.spawn-failed", runId: "rc-x-1", error: "ENOENT" });
   assert.deepEqual([s.flows!["rc-x-1"]!.spawnTries, s.flows!["rc-x-1"]!.spawnError], [1, "ENOENT"]);
   ev(s, { type: "flow.spawned", runId: "rc-x-1", pid: 77 });
@@ -176,12 +176,12 @@ test("a run that came to a result drops its input; the key points at the latest 
   ev(s, { type: "flow.ended", runId: "rc-x-1", end: { outcome: "done", summary: null, costUsd: 0, value: { x: 1 }, valueDropped: false, why: null } });
   assert.equal(s.flows!["rc-x-1"]!.input, null);
   ev(s, { type: "flow.retry", caseId: "tracker:1", name: "triage", key: "k", round: 1, runId: "rc-x-1-r1", by: "owner", estimateUsd: 0 });
-  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "k")], { round: 0, runId: "rc-x-1" }, "a person's act alone moves nothing: the intent that follows does");
+  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "triage-flow", "k")], { round: 0, runId: "rc-x-1" }, "a person's act alone moves nothing: the intent that follows does");
   ev(s, { type: "flow.intent", rec: rec({ runId: "rc-x-1-r1", round: 1 }) });
-  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "k")], { round: 1, runId: "rc-x-1-r1" });
+  assert.deepEqual(s.flowKeys![flowKeyOf("tracker:1", "triage", "triage-flow", "k")], { round: 1, runId: "rc-x-1-r1" });
   // an older round written late does not take the key back
   ev(s, { type: "flow.intent", rec: rec({ runId: "rc-x-1" }) });
-  assert.equal(s.flowKeys![flowKeyOf("tracker:1", "triage", "k")]!.runId, "rc-x-1-r1");
+  assert.equal(s.flowKeys![flowKeyOf("tracker:1", "triage", "triage-flow", "k")]!.runId, "rc-x-1-r1");
   // another item with the same key is another key
   ev(s, { type: "flow.intent", rec: rec({ runId: "rc-y-1", caseId: "tracker:2" }) });
   assert.equal(Object.keys(s.flowKeys!).length, 2);

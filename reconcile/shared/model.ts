@@ -276,8 +276,12 @@ export interface FlowEnd {
   outcome: FlowOutcome;
   /** The flow's own one line (its `summarize`); null when it gave none, or the run has no result. */
   summary: string | null;
-  /** The sum of the calls that ended; Claude-family only (the runtime's `run.end.cost.partial` says what is left out). */
+  /** The run's cost: its own total when it gave one, else the sum of the calls that ended; Claude-family only (the runtime's `run.end.cost.partial` says what is left out). */
   costUsd: number;
+  /** Set when `costUsd` is not all of it (what the run wrote was not all read, and it gave no total): a budget counts at least the run's ceiling then. */
+  costUnknown?: boolean;
+  /** When the run itself ended (the runtime's `run.end` time), where the controller knows it; `at` is when the controller recorded the end. */
+  completedAt?: string;
   /** What the flow returned, as the runtime wrote it; null when it has none, or `valueDropped`. */
   value: unknown;
   /** The result was too large to keep (more than FLOW_VALUE_BYTES): the rule gets the summary only. */
@@ -312,6 +316,11 @@ export interface FlowRec {
   inputHash: string;
   /** The fingerprint of the rules that asked for it. */
   rules: string;
+  /**
+   * The runtime's log directory the run was meant to go to (absolute), fixed with the intent: the process is given it, and the run
+   * is read from it for as long as the intent lives, whatever the machine's config says by then. A run's id is only unique within one.
+   */
+  logDir?: string;
   intentAt: string;
   spawnedAt?: string;
   pid?: number | null;

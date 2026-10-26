@@ -56,12 +56,17 @@ test("a rule that would start runs lists them apart, counts them in the breaker,
     { policy: POLICY({}) },
   ));
 
-test("the day's limits hold a preview back like the real thing: only the runs that would start are listed", () =>
+test("the day's limits hold a preview back like the real thing: the runs that would start now and the ones that wait for room are listed apart, and all count in the breaker", () =>
   withPreview(async (w, candidate) => {
     writeFileSync(path.join(candidate, "rules", "flow.mjs"), RULE);
     const p = await look(w, candidate);
-    assert.equal(p.flows.length, 2, "two at once is the default");
-    assert.deepEqual(p.breaker, null, "two is under the breaker's three");
+    assert.equal(p.flows.length, 4, "two at once is the default: two start, two wait, and all four are asked for");
+    assert.deepEqual(p.flows.map((f) => f.later !== undefined), [false, false, true, true], "the ones that wait say what holds them");
+    assert.match(p.flows[3]!.later!, /同时在跑的流程已经有 2 个（上限 2）/);
+    assert.deepEqual(p.breaker, { changes: { newCommitments: 0, dropped: 0, changed: 0, reopened: 0, flows: 4 }, limit: 3 }, "what waits for room is asked for all the same: it is counted, as the controller counts it");
+    const text = previewText(p);
+    assert.match(text, /候选会起，等有空位再起（现在挡着：同时在跑的流程已经有 2 个（上限 2）/);
+    assert.match(text, /⚠ 这个改动一下子会起 4 个流程/);
   }));
 
 test("a run both sides would start is no difference, and one already started is not asked again", async () => {
