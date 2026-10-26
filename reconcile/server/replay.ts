@@ -178,35 +178,74 @@ export function diffOutcomes(a: CapsuleOutcome, b: CapsuleOutcome): Diff {
 
 const listed = (want: string | string[]) => (Array.isArray(want) ? want : [want]);
 
-/** What of an expectation an answer does not meet, in words; empty when it meets all of it. */
-export function unmet(expect: Expect, outcome: CapsuleOutcome): string[] {
-  const out: string[] = [];
-  if (expect.error !== undefined && (outcome.output === null) !== expect.error) out.push(expect.error ? "该判断出错，它没有" : `不该判断出错：${clip(outcome.error ?? "", 80)}`);
-  const x = outcome.output;
-  if (!x) {
-    for (const key of Object.keys(expect).filter((k) => k !== "error")) out.push(`判断出错了，核对不了「${key}」`);
-    return out;
-  }
-  const one = (name: string, want: string | string[] | undefined, got: string, show: (v: string) => string = (v) => v) => {
-    if (want !== undefined && !listed(want).includes(got)) out.push(`${name}要是 ${listed(want).map(show).join(" 或 ")}，是 ${show(got)}`);
+/** One thing of an expectation an answer does not meet: which clause (stable between answers), and in words. */
+export interface Unmet {
+  key: string;
+  text: string;
+}
+
+interface Clause {
+  key: string;
+  /** The key of the expectation it belongs to, for saying a judgment that failed could not be held to it. */
+  top: string;
+  /** In words what the answer does not meet; null when it meets it. */
+  check: (x: RuleOutput) => string | null;
+}
+
+/** Every clause an expectation holds, in the order they are told. */
+function clausesOf(expect: Expect): Clause[] {
+  const out: Clause[] = [];
+  const one = (key: string, name: string, want: string | string[] | undefined, got: (x: RuleOutput) => string, show: (v: string) => string = (v) => v) => {
+    if (want === undefined) return;
+    out.push({ key, top: key, check: (x) => (listed(want).includes(got(x)) ? null : `${name}要是 ${listed(want).map(show).join(" 或 ")}，是 ${show(got(x))}`) });
   };
-  one("阶段", expect.stage, x.stage);
-  one("健康", expect.health, x.health, (v) => HEALTH[v] ?? v);
-  one("在等谁", expect.actor, x.next.actor, (v) => ACTOR[v] ?? v);
-  if (expect.notice !== undefined && !!x.notice !== expect.notice) out.push(expect.notice ? "该有提醒，没有" : "不该有提醒，有");
-  const keys = x.commitments.map((c) => c.key);
-  for (const prefix of expect.asks?.has ?? []) if (!keys.some((k) => k.startsWith(prefix))) out.push(`该问 ${prefix}…，没有`);
+  one("stage", "阶段", expect.stage, (x) => x.stage);
+  one("health", "健康", expect.health, (x) => x.health, (v) => HEALTH[v] ?? v);
+  one("actor", "在等谁", expect.actor, (x) => x.next.actor, (v) => ACTOR[v] ?? v);
+  if (expect.notice !== undefined) out.push({ key: "notice", top: "notice", check: (x) => (!!x.notice === expect.notice ? null : expect.notice ? "该有提醒，没有" : "不该有提醒，有") });
+  for (const prefix of expect.asks?.has ?? []) out.push({ key: `asks.has:${prefix}`, top: "asks", check: (x) => (x.commitments.some((c) => c.key.startsWith(prefix)) ? null : `该问 ${prefix}…，没有`) });
   for (const prefix of expect.asks?.none ?? []) {
-    const hit = keys.find((k) => k.startsWith(prefix));
-    if (hit) out.push(`不该问 ${prefix}…，却要问 ${hit}`);
+    out.push({
+      key: `asks.none:${prefix}`,
+      top: "asks",
+      check: (x) => {
+        const hit = x.commitments.find((c) => c.key.startsWith(prefix));
+        return hit ? `不该问 ${prefix}…，却要问 ${hit.key}` : null;
+      },
+    });
   }
   for (const [field, want] of Object.entries(expect.facts ?? {})) {
-    const got = x.facts.find((f) => f.field === field)?.value ?? null;
-    if (got !== want) out.push(want === null ? `不该记事实 ${field}，记了 ${clip(got ?? "", 60)}` : `事实 ${field} 该是 ${clip(want, 60)}，是 ${got === null ? "（没有）" : clip(got, 60)}`);
+    out.push({
+      key: `facts:${field}`,
+      top: "facts",
+      check: (x) => {
+        const got = x.facts.find((f) => f.field === field)?.value ?? null;
+        if (got === want) return null;
+        return want === null ? `不该记事实 ${field}，记了 ${clip(got ?? "", 60)}` : `事实 ${field} 该是 ${clip(want, 60)}，是 ${got === null ? "（没有）" : clip(got, 60)}`;
+      },
+    });
   }
-  for (const text of expect.headline?.has ?? []) if (!x.headline.includes(text)) out.push(`现状里该有「${text}」`);
-  for (const text of expect.headline?.not ?? []) if (x.headline.includes(text)) out.push(`现状里不该有「${text}」`);
+  for (const text of expect.headline?.has ?? []) out.push({ key: `headline.has:${text}`, top: "headline", check: (x) => (x.headline.includes(text) ? null : `现状里该有「${text}」`) });
+  for (const text of expect.headline?.not ?? []) out.push({ key: `headline.not:${text}`, top: "headline", check: (x) => (x.headline.includes(text) ? `现状里不该有「${text}」` : null) });
   return out;
+}
+
+/** What of an expectation an answer does not meet, clause by clause; empty when it meets all of it. */
+export function unmetClauses(expect: Expect, outcome: CapsuleOutcome): Unmet[] {
+  const out: Unmet[] = [];
+  if (expect.error !== undefined && (outcome.output === null) !== expect.error) out.push({ key: "error", text: expect.error ? "该判断出错，它没有" : `不该判断出错：${clip(outcome.error ?? "", 80)}` });
+  const x = outcome.output;
+  for (const clause of clausesOf(expect)) {
+    // A judgment that failed has no answer to hold to a clause: every one of them is unmet.
+    const text = x ? clause.check(x) : `判断出错了，核对不了「${clause.top}」`;
+    if (text) out.push({ key: clause.key, text });
+  }
+  return out;
+}
+
+/** What of an expectation an answer does not meet, in words; empty when it meets all of it. */
+export function unmet(expect: Expect, outcome: CapsuleOutcome): string[] {
+  return [...new Set(unmetClauses(expect, outcome).map((u) => u.text))];
 }
 
 /**
@@ -217,4 +256,20 @@ export function verdictOf(expect: Expect, run: ReplayRun | null): "met" | "unmet
   if (!run) return "none";
   if (run.missing.length > 0) return "unknown";
   return unmet(expect, run.outcome).length === 0 ? "met" : "unmet";
+}
+
+/**
+ * A side's standing against an expectation: the verdict and, whenever there is an answer, which
+ * clauses it does not meet -- for an unknown one, the clauses the answer it gave from what the
+ * capsule holds does not meet (a rule given nothing for what it asked is no proof it was right).
+ */
+export interface Standing {
+  verdict: "met" | "unmet" | "unknown" | "none";
+  unmet: Unmet[];
+}
+
+export function standingOf(expect: Expect, run: ReplayRun | null): Standing {
+  if (!run) return { verdict: "none", unmet: [] };
+  const clauses = unmetClauses(expect, run.outcome);
+  return { verdict: run.missing.length > 0 ? "unknown" : clauses.length === 0 ? "met" : "unmet", unmet: clauses };
 }

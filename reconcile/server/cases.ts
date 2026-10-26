@@ -39,7 +39,7 @@ export async function replayOnly(options: CasesOptions & { candidateDir?: string
     candidate = await loadRules(loadConfig(options.configDir, options.candidateDir).rulesDir, null);
   }
   const broken = !!candidate && candidate.errors.length > 0;
-  return replayCapsules(loaded.capsules.map((c) => c.capsule), inUse.rules, candidate && !broken ? candidate.rules : null, { unreadable: loaded.unreadable, broken });
+  return replayCapsules(loaded.capsules.map((c) => c.capsule), inUse.rules, candidate && !broken ? candidate.rules : null, { unreadable: loaded.unreadable, broken, casesRoot: casesIn(options.configDir) });
 }
 
 export interface CaseRow extends CapsuleRef {
@@ -56,7 +56,7 @@ export function listCases(options: CasesOptions & { item?: string }): CaseRow[] 
   const wanted = options.item?.replace(/^#/, "");
   for (const { file, capsule } of loadCapsules(roots(options)).capsules) {
     if (wanted && capsule.case !== wanted && !capsule.case.endsWith(`:${wanted}`)) continue;
-    rows.push({ ...refOf(capsule), file, where: file.startsWith(mine) ? "cases" : "data", expect: capsule.expect !== null, correction: capsule.correction !== null });
+    rows.push({ ...refOf(capsule), file, where: file.startsWith(mine + path.sep) ? "cases" : "data", expect: capsule.expect !== null, correction: capsule.correction !== null });
   }
   return rows;
 }
@@ -74,12 +74,22 @@ export function readExpect(file: string): Expect {
   return parsed.data;
 }
 
-function find(dir: string, id: string): { file: string; capsule: Capsule } | null {
+/**
+ * The files of a directory that hold a capsule, in the order they are read: the last is the one a
+ * load takes when a directory has more than one of an id (a controller's sample and a correction
+ * of the same moment), so that is the one `file` and `capsule` are; `all` are every one.
+ */
+function find(dir: string, id: string): { file: string; capsule: Capsule; all: string[] } | null {
+  const all: string[] = [];
+  let last: { file: string; capsule: Capsule } | null = null;
   for (const file of capsuleFiles(dir)) {
     const read = readCapsule(file);
-    if ("capsule" in read && read.capsule.id === id) return { file, capsule: read.capsule };
+    if ("capsule" in read && read.capsule.id === id) {
+      all.push(file);
+      last = { file, capsule: read.capsule };
+    }
   }
-  return null;
+  return last ? { ...last, all } : null;
 }
 
 const idShape = z.string().regex(/^k_[0-9a-f]{16}$/);
@@ -97,18 +107,22 @@ export function keepCase(options: CasesOptions & { id: string; expect?: Expect }
   return writeCapsule(casesIn(options.configDir), { ...from.capsule, expect: options.expect ?? from.capsule.expect }, { gzip: false });
 }
 
-/** Sets what is right for a capsule already among the cases of the config, in its own file. */
+/** Sets what is right for a capsule already among the cases of the config, in its own file (in each, where a directory holds the same capsule twice). */
 export function setExpect(options: { configDir: string; id: string; expect: Expect }): string {
   const here = find(casesIn(options.configDir), options.id);
   if (!here) throw new PreviewError(`${casesIn(options.configDir)} 里没有 ${options.id}：先 cases keep`);
-  const next: Capsule = { ...here.capsule, expect: options.expect };
-  const tmp = `${here.file}.tmp`;
-  try {
-    writeFileSync(tmp, here.file.endsWith(".gz") ? gzipSync(JSON.stringify(next)) : `${JSON.stringify(next, null, 2)}\n`);
-    renameSync(tmp, here.file);
-  } catch (error) {
-    rmSync(tmp, { force: true });
-    throw error;
+  for (const file of here.all) {
+    const read = readCapsule(file);
+    if (!("capsule" in read)) continue;
+    const next: Capsule = { ...read.capsule, expect: options.expect };
+    const tmp = `${file}.tmp`;
+    try {
+      writeFileSync(tmp, file.endsWith(".gz") ? gzipSync(JSON.stringify(next)) : `${JSON.stringify(next, null, 2)}\n`);
+      renameSync(tmp, file);
+    } catch (error) {
+      rmSync(tmp, { force: true });
+      throw error;
+    }
   }
   return here.file;
 }

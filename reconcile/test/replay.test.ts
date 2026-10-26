@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, test } from "node:test";
-import { readCapsule, writeCapsule, type Capsule, type CapsuleOutcome } from "../server/capsule";
-import { diffOutcomes, noDiff, replayOn, unmet, verdictOf } from "../server/replay";
+import { readCapsule, writeCapsule, type Capsule, type CapsuleOutcome, type Expect } from "../server/capsule";
+import { diffOutcomes, noDiff, replayOn, standingOf, unmet, unmetClauses, verdictOf } from "../server/replay";
 import { issue } from "./helpers";
 import { cleanDemos, capture, demoRuleText, loadDemo, type DemoParams } from "./replay-helpers";
 
@@ -160,4 +160,33 @@ test("whether a side meets an expectation is not said where the rule asked for w
   assert.equal(verdictOf({ stage: "finished" }, replayOn(live, await rule())), "unmet");
   assert.equal(verdictOf(expect, replayOn(live, await rule({ peek: "gcp-demo:3" }))), "unknown", "even a wish that happens to hold");
   assert.equal(verdictOf(expect, null), "none");
+});
+
+test("an expectation is held clause by clause: each clause has a key that is the same for any answer, so two answers can be told apart by which they fail", async () => {
+  const live = viaFile(capture(await rule(), "2026-10-21 17:00"));
+  const o = live.outcome;
+  const expect: Expect = { stage: "finished", health: "done", actor: "me", notice: true, asks: { has: ["release-check:"], none: ["ask:"] }, facts: { plan: "x" }, headline: { has: ["推断"], not: ["外放"] } };
+  assert.deepEqual(
+    unmetClauses(expect, o).map((u) => u.key),
+    ["stage", "health", "actor", "notice", "asks.has:release-check:", "asks.none:ask:", "facts:plan", "headline.has:推断", "headline.not:外放"],
+  );
+  // A judgment that failed meets none of them, each by its own key; error:true alone is met by it.
+  const failed = replayOn(live, await rule({ boom: true })).outcome;
+  assert.deepEqual(unmetClauses(expect, failed).map((u) => u.key), unmetClauses(expect, o).map((u) => u.key));
+  assert.ok(unmetClauses(expect, failed).every((u) => u.text.startsWith("判断出错了，核对不了")));
+  assert.deepEqual(unmetClauses({ error: true, headline: { has: ["a"], not: ["b"] } }, failed).map((u) => u.key), ["headline.has:a", "headline.not:b"]);
+  // The words stay one per expectation key for a failed judgment.
+  assert.deepEqual(unmet({ headline: { has: ["a"], not: ["b"] } }, failed), ["判断出错了，核对不了「headline」"]);
+});
+
+test("a side's standing holds what its answer from the tape does not meet, even where it asked for what the tape lacks", async () => {
+  const live = viaFile(capture(await rule(), "2026-10-21 17:00"));
+  const lacking = replayOn(live, await rule({ peek: "gcp-demo:3" }));
+  assert.ok(lacking.missing.length > 0);
+  const s = standingOf({ stage: "finished", health: "on-track" }, lacking);
+  assert.equal(s.verdict, "unknown");
+  assert.deepEqual(s.unmet.map((u) => u.key), ["stage"], "what its partial answer fails is kept");
+  assert.deepEqual(standingOf({ stage: "waiting" }, lacking), { verdict: "unknown", unmet: [] });
+  assert.deepEqual(standingOf({ stage: "waiting" }, null), { verdict: "none", unmet: [] });
+  assert.equal(standingOf({ stage: "waiting" }, replayOn(live, await rule())).verdict, "met");
 });

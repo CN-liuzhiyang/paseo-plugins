@@ -11,7 +11,7 @@ import { recordingLauncher } from "./flows";
 import { nextStep } from "./policy";
 import { loadCapsules } from "./capsule";
 import { ACTOR, HEALTH } from "./replay";
-import { regressions, replayCapsules, replayDigest, replayEmpty, replayLines, replayWarnings, type ReplayReport } from "./replay-report";
+import { replayCapsules, replayDigest, replayEmpty, replayLines, replayWarnings, stops, type ReplayReport, type Stop } from "./replay-report";
 import { fingerprintOf, loadRules, RULES_KEPT, type KeepRules, type LoadedRule } from "./rules";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type RulesDiff, type State } from "./state";
@@ -444,7 +444,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   // The capsules of past judgments asked of both sides. A candidate that does not load is not asked.
   const loadedCapsules = loadCapsules(options.casesDirs ?? [path.join(dataDir, "capsules"), path.join(configDir, "cases")]);
   const candidateBroken = ruleSets[1]!.errors.length > 0;
-  const replay = replayCapsules(loadedCapsules.capsules.map((c) => c.capsule), ruleSets[0]!.rules, candidateBroken ? null : ruleSets[1]!.rules, { unreadable: loadedCapsules.unreadable, broken: candidateBroken });
+  const replay = replayCapsules(loadedCapsules.capsules.map((c) => c.capsule), ruleSets[0]!.rules, candidateBroken ? null : ruleSets[1]!.rules, { unreadable: loadedCapsules.unreadable, broken: candidateBroken, casesRoot: path.join(configDir, "cases") });
   const ruleFor = (i: number, caseId: string): LoadedRule | undefined => {
     const item = base.store.state.items[caseId] ?? cand.store.state.items[caseId];
     return item ? ruleSets[i]!.rules.find((r) => r.source === item.source) : undefined;
@@ -864,6 +864,17 @@ function writeAll(dir: string, files: Array<[string, string]>, old: Map<string, 
 
 const sameFiles = (a: Map<string, string>, b: Map<string, string>) => a.size === b.size && [...a].every(([k, v]) => b.get(k) === v);
 
+/** What an apply stopped by the replay says: what stopped it, not what to write -- the ids are in the preview's ⚠ lines, for a person to read there and name. */
+function stoppedMessage(unnamed: Stop[]): string {
+  const of = (kind: Stop["kind"]) => unnamed.filter((x) => x.kind === kind);
+  const part = (kind: Stop["kind"], what: string) => {
+    const some = of(kind);
+    return some.length > 0 ? `${what} ${some.length} 处（${some.slice(0, 3).map((x) => x.label).join("、")}${some.length > 3 ? "…" : ""}）` : null;
+  };
+  const parts = [part("broken", "纠错又犯了"), part("unknown", "纠错核对不了"), part("error", "候选判断出错"), part("unreadable", "读不了的存档")].filter(Boolean);
+  return `重放有 ${unnamed.length} 处没过，没拷：${parts.join("；")}。确实要拷的话，自己对照预览里 ⚠ 的那几行，把认下的存档编号写进 --accept-regress（逗号隔开）`;
+}
+
 /**
  * Copies the candidate's changed files into the config in use, if a preview run now has the id
  * the person looked at; otherwise nothing, and the new preview. The candidate is read once, into
@@ -887,15 +898,14 @@ export async function applyCandidate(options: PreviewOptions & { expect: string;
     const p = await preview({ ...options, candidateDir: snapshot, workdays });
     if (p.candidate.errors.length > 0) throw new PreviewError(`候选的判断方法加载出错，不拷：${p.candidate.errors.map((e) => `${e.file}（${clip(e.error, 80)}）`).join("、")}`);
     if (p.id !== options.expect) return { applied: [], preview: p };
-    // A correction said again is a person's word against the candidate: it goes only if named.
-    const again = regressions(p.replay);
+    // Where the replay cannot say the candidate keeps what a person said is right, or the candidate
+    // fails where the rule in use does not, it goes only if each such thing is named.
+    const stopped = stops(p.replay);
     const named = options.acceptRegress ?? [];
-    const stray = named.filter((id) => !again.includes(id));
-    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次纠错又犯了的存档：看 diff 里 ⚠ 纠错又犯了 那几行括号里的编号`);
-    const unnamed = p.replay.expect.broken.filter((e) => !named.includes(e.id));
-    if (unnamed.length > 0) {
-      throw new PreviewError(`候选让 ${unnamed.length} 条纠错又犯了，没拷：${unnamed.map((e) => `${e.label} ${e.at.slice(5, 16).replace("T", " ")}（${e.id}）`).join("、")}。确实要拷的话，把这几条点名放行：--accept-regress ${unnamed.map((e) => e.id).join(",")}`);
-    }
+    const stray = named.filter((n) => !stopped.some((x) => x.name === n));
+    if (stray.length > 0) throw new PreviewError(`--accept-regress 里的 ${stray.join("、")} 不是这次重放拦下的：看预览里 ⚠ 那几行括号里的存档编号（读不了的存档写它在配置目录下的路径）`);
+    const unnamed = stopped.filter((x) => !named.includes(x.name));
+    if (unnamed.length > 0) throw new PreviewError(stoppedMessage(unnamed));
     const stillParts = [...partsIn(options.candidateDir)].join() === [...parts].join();
     if (!stillParts || !sameFiles(partFiles(options.candidateDir, parts), candidate) || !sameFiles(partFiles(options.configDir, parts), inUse)) {
       throw new PreviewError("预览的这几秒里，候选或者在用的文件变了，没拷：再 diff 一次，看改过以后的样子");
