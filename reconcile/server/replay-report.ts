@@ -145,8 +145,11 @@ export function replayWarnings(r: ReplayReport): string[] {
   const out: string[] = [];
   for (const e of r.expect.broken.slice(0, 10)) out.push(`⚠ 纠错又犯了：${e.label} ${when(e)}（${e.id}）${e.said ? `，说过：「${clip(e.said, 40)}」` : ""}：候选${e.unmet.map((u) => clip(u, 60)).join("；")}`);
   if (r.expect.broken.length > 10) out.push(`⚠ 还有 ${r.expect.broken.length - 10} 条纠错又犯了`);
-  for (const e of r.errors.filter((x) => x.side === "candidate").slice(0, 10)) out.push(`⚠ 候选在这份存档上判断出错，在用的不出错：${e.label} ${when(e)}（${why(e)}）：${e.error}`);
+  const failing = r.errors.filter((x) => x.side === "candidate");
+  for (const e of failing.slice(0, 10)) out.push(`⚠ 候选在这份存档上判断出错，在用的不出错：${e.label} ${when(e)}（${why(e)}）：${e.error}`);
+  if (failing.length > 10) out.push(`⚠ 还有 ${failing.length - 10} 份存档上候选也判断出错`);
   for (const s of r.selfCheck.slice(0, 10)) out.push(`⚠ 存档复现不了：${s.label} ${when(s)}，在用的判断方法和存下它时是同一版，拿存档里的数据再判断一遍，结果却不一样（${s.fields.join("、")}）：重放不可信，先查原因`);
+  if (r.selfCheck.length > 10) out.push(`⚠ 还有 ${r.selfCheck.length - 10} 份存档复现不了`);
   return out;
 }
 

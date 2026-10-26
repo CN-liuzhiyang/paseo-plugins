@@ -17,7 +17,21 @@ import { makeWorld, TEST_POLICY, TZ, type World } from "./helpers";
 // person said was right, and what stops an apply. The demo rule is replay-helpers.ts's; every
 // name, number and time is made up.
 
-after(() => cleanDemos());
+// apply makes its copy of the candidate under the system temp directory, and preview.test.ts counts
+// those copies before and after one of its own: test files run side by side, so this one keeps its
+// temp files (and the commands it starts) to a directory of its own.
+const outerTmp = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
+const ownTmp = mkdtempSync(path.join(os.tmpdir(), "reconcile-replay-tmp-"));
+process.env.TEMP = process.env.TMP = process.env.TMPDIR = ownTmp;
+
+after(() => {
+  cleanDemos();
+  for (const [name, value] of Object.entries(outerTmp)) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  rmSync(ownTmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
 
 const BIN = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "reconcile-preview.mjs");
 const person = { owner: { name: "测试用户", admin: true, tz: TZ, quiet: { work: "workdays 09:30-20:00" }, pushPerDay: 8 } };
@@ -171,6 +185,34 @@ test("a candidate that fails on a past moment is warned at the top, before the r
     assert.ok(lines.findIndex((l) => l.startsWith("⚠ 候选在这份存档上")) < lines.findIndex((l) => l.startsWith("## 拿过去的判断时刻重放")), "warned before the section");
   }));
 
+test("a warning list cut at ten says how many it leaves out", () =>
+  withDemo(async (t) => {
+    const minute = (i: number) => `2026-10-13 10:${String(i).padStart(2, "0")}`;
+    for (let i = 0; i < 12; i++) await t.keep(minute(i), {}, { correction: true, expect: { headline: { has: ["外放"] } } });
+    t.candidateRule({ boom: true });
+    const lines = previewText(await t.look()).split("\n");
+    assert.equal(lines.filter((l) => l.startsWith("⚠ 纠错又犯了")).length, 10);
+    assert.ok(lines.includes("⚠ 还有 2 条纠错又犯了"));
+    assert.equal(lines.filter((l) => l.startsWith("⚠ 候选在这份存档上判断出错")).length, 10);
+    assert.ok(lines.includes("⚠ 还有 2 份存档上候选也判断出错"));
+  }));
+
+test("a self-check list cut at ten says how many it leaves out", () =>
+  withDemo(async (t) => {
+    const kept = path.join(t.w.dir, "kept");
+    const rule = await loadDemo(demoRuleText());
+    for (let i = 0; i < 11; i++) {
+      const c = capture(rule, `2026-10-13 10:${String(i).padStart(2, "0")}`);
+      writeCapsule(kept, { ...c, outcome: { ...c.outcome, output: { ...c.outcome.output!, headline: "别的话" } } });
+    }
+    t.candidateRule({});
+    const p = await preview({ configDir: t.w.configDir, candidateDir: t.candidate, dataDir: t.w.dataDir, nowMs: t.w.clock.now, casesDirs: [kept] });
+    assert.equal(p.replay.selfCheck.length, 11);
+    const lines = previewText(p).split("\n");
+    assert.equal(lines.filter((l) => l.startsWith("⚠ 存档复现不了")).length, 10);
+    assert.ok(lines.includes("⚠ 还有 1 份存档复现不了"));
+  }));
+
 test("the rule in use failing on a capsule where the candidate does not is said, not warned as the candidate's", () =>
   withDemo(
     async (t) => {
@@ -257,6 +299,8 @@ test("apply: a correction said again is not copied unless named; a name that is 
     const done = await applyCandidate({ ...base, acceptRegress: [a.id] });
     assert.deepEqual(done.applied, [RULE_FILE]);
     assert.equal(readFileSync(path.join(t.w.configDir, RULE_FILE), "utf8"), demoRuleText({ verb: "上线" }));
+    assert.equal(os.tmpdir(), ownTmp, "the copy apply makes is made here, not beside another test file's");
+    assert.deepEqual(readdirSync(ownTmp).filter((f) => f.startsWith("reconcile-apply-")), [], "and is gone");
   }));
 
 test("apply: with two corrections said again, naming one is not enough", () =>
