@@ -254,13 +254,18 @@ export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEn
 
 // ---- the affair a run is for -------------------------------------------------------------------------
 
-/** What `--affair` is given (orchestration/runtime/affair.mjs): the label, the item's address when it has a plain one, and the item's page. */
+/**
+ * What `--affair` is given (orchestration/runtime/affair.mjs): the label, the item's address when it has a plain one, the item's page,
+ * and the `key` the runtime tells the item's runs apart by (they share one Paseo workspace). The key is the item's id alone, so the
+ * runs for one item are one affair whatever stage they were asked in; the stage is in the link, which the runtime would otherwise
+ * take as the identity. This plugin never reads the key back or draws it.
+ */
 export function affairOf(rec: Pick<FlowRec, "caseId" | "stage" | "label">, url: string | null, screen: { plugin: string; screen: string }): Record<string, unknown> {
   const label = cleanText(rec.label, 120) ?? rec.caseId.slice(0, 120);
   const plain = url !== null && url.length <= 2048 && /^https?:\/\/[^\s/@]+(\/|$)/.test(url) && !hasUnsafe(url) ? url : null;
   const params: Record<string, string> = { case: rec.caseId.slice(0, 256) };
   if (rec.stage && !hasUnsafe(rec.stage)) params.stage = rec.stage.slice(0, 256);
-  return { label, ...(plain ? { url: plain } : {}), link: { plugin: screen.plugin, screen: screen.screen, params } };
+  return { label, ...(plain ? { url: plain } : {}), link: { plugin: screen.plugin, screen: screen.screen, params }, key: params.case };
 }
 
 // ---- starting the process ----------------------------------------------------------------------------

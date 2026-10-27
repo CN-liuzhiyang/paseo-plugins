@@ -209,12 +209,24 @@ test("the message for a run that ended says what was found, or that it did not c
 test("a run is told to the runtime as the item it is for, the stage it was asked in and a link back, and an address only when it is a plain one", () => {
   const screen = { plugin: "reconcile", screen: "inbox" };
   const a = affairOf({ caseId: "tracker:1", stage: "review", label: "#1 · 评审 · 初查" }, "https://tracker.example/issues/1", screen);
-  assert.deepEqual(a, { label: "#1 · 评审 · 初查", url: "https://tracker.example/issues/1", link: { plugin: "reconcile", screen: "inbox", params: { case: "tracker:1", stage: "review" } } });
+  assert.deepEqual(a, { label: "#1 · 评审 · 初查", url: "https://tracker.example/issues/1", link: { plugin: "reconcile", screen: "inbox", params: { case: "tracker:1", stage: "review" } }, key: "tracker:1" });
   const none = affairOf({ caseId: "tracker:1", stage: null, label: "x" }, "javascript:alert(1)", screen);
   assert.equal("url" in none, false, "not an address a page may link to");
   assert.deepEqual((none.link as { params: unknown }).params, { case: "tracker:1" });
   assert.equal("url" in affairOf({ caseId: "tracker:1", stage: "a", label: "x" }, "https://user:pw@host.example/x", screen), false, "an address with credentials in it is not a plain one");
   assert.equal((affairOf({ caseId: "tracker:1", stage: "a", label: "x".repeat(300) }, null, screen).label as string).length <= 120, true);
+  assert.equal((affairOf({ caseId: "tracker:" + "9".repeat(300), stage: null, label: "x" }, null, screen).key as string).length, 256, "as long as the runtime takes");
+});
+
+test("the runtime is told one key for one item, whatever stage or run it is, and another for another item", () => {
+  const screen = { plugin: "reconcile", screen: "inbox" };
+  const key = (caseId: string, stage: string | null, label: string, url: string | null = null) => affairOf({ caseId, stage, label }, url, screen).key;
+  assert.equal(key("tracker:1", "review", "#1 · 评审"), key("tracker:1", "fix", "#1 · 修复", "https://tracker.example/issues/1"));
+  assert.equal(key("tracker:1", "review", "#1"), key("tracker:1", null, "#1"));
+  assert.notEqual(key("tracker:1", "review", "#1"), key("tracker:2", "review", "#1"));
+  assert.notEqual(key("tracker:1", "review", "#1"), key("other:1", "review", "#1"), "the same number from another source is another item");
+  // The runtime takes the object as given: a key it refuses would refuse the run.
+  assert.equal(typeof key("tracker:1", "review", "#1"), "string");
 });
 
 // ---- starting the process ----------------------------------------------------------------------------------
