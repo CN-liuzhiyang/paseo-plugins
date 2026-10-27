@@ -1,0 +1,25 @@
+{
+  "_about": "What the runtime's CLI layer (runtime/paseo-cli.mjs runPaseo) got back, byte for byte, from `paseo run` (CLI 1.4.1) refused before it made an agent: ask-missing is the structured-output form (executor.ask) and spawn-missing the --background form (executor.spawn, with the CLI's deprecation line) given a workspace id that does not exist; ask-archived the same for a workspace that was archived; unknown-option an option the CLI does not know (--bogus-flag standing in for --workspace on an older CLI). Measured 2026-10-27. Edited: the workspace ids (random, one per workspace) are replaced by the placeholder wks_0000000000000000; nothing else is (no paths, names or other ids were in them).",
+  "cases": {
+    "ask-missing": {
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "Using workspace wks_0000000000000000\n{\n  \"error\": {\n    \"code\": \"WORKSPACE_NOT_FOUND\",\n    \"message\": \"Workspace not found: wks_0000000000000000\"\n  }\n}\n"
+    },
+    "spawn-missing": {
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "Warning: --background (-d) is deprecated. Use --no-wait instead.\nUsing workspace wks_0000000000000000\n{\n  \"error\": {\n    \"code\": \"WORKSPACE_NOT_FOUND\",\n    \"message\": \"Workspace not found: wks_0000000000000000\"\n  }\n}\n"
+    },
+    "ask-archived": {
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "Using workspace wks_0000000000000000\n{\n  \"error\": {\n    \"code\": \"WORKSPACE_NOT_FOUND\",\n    \"message\": \"Workspace not found: wks_0000000000000000\"\n  }\n}\n"
+    },
+    "unknown-option": {
+      "exitCode": 1,
+      "stdout": "",
+      "stderr": "error: unknown option '--bogus-flag'\n"
+    }
+  }
+}

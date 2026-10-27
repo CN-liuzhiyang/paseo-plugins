@@ -94,6 +94,29 @@ export function workspaceTitle(label, cwd, runCwd) {
 }
 
 /**
+ * The `error.code` of the JSON error object the CLI prints, or null. The object is pretty-printed over
+ * several lines and the CLI may print other lines around it ("Using workspace <id>" before, a deprecation
+ * warning before that, as measured), so it is looked for: from each line that starts with `{`, the longest run
+ * of lines that parses.
+ */
+function jsonErrorCode(raw) {
+  const lines = raw.split(/\r?\n/);
+  if (lines.length > 100) return null;
+  for (let start = 0; start < lines.length; start += 1) {
+    if (!lines[start].startsWith("{")) continue;
+    for (let end = lines.length; end > start; end -= 1) {
+      try {
+        const code = JSON.parse(lines.slice(start, end).join("\n"))?.error?.code;
+        return typeof code === "string" ? code : null;
+      } catch {
+        // Not that stretch; a shorter one, or a later line, may be the object.
+      }
+    }
+  }
+  return null;
+}
+
+/**
  * Whether an error from starting an agent is Paseo refusing the workspace
  * before it made the agent, and which way:
  *   "gone"  the workspace is not there (`WORKSPACE_NOT_FOUND`: archived, or never was)
@@ -101,17 +124,16 @@ export function workspaceTitle(label, cwd, runCwd) {
  * or null for anything else, which is not ours to retry: an agent that began
  * and then failed has spent something, and doing it again would spend it twice.
  *
- * Both were measured (docs/affair-workspace.md): exit code 1, no agent made. The
- * first is the JSON error on stderr, the second the argument parser's own line.
+ * Both were measured (docs/affair-workspace.md, test/fixtures/paseo-refusals.json): exit code 1, no agent made.
+ * The first is the JSON error on stderr behind a "Using workspace" line, the second the argument
+ * parser's own line. Only the error's `code` counts, never words that appear in it: a failure whose message
+ * or whose agent's title mentions WORKSPACE_NOT_FOUND is not this. The `m` flag lets the parser's line
+ * be preceded by others (a deprecation warning); it still has to start a line.
  */
 export function workspaceRefusal(error) {
   if (error?.name !== "PaseoCliError" || typeof error.exitCode !== "number" || error.exitCode === 0) return null;
   const raw = `${error.stderr ?? ""}`.trim() || `${error.stdout ?? ""}`.trim();
-  try {
-    if (JSON.parse(raw)?.error?.code === "WORKSPACE_NOT_FOUND") return "gone";
-  } catch {
-    // Not JSON: the argument parser speaks plain text.
-  }
+  if (jsonErrorCode(raw) === "WORKSPACE_NOT_FOUND") return "gone";
   return /^error: unknown option '--workspace'/m.test(raw) ? "flag" : null;
 }
 

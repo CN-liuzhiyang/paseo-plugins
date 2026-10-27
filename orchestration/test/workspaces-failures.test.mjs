@@ -16,7 +16,9 @@ import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { lockIo, normalizeDir, workspaceRefusal, workspaceTitle, workspacesDir } from "../runtime/workspaces.mjs";
 import { PaseoCliError } from "../runtime/paseo-cli.mjs";
-import { fakeExecutor } from "./fake-executor.mjs";
+import { fakeExecutor, refusalError } from "./fake-executor.mjs";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 let roster;
 before(async () => {
@@ -59,16 +61,36 @@ const eventsOf = (result) => {
 const workspaceEvents = (result) => eventsOf(result).filter((e) => e.kind === "workspace");
 const affairCaveats = (result) => result.caveats.filter((c) => c.startsWith("affair:"));
 const affairCaveat = (result, pattern) => affairCaveats(result).find((c) => pattern.test(c));
-const cliError = (stderr) => new PaseoCliError("paseo run failed", { argv: ["run"], exitCode: 1, stdout: "", stderr });
+const cliError = (stderr, exitCode = 1) => new PaseoCliError("paseo run failed", { argv: ["run"], exitCode, stdout: "", stderr });
+const FIXTURES = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "paseo-refusals.json"), "utf8")).cases;
 
 // --- F1: Paseo refuses the workspace before it makes the agent -----------------------------------------------
 
+test("workspaceRefusal knows what the real CLI printed, prefix lines and all", () => {
+  // Byte for byte from the CLI (test/fixtures/paseo-refusals.json): the JSON error comes after "Using workspace <id>",
+  // and for --background after a deprecation warning too. The old reading, JSON.parse of all of stderr, saw none of these.
+  for (const name of ["ask-missing", "spawn-missing", "ask-archived"]) {
+    assert.ok(!FIXTURES[name].stderr.startsWith("{"), `${name}: a line comes before the JSON`);
+    assert.equal(workspaceRefusal(refusalError(name)), "gone", name);
+  }
+  assert.equal(workspaceRefusal(refusalError("unknown-option")), "flag");
+  // The older shapes still hold: the bare JSON, and the parser's line with a warning before it.
+  assert.equal(workspaceRefusal(cliError(JSON.stringify({ error: { code: "WORKSPACE_NOT_FOUND", message: "m" } }))), "gone");
+  assert.equal(workspaceRefusal(cliError("Warning: --background (-d) is deprecated. Use --no-wait instead.\nerror: unknown option '--workspace'\n")), "flag");
+  // The JSON may also have lines after it.
+  assert.equal(workspaceRefusal(cliError(`${FIXTURES["ask-missing"].stderr}some trailing line\n`)), "gone");
+});
+
 test("workspaceRefusal: only a refusal that came before any agent existed", () => {
-  assert.equal(workspaceRefusal(cliError(JSON.stringify({ error: { code: "WORKSPACE_NOT_FOUND", message: "Workspace not found: wks_x" } }))), "gone");
-  assert.equal(workspaceRefusal(cliError("error: unknown option '--workspace'\n")), "flag");
   // What is not that: another code, another option, a failure with no exit code (a timeout), anything that is not the CLI's.
   assert.equal(workspaceRefusal(cliError(JSON.stringify({ error: { code: "OUTPUT_SCHEMA_FAILED", message: "m" } }))), null);
   assert.equal(workspaceRefusal(cliError("error: unknown option '--thinking'\n")), null);
+  // Words are not codes: a failure that mentions the name (its message, a title, a prompt echoed back) is its own.
+  const mentions = "Using workspace wks_0000000000000000\n" + JSON.stringify({ error: { code: "OUTPUT_SCHEMA_FAILED", message: "WORKSPACE_NOT_FOUND in the title of the agent" } }, null, 2) + "\n";
+  assert.equal(workspaceRefusal(cliError(mentions)), null);
+  assert.equal(workspaceRefusal(cliError("agent 'WORKSPACE_NOT_FOUND report' failed\n")), null);
+  assert.equal(workspaceRefusal(cliError("I was told: error: unknown option '--workspace'\n")), null, "the parser's line starts a line");
+  assert.equal(workspaceRefusal(cliError(FIXTURES["ask-missing"].stderr, 0)), null, "a zero exit is not a refusal");
   assert.equal(workspaceRefusal(new PaseoCliError("paseo run exceeded 5ms", { argv: ["run"], exitCode: null, stdout: "", stderr: "" })), null);
   assert.equal(workspaceRefusal(new Error("Workspace not found")), null);
   assert.equal(workspaceRefusal(null), null);
@@ -131,6 +153,24 @@ test("F1: any other failure of the start is the call's own and is not repeated",
   const result = await run(asking, { logDir: await freshLogDir(), executor, affair: AFFAIR });
   assert.equal(result.outcome, "failed");
   assert.equal(executor.requests.length, 1, "one start, no second");
+  assert.equal(executor.refused.length, 0);
+  assert.equal(affairCaveat(result, /refused/), undefined);
+});
+
+test("F1: an ordinary failure whose title and message say WORKSPACE_NOT_FOUND is not a refusal and is not repeated", async () => {
+  const titled = flow({
+    name: "titled",
+    description: "d",
+    phases: [],
+    inputs: {},
+    grants: [],
+    run: async (_, $) => $.ask(say, {}, { title: "WORKSPACE_NOT_FOUND report" }),
+  });
+  const failure = cliError("Using workspace fake-ws-1\n" + JSON.stringify({ error: { code: "OUTPUT_SCHEMA_FAILED", message: "WORKSPACE_NOT_FOUND report: no output" } }, null, 2) + "\n");
+  const executor = fakeExecutor({ answer: () => Promise.reject(failure), workspaces: [] });
+  const result = await run(titled, { logDir: await freshLogDir(), executor, affair: AFFAIR });
+  assert.equal(result.outcome, "failed");
+  assert.equal(executor.requests.length, 1, "started once");
   assert.equal(executor.refused.length, 0);
   assert.equal(affairCaveat(result, /refused/), undefined);
 });

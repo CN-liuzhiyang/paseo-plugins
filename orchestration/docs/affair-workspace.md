@@ -22,8 +22,14 @@
 | `paseo run --workspace <id> ...` | agent 进了那个 workspace。stderr 打一行 `Using workspace <id>`，**stdout 的 JSON 不受影响**（`--output-schema` 的结构化结果、`--background` 的 `{ agentId }` 都照常） |
 | `paseo run --workspace <id> --cwd <另一个目录>` | **`--cwd` 被忽略**：agent 的 cwd 是 workspace 的目录（`inspect` 的 `Cwd`、`ls` 的 `cwd` 一致）。一个 workspace 里的 agent 没法用别的目录 |
 | `paseo run --background` | 仍能用，但 CLI 打 `Warning: --background (-d) is deprecated. Use --no-wait instead.`（stderr）。`executor.spawn` 还在用它，不是这次的事，记在这里 |
-| `paseo run --workspace <id>`，id 不存在或已归档 | 退出码 1，stderr 是 JSON `{"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace not found: <id>"}}`（`--output-schema` 和 `--no-wait` 都一样）。**没有创建 agent**（`agent ls -g -a` 为空） |
+| `paseo run --workspace <id>`，id 不存在或已归档 | 退出码 1，stdout 空。**stderr 不是纯 JSON**：先一行 `Using workspace <id>`，再是缩进多行的 `{"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace not found: <id>"}}`。`--background` 形态（人闸卡片用的）前面还有一行 `Warning: --background (-d) is deprecated. Use --no-wait instead.`。没有创建 agent（`agent ls -g -a` 为空） |
 | `paseo run --bogus-flag`（CLI 不认识的选项，老版本不认识 `--workspace` 时同理） | 退出码 1，stderr 是参数解析器的一行纯文本 `error: unknown option '--bogus-flag'`，不是 JSON。同样没有创建 agent |
+
+这几段 stderr 是**逐字**抓的（经运行时自己的 `runPaseo`，和 executor 走同一条路），存在 `test/fixtures/paseo-refusals.json`，
+测试里 fake executor 抛的错就是用它做的。夹具里的 workspace id（随机的）换成了占位符 `wks_0000000000000000`，除此之外
+没改（里面本来就没有路径或用户名）；"不认识的选项"那段用的是 `--bogus-flag`，测试里把它换成 `--workspace` 来代表老版本 CLI，
+这是**推断**，没有真的拿一个老版本 CLI 抓过。第一轮评审我只看了终端里合并显示的输出，把 stderr 当成纯 JSON，
+`workspaceRefusal` 因此对整段 stderr 做 `JSON.parse`、在真实形态下一次都认不出来；这是那次的错。
 | `PASEO_HOME` 环境变量 | 和 `--home` 一样选 daemon；运行时的 `runPaseo` 原样转交环境，所以实测时设它就能让整个运行器对着临时 daemon |
 
 端到端（真实的 `orch.mjs` + `paseoExecutor`，两个 haiku 调用，一个在目录 `a`、一个在目录 `b`，总共几美分）：
@@ -116,8 +122,11 @@
 
 **选定 workspace 之后、agent 还没创建就被 Paseo 拒绝**（人在这期间归档了它；或者 `workspace create` 能用而 `run`
 的 CLI 不认识 `--workspace`）也走这条路，不让运行失败。依据是上面实测的两种拒绝，它们都发生在创建 agent 之前
-（`agent ls` 为空）：`workspaceRefusal(error)` 只认 **退出码非 0 的 `PaseoCliError`** 且 stderr 里是
-`error.code === "WORKSPACE_NOT_FOUND"`（`gone`），或以 `error: unknown option '--workspace'` 开头（`flag`）。认出来时：
+（`agent ls` 为空）：`workspaceRefusal(error)` 只认 **退出码非 0 的 `PaseoCliError`**，且 stderr 里：从某一行以 `{` 开头起能解析出一个 JSON 对象
+（容忍前面的 `Using workspace`、弃用警告和后面的杂行），它的 `error.code === "WORKSPACE_NOT_FOUND"`（`gone`）；或者有一行以
+`error: unknown option '--workspace'` 开头（`flag`；正则的 `m` 标志是必要的，参数解析器的那行前面可能有别的行，但它必须是
+一行的开头）。**只看 `code` 字段，不看正文里出现的字样**：标题、提示词或错误信息里写着 `WORKSPACE_NOT_FOUND` 的普通失败不会被当成拒绝
+（有测试）。认出来时：
 
 - 记一条 caveat；
 - 缓存里只丢掉**被拒绝的那一个**结果（别的调用可能已经换了新的）；
@@ -128,6 +137,12 @@
 重试只发生在这一种情形下，且最多一次。**判断不了就不重试**：别的任何错误（含超时、退出码为空、agent 起来后才失败的
 `OUTPUT_SCHEMA_FAILED`）都是调用自己的失败，照旧向外抛——agent 可能已经花了钱、动了东西，再来一遍就是两遍。
 人闸卡片的 `spawn` 同样处理。
+
+**验证到什么程度**：识别函数用真实 CLI 的 stderr 形态（上面的夹具）测了，单测和三条回归（归档后第二次 ask、启动前被归档、
+卡片 spawn）都用这些形态。另外在临时 daemon 上用真实的 `orch.mjs` 和 `paseoExecutor` 端到端跑了一次：两次 `$.ask` 之间用 `$.do` 把事项的
+workspace 归档掉，第二次 ask 被 Paseo 以 `WORKSPACE_NOT_FOUND` 拒绝，运行时记 caveat、重新建了 workspace、重试成功，运行 `done`；
+同一场景用改之前的识别函数跑，运行 `failed`，报的正是这个 `WORKSPACE_NOT_FOUND`。**这一条端到端覆盖的是 `ask` 形态；
+`flag`（老 CLI）和人闸卡片的真实重试没有在真 daemon 上跑过。**
 
 ### 并发
 
@@ -143,6 +158,8 @@
   30 秒（评审里的 `ENOSPC` 注入）。
 
 接管过期锁的竞态**没有解决，是已接受的限制**，见下面"失败与限制"。
+
+`workspaces.mjs` 导出的 `lockIo` 是**测试接缝**（让测试能让"锁文件已创建、写内容失败"发生），运行时代码不改它。
 
 ### 不自动归档、不自动删
 
@@ -178,7 +195,7 @@
 4. **登记读坏了重建，可能留下重复。** 读到的文件不是合法记录时当作没有、新建，并记一条 caveat；以前为这个事项建的
    workspace 不会被认领，会留在 App 里。不校验记录里的 `key`/`cwd`（文件名就是它们的哈希）。
 5. **model 载体的人闸没接**：它要自己 Write 回执，换 cwd 会不会改变它的权限请求没验证过。
-6. **人闸 provider 没在真 daemon 上跑**：orchestration-gate 要 `npm ci` 构建，而且会写到插件目录，没有为它动在用的
+6. **人闸 provider 没在真 daemon 上跑**（卡片的重试同样只在假 executor 上，用真实 stderr 形态测过）：orchestration-gate 要 `npm ci` 构建，而且会写到插件目录，没有为它动在用的
    目录。验证到的是：同样形态的命令（`run --no-wait --workspace <id>`，claude agent）进了那个 workspace。
    第一次真的发起带 affair 的人闸时看一眼卡片是不是进了事项的 workspace。
 7. **多个 daemon**：运行时不传 `--home`，登记文件按 logDir 共用。拿另一个 daemon 的 id 去问当前 daemon 会得到"不在"，

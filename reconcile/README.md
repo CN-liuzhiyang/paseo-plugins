@@ -391,7 +391,7 @@ stages: [
 页面答的是问这个问题时指定的那个人的问题，插件只有一个管理员在用，没有再核对是谁在点。
 
 **流程（flow）**：页面上有「流程」一段，读编排运行时写的事件文件（`<logDir>/runs/*.jsonl` 和 `.claim`，路径的找法和运行时一样），**只读**。
-一次运行属于哪件事，只看启动它时给的 `--affair`：`link` 指向本插件的屏（`plugin: "reconcile"`、`screen: "inbox"`），`params.case` 是事项的 key，`params.stage` 可选。`--affair` 里另有一个 `key`（值同 `params.case`，即事项 id，不含阶段），是给运行时用的：同一事项的几次运行、几个阶段共用运行时建的一个 Paseo workspace；本插件不读它、页面不画它。
+一次运行属于哪件事，只看启动它时给的 `--affair`：`link` 指向本插件的屏（`plugin: "reconcile"`、`screen: "inbox"`），`params.case` 是事项的 key，`params.stage` 可选。`--affair` 里另有一个 `key`（事项 id，不含阶段；不超过 256 个字符时和 `params.case` 相同，超过则是前 223 个字符加 `~` 加完整 id 的 SHA-256 前 32 位，使不同的长 id 仍是不同的 key），是给运行时用的：同一事项的几次运行、几个阶段共用运行时建的一个 Paseo workspace；本插件不读它、页面不画它。
 没有别的关联办法。**活着不是这里判的**：是运行时的那张表（`orchestration/runtime/liveness.mjs` 的 `classify`），`shared/liveness.mjs` 是它的一份拷贝
 （`orchestration/` 里 `npm run sync:liveness` 复制，头部标着「由运行时复制，别手改」），测试比对文字相同、并逐行按 `orchestration/fixtures/run-state-cases.json` 测。
 读的事实和运行时一样：占位文件的修改时间（2 分钟内）和内容、持有者那台机器上 pid 是不是已经不在（不在就是死了，不管占位多新）；没有占位的旧文件用 `run.start` 里的 pid，再看最后一条事件是不是 15 分钟内。

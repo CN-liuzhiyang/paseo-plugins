@@ -30,9 +30,25 @@
 // --workspace. A title is cut to 120 characters, by code point, as the real one is.
 
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { PaseoCliError } from "../runtime/paseo-cli.mjs";
+
+/**
+ * What the CLI really printed when it refused a workspace before making an agent (fixtures/paseo-refusals.json,
+ * measured, not written by hand): stderr behind a "Using workspace" line, and for --background a deprecation line too.
+ */
+const REFUSALS = JSON.parse(readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "paseo-refusals.json"), "utf8")).cases;
+const FIXTURE_ID = "wks_0000000000000000";
+/** A PaseoCliError as runPaseoJson would throw it for the fixture `name`, naming `workspace` where the fixture has its placeholder id. */
+export function refusalError(name, workspace) {
+  const { exitCode, stdout, stderr } = REFUSALS[name];
+  // The unknown-option fixture was made with a stand-in option; on an old CLI it is --workspace that it does not know.
+  const text = (s) => s.split(FIXTURE_ID).join(workspace ?? FIXTURE_ID).split("--bogus-flag").join("--workspace");
+  return new PaseoCliError("paseo run failed", { argv: ["run"], exitCode, stdout: text(stdout), stderr: text(stderr) });
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -84,19 +100,18 @@ export function fakeExecutor({
 } = {}) {
   const refused = [];
   let archived = false;
-  const cliError = (stderr) => new PaseoCliError("paseo run failed", { argv: ["run"], exitCode: 1, stdout: "", stderr });
-  /** What the real CLI does with --workspace before it makes an agent. */
-  const checkWorkspace = (request) => {
+  /** What the real CLI does with --workspace before it makes an agent; `form` is how it was asked (ask: structured; spawn: --background). */
+  const checkWorkspace = (request, form) => {
     if (!request.workspace) return;
     let error = null;
-    if (!workspaceFlag) error = cliError("error: unknown option '--workspace'");
+    if (!workspaceFlag) error = refusalError("unknown-option");
     else if (archiveOnStart && !archived) {
       archived = true;
       const at = workspaces.findIndex((w) => w.workspaceId === request.workspace);
       if (at >= 0) workspaces.splice(at, 1);
     }
     if (!error && !workspaces.some((w) => w.workspaceId === request.workspace)) {
-      error = cliError(JSON.stringify({ error: { code: "WORKSPACE_NOT_FOUND", message: `Workspace not found: ${request.workspace}` } }));
+      error = refusalError(form === "spawn" ? "spawn-missing" : "ask-missing", request.workspace);
     }
     if (error) {
       refused.push(request);
@@ -124,7 +139,7 @@ export function fakeExecutor({
     transcripts,
 
     async ask(request) {
-      checkWorkspace(request);
+      checkWorkspace(request, "ask");
       requests.push(request);
       const id = start(request, "running");
       await sleep(typeof delayMs === "function" ? delayMs(request) : delayMs);
@@ -139,7 +154,7 @@ export function fakeExecutor({
     },
 
     async spawn(request) {
-      checkWorkspace(request);
+      checkWorkspace(request, "spawn");
       requests.push(request);
       const id = start(request, "running");
       if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), 5);
