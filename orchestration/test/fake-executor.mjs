@@ -22,11 +22,17 @@
 // `providers` is what providerAvailable reports as available.
 // `workspaces` is the daemon's list of workspaces; two executors given the same
 // array are two clients of one daemon. `workspaceDelayMs` spaces out making one,
-// `workspaceFails` makes listing (`"list"`) or making (`"create"`) fail.
+// `workspaceFails` makes listing (`"list"`) or making (`"create"`) fail. Like Paseo, an
+// agent started in a workspace the daemon does not have is refused before it exists
+// (`refused` holds those requests; `requests` only the ones started). `archiveOnStart`
+// archives the workspace of the first such start, as a person might between the
+// executor's listing and the start; `workspaceFlag: false` is a CLI that does not know
+// --workspace. A title is cut to 120 characters, by code point, as the real one is.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { PaseoCliError } from "../runtime/paseo-cli.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -73,7 +79,30 @@ export function fakeExecutor({
   workspaces = [],
   workspaceDelayMs = 0,
   workspaceFails = null,
+  archiveOnStart = false,
+  workspaceFlag = true,
 } = {}) {
+  const refused = [];
+  let archived = false;
+  const cliError = (stderr) => new PaseoCliError("paseo run failed", { argv: ["run"], exitCode: 1, stdout: "", stderr });
+  /** What the real CLI does with --workspace before it makes an agent. */
+  const checkWorkspace = (request) => {
+    if (!request.workspace) return;
+    let error = null;
+    if (!workspaceFlag) error = cliError("error: unknown option '--workspace'");
+    else if (archiveOnStart && !archived) {
+      archived = true;
+      const at = workspaces.findIndex((w) => w.workspaceId === request.workspace);
+      if (at >= 0) workspaces.splice(at, 1);
+    }
+    if (!error && !workspaces.some((w) => w.workspaceId === request.workspace)) {
+      error = cliError(JSON.stringify({ error: { code: "WORKSPACE_NOT_FOUND", message: `Workspace not found: ${request.workspace}` } }));
+    }
+    if (error) {
+      refused.push(request);
+      throw error;
+    }
+  };
   const agents = new Map();
   const requests = [];
   const denied = [];
@@ -90,10 +119,12 @@ export function fakeExecutor({
   return {
     agents,
     requests,
+    refused,
     denied,
     transcripts,
 
     async ask(request) {
+      checkWorkspace(request);
       requests.push(request);
       const id = start(request, "running");
       await sleep(typeof delayMs === "function" ? delayMs(request) : delayMs);
@@ -108,6 +139,7 @@ export function fakeExecutor({
     },
 
     async spawn(request) {
+      checkWorkspace(request);
       requests.push(request);
       const id = start(request, "running");
       if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), 5);
@@ -122,8 +154,10 @@ export function fakeExecutor({
     async createWorkspace({ cwd, title }) {
       if (workspaceFails === "create") throw new Error("fake failure of workspace create");
       await sleep(workspaceDelayMs);
-      const workspaceId = `fake-ws-${workspaces.length + 1}`;
-      workspaces.push({ workspaceId, cwd, title });
+      // Counted on the shared array, not taken from its length: an archived workspace's id is not made again.
+      workspaces.made = (workspaces.made ?? 0) + 1;
+      const workspaceId = `fake-ws-${workspaces.made}`;
+      workspaces.push({ workspaceId, cwd, title: [...title].slice(0, 120).join("") });
       return { workspaceId };
     },
 

@@ -254,6 +254,21 @@ export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEn
 
 // ---- the affair a run is for -------------------------------------------------------------------------
 
+/** The longest `affair.key` the runtime takes, in characters (code points). */
+const AFFAIR_KEY_LIMIT = 256;
+const KEY_HASH_CHARS = 32;
+
+/**
+ * The item's id as the runtime's identity for it: the id itself when it fits, otherwise its first characters and a
+ * SHA-256 of the whole id, so that two long ids that differ only past the cut are still two keys. (`params.case`, the
+ * link's copy, is cut at 256 as it always was; it is for going back to the page, not for telling items apart.)
+ */
+export function affairKeyOf(caseId: string): string {
+  const chars = [...caseId];
+  if (chars.length <= AFFAIR_KEY_LIMIT) return caseId;
+  return `${chars.slice(0, AFFAIR_KEY_LIMIT - 1 - KEY_HASH_CHARS).join("")}~${sha256(caseId).slice(0, KEY_HASH_CHARS)}`;
+}
+
 /**
  * What `--affair` is given (orchestration/runtime/affair.mjs): the label, the item's address when it has a plain one, the item's page,
  * and the `key` the runtime tells the item's runs apart by (they share one Paseo workspace). The key is the item's id alone, so the
@@ -265,7 +280,7 @@ export function affairOf(rec: Pick<FlowRec, "caseId" | "stage" | "label">, url: 
   const plain = url !== null && url.length <= 2048 && /^https?:\/\/[^\s/@]+(\/|$)/.test(url) && !hasUnsafe(url) ? url : null;
   const params: Record<string, string> = { case: rec.caseId.slice(0, 256) };
   if (rec.stage && !hasUnsafe(rec.stage)) params.stage = rec.stage.slice(0, 256);
-  return { label, ...(plain ? { url: plain } : {}), link: { plugin: screen.plugin, screen: screen.screen, params }, key: params.case };
+  return { label, ...(plain ? { url: plain } : {}), link: { plugin: screen.plugin, screen: screen.screen, params }, key: affairKeyOf(rec.caseId) };
 }
 
 // ---- starting the process ----------------------------------------------------------------------------

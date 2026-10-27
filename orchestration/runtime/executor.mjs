@@ -23,6 +23,7 @@
 // workspace's own directory: `paseo run --workspace` ignores --cwd.
 
 import { runPaseo, runPaseoJson } from "./paseo-cli.mjs";
+import { cutTitle } from "./workspaces.mjs";
 
 /** Titles are truncated for Paseo; the events record the same truncated text. */
 export const sentTitle = (title) => title.slice(0, 120);
@@ -124,7 +125,7 @@ export function paseoExecutor({ host = null } = {}) {
 
     createWorkspace: async ({ cwd, title }) => {
       const made = await runPaseoJson(
-        ["workspace", "create", "--isolation", "local", "--path", cwd, "--title", sentTitle(title), "--no-background"],
+        ["workspace", "create", "--isolation", "local", "--path", cwd, "--title", cutTitle(title), "--no-background"],
         { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS },
       );
       if (typeof made?.workspaceId !== "string") throw new Error("paseo workspace create returned no workspaceId");

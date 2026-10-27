@@ -18,7 +18,7 @@
 // Nothing here may fail a run. ensureWorkspace throws; the runner turns that
 // into a caveat and carries on as it did before this existed.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,9 +28,17 @@ export const LOCK_WAIT_MS = 30_000;
 /** A lock older than this was left by a process that died holding it. Longer than the two CLI calls it covers can take. */
 export const LOCK_STALE_MS = 180_000;
 const LOCK_POLL_MS = 200;
+/** The longest title Paseo is sent, in characters (code points). */
+export const TITLE_LIMIT = 120;
 
 /** `<logDir>/workspaces` */
 export const workspacesDir = (dir) => path.join(dir, "workspaces");
+
+/**
+ * What the lock file's contents are written through. A seam for tests (a write
+ * that fails after the file exists); nothing else touches it.
+ */
+export const lockIo = { write: (fd, text) => writeSync(fd, text) };
 
 /**
  * What identifies an affair, for sharing a workspace: the caller's `key` when
@@ -52,22 +60,59 @@ export function affairKey(affair) {
   return null;
 }
 
-/** Directories compared as the file system would: Windows ignores case and the kind of slash. */
-export function samePath(a, b) {
-  const norm = (p) => {
-    const resolved = path.resolve(p);
-    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
-  };
-  return norm(a) === norm(b);
+/**
+ * A directory as the file system would compare it: absolute, and on Windows
+ * without regard to case or the kind of slash. The one spelling that a run's
+ * cache of resolved workspaces and the registry's file name are both made
+ * from; what is shown and what is given to a command stays the directory as it
+ * was written.
+ */
+export function normalizeDir(dir) {
+  const resolved = path.resolve(dir);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+export const samePath = (a, b) => normalizeDir(a) === normalizeDir(b);
+
+/** `text` cut to `limit` characters (code points), never in the middle of a surrogate pair. */
+export const cutTitle = (text, limit = TITLE_LIMIT) => {
+  const chars = [...text];
+  return chars.length > limit ? chars.slice(0, limit).join("") : text;
+};
+
+/**
+ * The workspace's title, as it is sent and as it is recorded: the affair's
+ * label, and for a directory other than the run's own the directory's name
+ * after it, so that two workspaces of one affair can be told apart. When the
+ * whole is too long it is the label that gives way, not the name.
+ */
+export function workspaceTitle(label, cwd, runCwd) {
+  if (samePath(cwd, runCwd)) return cutTitle(label);
+  const suffix = ` · ${path.basename(path.resolve(cwd))}`;
+  const room = TITLE_LIMIT - [...suffix].length;
+  return room > 0 ? `${cutTitle(label, room)}${suffix}` : cutTitle(suffix.trimStart());
 }
 
 /**
- * The workspace's title: the affair's label, and for a directory other than
- * the run's own, the directory's name after it, so that two workspaces of one
- * affair can be told apart.
+ * Whether an error from starting an agent is Paseo refusing the workspace
+ * before it made the agent, and which way:
+ *   "gone"  the workspace is not there (`WORKSPACE_NOT_FOUND`: archived, or never was)
+ *   "flag"  this CLI does not know `--workspace` (an older one)
+ * or null for anything else, which is not ours to retry: an agent that began
+ * and then failed has spent something, and doing it again would spend it twice.
+ *
+ * Both were measured (docs/affair-workspace.md): exit code 1, no agent made. The
+ * first is the JSON error on stderr, the second the argument parser's own line.
  */
-export function workspaceTitle(label, cwd, runCwd) {
-  return samePath(cwd, runCwd) ? label : `${label} · ${path.basename(path.resolve(cwd))}`;
+export function workspaceRefusal(error) {
+  if (error?.name !== "PaseoCliError" || typeof error.exitCode !== "number" || error.exitCode === 0) return null;
+  const raw = `${error.stderr ?? ""}`.trim() || `${error.stdout ?? ""}`.trim();
+  try {
+    if (JSON.parse(raw)?.error?.code === "WORKSPACE_NOT_FOUND") return "gone";
+  } catch {
+    // Not JSON: the argument parser speaks plain text.
+  }
+  return /^error: unknown option '--workspace'/m.test(raw) ? "flag" : null;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,6 +121,22 @@ export class LockTimeout extends Error {
   constructor(file, waitedMs) {
     super(`another run has held ${file} for ${Math.round(waitedMs / 1000)}s`);
     this.name = "LockTimeout";
+  }
+}
+
+/**
+ * Remove the lock file if it is ours. Every holder writes a token into its lock;
+ * only the one whose token is in the file removes it, so a holder whose lock
+ * was taken over as stale does not remove the new holder's. (Read and remove are
+ * two steps, so this narrows the race, it does not close it: docs/affair-workspace.md.)
+ * `token` null: the file was just made here and its contents never written, so it is ours without asking.
+ */
+function release(file, token) {
+  try {
+    if (token !== null && JSON.parse(readFileSync(file, "utf8")).token !== token) return;
+    unlinkSync(file);
+  } catch {
+    // Gone already, or taken over and rewritten: not ours to remove.
   }
 }
 
@@ -102,30 +163,42 @@ async function withLock(file, { waitMs, staleMs, pollMs }, fn) {
       await sleep(pollMs);
       continue;
     }
+    // From here the file is ours, whatever happens to writing into it.
+    const token = randomUUID();
     try {
-      writeSync(fd, JSON.stringify({ pid: process.pid, hostname: os.hostname(), at: new Date().toISOString() }));
-    } finally {
-      closeSync(fd);
+      try {
+        lockIo.write(fd, JSON.stringify({ token, pid: process.pid, hostname: os.hostname(), at: new Date().toISOString() }));
+      } finally {
+        closeSync(fd);
+      }
+    } catch (error) {
+      // Writing or closing failed with the file already made: take it away, or the next runs wait for it.
+      release(file, null);
+      throw error;
     }
     try {
       return await fn();
     } finally {
-      try {
-        unlinkSync(file);
-      } catch {
-        // Removed under us (a clean-up): nothing left to release.
-      }
+      release(file, token);
     }
   }
 }
 
+/** The registry entry, or null when there is none, or `{ unreadable }` when there is a file that is not one. */
 function readEntry(file) {
+  let text;
   try {
-    const entry = JSON.parse(readFileSync(file, "utf8"));
-    return typeof entry?.workspaceId === "string" ? entry : null;
+    text = readFileSync(file, "utf8");
   } catch {
-    // Absent, or half-written by a crash: as good as absent, and rewritten below.
     return null;
+  }
+  try {
+    const entry = JSON.parse(text);
+    if (typeof entry?.workspaceId === "string") return entry;
+    return { unreadable: "it has no workspaceId" };
+  } catch (error) {
+    // Half-written by a crash, or edited: treated as absent below, and said.
+    return { unreadable: error.message };
   }
 }
 
@@ -134,15 +207,18 @@ function readEntry(file) {
  * has it, otherwise a new one, recorded. Throws when the daemon cannot be
  * asked, the workspace cannot be made, or the lock stays taken.
  *
+ * `title` is what is sent to Paseo, the event and the registry, all the same text.
+ *
  * @param {{ dir: string, key: string, cwd: string, title: string, runId: string,
  *           executor: { listWorkspaces: () => Promise<Array<{ workspaceId: string }>>,
  *                       createWorkspace: (request: { cwd: string, title: string }) => Promise<{ workspaceId: string }> },
  *           lock?: { waitMs?: number, staleMs?: number, pollMs?: number } }} options
- * @returns {Promise<{ workspaceId: string, created: boolean, unrecorded?: string }>} `unrecorded`: made, but the registry could not be written (why)
+ * @returns {Promise<{ workspaceId: string, created: boolean, unrecorded?: string, unreadable?: string }>}
+ *   `unrecorded`: made, but the registry could not be written (why).
+ *   `unreadable`: the registry file was there and could not be read (why), so a workspace made before may not have been found.
  */
 export async function ensureWorkspace({ dir, key, cwd, title, runId, executor, lock = {} }) {
-  const normalized = process.platform === "win32" ? path.resolve(cwd).toLowerCase() : path.resolve(cwd);
-  const name = createHash("sha256").update(`${key}\0${normalized}`).digest("hex").slice(0, 32);
+  const name = createHash("sha256").update(`${key}\0${normalizeDir(cwd)}`).digest("hex").slice(0, 32);
   const file = path.join(workspacesDir(dir), `${name}.json`);
   const lockOptions = { waitMs: lock.waitMs ?? LOCK_WAIT_MS, staleMs: lock.staleMs ?? LOCK_STALE_MS, pollMs: lock.pollMs ?? LOCK_POLL_MS };
 
@@ -150,9 +226,10 @@ export async function ensureWorkspace({ dir, key, cwd, title, runId, executor, l
     const entry = readEntry(file);
     // The id alone: the daemon may spell the directory its own way, and the
     // registry's name already says which directory this is for.
-    if (entry && (await executor.listWorkspaces()).some((row) => row.workspaceId === entry.workspaceId)) {
+    if (entry?.workspaceId && (await executor.listWorkspaces()).some((row) => row.workspaceId === entry.workspaceId)) {
       return { workspaceId: entry.workspaceId, created: false };
     }
+    const unreadable = entry?.unreadable;
     const made = await executor.createWorkspace({ cwd, title });
     const record = { key, cwd, title, workspaceId: made.workspaceId, createdAt: new Date().toISOString(), runId };
     // Written beside and renamed over: a reader sees the old entry or the new one, never half of one.
@@ -162,8 +239,8 @@ export async function ensureWorkspace({ dir, key, cwd, title, runId, executor, l
       renameSync(next, file);
     } catch (error) {
       // The workspace exists; this run uses it. Only the next run will not find it, which the caller says.
-      return { workspaceId: made.workspaceId, created: true, unrecorded: error.message };
+      return { workspaceId: made.workspaceId, created: true, unrecorded: error.message, ...(unreadable ? { unreadable } : {}) };
     }
-    return { workspaceId: made.workspaceId, created: true };
+    return { workspaceId: made.workspaceId, created: true, ...(unreadable ? { unreadable } : {}) };
   });
 }

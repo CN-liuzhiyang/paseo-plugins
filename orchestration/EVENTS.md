@@ -138,7 +138,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 |---|---|---|
 | `workspaceId` | string | Paseo 的 workspace id |
 | `cwd` | string | 这个 workspace 对应的目录（`$.ask` 的 `cwd` 或运行的 `cwd`） |
-| `title` | string | 建的时候用的标题；复用已有的时，人可能已经改过名，这里是**这次会用的**标题，不是 workspace 现在的 |
+| `title` | string | 建的时候发给 Paseo 的标题（最长 120 个字符，按码点；登记文件里也是这一串）；复用已有的时，人可能已经改过名，这里是**这次会用的**标题，不是 workspace 现在的 |
 | `key` | string | 事项的身份（带前缀 `key:` / `link:` / `url:`） |
 | `created` | boolean | true：这次新建的；false：用了之前某次运行建的 |
 

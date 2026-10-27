@@ -22,6 +22,8 @@
 | `paseo run --workspace <id> ...` | agent 进了那个 workspace。stderr 打一行 `Using workspace <id>`，**stdout 的 JSON 不受影响**（`--output-schema` 的结构化结果、`--background` 的 `{ agentId }` 都照常） |
 | `paseo run --workspace <id> --cwd <另一个目录>` | **`--cwd` 被忽略**：agent 的 cwd 是 workspace 的目录（`inspect` 的 `Cwd`、`ls` 的 `cwd` 一致）。一个 workspace 里的 agent 没法用别的目录 |
 | `paseo run --background` | 仍能用，但 CLI 打 `Warning: --background (-d) is deprecated. Use --no-wait instead.`（stderr）。`executor.spawn` 还在用它，不是这次的事，记在这里 |
+| `paseo run --workspace <id>`，id 不存在或已归档 | 退出码 1，stderr 是 JSON `{"error":{"code":"WORKSPACE_NOT_FOUND","message":"Workspace not found: <id>"}}`（`--output-schema` 和 `--no-wait` 都一样）。**没有创建 agent**（`agent ls -g -a` 为空） |
+| `paseo run --bogus-flag`（CLI 不认识的选项，老版本不认识 `--workspace` 时同理） | 退出码 1，stderr 是参数解析器的一行纯文本 `error: unknown option '--bogus-flag'`，不是 JSON。同样没有创建 agent |
 | `PASEO_HOME` 环境变量 | 和 `--home` 一样选 daemon；运行时的 `runPaseo` 原样转交环境，所以实测时设它就能让整个运行器对着临时 daemon |
 
 端到端（真实的 `orch.mjs` + `paseoExecutor`，两个 haiku 调用，一个在目录 `a`、一个在目录 `b`，总共几美分）：
@@ -29,7 +31,7 @@
 - 同一事项跑两次：第一次建出 2 个 workspace（`Probe affair 7`、`Probe affair 7 · b`），第二次两个都复用
   （`workspace` 事件 `created: false`），4 个 agent 的 cwd 分别是各自 workspace 的目录。
 - 同一事项，**3 个 `orch.mjs run` 进程同时起**：daemon 上只多出 2 个 workspace（每个目录 1 个），三个进程都退出码 0。
-- 没有在真 daemon 上跑人闸载体（见"未决"）。
+- 没有在真 daemon 上跑人闸载体（见"失败与限制"）。
 
 ## 设计
 
@@ -68,7 +70,8 @@
 ### 标题
 
 `affair.label`；这次调用的目录不是运行本身的目录时（`$.ask(..., { cwd })` 指到别处），后面加
-` · <目录名>`。最长 120。
+` · <目录名>`。最长 120 个字符，**按码点**算，不会切开代理对；太长时让的是 label，不是后缀（后缀才是区分两个
+目录的那部分）。这个最终文本在运行器里只生成一次，发给 Paseo、写进 `workspace` 事件、写进登记文件的是同一串。
 
 没有按任务书建议的 `<flow 名> · <label>`：一件事下可以有好几个 flow 的运行，它们共用一个 workspace，
 标题里写哪个 flow 都是错的。flow 名在每个 agent 的标题和运行视图里本来就有。标题只在建的时候写，
@@ -78,7 +81,9 @@
 
 实测 `--workspace` 下 `--cwd` 被忽略，agent 只能在 workspace 的目录里。所以同一事项下 cwd 不同的调用，
 各用各的 workspace（`$.ask` 的 `cwd` 选项真的有意义时才会多出来）。运行的 `cwd` 和每个 `$.ask` 的 `cwd`
-都算。
+都算。同一个目录的不同写法（Windows 上的大小写、正反斜杠、`.`/`..`）是同一个目录：运行里缓存解析结果用的键和登记
+文件名用的是同一个规范化函数（`normalizeDir`），所以并行的调用不管怎么写这个目录，都只解析一次、只发一条事件；
+展示和传给命令的仍是第一个调用写的原样。
 
 ### 人闸卡片
 
@@ -106,7 +111,23 @@
 - 这次调用照老办法起 agent（不传 `--workspace`）。
 
 登记写不进去但 workspace 已经建好：这次运行照用，caveat 说"下一次运行会再建一个"。
+登记文件在但读不了（半写、被改坏）：当作没有，重建，并记一条 caveat 说"以前为它建的 workspace 可能没被找到"。
 一个目录的解析结果（含失败）在一次运行里是缓存的，不会每个 `$.ask` 都重试一遍、各等一次超时。
+
+**选定 workspace 之后、agent 还没创建就被 Paseo 拒绝**（人在这期间归档了它；或者 `workspace create` 能用而 `run`
+的 CLI 不认识 `--workspace`）也走这条路，不让运行失败。依据是上面实测的两种拒绝，它们都发生在创建 agent 之前
+（`agent ls` 为空）：`workspaceRefusal(error)` 只认 **退出码非 0 的 `PaseoCliError`** 且 stderr 里是
+`error.code === "WORKSPACE_NOT_FOUND"`（`gone`），或以 `error: unknown option '--workspace'` 开头（`flag`）。认出来时：
+
+- 记一条 caveat；
+- 缓存里只丢掉**被拒绝的那一个**结果（别的调用可能已经换了新的）；
+- `gone`：重新解析（登记里的 id 已不在 daemon 的列表里，所以会新建），**重试一次**；还是同一个 id（daemon 还列着它却拒绝）
+  就不带 workspace 重试；
+- `flag`：不带 workspace 重试，并且这次运行里之后的调用都不再要 workspace（不会每个 `$.ask` 各被拒一次）。
+
+重试只发生在这一种情形下，且最多一次。**判断不了就不重试**：别的任何错误（含超时、退出码为空、agent 起来后才失败的
+`OUTPUT_SCHEMA_FAILED`）都是调用自己的失败，照旧向外抛——agent 可能已经花了钱、动了东西，再来一遍就是两遍。
+人闸卡片的 `spawn` 同样处理。
 
 ### 并发
 
@@ -116,9 +137,12 @@
 - 拿不到锁就每 200 ms 再试，最多等 30 秒；等不到按失败降级，**不是自己去建**，所以不会因为等不到而多建一个。
 - 锁文件超过 3 分钟没动算持有者死了，抢过来。（比里面两条 CLI 调用各 60 秒的超时之和长。）
 - 同一进程里并行的 `$.ask` 共用一个 promise，根本不进锁。
+- 锁里写一个随机 token，释放时**只删自己的**：读出来 token 对得上才删。所以持有者的锁被别人当过期锁接管之后，
+  它收尾时不会把新持有者的锁也删了（再带出第三个等待者）。
+- 锁文件一创建成功，后面不管写内容还是关文件失败，都把它删掉再抛，不会留下一把没人持有的新锁让后面几次运行各等
+  30 秒（评审里的 `ENOSPC` 注入）。
 
-抢过期锁本身有个小竞态（两个等待者同时抢）；过期锁是持有进程在这一小段里死掉才有的，代价是多建一个，
-不是运行失败，接受。
+接管过期锁的竞态**没有解决，是已接受的限制**，见下面"失败与限制"。
 
 ### 不自动归档、不自动删
 
@@ -133,19 +157,45 @@
 没有加 `call.start` 的字段：agent 在哪个 workspace 看 Paseo 就行，不为此动 `call.start` 和样例 fixture。
 降级走已有的 `caveat` 事件。
 
-## 未决
+## 失败与限制
 
-1. **事项追踪（reconcile）传的 affair 会按阶段拆开。** 它的 `link.params` 是 `{ case, stage? }`，
-   没有 `key`，按上面的规则同一件事的不同阶段各有一个 workspace。想合一，它传 `affair.key`（比如案件号）。
-   那边不在这次的范围里，没改。
-2. **model 载体的人闸**没接（上面说了原因）。
-3. **人闸 provider 没在真 daemon 上跑**：orchestration-gate 要 `npm ci` 构建，而且会写到插件目录，没有为它动在用的
-   目录。验证到的是：同样形态的命令（`run --background --workspace <id>`，claude agent）进了那个 workspace。
+已接受的，每条说明依据和后果。
+
+1. **接管过期锁有竞态。** 读 mtime 判过期和 `unlink` 是两步。评审用强制时序复现了：两个进程都读到旧锁的 mtime，A 删了旧锁
+   并拿到新锁、开始建 workspace，B 按旧判断把 A 的新锁也删了，再自己拿锁——结果两个都 `created: true`，建出两个
+   workspace。（不注入时序的三进程正常竞争只建 1 个，我们的真 daemon 实测也是。）token 校验只保证"收尾时不删别人的锁"，
+   **不**让接管本身原子，评审也指出光"再查一次 token/mtime"补不上。要严格唯一得换成经过验证的跨进程锁或租约，
+   不在这次范围里。触发条件是：上一个持有者死在那一小段里，**并且**两个新运行在同一瞬间都来接管；后果是多一个
+   workspace，不是运行失败，也不是永久死锁。**没有加测试**：复现它要在 `statSync` 和 `unlinkSync` 之间插入另一个进程的动作，
+   模块没有也不该为此开接缝；所有权校验的部分有测试（`test/workspaces-failures.test.mjs`）。
+2. **运行总 timeout 包含等 workspace 的时间。** 全局 timeout 到了就结束运行，此时还在找/建 workspace 的解析会在后台
+   做完，但事件流已经关了，不再记 `workspace` 事件（评审实测：timeout=1s，建 workspace 1.1s，结果 timeout、
+   没起 agent）。"降级不影响运行"指的是失败不让运行失败，不是这段等待不花预算。默认每条 CLI 调用最多 60 秒，
+   等锁最多 30 秒。
+3. **自定义 executor 没有外层超时。** 内置的 `paseoExecutor` 每条 workspace 调用有 60 秒超时；测试里或别处注入的
+   executor 如果 `listWorkspaces`/`createWorkspace` 永不返回，这个目录的解析就一直挂着（锁也一直被持有）。接口上没有规定超时，
+   由 executor 自己负责。
+4. **登记读坏了重建，可能留下重复。** 读到的文件不是合法记录时当作没有、新建，并记一条 caveat；以前为这个事项建的
+   workspace 不会被认领，会留在 App 里。不校验记录里的 `key`/`cwd`（文件名就是它们的哈希）。
+5. **model 载体的人闸没接**：它要自己 Write 回执，换 cwd 会不会改变它的权限请求没验证过。
+6. **人闸 provider 没在真 daemon 上跑**：orchestration-gate 要 `npm ci` 构建，而且会写到插件目录，没有为它动在用的
+   目录。验证到的是：同样形态的命令（`run --no-wait --workspace <id>`，claude agent）进了那个 workspace。
    第一次真的发起带 affair 的人闸时看一眼卡片是不是进了事项的 workspace。
-4. **多个 daemon**：运行时不传 `--home`，登记文件按 logDir 共用。拿另一个 daemon 的 id 去问当前 daemon 会得到"不在"，
+7. **多个 daemon**：运行时不传 `--home`，登记文件按 logDir 共用。拿另一个 daemon 的 id 去问当前 daemon 会得到"不在"，
    于是新建并覆盖登记；两个 daemon 轮流跑同一事项才会来回覆盖，没处理。
-5. **标题不跟 label 走**：label 里带状态的话（"… · blocked"），建好以后 workspace 的标题就停在建的那一刻。
+8. **标题不跟 label 走**：label 里带状态的话（"… · blocked"），建好以后 workspace 的标题就停在建的那一刻。
    不自动改名是因为人可能改过。
-6. **一个调用方是 Paseo agent 时**，以前新 agent 进调用方的 workspace，现在带 affair 就进事项的 workspace；
+9. **一个调用方是 Paseo agent 时**，以前新 agent 进调用方的 workspace，现在带 affair 就进事项的 workspace；
    父子 label（`paseo.parent-agent-id`）不变，App 上的分组照旧。
-7. `executor.spawn` 用的 `--background` 已被 CLI 标为弃用（改 `--no-wait`），另议。
+10. **身份只在一份配置内唯一。** 事项追踪的 `caseId` 是 `<来源>:<编号>`，来源 id 只在一份配置里唯一；几份独立的配置共用同一个
+    logDir 和 cwd 时，相同的 `caseId` 会被当成同一件事。要支持就得给 key 加部署命名空间。
+11. `executor.spawn` 用的 `--background` 已被 CLI 标为弃用（改 `--no-wait`），另议。
+
+## 已解决
+
+- **事项追踪（reconcile）传的 affair 按阶段拆开**：已解决。`reconcile/server/flows.ts` 的 `affairOf` 现在给 `--affair` 带 `key`，
+  来源是 `FlowRec.caseId`（`<来源>:<编号>`，事项本身的 id，不含阶段、轮次；阶段在 `stage`，运行身份另算）。
+  长度不超过 256 个字符（码点）就原样用；超过就取前 223 个字符 + `~` + 完整 `caseId` 的 SHA-256 前 32 位，
+  总长 256，所以只在 256 个字符之后才不同的两个长 id 仍是两个 key（评审 F5：以前截断后会撞）。链接里的
+  `params.case` 仍按旧办法截到 256，它是用来跳回页面的，不是身份。key 不进界面：reconcile 只读 link 的
+  plugin、screen、case、stage，orchestration-ui 只取 label、url、link。

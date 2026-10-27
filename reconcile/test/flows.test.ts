@@ -3,10 +3,13 @@ import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFil
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { FLOW_VALUE_BYTES, type FlowEnd, type FlowRec } from "../shared/model";
-import { actFor, affairOf, createLauncher, endedMessage, inputHashOf, limitWhy, MAX_RESTARTS, recordingLauncher, resultOf, runIdOf, SUSPECT_MS } from "../server/flows";
+import { actFor, affairKeyOf, affairOf, createLauncher, endedMessage, inputHashOf, limitWhy, MAX_RESTARTS, recordingLauncher, resultOf, runIdOf, SUSPECT_MS } from "../server/flows";
 import { probeOf } from "./helpers";
 import { AFFAIR, ago, fixture, MIN, NOW, start } from "./run-files";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 // Flows started for items (server/flows.ts): the run's id, the day's limits, the table of what to do with a run in each
 // state the runtime's files can be in, and how the process is started. All names are made up.
@@ -215,7 +218,9 @@ test("a run is told to the runtime as the item it is for, the stage it was asked
   assert.deepEqual((none.link as { params: unknown }).params, { case: "tracker:1" });
   assert.equal("url" in affairOf({ caseId: "tracker:1", stage: "a", label: "x" }, "https://user:pw@host.example/x", screen), false, "an address with credentials in it is not a plain one");
   assert.equal((affairOf({ caseId: "tracker:1", stage: "a", label: "x".repeat(300) }, null, screen).label as string).length <= 120, true);
-  assert.equal((affairOf({ caseId: "tracker:" + "9".repeat(300), stage: null, label: "x" }, null, screen).key as string).length, 256, "as long as the runtime takes");
+  // The key is the whole id when it fits; the link's copy is cut at 256 as it always was.
+  const long = affairOf({ caseId: "tracker:" + "9".repeat(300), stage: null, label: "x" }, null, screen);
+  assert.equal((long.link as { params: { case: string } }).params.case.length, 256);
 });
 
 test("the runtime is told one key for one item, whatever stage or run it is, and another for another item", () => {
@@ -225,8 +230,26 @@ test("the runtime is told one key for one item, whatever stage or run it is, and
   assert.equal(key("tracker:1", "review", "#1"), key("tracker:1", null, "#1"));
   assert.notEqual(key("tracker:1", "review", "#1"), key("tracker:2", "review", "#1"));
   assert.notEqual(key("tracker:1", "review", "#1"), key("other:1", "review", "#1"), "the same number from another source is another item");
-  // The runtime takes the object as given: a key it refuses would refuse the run.
-  assert.equal(typeof key("tracker:1", "review", "#1"), "string");
+});
+
+test("two long ids that differ only past the cut are two keys, and the runtime takes every affair this makes", async () => {
+  const screen = { plugin: "reconcile", screen: "inbox" };
+  const { affairProblems } = (await import(pathToFileURL(path.join(here, "..", "..", "orchestration", "runtime", "affair.mjs")).href)) as { affairProblems: (affair: unknown) => string[] };
+  const source = "s".repeat(255);
+  const a = affairOf({ caseId: `${source}:1`, stage: "review", label: "x" }, null, screen);
+  const b = affairOf({ caseId: `${source}:2`, stage: "review", label: "x" }, null, screen);
+  assert.notEqual(a.key, b.key, "the same 256 characters, a different item");
+  assert.equal(a.key, affairOf({ caseId: `${source}:1`, stage: "fix", label: "y" }, null, screen).key, "and the same item is the same key whatever the stage");
+  // The runtime counts characters (code points), so a long id of astral characters is cut by those, not by UTF-16 units.
+  const astral = (tail: string) => affairOf({ caseId: "𠀀".repeat(300) + tail, stage: null, label: "x" }, null, screen);
+  assert.notEqual(astral("1").key, astral("2").key);
+  for (const made of [a, b, astral("1"), affairOf({ caseId: "tracker:1", stage: null, label: "x" }, null, screen)]) {
+    assert.deepEqual(affairProblems(made), []);
+    assert.ok([...(made.key as string)].length <= 256);
+  }
+  assert.equal(affairKeyOf("tracker:1"), "tracker:1", "an id that fits is the key as it is");
+  assert.equal([...affairKeyOf("x".repeat(256))].length, 256);
+  assert.equal([...affairKeyOf("x".repeat(257))].length, 256);
 });
 
 // ---- starting the process ----------------------------------------------------------------------------------
