@@ -20,6 +20,9 @@
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
 // `providers` is what providerAvailable reports as available.
+// `workspaces` is the daemon's list of workspaces; two executors given the same
+// array are two clients of one daemon. `workspaceDelayMs` spaces out making one,
+// `workspaceFails` makes listing (`"list"`) or making (`"create"`) fail.
 
 import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -67,6 +70,9 @@ export function fakeExecutor({
   providers = ["orch-gate"],
   typed = "这个类的源文件不对，别批",
   message = "denied from the command line",
+  workspaces = [],
+  workspaceDelayMs = 0,
+  workspaceFails = null,
 } = {}) {
   const agents = new Map();
   const requests = [];
@@ -106,6 +112,19 @@ export function fakeExecutor({
       const id = start(request, "running");
       if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), 5);
       return { agentId: id };
+    },
+
+    async listWorkspaces() {
+      if (workspaceFails === "list") throw new Error("fake failure of workspace ls");
+      return workspaces.map((w) => ({ workspaceId: w.workspaceId, name: w.title, cwd: w.cwd }));
+    },
+
+    async createWorkspace({ cwd, title }) {
+      if (workspaceFails === "create") throw new Error("fake failure of workspace create");
+      await sleep(workspaceDelayMs);
+      const workspaceId = `fake-ws-${workspaces.length + 1}`;
+      workspaces.push({ workspaceId, cwd, title });
+      return { workspaceId };
     },
 
     async providerAvailable(family) {

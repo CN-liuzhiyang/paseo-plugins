@@ -4,7 +4,13 @@
 // draws what it is given.
 //
 //   { label: "Release 2.4 · blocked", url: "https://example.com/r/24",
-//     link: { plugin: "tracker", screen: "case", params: { id: "24" } } }
+//     link: { plugin: "tracker", screen: "case", params: { id: "24" } },
+//     key: "release-24" }
+//
+// `key` is for the runtime, not for a screen: what makes two runs the same
+// affair, when the link (which may carry more than the item's identity, a stage
+// say) or the url is not it. Runs of one affair share a Paseo workspace
+// (workspaces.mjs); without a key the link is the identity, then the url.
 //
 // The label and the url are drawn on a screen and the file they sit in can be
 // edited by anyone with the disk, so they are checked here as untrusted text:
@@ -15,6 +21,7 @@
 
 export const LABEL_LIMIT = 120;
 export const URL_LIMIT = 2_048;
+export const KEY_LIMIT = 256;
 export const PARAMS_LIMIT = 16;
 export const PARAM_VALUE_LIMIT = 256;
 
@@ -68,19 +75,23 @@ function urlProblem(where, value) {
 
 /**
  * What is wrong with an affair value: an empty list when it is `null` or fits
- * `{ label, url?, link?: { plugin, screen, params? } }`.
+ * `{ label, url?, link?: { plugin, screen, params? }, key? }`.
  *
  * @param {unknown} value
  * @returns {string[]}
  */
 export function affairProblems(value) {
   if (value === null || value === undefined) return [];
-  if (!isObject(value)) return ["affair must be an object { label, url?, link? } or null"];
+  if (!isObject(value)) return ["affair must be an object { label, url?, link?, key? } or null"];
   const problems = [];
-  onlyKeys("affair", value, ["label", "url", "link"], problems);
+  onlyKeys("affair", value, ["label", "url", "link", "key"], problems);
 
   const label = textProblem("affair.label", value.label, LABEL_LIMIT);
   if (label) problems.push(label);
+  if (value.key !== undefined) {
+    const key = textProblem("affair.key", value.key, KEY_LIMIT);
+    if (key) problems.push(key);
+  }
   if (value.url !== undefined) {
     const url = urlProblem("affair.url", value.url);
     if (url) problems.push(url);

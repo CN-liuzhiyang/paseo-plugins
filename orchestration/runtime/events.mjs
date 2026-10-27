@@ -238,6 +238,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         break;
       }
+      case "workspace":
+        need(event, isString(event.workspaceId) && event.workspaceId !== "", "workspaceId is not a non-empty string");
+        need(event, isString(event.cwd) && isString(event.title), "cwd / title are not strings");
+        need(event, isString(event.key) && event.key !== "", "key is not a non-empty string");
+        need(event, typeof event.created === "boolean", "created is not a boolean");
+        break;
       case "caveat":
         need(event, event.callId === null || calls.has(event.callId), "callId is not null or a started call");
         need(event, isString(event.text), "text is not a string");

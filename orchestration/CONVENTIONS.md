@@ -423,7 +423,8 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 | `inspect` 的 `LastUsage` 是**最后一轮**，不是累计 | 一次结构化调用只发一个 prompt，按调用收应该是准的（推断）；多轮对话会低估 |
 | Codex agent 的 `LastUsage.CostUsd` 是 **0**，token 数照常有（2026-09-23，gpt-6-astra，27k 输入） | `call.end.cost.usd` 照实给 0，`run.end.cost.totalUsd` 只含 Claude 系。要算 Codex 得按 token 自己折 |
 | Claude 的 `LastUsage.InputTokens` 只数未缓存的输入（2026-09-24：一次 haiku 调用 `inputTokens: 10`，`usd: 0.075`） | 成本看 `usd`，不要按 token 数估 Claude 的钱 |
-| 在 Paseo agent 里起的子 agent，cwd **一律是调用方 workspace 的目录**：`--cwd` 被忽略，子进程 cwd 也不管用（2026-09-23 实测：gate 探针指定了临时目录，agent 仍落在调用方的项目目录） | prompt 里一律给绝对路径。`$.ask` 的 `cwd` 是脚本**要求**的目录，不一定是 agent 实际所在的目录；`effects: "workspace"` 的"工作目录"因此也是调用方的。真要换目录大概得传 `--workspace`，未验证 |
+| 在 Paseo agent 里起的子 agent，cwd **一律是调用方 workspace 的目录**：`--cwd` 被忽略，子进程 cwd 也不管用（2026-09-23 实测：gate 探针指定了临时目录，agent 仍落在调用方的项目目录） | prompt 里一律给绝对路径。`$.ask` 的 `cwd` 是脚本**要求**的目录，不一定是 agent 实际所在的目录；`effects: "workspace"` 的"工作目录"因此也是调用方的。传 `--workspace` 也不能换目录：agent 的 cwd 是 **workspace 的目录**，`--cwd` 照样被忽略（2026-10-27 实测）。要换目录得换 workspace |
+| `paseo workspace create` **不去重**：同目录同标题连建两次得到两个 id；`workspace ls` 只有标题和目录，没有标签（2026-10-27） | 运行时不按标题找，用登记文件加锁，见 `docs/affair-workspace.md` |
 | Claude 的 `plan` 模式每轮结束都会发权限请求 | 无人值守 + `--output-schema` 必炸（`OUTPUT_SCHEMA_FAILED`），且是花完 token 之后。见 R8 |
 | 结构化调用中途失败，前面轮次的钱**不会**退 | 失败的调用也收成本；多步编排要让中间失败保住已有结果（R6） |
 | `run` 的 prompt **只能**是命令行参数（没有 stdin、没有文件，`cli/src/commands/agent/run.ts`），而 Windows 命令行上限 32767 字符。超了 Node 只报 `ENAMETOOLONG`（2026-09-23 实测：一个 818 行的补丁文件放进 prompt 就超了） | `runPaseo` 超过 `COMMAND_LINE_BUDGET`（32000）直接报错并说明原因。大段输入给文件路径让 agent 读：小于几千字符的内联，更大的只给绝对路径 |

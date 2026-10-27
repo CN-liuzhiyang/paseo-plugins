@@ -14,17 +14,25 @@
 //   deny(agentId, { message })              deny every pending permission request
 //   stop(agentId)                           interrupt it
 //   providerAvailable(family)               true when Paseo lists it as available and enabled
+//   listWorkspaces()                        [{ workspaceId, name, cwd }], hidden ones too
+//   createWorkspace({ cwd, title })         { workspaceId } of a new visible workspace on cwd
 //
 // A request is { provider, thinking, mode, title, labels, prompt, cwd } plus,
-// for ask, { schema, timeout }.
+// for ask, { schema, timeout }, and `workspace` (a workspace id) when the agent
+// is to be started in that workspace. A workspace's agents all work in the
+// workspace's own directory: `paseo run --workspace` ignores --cwd.
 
 import { runPaseo, runPaseoJson } from "./paseo-cli.mjs";
 
 /** Titles are truncated for Paseo; the events record the same truncated text. */
 export const sentTitle = (title) => title.slice(0, 120);
 
-function agentArgs({ provider, thinking, title, mode, labels }) {
+/** Listing or making a workspace is a quick call; one that hangs would hold the affair's lock. */
+const WORKSPACE_CALL_TIMEOUT_MS = 60_000;
+
+function agentArgs({ provider, thinking, title, mode, labels, workspace }) {
   const args = ["--provider", provider];
+  if (workspace) args.push("--workspace", workspace);
   if (thinking) args.push("--thinking", thinking);
   if (title) args.push("--title", sentTitle(title));
   if (mode) args.push("--mode", mode);
@@ -103,6 +111,24 @@ export function paseoExecutor({ host = null } = {}) {
     providerAvailable: async (family) => {
       const rows = (await runPaseoJson(["provider", "ls"], opts())) ?? [];
       return rows.some((row) => row.provider === family && row.status === "available" && row.enabled === "Enabled");
+    },
+
+    // `workspace ls --json` rows are { workspaceId, project, name, isolation, cwd, background }.
+    // `--background` includes hidden ones: a person who hid the affair's workspace has not archived it.
+    // `create` is given `--no-background` so that it is visible even when the caller's own workspace is hidden.
+    // Neither is for another host: runs with --host keep their agents where Paseo puts them (workspaces.mjs).
+    listWorkspaces: async () => {
+      const rows = (await runPaseoJson(["workspace", "ls", "--background"], { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS })) ?? [];
+      return rows.map((row) => ({ workspaceId: row.workspaceId, name: row.name, cwd: row.cwd }));
+    },
+
+    createWorkspace: async ({ cwd, title }) => {
+      const made = await runPaseoJson(
+        ["workspace", "create", "--isolation", "local", "--path", cwd, "--title", sentTitle(title), "--no-background"],
+        { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS },
+      );
+      if (typeof made?.workspaceId !== "string") throw new Error("paseo workspace create returned no workspaceId");
+      return { workspaceId: made.workspaceId };
     },
   };
 }

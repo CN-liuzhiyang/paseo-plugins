@@ -112,7 +112,7 @@
 | `host` | string \| null | `--host`，本机为 null |
 | `pid` | number | 跑这次运行的进程 id |
 | `hostname` | string | 跑这次运行的机器，Node 的 `os.hostname()` |
-| `affair` | `{ label, url?, link? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
+| `affair` | `{ label, url?, link?, key? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
 
 `affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
 
@@ -121,11 +121,30 @@
 | `label` | string | 必填。1 到 120 个字符（按 Unicode 码点），不含控制字符、换行、改变文字方向的字符、零宽和不显示的字符（零宽空格、软连字符、Hangul 填充符、tag 字符等；连接符 U+200C、U+200D 和 emoji 选择符 U+FE0F 允许），清单在 `fixtures/affair-cases.json` |
 | `url` | string | 可选。绝对的 `http` / `https` 地址，最长 2048，不含空白和控制字符，不带用户名密码 |
 | `link` | `{ plugin, screen, params? }` | 可选，指向 Paseo 插件的一个屏。`plugin`、`screen`：`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；`params`：字符串到字符串，最多 16 个，键同上，值最长 256 个字符、不含控制字符 |
+| `key` | string | 可选（后加，2026-10-27），给运行时用、界面不画：什么让两次运行是同一件事。1 到 256 个字符，文本限制同 `label`。没有时身份取 `link`（`plugin`、`screen` 和全部 `params`），再取 `url`；三样都没有就没有身份。同一件事的运行共用一个 Paseo workspace，见下面的 `workspace` 事件 |
 
 - 不合格式、多出不认识的键，运行在花钱之前就被拒（`RunRefused`），不会被"清理"后接受：记下来的就是调用方写下的。
 - **读的一方把它当不可信文本**：`label`、`url` 会被画到界面上，文件落盘后谁都改得了。读者自己再校验一遍，不要信文件
   里的内容合乎上面的限制：`url` 只认 `http(s)`，`link` 的 `plugin`、`screen` 不合白名单就当没有。
 - 有 `link` 时界面拼成插件屏的路由让人点回去；只有 `url` 就当外链；都没有只显示文字。两个都有，`link` 优先。
+
+### `workspace`
+
+运行带 `affair` 且能认出它是哪件事（`affair.key`，或 `link`、`url`）时，这件事的 agent 和人闸卡片放进同一个 Paseo
+workspace（每个目录一个）。第一次要起 agent 的调用要用某个目录的 workspace 时，找到或建好它，发一条。设计和
+实测：`docs/affair-workspace.md`。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `workspaceId` | string | Paseo 的 workspace id |
+| `cwd` | string | 这个 workspace 对应的目录（`$.ask` 的 `cwd` 或运行的 `cwd`） |
+| `title` | string | 建的时候用的标题；复用已有的时，人可能已经改过名，这里是**这次会用的**标题，不是 workspace 现在的 |
+| `key` | string | 事项的身份（带前缀 `key:` / `link:` / `url:`） |
+| `created` | boolean | true：这次新建的；false：用了之前某次运行建的 |
+
+- 每个目录最多一条，在用到它的第一个 `call.start` 之前。没有 `affair`、身份认不出、跨机（`--host`）、或者找/建失败时
+  **没有这条**；后三种会有一条 `caveat`（`affair: ...`），调用照老办法起 agent，运行不因此失败。
+- 之前的文件没有这个事件，读者忽略不认识的 `kind`（见"演进规则"）。
 
 ### `phase.start` / `phase.end`
 
@@ -306,7 +325,7 @@
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null。人闸的 `call.start.carrier`
+  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

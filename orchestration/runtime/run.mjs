@@ -24,6 +24,7 @@ import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog, eventsFile } from "./events.mjs";
 import { affairProblems } from "./affair.mjs";
+import { affairKey, ensureWorkspace, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest } from "./gate.mjs";
@@ -148,19 +149,21 @@ function checkKeys(where, object, allowed) {
  * The run takes its id first (claim.mjs), before anything slow: with `runId`
  * the caller's own id, otherwise a fresh one. An id that is already claimed, or
  * already has events, is refused and nothing is spent. `affair` is what the run
- * is for, recorded as run.start.affair (affair.mjs).
+ * is for, recorded as run.start.affair (affair.mjs); the agents and gate cards of
+ * the runs for one affair share a Paseo workspace per directory (workspaces.mjs).
  *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
  *           agentProbeDelays?: number[], runId?: string, affair?: object | null,
+ *           workspaceLock?: { waitMs?: number, staleMs?: number, pollMs?: number },
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
  *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "taken"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "taken", "workspaceLock"]);
 
   // --- The id, before anything slow ---------------------------------------
   // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
@@ -326,6 +329,42 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // the runner: a flow that catches it still ends as stopped.
   let stopped = null;
 
+  // The affair's workspace, per directory, found or made the first time a call
+  // needs it (a run that never calls an agent makes none). Resolves to the
+  // workspace id, or null: whatever goes wrong is a caveat and the call goes
+  // on as it did before workspaces were shared, never a failed run.
+  const affairWorkspaces = new Map(); // cwd -> Promise<string | null>
+  const key = affairKey(affair);
+  const resolveWorkspace = async (callCwd) => {
+    if (host) {
+      caveat(`affair: the agents of a run on another host (${host}) are not put in a shared workspace`, null);
+      return null;
+    }
+    if (key === null) {
+      caveat("affair: it has no key, link or url, so there is nothing to tell its runs apart by and no shared workspace", null);
+      return null;
+    }
+    if (typeof executor.listWorkspaces !== "function" || typeof executor.createWorkspace !== "function") {
+      caveat("affair: the executor cannot list or make workspaces, so the agents are not put in a shared one", null);
+      return null;
+    }
+    const title = workspaceTitle(affair.label, callCwd, cwd);
+    try {
+      const found = await ensureWorkspace({ dir, key, cwd: callCwd, title, runId, executor, lock: options.workspaceLock });
+      log.emit("workspace", { workspaceId: found.workspaceId, cwd: callCwd, title, key, created: found.created });
+      if (found.unrecorded) caveat(`affair: the workspace was made but not recorded (${found.unrecorded}), so the next run of this affair will make another`, null);
+      return found.workspaceId;
+    } catch (error) {
+      caveat(`affair: no shared workspace (${error?.message ?? error}); the agents are where Paseo puts them by default`, null);
+      return null;
+    }
+  };
+  const workspaceFor = (callCwd) => {
+    if (!affair) return Promise.resolve(null);
+    if (!affairWorkspaces.has(callCwd)) affairWorkspaces.set(callCwd, resolveWorkspace(callCwd));
+    return affairWorkspaces.get(callCwd);
+  };
+
   const caveat = (text, callId) => {
     if (caveats.includes(text)) return;
     caveats.push(text);
@@ -414,6 +453,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       // The call's own title, then the step's, then its name: one value for
       // the events and for the agent on Paseo.
       const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
+      const callCwd = callOptions.cwd ?? cwd;
+      // Before the call exists: a wait for another run's workspace is not part of this call's time.
+      const workspace = await workspaceFor(callCwd);
 
       const record = startCall();
       log.emit("call.start", {
@@ -448,7 +490,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
           prompt,
           schema: step.schema,
           timeout,
-          cwd: callOptions.cwd ?? cwd,
+          cwd: callCwd,
+          workspace: workspace ?? undefined,
         });
         // Paseo enforces the schema; this catches what reaches the flow anyway
         // (an empty stdout parses to null). The answer stays in call.end.
@@ -512,6 +555,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       }
       // One line: it heads the provider's three-line prompt, and a line break in it could pass for a pointer.
       const oneLineTitle = sentTitle(title.replace(/\s+/g, " ").trim());
+      // The provider's card needs nothing of its directory (its prompt gives absolute paths), so it goes
+      // with the run's own agents. A model carrier writes the receipt itself and stays where it was.
+      const workspace = carrier === "provider" ? await workspaceFor(cwd) : null;
 
       const record = startCall();
       const holdPath = request.holdPath ?? path.join(runDir, "gate", `${record.callId}.receipt.txt`);
@@ -567,6 +613,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
             labels: { ...record.labels, "orch-step": "gate" },
             prompt: composePrompt(bound, prompt),
             cwd: path.dirname(holdPath),
+            workspace: workspace ?? undefined,
           });
           announceAgent(record, agentId);
           return agentId;

@@ -26,6 +26,7 @@ runtime/
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
   affair.mjs     run.start.affair 的形状和校验
+  workspaces.mjs 同一事项的 agent 和人闸卡片放进同一个 Paseo workspace（找/建、锁、登记）；设计见 docs/affair-workspace.md
   resolve.mjs    flow 名字到文件（flows/ 加 config 的 flowsDirs）
   catalog.mjs    有哪些 flow（`orch.mjs list` 的数据：名字、说明、阶段、输入、文件、读不了的原因）
   executor.mjs   执行层：唯一跟 Paseo 说话的地方
@@ -38,6 +39,7 @@ flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸�
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例
+docs/        设计稿（affair-workspace.md：同一事项的 agent 放进同一个 workspace）
 ```
 
 ## 跑
