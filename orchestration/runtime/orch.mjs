@@ -4,6 +4,11 @@
 //                                        [--host ssh://user@box --cwd /path/on/box]
 //                                        [--run-id <id>] [--affair <json | @file>]
 //   node runtime/orch.mjs check <flow.mjs | name>
+//   node runtime/orch.mjs list
+//
+// `list` prints the flows that exist -- the shipped ones and those in `flowsDirs` -- as JSON: name,
+// description, phases, inputs, where the file is, and why a file that is not a usable flow is not
+// (catalog.mjs). It starts nothing and costs nothing; a UI shows it as the list of flows.
 //
 // `run` prints one JSON object, { ok, outcome, value, runId, events, cost,
 // caveats, durationMs } plus error / stop when there is one. The events file
@@ -34,12 +39,14 @@ import { parseArgs } from "node:util";
 import { loadFlow, checkFlow } from "./flow.mjs";
 import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
 import { resolveTarget } from "./resolve.mjs";
+import { listFlows } from "./catalog.mjs";
 
 const USAGE = [
   "Usage:",
   "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
   "                                              [--run-id <id>] [--affair <json | @file>]",
   "  node runtime/orch.mjs check <flow.mjs | name>",
+  "  node runtime/orch.mjs list",
 ].join("\n");
 
 const kebab = (name) => name.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`);
@@ -181,6 +188,16 @@ async function run(name, argv) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, target, ...rest] = process.argv.slice(2);
   const print = (value) => console.log(JSON.stringify(jsonSafe(value), null, 2));
+
+  if (command === "list" && target === undefined) {
+    try {
+      print({ flows: await listFlows() });
+      process.exit(0);
+    } catch (error) {
+      console.error(`${error.name}: ${error.message}`);
+      process.exit(2);
+    }
+  }
 
   if (!["run", "check"].includes(command) || !target) {
     console.error(USAGE);

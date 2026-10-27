@@ -13,6 +13,7 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
   const status = useRpc(statusRpc);
   const [where, setWhere] = useState<Status | null>(null);
   const [logDir, setLogDir] = useState<string | null>(null);
+  const [orchPath, setOrchPath] = useState<string | null>(null);
   const [stale, setStale] = useState<string | null>(null);
   const revision = settings.status === "ready" ? settings.revision : null;
 
@@ -51,10 +52,11 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
   }
 
   const draftLogDir = logDir ?? settings.values.logDir;
+  const draftOrch = orchPath ?? settings.values.orchPath;
   const draftStale = stale ?? String(settings.values.staleMinutes);
   const minutes = Number(draftStale);
   const staleError = Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440 ? null : "填 1 到 1440 之间的整数";
-  const dirty = draftLogDir !== settings.values.logDir || draftStale !== String(settings.values.staleMinutes);
+  const dirty = draftLogDir !== settings.values.logDir || draftOrch !== settings.values.orchPath || draftStale !== String(settings.values.staleMinutes);
 
   return (
     <>
@@ -90,6 +92,14 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
             onChangeText={setLogDir}
           />
           <SettingsInput
+            key={`orch-${revision}`}
+            label="orchPath"
+            hint="orch.mjs 的路径（paseo-plugins/orchestration/runtime/orch.mjs）。页面上「有哪些流程」是问它的：node orch.mjs list。留空就只能显示跑过的流程。"
+            initialValue={settings.values.orchPath}
+            placeholder="/path/to/paseo-plugins/orchestration/runtime/orch.mjs"
+            onChangeText={setOrchPath}
+          />
+          <SettingsInput
             key={`stale-${revision}`}
             label="多久没有新事件算失联（分钟）"
             hint="没有 run.end 的流程安静超过这么久就显示「失联」；正在等的调用自己的时限更长时，按那个时限算。"
@@ -103,10 +113,11 @@ export function OrchestrationSettings(_props: PluginSurfaceProps) {
             disabled={!dirty || staleError !== null || settings.saving}
             onPress={() => {
               void settings
-                .save({ ...settings.values, logDir: draftLogDir.trim(), staleMinutes: minutes }, settings.revision)
+                .save({ ...settings.values, logDir: draftLogDir.trim(), orchPath: draftOrch.trim(), staleMinutes: minutes }, settings.revision)
                 .then((saved) => {
                   if (!saved) return;
                   setLogDir(null);
+                  setOrchPath(null);
                   setStale(null);
                 });
             }}

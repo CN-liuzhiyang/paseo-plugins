@@ -1,6 +1,7 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginOpenScreenInput, PluginScreenProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
+import { FlowDetail } from "./flow-detail";
 import { RunDetail } from "./run-detail";
 import { RunList } from "./run-list";
 import { Button, UiProvider } from "./ui";
@@ -62,13 +63,24 @@ function OneRun({ runId, node, actions, onBack }: { runId: string; node: string 
 export function RunsSurface(props: PluginScreenProps & { actions: SurfaceActions }) {
   const { actions } = props;
   const runId = props.params.run ?? null;
-  const open = (run: string | null) => actions.openScreen({ screenId: SCREEN_ID, params: run ? { run } : {} });
+  const flowName = props.params.flow ?? null;
+  // A run opened from a flow's page goes back to that page, not to the list.
+  const from = props.params.from ?? null;
+  const go = (params: Record<string, string>) => actions.openScreen({ screenId: SCREEN_ID, params });
   return (
     <UiProvider props={props}>
-      {runId === null ? (
-        <RunList host={props.host.label} onOpen={open} onSettings={actions.openSettings} />
+      {runId !== null ? (
+        <OneRun
+          key={`${runId}:${props.params.node ?? ""}`}
+          runId={runId}
+          node={props.params.node ?? null}
+          actions={actions}
+          onBack={() => go(from ? { flow: from } : {})}
+        />
+      ) : flowName !== null ? (
+        <FlowDetail name={flowName} onBack={() => go({})} onOpenRun={(run) => go({ run, from: flowName })} />
       ) : (
-        <OneRun key={`${runId}:${props.params.node ?? ""}`} runId={runId} node={props.params.node ?? null} actions={actions} onBack={() => open(null)} />
+        <RunList host={props.host.label} onOpen={(run) => go({ run })} onOpenFlow={(flow) => go({ flow })} onSettings={actions.openSettings} />
       )}
     </UiProvider>
   );

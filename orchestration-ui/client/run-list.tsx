@@ -5,6 +5,7 @@ import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import { useNow, useRunList } from "./data";
 import { LOG_DIR_SOURCE, RUN_LOOK, VISIT_LOOK } from "./looks";
 import { AffairTag } from "./affair";
+import { FlowList } from "./flow-list";
 import { Banner, Block, useUi } from "./ui";
 
 // Every run, sorted by whether it needs you: a gate waiting or a run gone quiet first, then what
@@ -15,7 +16,7 @@ const LAUNCH = "node <paseo-plugins>/orchestration/runtime/orch.mjs run <flow.mj
 
 type Group = { key: string; title: string; runs: RunSummary[] };
 
-function grouped(runs: RunSummary[]): Group[] {
+export function grouped(runs: RunSummary[]): Group[] {
   const needs: RunSummary[] = [];
   const live: RunSummary[] = [];
   const ended: RunSummary[] = [];
@@ -31,7 +32,17 @@ function grouped(runs: RunSummary[]): Group[] {
   ].filter((group) => group.runs.length > 0);
 }
 
-export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(runId: string): void; onSettings(): void }) {
+export function RunList({
+  host,
+  onOpen,
+  onOpenFlow,
+  onSettings,
+}: {
+  host: string;
+  onOpen(runId: string): void;
+  onOpenFlow(name: string): void;
+  onSettings(): void;
+}) {
   const ui = useUi();
   const { data, error } = useRunList();
   const live = data?.runs.some((run) => run.status === "running" || run.status === "starting") ?? false;
@@ -41,7 +52,12 @@ export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(run
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <View style={{ gap: 4 }}>
         <Text style={ui.styles.title}>流程</Text>
-        {data?.logDir ? <Where host={host} info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
+        <Text style={[ui.styles.small, { fontWeight: "700" }]}>{host}</Text>
+      </View>
+      <FlowList now={now} onOpen={onOpenFlow} onSettings={onSettings} />
+      <View style={{ gap: 4, marginTop: 8 }}>
+        <Text style={ui.styles.heading}>运行记录</Text>
+        {data?.logDir ? <Where info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
       </View>
       {error ? (
         <Banner tone="danger" icon="TriangleAlert" title="刷新失败，下面是上一次读到的列表">
@@ -103,15 +119,13 @@ export function RunList({ host, onOpen, onSettings }: { host: string; onOpen(run
   );
 }
 
-// The runs are files on one daemon's disk; with several hosts connected, the host is what tells
-// you whose runs these are.
-function Where({ host, info, total, shown, onSettings }: { host: string; info: LogDirInfo; total: number; shown: number; onSettings(): void }) {
+// The runs are files on one daemon's disk; the page's host line says whose.
+function Where({ info, total, shown, onSettings }: { info: LogDirInfo; total: number; shown: number; onSettings(): void }) {
   const ui = useUi();
   return (
     <View style={ui.styles.row}>
-      <Text style={[ui.styles.small, { fontWeight: "700" }]}>{host}</Text>
       <Text style={ui.styles.small} selectable>
-        · {info.runsDir}
+        {info.runsDir}
       </Text>
       <Text style={ui.styles.small}>
         （{LOG_DIR_SOURCE[info.source]}）· {total > shown ? `最近 ${shown} 次，共 ${total} 次` : `共 ${total} 次`}
@@ -187,7 +201,7 @@ function sentence(run: RunSummary): string | null {
   return run.hero?.title ?? run.activity;
 }
 
-function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId: string): void }) {
+export function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId: string): void }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const look = RUN_LOOK[run.status];

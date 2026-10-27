@@ -27,6 +27,7 @@ runtime/
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
   affair.mjs     run.start.affair 的形状和校验
   resolve.mjs    flow 名字到文件（flows/ 加 config 的 flowsDirs）
+  catalog.mjs    有哪些 flow（`orch.mjs list` 的数据：名字、说明、阶段、输入、文件、读不了的原因）
   executor.mjs   执行层：唯一跟 Paseo 说话的地方
   paseo-cli.mjs  CLI 调用（Windows 上绕开 cmd.exe）
   gate.mjs       人闸：起一张 Paseo 权限卡片，人批的是回执，判定只看回执文件

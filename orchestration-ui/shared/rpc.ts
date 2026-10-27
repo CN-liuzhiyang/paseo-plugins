@@ -78,6 +78,56 @@ export const listRunsRpc = defineRpc({
   }),
 });
 
+/** How many runs the list reads; the flows' counts are over the same ones, so the two share what the daemon has folded. */
+export const RUN_LIST_LIMIT = 200;
+
+const flowInput = z.object({
+  name: z.string(),
+  /** The command-line flag the runtime takes it as (`--item-no`). */
+  flag: z.string(),
+  kind: z.enum(["text", "choice", "count", "flag", "list", "group"]),
+  description: z.string(),
+  choices: z.array(z.string()).optional(),
+});
+export type FlowInput = z.output<typeof flowInput>;
+
+/** One flow: what it is (from the runtime's `list`) and how its runs have gone (from the run files). */
+export const flowRow = z.object({
+  name: z.string(),
+  description: z.string(),
+  /** shipped: in the runtime's own flows/; config: in a flowsDirs directory; seen: not in the list, but a run file says it ran. */
+  origin: z.enum(["shipped", "config", "seen"]),
+  file: z.string().nullable(),
+  phases: z.array(z.object({ id: z.string(), title: z.string() })),
+  inputs: z.array(flowInput),
+  grants: z.array(z.string()),
+  /** What `orch check` would refuse or warn about in the source. */
+  problems: z.array(z.string()),
+  /** The file is in a flows directory but cannot be used as a flow; this is why. */
+  error: z.string().nullable(),
+  /** How many of the runs the list shows (the newest RUN_LIST_LIMIT) are this flow's. */
+  runCount: z.number(),
+  /** Its newest run, by start time. */
+  latest: runSummary.nullable(),
+});
+export type FlowRow = z.output<typeof flowRow>;
+
+export const listFlowsRpc = defineRpc({
+  name: "orchestration-ui.flows.list",
+  input: z.object({}),
+  output: z.object({
+    /**
+     * ok: the runtime listed the flows. fallback: it could not be asked (`detail` says why), so these are the flows
+     * a run file says ran -- a flow nobody has run yet is not among them.
+     */
+    state: z.enum(["ok", "fallback"]),
+    detail: z.string(),
+    /** The orch.mjs the list came from (the setting), for the command that starts a flow; null when there is none. */
+    orchPath: z.string().nullable(),
+    flows: z.array(flowRow),
+  }),
+});
+
 export const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export const readRunRpc = defineRpc({

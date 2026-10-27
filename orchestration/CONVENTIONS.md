@@ -327,6 +327,8 @@ step 声明 `effects`，**必填、没有默认**：
 **flow 的文件名就是别人引用它的名字。** 调用方（别的插件、调度器）只给名字：`orch.mjs run triage`
 在 `flows/` 和 config.json 的 `flowsDirs` 里找 `triage.mjs`。所以文件名和 `flow({ name })` 写成同一个，
 改文件名等于改了所有调用方依赖的接口。同名的 flow 出现在两个目录里是错误，不是覆盖。
+`node runtime/orch.mjs list` 列出这两处的全部 flow（名字、说明、阶段、输入、文件；import 不了的文件也列，带原因），
+不起任何东西、不花钱；「流程」页面上"有哪些流程"就是它。所以 `description` 是写给要挑流程的人看的一句话。
 输入名 `runId`、`affair` 是运行器的 `--run-id`、`--affair` 占着的，flow 不能用（和 `input`、`timeout`、
 `host`、`cwd` 一样，`flow()` 在 import 时就拒绝）。
 

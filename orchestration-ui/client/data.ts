@@ -1,7 +1,7 @@
 import type { RpcOutput } from "@getpaseo/plugin";
 import { useRpc } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
-import { listRunsRpc, readRunRpc } from "../shared/rpc";
+import { listFlowsRpc, listRunsRpc, readRunRpc, RUN_LIST_LIMIT } from "../shared/rpc";
 import { createRun, foldEvents, runStatus, type ProcessCheck, type RunState } from "../shared/run";
 
 // Polling. The list refreshes every few seconds. A run is read incrementally from the byte
@@ -22,7 +22,7 @@ export function useRunList(): { data: RunList | null; error: string | null } {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       try {
-        const data = await list({ limit: 200 });
+        const data = await list({ limit: RUN_LIST_LIMIT });
         if (!cancelled) setState({ data, error: null });
       } catch (error) {
         // Keep showing the last list; say the refresh failed.
@@ -133,4 +133,33 @@ export function useNow(active: boolean, everyMs = 1_000): number {
     return () => clearInterval(timer);
   }, [active, everyMs]);
   return now;
+}
+
+const FLOWS_MS = 5_000;
+
+export type FlowList = RpcOutput<typeof listFlowsRpc>;
+
+/** The flows that exist and how each has gone. Keeps the last list when a refresh fails. */
+export function useFlowList(): { data: FlowList | null; error: string | null } {
+  const list = useRpc(listFlowsRpc);
+  const [state, setState] = useState<{ data: FlowList | null; error: string | null }>({ data: null, error: null });
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        const data = await list({});
+        if (!cancelled) setState({ data, error: null });
+      } catch (error) {
+        if (!cancelled) setState((current) => ({ data: current.data, error: String(error) }));
+      }
+      if (!cancelled) timer = setTimeout(tick, FLOWS_MS);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [list]);
+  return state;
 }

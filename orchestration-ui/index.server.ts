@@ -1,7 +1,9 @@
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { listRunsRpc, readCardRpc, readRunRpc, statusRpc, RUN_ID, type CardsState } from "./shared/rpc";
+import { listFlowsRpc, listRunsRpc, readCardRpc, readRunRpc, statusRpc, RUN_ID, RUN_LIST_LIMIT, type CardsState } from "./shared/rpc";
 import { settingsDefinition, type Settings } from "./shared/settings";
+import { createCatalog } from "./server/catalog";
+import { flowRows } from "./server/flows";
 import { createCardFeed, readCard, startCardFeed } from "./server/cards";
 import { defaultHome, resolveLogDir } from "./server/logdir";
 import { createRunIndex, readRun } from "./server/runs";
@@ -10,7 +12,7 @@ import { createRunIndex, readRun } from "./server/runs";
 // It starts no runs, answers no gates, and writes no files. The one thing it writes is a card
 // per run into the timeline of the Paseo agent that started it (daemon memory, see server/cards.ts).
 
-const DEFAULTS: Settings = { logDir: "", staleMinutes: 15, cards: true };
+const DEFAULTS: Settings = { logDir: "", staleMinutes: 15, orchPath: "", cards: true };
 
 const NO_TIMELINE =
   "这个 Paseo 没有给插件 server 提供 server.paseo（目前只有 fork 版有），插件没法往对话里贴卡片。列表和流程视图照常可用。";
@@ -18,6 +20,7 @@ const NO_TIMELINE =
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(settingsDefinition);
   const index = createRunIndex();
+  const catalog = createCatalog();
   // COMPAT(server.paseo): a fork-only extension point until upstream lands its own shape.
   const paseo = (server as PluginServerContext & { readonly paseo?: PaseoApi }).paseo;
 
@@ -72,6 +75,14 @@ export default function contribute(server: PluginServerContext) {
     if (!resolved.ok) return { state: "config" as const, detail: resolved.detail, logDir: null, runs: [], total: 0, staleMs };
     const listed = await index.list(resolved.info.runsDir, limit, staleMs);
     return { ...listed, logDir: resolved.info, staleMs };
+  });
+
+  server.handle(listFlowsRpc, async () => {
+    const values = await current();
+    const { resolved, staleMs } = await where();
+    // The runs only say how each flow has gone; a log directory that cannot be read does not stop the list of flows.
+    const runs = resolved.ok ? await index.list(resolved.info.runsDir, RUN_LIST_LIMIT, staleMs).catch(() => null) : null;
+    return { ...flowRows(await catalog.get(values.orchPath), runs?.runs ?? []), orchPath: values.orchPath.trim() || null };
   });
 
   server.handle(readRunRpc, async ({ runId, offset, probe }) => {
