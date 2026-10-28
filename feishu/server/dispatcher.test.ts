@@ -77,7 +77,9 @@ function registry() {
   const streams = new Map<string, (event: unknown) => void>();
   // Called while a prompt is on its way to the agent, before the send returns.
   const onSend = null as ((agentId: string) => void) | null;
-  return { agents, workspaces, created, sends, responses, streams, respondFails: false, onSend };
+  // Each agent's history, as timeline.refetch returns it.
+  const timelines = new Map<string, AgentTimelineItem[]>();
+  return { agents, workspaces, created, sends, responses, streams, timelines, respondFails: false, onSend };
 }
 
 interface Sent {
@@ -201,6 +203,7 @@ function harness(
         paseo.responses.push({ agentId: id, ...input });
       },
       timeline: {
+        refetch: async () => ({ entries: (paseo.timelines.get(id) ?? []).map((item) => ({ item })) }),
         subscribe: (handler: (event: unknown) => void) => {
           paseo.streams.set(id, handler);
           return Object.assign(() => paseo.streams.delete(id), { ready: Promise.resolve() });
@@ -239,15 +242,11 @@ function harness(
   const end = async (agentId: string, answer: string) => {
     const fake = paseo.agents.get(agentId);
     if (fake) fake.status = "idle";
-    dispatcher.onTurnEnded({
-      agent: agent(agentId),
-      turnId: null,
-      outcome: { kind: "completed" },
-      timeline: [
-        { type: "user_message", text: "q" },
-        { type: "assistant_message", text: answer },
-      ],
-    });
+    paseo.timelines.set(agentId, [
+      { type: "user_message", text: "q" },
+      { type: "assistant_message", text: answer },
+    ]);
+    dispatcher.onTurnEnded({ agent: agent(agentId), turnId: null, outcome: { kind: "completed" }, timeline: [] });
     await settle();
   };
   /** A turn starts that no Feishu message sent, as Paseo's turn_started hook reports it. */
@@ -435,11 +434,12 @@ test("a routed message walks one card from received to done", async () => {
     { type: "assistant_message", text: "构建全部" },
     { type: "assistant_message", text: "通过。" },
   ];
+  h.paseo.timelines.set(String(input.agentId), timeline);
   h.dispatcher.onTurnEnded({
     agent: agent(String(input.agentId)),
     turnId: null,
     outcome: { kind: "completed" },
-    timeline,
+    timeline: [],
   });
   await h.settle();
 

@@ -62,6 +62,8 @@ const FOLLOW_WAIT_MS = 3_000;
 const CONFIRM_MS = 15_000;
 const REMEMBERED_ORPHANS = 100;
 // Worded like the orchestration runtime's gate, which has the same blind spot.
+// How much of the history's tail to read for the answer a turn ended with.
+const ANSWER_TAIL = 50;
 const UNATTRIBUTED = "paseo (unattributed: Paseo does not record who answered)";
 // Marks the agent that holds a chat's conversation. It lives on the agent in Paseo's own
 // registry, so the conversation survives plugin reloads and daemon restarts.
@@ -962,9 +964,8 @@ export function createDispatcher(deps: {
     const { outcome } = event;
     const at = now();
     if (outcome.kind === "completed") {
-      run.painter.finish(
-        doneCard(run, finalAnswer(event.timeline), at),
-        lastResortCard(doneTitle(run, at), "green", run),
+      void answerOf(run.agentId).then((answer) =>
+        run.painter.finish(doneCard(run, answer, at), lastResortCard(doneTitle(run, at), "green", run)),
       );
     } else if (outcome.kind === "failed") {
       run.painter.finish(
@@ -973,6 +974,20 @@ export function createDispatcher(deps: {
       );
     } else {
       run.painter.finish(canceledCard(run, outcome.reason, at), lastResortCard("已取消", "grey", run));
+    }
+  }
+
+  /**
+   * The answer the agent's turn ended with. turn_ended carries no timeline since Paseo 0.13
+   * (it is always empty), so the tail of the history is fetched instead.
+   */
+  async function answerOf(agentId: string): Promise<string> {
+    try {
+      const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: ANSWER_TAIL });
+      return finalAnswer(page.entries.map(({ item }) => item));
+    } catch (error) {
+      log(`answer of agent ${agentId}: ${describe(error)}`);
+      return "";
     }
   }
 
