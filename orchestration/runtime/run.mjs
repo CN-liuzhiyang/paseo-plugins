@@ -27,7 +27,7 @@ import { affairProblems } from "./affair.mjs";
 import { affairKey, ensureWorkspace, normalizeDir, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
-import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest } from "./gate.mjs";
+import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, INPUT_REDACTED } from "./gate.mjs";
 import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
@@ -89,6 +89,29 @@ const isEvidence = (e) =>
   typeof e.text === "string" &&
   (e.kind === undefined || e.kind === "diff" || e.kind === "text") &&
   (e.name === undefined || typeof e.name === "string");
+
+/**
+ * A `$.gate` input: { label, secret?, pattern?, hint? }. `secret` defaults to true -- a value is kept out of
+ * the run's records unless the flow says it need not be. `pattern` is a regular expression the whole value must
+ * match; it must compile.
+ */
+function gateInputOf(input) {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) throw new TypeError("$.gate: input must be { label, secret?, pattern?, hint? }");
+  checkKeys("$.gate input", input, ["label", "secret", "pattern", "hint"]);
+  const { label, secret = true, pattern = null, hint = "" } = input;
+  if (typeof label !== "string" || label.trim() === "") throw new TypeError("$.gate: input.label must be a non-empty string");
+  if (typeof secret !== "boolean") throw new TypeError("$.gate: input.secret must be a boolean");
+  if (pattern !== null && typeof pattern !== "string") throw new TypeError("$.gate: input.pattern must be a string");
+  if (typeof hint !== "string") throw new TypeError("$.gate: input.hint must be a string");
+  if (pattern !== null) {
+    try {
+      new RegExp(`^(?:${pattern})$`);
+    } catch (error) {
+      throw new TypeError(`$.gate: input.pattern is not a regular expression: ${error.message}`);
+    }
+  }
+  return { label: label.trim(), secret, pattern, hint: hint.replace(/\s+/g, " ").trim() };
+}
 
 class RunEnded extends Error {
   constructor() {
@@ -563,8 +586,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
      * is -- check `approved` -- and throws only when the gate itself broke.
      */
     async gate(request) {
-      checkKeys("$.gate", request, ["title", "content", "name", "summary", "brief", "evidence", "timeout", "holdPath"]);
+      checkKeys("$.gate", request, ["title", "content", "name", "summary", "brief", "evidence", "timeout", "holdPath", "input"]);
       const { title, content, name = "content.txt", summary = "", brief = "", evidence = [], timeout = "2h" } = request ?? {};
+      const input = request.input === undefined ? null : gateInputOf(request.input);
       if (typeof title !== "string" || title.trim() === "") throw new TypeError("$.gate needs a title");
       if (typeof content !== "string") throw new TypeError("$.gate: content must be a string");
       for (const [key, value] of Object.entries({ name, summary, brief })) {
@@ -582,6 +606,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       const bound = bindRole(roster, { role: GATE_ROLE });
       const fence = fenceFor(bound.provider, "ask-human");
       const carrier = carrierKind(bound.provider);
+      if (input && carrier !== "provider") {
+        throw new TypeError(`$.gate: a gate that asks for a value needs the orch-gate provider as its carrier, but role "${GATE_ROLE}" is ${bound.provider}`);
+      }
       // The provider's card needs nothing of its directory (its prompt gives absolute paths), so it goes
       // with the run's own agents. A model carrier writes the receipt itself and stays where it was.
       // Resolved before the receipt path is looked at and claimed, not between the two: the wait would
@@ -611,6 +638,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         timeout,
         runId,
         callId: record.callId,
+        input,
       });
       log.emit("call.start", {
         callId: record.callId,
@@ -633,7 +661,16 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         evidence,
         receipt: prepared.receipt,
         requestPath: prepared.requestPath,
+        ...(input ? { input } : {}),
       });
+      if (input) {
+        caveat(
+          "gate input: the value is typed into a Paseo card, so Paseo's own record of that answer may hold it; " +
+            "this run's events, and everything the runtime writes, do not" +
+            (input.secret ? "" : " (secret: false: the value is in the call's output)"),
+          record.callId,
+        );
+      }
       caveat(
         "gate: Paseo does not record who answers a permission card; answeredVia is what the answering client sent " +
           "(a card button id or none), a weak signal, and any local process can send either",
@@ -669,7 +706,11 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         endCall(record, { ok: false, output: null, error, ...(await settleAgent(record)) });
         throw error;
       }
-      endCall(record, { ok: true, output: decision, error: null, ...(await settleAgent(record)) });
+      // The flow gets the value; the record gets a stand-in when it is a secret, and from here on
+      // nothing the run writes may carry it (EventLog scrubs it wherever it turns up).
+      if (typeof decision.input === "string" && input?.secret) log.addSecret(decision.input);
+      const recorded = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
+      endCall(record, { ok: true, output: recorded, error: null, ...(await settleAgent(record)) });
       return decision;
     },
 

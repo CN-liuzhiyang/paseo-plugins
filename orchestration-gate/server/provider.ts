@@ -11,7 +11,7 @@ import {
   type ProviderSessionConfig,
   type ProviderTimelineItem,
 } from "@getpaseo/plugin/server/provider";
-import { readRequest, receiptFor, RequestError, type GateRequest } from "./request";
+import { inputProblem, readRequest, receiptFor, RequestError, type GateRequest } from "./request";
 
 // The human gate's carrier, with no model. The orchestration runtime starts it
 // with `paseo run --provider orch-gate/card` and a prompt that points at a gate
@@ -26,6 +26,13 @@ import { readRequest, receiptFor, RequestError, type GateRequest } from "./reque
 // app and IM cards send them, `paseo permit` does not), "no-button" when it did
 // not, "typed" when someone wrote in the conversation while the card was up.
 // That is what the answering client sent, not who it was.
+//
+// An input gate (request.input) asks for a value with the approval -- a verification code. Its card is
+// Paseo's `question` card: a text field, "提交" (approve with the value) and a dismiss button labelled 不批.
+// The two ways of saying something stay apart: the field is the value, never a comment; words typed in
+// the conversation are still a no, with the words as the reason. The value goes to its own file
+// (`<callId>.input.json`) for the runtime to take and delete; the answer record only says one was given.
+// A value that does not fit `pattern` is not an answer: the card goes up again, nothing is recorded.
 
 export const PROVIDER_ID = "orch-gate";
 export const MODEL_ID = "card";
@@ -39,16 +46,20 @@ export interface Answer {
   at: string;
   permissionId: string | null;
   behavior: "allow" | "deny";
-  via: "button" | "no-button" | "typed" | "interrupt";
+  via: "button" | "no-button" | "typed" | "interrupt" | "form" | "dismiss";
   selectedActionId: string | null;
   message: string | null;
   typed: string | null;
+  /** An input gate's allow: that a value was given (never the value). */
+  input?: { given: true; secret: boolean };
 }
 
 interface Waiting {
   turnId: string;
   permissionId: string;
   request: GateRequest;
+  /** Entries sent back for not fitting the pattern. */
+  rejected: number;
 }
 
 interface Session {
@@ -148,6 +159,64 @@ export function gatePermission(request: GateRequest, permissionId: string): Prov
   };
 }
 
+/** What the app's question form sends for its dismiss button (question-form-card.tsx handleDeny). */
+export const DISMISSED = "Dismissed by user";
+
+/**
+ * An input gate's card: Paseo's question card with one text field. The app draws only the question, not a
+ * title or description, so the decision and what each answer does are in the question itself. `notice`
+ * goes above them when an earlier entry was sent back.
+ */
+export function gateQuestion(request: GateRequest, permissionId: string, notice: string | null = null): ProviderPermissionRequest {
+  const input = request.input!;
+  const question = [
+    ...(notice ? [`⚠ ${notice}`] : []),
+    request.title,
+    ...(request.summary.trim() === "" ? [] : [request.summary.trim()]),
+    `在下面填「${input.label}」，点「提交」= 批准（${request.name}，${lines(request.content)} 行，sha256 ${request.sha256.slice(0, 12)}…）；点「不批」= 不批。`,
+    "想说明不批的理由：点「不批」，再在对话底部的消息框里写。这个输入框只填值，不当理由。",
+    `${request.timeout} 内没人处理按不批。`,
+  ].join("\n");
+  return {
+    id: permissionId,
+    name: "人闸",
+    kind: "question",
+    title: request.title,
+    description: input.hint,
+    input: {
+      questions: [
+        {
+          header: input.label,
+          question,
+          options: [],
+          multiSelect: false,
+          allowOther: true,
+          allowEmpty: false,
+          placeholder: input.hint !== "" ? input.hint : input.label,
+          dismissLabel: "不批",
+        },
+      ],
+    },
+    metadata: { runId: request.runId, callId: request.callId, sha256: request.sha256, input: true },
+  };
+}
+
+/** The value a question form answered with: `updatedInput.answers[label]`, or null when the response has none. */
+export function answeredValue(response: ProviderPermissionResponse, label: string): string | null {
+  if (response.behavior !== "allow") return null;
+  const answers = (response.updatedInput as { answers?: unknown } | undefined)?.answers;
+  if (!answers || typeof answers !== "object") return null;
+  const value = (answers as Record<string, unknown>)[label];
+  // Surrounding whitespace is a paste, not part of the value.
+  return typeof value === "string" ? value.trim() : null;
+}
+
+/** How an answer to an input gate's card came in: an allow (the form, or `permit allow --input`), the form's own dismiss, or another deny. */
+export function questionViaOf(response: ProviderPermissionResponse): "form" | "dismiss" | "no-button" {
+  if (response.behavior === "allow") return "form";
+  return response.message === DISMISSED ? "dismiss" : "no-button";
+}
+
 /** How an answer came in, from the ids the card offered. */
 export function viaOf(response: ProviderPermissionResponse): "button" | "no-button" {
   const own = response.behavior === "allow" ? APPROVE : DENY;
@@ -161,6 +230,9 @@ export function viaOf(response: ProviderPermissionResponse): "button" | "no-butt
  * is told, in so many words, that it was read as a no rather than as chat.
  */
 export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, receiptPath: string): string {
+  if (answer.behavior === "allow" && answer.input) {
+    return `**已记为批准**（收到表单里填的值${answer.input.secret ? "，值不会显示在这里" : ""}）。回执已写到 \`${receiptPath}\`，脚本核对回执后取值。`;
+  }
   if (answer.behavior === "allow") {
     const how = answer.via === "button" ? "收到的应答带着卡片「批准」按钮的 id" : "收到的应答没有带卡片按钮的 id，例如命令行";
     return `**已记为批准**（${how}）。回执已写到 \`${receiptPath}\`，脚本核对回执后写入。`;
@@ -175,6 +247,7 @@ export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, r
   if (answer.via === "interrupt") {
     return "**卡片被中断关闭了**（停止，或者 Paseo 重载、替换了这个会话），不是谁的裁决。脚本按出错处理，什么都不会写入。";
   }
+  if (answer.via === "dismiss") return "**已记为不批**（点了表单的「不批」）。卡片已关闭，脚本按不批处理，什么都不会写入。";
   if (answer.via === "button") return "**已记为不批**（收到的应答带着卡片「不批」按钮的 id）。卡片已关闭，脚本按不批处理，什么都不会写入。";
   return (
     "**已记为不批**（收到的应答没有带卡片按钮的 id，例如命令行或到期）。卡片已关闭，脚本按不批处理，什么都不会写入。" +
@@ -209,7 +282,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
   }
 
   /** The card is answered: write what the runtime needs, close the card, end the turn. */
-  async function settle(sessionId: string, session: Session, answer: Omit<Answer, "v" | "at" | "permissionId">): Promise<void> {
+  async function settle(sessionId: string, session: Session, answer: Omit<Answer, "v" | "at" | "permissionId">, value: string | null = null): Promise<void> {
     const waiting = session.waiting;
     if (!waiting) return;
     session.waiting = null;
@@ -217,7 +290,9 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
     const { request, turnId, permissionId } = waiting;
     let failure: string | null = null;
     try {
-      // The answer first, then the receipt: the runtime takes a receipt only with an allow record
+      // An input gate's value first, in a file of its own: the answer record says only that one was given.
+      if (answer.behavior === "allow" && value !== null) await files.create(request.inputPath!, JSON.stringify({ v: 1, value }));
+      // The answer, then the receipt: the runtime takes a receipt only with an allow record
       // beside it, so a failure in between leaves an allow without a receipt -- an error, not an approval.
       await record(request.answerPath, { permissionId, ...answer });
       if (answer.behavior === "allow") await files.create(request.receiptPath, receiptFor(request));
@@ -274,8 +349,24 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
     for (const item of gateTimeline(request, session.turns)) emit({ type: "timeline.item", sessionId, item });
     const permissionId = `gate-${request.callId}-${session.turns}`;
     session.state = "waiting";
-    session.waiting = { turnId, permissionId, request };
-    emit({ type: "session.permission", sessionId, request: gatePermission(request, permissionId) });
+    session.waiting = { turnId, permissionId, request, rejected: 0 };
+    emit({ type: "session.permission", sessionId, request: request.input ? gateQuestion(request, permissionId) : gatePermission(request, permissionId) });
+  }
+
+  /**
+   * An input that does not fit is not an answer: nothing is recorded and the deadline does not move. The
+   * card is closed and put up again under a new id, with the reason above the question (never the entry).
+   */
+  async function askAgain(sessionId: string, session: Session, problem: string): Promise<void> {
+    const waiting = session.waiting;
+    if (!waiting) return;
+    waiting.rejected += 1;
+    emit({ type: "session.permission_resolved", sessionId, permissionId: waiting.permissionId });
+    const permissionId = `gate-${waiting.request.callId}-${session.turns}-r${waiting.rejected}`;
+    waiting.permissionId = permissionId;
+    const notice = `上一次填的不符合要求：${problem}。没有算作答复，请重新填写。`;
+    say(sessionId, `invalid-${waiting.turnId}-${waiting.rejected}`, `**${notice}**`);
+    emit({ type: "session.permission", sessionId, request: gateQuestion(waiting.request, permissionId, notice) });
   }
 
   async function dispatch(input: ProviderInput): Promise<void> {
@@ -340,6 +431,26 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
         const session = sessions.get(input.sessionId);
         if (!session?.waiting || session.waiting.permissionId !== input.permissionId) return;
         const { response } = input;
+        const gateInput = session.waiting.request.input;
+        if (gateInput) {
+          if (response.behavior === "deny") {
+            await settle(input.sessionId, session, { behavior: "deny", via: questionViaOf(response), selectedActionId: null, message: response.message ?? null, typed: null });
+            return;
+          }
+          const value = answeredValue(response, gateInput.label);
+          const problem = inputProblem(value, gateInput);
+          if (problem) {
+            await askAgain(input.sessionId, session, problem);
+            return;
+          }
+          await settle(
+            input.sessionId,
+            session,
+            { behavior: "allow", via: "form", selectedActionId: null, message: null, typed: null, input: { given: true, secret: gateInput.secret } },
+            value,
+          );
+          return;
+        }
         await settle(input.sessionId, session, {
           behavior: response.behavior,
           via: viaOf(response),

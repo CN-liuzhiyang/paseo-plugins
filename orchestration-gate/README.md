@@ -18,6 +18,21 @@ provider `orch-gate/card`。它不带模型，只做一件事：把待批的东�
 
 推送和通知的正文就是标题和说明。
 
+## 带值的人闸（`$.gate({ input })`）
+
+运行时的请求文件带 `input` 时，卡片是 Paseo 的 `question` 卡而不是两个按钮：
+
+- 一个文本框（占位符是 `hint`）、「提交」（批准，带框里的值）和「不批」（拒绝）。标题、说明、待批全文在卡片上方和问题文字里。
+- **框里只填值**；想说明不批的理由，点「不批」，再在对话底部的消息框里写（照旧是 `typed` 的拒绝）。对话里打的字永远不会当成值。
+- 填的内容不合格（`pattern` 要整个值匹配，空、过长、`secret` 太短都算），provider **不当作答复**：不记录、不写文件，
+  关掉这张卡，换一个 id 再挂一张，卡片顶上写原因，不回显填的内容。
+- 合格的值写进 `<callId>.input.json`（只新建），应答记录里只记 `input: { given: true, secret }`，对话里说"已记为批准（值不会显示在这里）"。
+  运行时读完就删。
+- 命令行 `paseo permit allow <agent> <id> --input '{"answers":{"<label>":"<值>"}}'` 发的是同一种应答；不带 `--input` 的 allow 被当作不合格退回。
+- IM 渠道的问题卡只认 claude/codex 的提问，这张卡在 IM 里会退成「请到 Paseo 里回答」（读代码，未实测）。
+
+细节、被否决的做法和没验证的：[`../orchestration/docs/gate-input.md`](../orchestration/docs/gate-input.md)。
+
 ## 它做什么、不做什么
 
 - 运行时在回执路径旁边写一份请求文件（`<callId>.request.json`），prompt 恰好三行：决定句、文件路径、它的 sha256。
@@ -32,6 +47,7 @@ provider `orch-gate/card`。它不带模型，只做一件事：把待批的东�
   - `button`：带着这张卡片按钮的 id。Paseo App 和 IM 卡片会带；
   - `no-button`：没带，例如 `paseo permit allow/deny`、到期时运行时替人拒绝；
   - `typed`：卡片挂着的时候，有人在对话里打了字，按不批处理，打的字记成理由；
+  - `form`、`dismiss`：只有带值的闸——带值的 allow（表单提交，或命令行 `--input`）、表单「不批」按钮发的 `Dismissed by user`；
   - `interrupt`：卡片被中断关闭（停止，或 Paseo 重载、替换这个会话），不是谁的裁决。
 - **判定不在这里**（见 `orchestration/runtime/gate.mjs`）。运行时要回执与它预期的一致，**并且**应答记录是批准，
   才算批准。应答记录说"批了"而回执不在，或者回执在而记录是拒绝，都不算。

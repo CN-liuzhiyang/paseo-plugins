@@ -1,0 +1,21 @@
+{
+  "_": "What the provider's `session.permission` input carried, captured from a real daemon (fork CLI 1.4.1, throwaway home, 2026-10-28) by logging `JSON.stringify(input)` in the provider while an input gate's card was answered with `paseo permit`. Nothing here was written by hand; the session id is cut. The app's own form (question-form-card.tsx handleSubmit / handleDeny) was NOT driven: its shape is read from source, see orchestration/docs/gate-input.md.",
+  "cases": {
+    "permit-allow-with-input": {
+      "command": "paseo permit allow <agent> gate-c1-1 --input '{\"answers\":{\"验证码\":\"483921\"}}'",
+      "input": { "type": "session.permission", "permissionId": "gate-c1-1", "response": { "behavior": "allow", "updatedInput": { "answers": { "验证码": "483921" } } } }
+    },
+    "permit-allow-bare": {
+      "command": "paseo permit allow <agent> gate-c1-1",
+      "input": { "type": "session.permission", "permissionId": "gate-c1-1", "response": { "behavior": "allow" } }
+    },
+    "permit-deny-with-message": {
+      "command": "paseo permit deny <agent> gate-c1-1 --message 'from the command line'",
+      "input": { "type": "session.permission", "permissionId": "gate-c1-1", "response": { "behavior": "deny", "message": "from the command line" } }
+    },
+    "runtime-close-out-deny": {
+      "command": "the runtime's own deny when the gate expires (executor.deny)",
+      "input": { "type": "session.permission", "permissionId": "gate-c1-1", "response": { "behavior": "deny", "message": "gate expired after 12s without an answer" } }
+    }
+  }
+}

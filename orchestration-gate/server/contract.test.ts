@@ -6,7 +6,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -17,7 +17,7 @@ import { parsePointer } from "./request";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const runtimeGate = pathToFileURL(path.join(HERE, "..", "..", "orchestration", "runtime", "gate.mjs")).href;
 
-type Prepared = { holdPath: string; answerPath: string; requestPath: string; requestText: string; receipt: string };
+type Prepared = { holdPath: string; answerPath: string; requestPath: string; requestText: string; receipt: string; inputPath: string | null };
 type Answer = (send: (input: ProviderInput) => Promise<void>, permissionId: string, prepared: Prepared) => Promise<void>;
 
 interface Through {
@@ -28,11 +28,13 @@ interface Through {
   /** What the host reports instead of the provider's own turn state. */
   hostStatus?: () => string | null;
   timeout?: string;
+  /** Makes it an input gate (the runtime's `$.gate({ input })`, already normalized). */
+  input?: { label: string; secret: boolean; pattern: string | null; hint: string } | null;
 }
 
 /** One gate through the runtime and the provider; `answer` is what the person does with the card. */
 async function gateThrough(answer: Answer | Through) {
-  const { answer: act, before, hostStatus, timeout = "1m" }: Through = typeof answer === "function" ? { answer } : answer;
+  const { answer: act, before, hostStatus, timeout = "1m", input = null }: Through = typeof answer === "function" ? { answer } : answer;
   const gate = await import(runtimeGate);
   const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-contract-"));
   const prepared = gate.prepareGate({
@@ -47,6 +49,7 @@ async function gateThrough(answer: Answer | Through) {
     runId: "run-1",
     callId: "c1",
     timeout,
+    input,
   });
 
   const connection = await createGateProvider().connect({ versions: [1], capabilities: ["prompt.message", "prompt.steer", "permission"] });
@@ -189,4 +192,73 @@ test("the runtime's prompt is the three lines the provider takes, even with a li
   });
   assert.equal(prepared.prompt.split("\n").length, 3);
   assert.equal(parsePointer(prepared.prompt)?.path, prepared.requestPath);
+});
+
+// --- An input gate: approve with a value ---------------------------------------------------------------
+
+const CODE = "483921";
+const CODE_INPUT = { label: "验证码", secret: true, pattern: "\\d{6}", hint: "6 位数字" };
+const submit = (value: unknown): Answer => (send, id) =>
+  send({ type: "session.permission", sessionId: "s", permissionId: id, response: { behavior: "allow", updatedInput: { answers: { 验证码: value as string } } } });
+
+test("an input gate: the form's value reaches the flow through the runtime; the file is gone after; no event carries it", async () => {
+  const decision = await gateThrough({ input: CODE_INPUT, answer: submit(CODE) });
+  assert.equal(decision.outcome, "allowed");
+  assert.equal(decision.input, CODE);
+  assert.equal(decision.answeredVia, "form");
+  assert.equal(await readFile(decision.prepared.inputPath!, "utf8").catch(() => null), null, "the value file is taken and deleted");
+  assert.ok(!JSON.stringify(decision.events).includes(CODE));
+  assert.ok(!(await readFile(decision.prepared.requestPath, "utf8")).includes(CODE));
+  assert.ok(!(await readFile(decision.prepared.answerPath, "utf8")).includes(CODE));
+});
+
+test("an input gate: a wrong entry is sent back and the right one after it is the answer", async () => {
+  const decision = await gateThrough({
+    input: CODE_INPUT,
+    answer: async (send, id, prepared) => {
+      await submit("12ab56")(send, id, prepared);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      await submit(CODE)(send, `gate-c1-1-r1`, prepared);
+    },
+  });
+  assert.equal(decision.outcome, "allowed");
+  assert.equal(decision.input, CODE);
+});
+
+test("an input gate: the form's dismiss is denied, words typed in the conversation are denied with the words; neither carries a value", async () => {
+  const dismissed = await gateThrough({
+    input: CODE_INPUT,
+    answer: (send, id) => send({ type: "session.permission", sessionId: "s", permissionId: id, response: { behavior: "deny", message: "Dismissed by user" } }),
+  });
+  assert.equal(dismissed.outcome, "denied");
+  assert.equal(dismissed.answeredVia, "dismiss");
+  assert.equal(dismissed.reason, null);
+  assert.equal(dismissed.input, null);
+
+  const typed = await gateThrough({
+    input: CODE_INPUT,
+    answer: (send) =>
+      send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "t", delivery: "steer", clearPendingPermissions: true, input: { type: "message", content: [{ type: "text", text: "再改一下第 2 行" }] } } }),
+  });
+  assert.equal(typed.outcome, "denied");
+  assert.equal(typed.answeredVia, "typed");
+  assert.equal(typed.reason, "再改一下第 2 行");
+  assert.equal(typed.input, null);
+});
+
+test("an input gate nobody answers expires with no value", async () => {
+  const decision = await gateThrough({ input: CODE_INPUT, timeout: "1s" });
+  assert.equal(decision.outcome, "expired");
+  assert.equal(decision.input, null);
+  assert.equal(await readFile(decision.prepared.inputPath!, "utf8").catch(() => null), null);
+});
+
+test("an input gate answered with a bare allow (no value) is sent back, then expires: it is never an approval", async () => {
+  const decision = await gateThrough({
+    input: CODE_INPUT,
+    timeout: "1s",
+    answer: (send, id) => send({ type: "session.permission", sessionId: "s", permissionId: id, response: { behavior: "allow" } }),
+  });
+  assert.equal(decision.outcome, "expired");
+  assert.equal(decision.approved, false);
 });

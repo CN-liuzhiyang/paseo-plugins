@@ -80,7 +80,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 |---|---|---|
 | `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title` | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
-| `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
+| `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath?, input? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。`input: { label, secret?, pattern?, hint? }`：批准的同时带一个值（验证码），见下「批准并附一个值」。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
 | `$.all(tasks)` | 并发，等全部结束。**永不因为某个任务失败而 reject**，返回 `[{ ok: true, value } \| { ok: false, error }]`，和 `tasks` 一一对应。任务可以是 promise 或返回 promise 的函数 | 无（并发看调用的时间重叠） |
 | `$.stop(reason, value)` | flow 主动停下，`value` 是部分结果。调用的那一刻运行器就记下这次停止（第一次为准），之后任何新的调用、阶段都抛 `RunEnded`。它也会抛出以便中断当前代码，但**接住它没有用**：结局照样是 `stopped`，接住之后想接着花钱会被拦下。`$.all` 里某个任务调了它，其他任务里已经在跑的调用照常结束，新的起不来 | `run.end.outcome = "stopped"` |
@@ -538,6 +538,25 @@ flow 要停下来等人拍板时，用 `$.gate({ title, content, name, summary, 
     - 从终端起：10 次里 9 次逐字提出了写回执，1 次因为卡片说明里的 ⚠ 拒绝了；
     - 从另一个 agent 的会话里起（环境里有 `PASEO_AGENT_ID`，Paseo 把 prompt 当成那个 agent 发来的消息）：2 次都拒绝了。
     所以后备载体只适合插件确实不可用的时候用。
+
+**批准并附一个值（`input`）。** `$.gate({ …, input: { label: "验证码", pattern: "\\d{6}", hint: "6 位数字" } })`：
+卡片是 Paseo 的 `question` 卡（一个文本框，「提交」= 批准并带值，「不批」= 拒绝），不是两个按钮。判定对象多一个
+`input`（批准时是值，否则 `null`；没有 `input` 的闸没有这个键）。要点：
+
+- **框里只填值，对话里打的字永远是理由**（`typed` 的拒绝），哪怕看着像验证码。卡片上写明了这一点。
+- `pattern` 要**整个值**匹配；不合格的输入 provider 不当作答复（不记录、不写文件、不顶期限），原卡关掉、新卡带原因重挂，不回显填的内容。
+  运行时读到值以后再查一遍。不带值的 allow（`permit allow` 不带 `--input`）同样被退回，永远不是批准。
+- `secret` 缺省 **true**：值不进事件流——`call.end.output.input` 是 `"<已用>"`，之后写进事件流的任何字符串里凡含有它的都换成
+  `<已用>`（`EventLog.addSecret`，flow 自己的 `$.log`、返回值、错误信息也在内）。`secret: false` 才照实记。值至少 4 个字符。
+- 只有 `orch-gate` provider 能收值；角色 `gate` 指向模型时调用处抛错。
+- 值从 provider 到运行时走 `<callId>.input.json`（明文，读完即删），不经应答记录和回执。
+  **flow 拿到值之后写到哪、传给谁，运行时管不了**；终端打印的 `value` 也没有兜底。
+- 调查、被否决的做法、已验证和没验证的：`docs/gate-input.md`。
+
+**等得久的步骤。** `$.do` 没有时间上限，总超时缺省也没有（`--timeout` 由调用方给，flow 自己设不了）；`$.gate` 的
+`timeout` 到 `8h` 没问题。运行"活着"看 claim 的心跳（定时器，每 30 秒），和事件无关；"可能卡住"的底线对一个开着的
+`$.do` 是 15 分钟没有事件，所以长 `$.do` 里每 5–10 分钟 `$.log.info("还在编译，已 N 分钟")`。长步骤必须是异步的：
+`execFileSync` 之类会让定时器停转，claim 两分钟后读作丢了。依据和测试：`docs/gate-input.md`、`test/long-task.test.mjs`。
 
 为什么这样搭，而不是让脚本在终端里等人输入：
 

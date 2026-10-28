@@ -48,6 +48,26 @@ export function parseDuration(value) {
   return Number(match[1]) * { s: 1e3, m: 60e3, h: 3600e3 }[match[2]];
 }
 
+/** The longest value an input gate takes (the plugin's INPUT_MAX_CHARS). */
+export const INPUT_MAX_CHARS = 1000;
+/** A secret shorter than this is not taken: matching it out of the logs would eat everything else too. */
+export const MIN_SECRET_CHARS = 4;
+/** What stands for a secret value anywhere the run records things. */
+export const INPUT_REDACTED = "<已用>";
+
+/**
+ * Why `value` is not an acceptable input to a gate asking `input` ({ secret, pattern, hint }), or null:
+ * not empty, not too long or (for a secret) too short, the whole of it matching the pattern. The plugin
+ * applies the same rule before it takes an answer; the runtime applies it again to what it reads.
+ */
+export function inputProblem(value, input) {
+  if (typeof value !== "string" || value.trim() === "") return "no value";
+  if (value.length > INPUT_MAX_CHARS) return `longer than ${INPUT_MAX_CHARS} characters`;
+  if (input.secret && value.length < MIN_SECRET_CHARS) return `shorter than ${MIN_SECRET_CHARS} characters`;
+  if (input.pattern !== null && !new RegExp(`^(?:${input.pattern})$`).test(value)) return "does not match the pattern";
+  return null;
+}
+
 export const sameContent = (a, b) => sha256(canonical(a)) === sha256(canonical(b));
 
 /**
@@ -158,14 +178,16 @@ export function carrierPrompt(gate, limit = CARRIER_PROMPT_LIMIT) {
  * call.start before anything happens.
  */
 export function prepareGate(gate) {
-  const { carrier, holdPath, content, runId, callId, timeout = "2h" } = gate;
+  const { carrier, holdPath, content, runId, callId, timeout = "2h", input = null } = gate;
+  if (input && carrier !== "provider") throw new TypeError("a gate that asks for a value needs the orch-gate provider as its carrier: a model carrier cannot take one");
   // One line: the provider takes a prompt of exactly three lines, the first of them ending in the title.
   const title = gate.title.replace(/\s+/g, " ").trim();
   const digest = contentDigest(content);
   const receipt = receiptFor({ title, runId, callId, digest });
   const dir = path.dirname(holdPath);
   const answerPath = path.join(dir, `${callId}.answer.json`);
-  const base = { carrier, holdPath, answerPath, digest, receipt, timeout };
+  const inputPath = input ? path.join(dir, `${callId}.input.json`) : null;
+  const base = { carrier, holdPath, answerPath, digest, receipt, timeout, input, inputPath };
 
   if (carrier === "model") {
     const { prompt, fits } = carrierPrompt({ ...gate, title, receipt });
@@ -191,6 +213,7 @@ export function prepareGate(gate) {
       answerPath,
       timeout,
       help: answerHelp(timeout),
+      ...(input ? { input, inputPath } : {}),
     },
     null,
     2,
@@ -257,12 +280,33 @@ async function readAnswer(answerPath) {
   }
 }
 
-const VIA = ["button", "no-button", "typed"];
+const VIA = ["button", "no-button", "typed", "form", "dismiss"];
 
 export const UNATTRIBUTED = "unattributed (Paseo does not record who answered)";
 const CARRIER_ENDED = "nobody (the carrier ended without an answer)";
 const RECORDS_DISAGREE = "nobody (the receipt and the answer record disagree)";
 const INTERRUPTED = "nobody (the carrier was interrupted)";
+
+/**
+ * An input gate's allow, with its value: the plugin recorded that one was given and put it in its own
+ * file. The value is read here and checked against the rule again; one that is missing or does not fit makes
+ * the gate an error, never an approval. No reason below carries the value.
+ */
+async function takeInput(prepared, answer, decision, base) {
+  const fail = (reason) => decision({ ...base, outcome: "error", reason, by: RECORDS_DISAGREE });
+  if (answer?.input?.given !== true) return fail("the gate asks for a value, but the allow on record carries none");
+  const text = await readFile(prepared.inputPath, "utf8").catch(() => null);
+  let value = null;
+  try {
+    value = text === null ? null : JSON.parse(text)?.value;
+  } catch {
+    return fail("the value file is not JSON");
+  }
+  if (value === null) return fail("the allow carries a value, but its file is missing");
+  const problem = inputProblem(value, prepared.input);
+  if (problem) return fail(`the value the card took is not acceptable: ${problem}`);
+  return decision({ ...base, outcome: "allowed", by: UNATTRIBUTED, input: value });
+}
 
 /**
  * Hold until a person approves the gate `prepared` describes (prepareGate).
@@ -283,7 +327,16 @@ const INTERRUPTED = "nobody (the carrier was interrupted)";
  *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null,
  *   answeredVia: "button"|"no-button"|"typed"|null }>}
  */
-export async function requestApproval(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min(STARTUP_GRACE_MS, pollMs * 3) } = {}) {
+export async function requestApproval(io, prepared, options = {}) {
+  // An input gate's value file is read once and goes whatever the outcome: it is never left on disk.
+  try {
+    return await decide(io, prepared, options);
+  } finally {
+    if (prepared.inputPath) await rm(prepared.inputPath, { force: true }).catch(() => {});
+  }
+}
+
+async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min(STARTUP_GRACE_MS, pollMs * 3) } = {}) {
   const { carrier, holdPath, answerPath, requestPath, requestText, digest, receipt, prompt, fits, timeout } = prepared;
   const deadline = Date.now() + parseDuration(timeout);
 
@@ -291,6 +344,7 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
   await mkdir(path.dirname(holdPath), { recursive: true });
   await rm(holdPath, { force: true });
   await rm(answerPath, { force: true });
+  if (prepared.inputPath) await rm(prepared.inputPath, { force: true });
 
   const askedAt = new Date();
   const decision = (fields) => {
@@ -306,6 +360,7 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
       agentReport: "",
       agentStatusAtDecision: null,
       answeredVia: null,
+      ...(prepared.input ? { input: null } : {}),
       ...fields,
     };
   };
@@ -404,6 +459,7 @@ export async function requestApproval(io, prepared, { pollMs = 10_000, startupGr
         by: RECORDS_DISAGREE,
       });
     }
+    if (prepared.input) return takeInput(prepared, answer, decision, { ...base, answeredVia: via });
     return decision({ ...base, outcome: "allowed", by: UNATTRIBUTED, answeredVia: via });
   }
 

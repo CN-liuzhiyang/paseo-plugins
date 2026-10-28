@@ -54,6 +54,15 @@ export default flow({
     if (a.ok) a.value.diagnosis;
     // @ts-expect-error a settled task must be checked before its value is read
     b.value.toFixed();
+    const gated = await $.gate({ title: "t", content: "c", input: { label: "验证码", pattern: "\d{6}", hint: "6 位数字" } });
+    /** @type {string | null | undefined} */
+    const given = gated.input;
+    // @ts-expect-error the value is a string, not a number
+    gated.input?.toFixed();
+    // @ts-expect-error an input needs a label
+    await $.gate({ title: "t", content: "c", input: { secret: true } });
+    // @ts-expect-error secret is a boolean
+    await $.gate({ title: "t", content: "c", input: { label: "x", secret: "yes" } });
     return { d, c, ok };
   },
   summarize: (value, { outcome }) => `${outcome}: ${value.d}`,

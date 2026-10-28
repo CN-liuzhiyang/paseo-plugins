@@ -200,6 +200,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `provider` | string | 载体的 `family/model`（角色 `gate`） |
 | `fence` | object | 同 `ask`，`mode` 是"每次写都要人批"那一档；`orch-gate` 载体是 `null`、`enforced: true` |
 | `prompt` | string | 实际发给载体的完整 prompt。`model` 载体：决定、summary、brief、证据、原文、给载体的指令（brief 和证据过长时被截断的那份）；`provider` 载体：恰好三行，`人闸 <callId> · 运行 <runId>：<title>`、请求文件路径、它的 sha256 |
+| `input` | `{ label, secret, pattern, hint }` | 仅在 `$.gate` 带 `input` 时有（后加）：要人填的值是什么。**没有值本身**。`pattern` 无则为 null |
 | `carrier` | `"provider"` \| `"model"` | 载体种类：`orchestration-gate` 插件的无模型 provider，或者一个写回执的模型 |
 | `contentName` | string | 原文的显示名（高亮、卡片上的"待批全文 x.lua"），flow 没给时是 `content.txt` |
 | `summary` | string | 卡片说明（几行纯文本），flow 没给时是空串 |
@@ -263,9 +264,14 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 - 已知限制：`model` 载体在挂着卡片时被 daemon 重启打断，tool 记录里有那一行、却没人应答，仍判 `denied`。
   被拒绝的 Write 在 tool 记录里还留着那一行，是读 Paseo 代码得出的，没有实测。
 
+带 `input` 的闸，判定对象另有 `input`（后加）：批准时是值，其余结局为 null；`secret` 的值在事件里写成 `"<已用>"`
+（flow 拿到的是真的值），事件流里别处出现的该值也一律换成 `<已用>`（`EventLog.addSecret`）。不带 `input` 的闸，判定对象没有这个键。
+批准要求应答记录里 `input.given === true`、值文件读得出来、值通过 `pattern`；缺哪样判 `error`，`reason` 不含值。
+
 `answeredVia`（后加，之前的文件没有，按 null 处理）是应答方自己发来的东西，**弱信号，不是"谁"**：
 `"button"` 带着卡片按钮的 id（Paseo App、IM 卡片会带），`"no-button"` 没带（`paseo permit`、到期替人拒绝），
-`"typed"` 卡片挂着时有人在对话里打了字（按不批处理）；`model` 载体、过期、出错时为 null（中断判 `error`，也是 null）。
+`"typed"` 卡片挂着时有人在对话里打了字（按不批处理）；`"form"` 带值闸收到带值的 allow（App 表单或 `permit allow --input`）；
+`"dismiss"` 带值闸收到的 deny 恰是表单"不批"按钮发的 `"Dismissed by user"`（`reason` 为 null）；`model` 载体、过期、出错时为 null（中断判 `error`，也是 null）。
 本机任何进程都能发出其中任何一种，所以它挡不住有意伪造；flow 可以用它挡"顺手用命令行批了"，例如写盘只认 `button`。
 
 `reason`：`expired`、`error` 时是运行时确知的原因；`denied` 时，`typed` 是人在对话里打的那句话，`no-button`

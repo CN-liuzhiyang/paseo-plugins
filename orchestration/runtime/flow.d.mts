@@ -100,6 +100,22 @@ export interface GateRequest {
   timeout?: Duration;
   /** Where the receipt goes. Default <runDir>/gate/<callId>.receipt.txt. */
   holdPath?: string;
+  /**
+   * Approve *with a value* (a verification code, say). The card has a text field; "提交" is the approval and
+   * carries the value, the dismiss button (不批) denies. Needs the orch-gate provider as the carrier.
+   */
+  input?: GateInput;
+}
+
+export interface GateInput {
+  /** What the field is called on the card. */
+  label: string;
+  /** Default true: the value never appears in the run's events, logs or errors (shown as "<已用>"). */
+  secret?: boolean;
+  /** A regular expression the whole value must match. A wrong entry is sent back to the person, not counted as an answer. */
+  pattern?: string;
+  /** Said on the card and in the "wrong format" message, e.g. "6 位数字". */
+  hint?: string;
 }
 
 export interface GateDecision {
@@ -115,7 +131,9 @@ export interface GateDecision {
   by: string;
   agentStatusAtDecision: string | null;
   /** How the answer came, as the answering client sent it -- a weak signal, not who answered. Null when not known. */
-  answeredVia: "button" | "no-button" | "typed" | null;
+  answeredVia: "button" | "no-button" | "typed" | "form" | "dismiss" | null;
+  /** Only on a gate that asked for a value (`input`): the value when approved, else null. In memory; see GateInput.secret. */
+  input?: string | null;
 }
 
 export type Settled<T> = { ok: true; value: T } | { ok: false; error: Error };

@@ -16,9 +16,14 @@
 //   "typed"      provider only: the person typed a reply instead (`typed` is the text)
 //   "cli-deny"   provider only: denied without a button id, with `message`
 //   "cli-allow"  provider only: allowed without a button id (`paseo permit allow`)
+//   "input"      provider only, an input gate: approved with `inputValue`, which the carrier files beside the
+//                request and the answer record says was given (the real provider's way, orchestration-gate)
+//   "input-lost" ... the record says a value was given but its file is not there
+//   "input-bad"  ... the file holds `inputValue` although it does not fit the gate's pattern (a carrier that did not check)
 //   "paraphrase" the content is written in place of the receipt
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
+// `answerAfterMs` is how long after it is spawned the carrier answers (5 by default; a long gate under a mocked clock).
 // `providers` is what providerAvailable reports as available.
 // `workspaces` is the daemon's list of workspaces; two executors given the same
 // array are two clients of one daemon. `workspaceDelayMs` spaces out making one,
@@ -55,7 +60,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const sha256 = (text) => createHash("sha256").update(text, "utf8").digest("hex");
 
 /** What an answered carrier leaves behind, per `carrier` (see above). */
-export async function carryAs(carrier, prompt, { typed, message }) {
+export async function carryAs(carrier, prompt, { typed, message, inputValue = "483921" }) {
   const pointer = /^request: (.+)\nsha256: ([0-9a-f]{64})$/m.exec(prompt);
   if (pointer) {
     const text = await readFile(pointer[1], "utf8");
@@ -63,6 +68,11 @@ export async function carryAs(carrier, prompt, { typed, message }) {
     const record = (answer) => writeFile(request.answerPath, JSON.stringify(answer), "utf8");
     if (sha256(text) !== pointer[2]) return record({ error: "request file does not match its sha256" });
     await mkdir(path.dirname(request.receiptPath), { recursive: true });
+    if (carrier === "input" || carrier === "input-lost" || carrier === "input-bad") {
+      if (carrier !== "input-lost") await writeFile(request.inputPath, JSON.stringify({ v: 1, value: inputValue }), "utf8");
+      await record({ behavior: "allow", via: "form", selectedActionId: null, input: { given: true, secret: request.input.secret } });
+      return writeFile(request.receiptPath, request.receipt, "utf8");
+    }
     if (carrier === "approve" || carrier === "cli-allow") {
       await record(carrier === "approve" ? { behavior: "allow", via: "button", selectedActionId: "approve" } : { behavior: "allow", via: "no-button", selectedActionId: null });
       return writeFile(request.receiptPath, request.receipt, "utf8");
@@ -92,6 +102,8 @@ export function fakeExecutor({
   providers = ["orch-gate"],
   typed = "这个类的源文件不对，别批",
   message = "denied from the command line",
+  inputValue = "483921",
+  answerAfterMs = 5,
   workspaces = [],
   workspaceDelayMs = 0,
   workspaceFails = null,
@@ -123,7 +135,7 @@ export function fakeExecutor({
   const denied = [];
   const transcripts = [];
   let count = 0;
-  const carry = (prompt) => carryAs(carrier, prompt, { typed, message });
+  const carry = (prompt) => carryAs(carrier, prompt, { typed, message, inputValue });
 
   const start = (request, status) => {
     const id = `fake-agent-${++count}`;
@@ -157,7 +169,7 @@ export function fakeExecutor({
       checkWorkspace(request, "spawn");
       requests.push(request);
       const id = start(request, "running");
-      if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), 5);
+      if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), answerAfterMs);
       return { agentId: id };
     },
 

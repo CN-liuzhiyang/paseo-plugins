@@ -14,6 +14,18 @@ export interface GateEvidence {
   name?: string;
 }
 
+/**
+ * An approve-with-a-value gate: the person's approval carries a string (a verification code, say). The
+ * card asks for it in a form field; `pattern` (a regular expression the whole value must match) is checked
+ * here, so a wrong entry is sent back to the person instead of spending the answer.
+ */
+export interface GateInput {
+  label: string;
+  secret: boolean;
+  pattern: string | null;
+  hint: string;
+}
+
 export interface GateRequest {
   v: 1;
   kind: "orchestration-gate/request";
@@ -31,6 +43,9 @@ export interface GateRequest {
   answerPath: string;
   timeout: string;
   help: string;
+  /** Present only on an input gate; then `inputPath` is where the value goes (next to the request, never in the answer). */
+  input?: GateInput;
+  inputPath?: string;
 }
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
@@ -85,6 +100,35 @@ export function receiptFor(request: Pick<GateRequest, "title" | "runId" | "callI
   return [decision.startsWith("批准") ? decision : `批准：${decision}`, `人闸 ${request.callId} · 运行 ${request.runId}`, `内容 sha256 ${request.sha256}`].join("\n");
 }
 
+/** The longest value a card takes; the same bound in the runtime (gate.mjs INPUT_MAX_CHARS). */
+export const INPUT_MAX_CHARS = 1000;
+/** A secret shorter than this cannot be kept out of the run's logs by matching it, so it is not taken (gate.mjs MIN_SECRET_CHARS). */
+export const MIN_SECRET_CHARS = 4;
+
+/** Why `value` is not an acceptable input, or null: not empty, not over- or under-long, the whole of it matches the pattern. */
+export function inputProblem(value: unknown, input: Pick<GateInput, "pattern" | "hint" | "secret">): string | null {
+  if (typeof value !== "string" || value.trim() === "") return "没有填写";
+  if (value.length > INPUT_MAX_CHARS) return `太长（最多 ${INPUT_MAX_CHARS} 个字符）`;
+  if (input.secret && value.length < MIN_SECRET_CHARS) return `太短（至少 ${MIN_SECRET_CHARS} 个字符）`;
+  if (input.pattern !== null && !new RegExp(`^(?:${input.pattern})$`).test(value)) {
+    return input.hint.trim() !== "" ? `格式不对（要求：${input.hint.trim()}）` : "格式不对";
+  }
+  return null;
+}
+
+const isGateInput = (value: unknown): value is GateInput => {
+  if (!value || typeof value !== "object") return false;
+  const i = value as Record<string, unknown>;
+  if (!isString(i.label) || i.label.trim() === "" || typeof i.secret !== "boolean" || !isString(i.hint)) return false;
+  if (!(i.pattern === null || isString(i.pattern))) return false;
+  try {
+    if (isString(i.pattern)) new RegExp(`^(?:${i.pattern})$`);
+  } catch {
+    return false;
+  }
+  return true;
+};
+
 const REQUEST_SUFFIX = ".request.json";
 const sameFile = (a: string, b: string) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 /** `file` sits directly in `dir`. */
@@ -123,6 +167,7 @@ export async function readRequest(prompt: string): Promise<GateRequest> {
   if (r.v !== 1 || r.kind !== "orchestration-gate/request" || missing.length > 0 || !Array.isArray(r.evidence) || !r.evidence.every(isEvidence)) {
     throw new RequestError(`the request is not a v1 gate request${missing.length > 0 ? ` (missing ${missing.join(", ")})` : ""}`, answerPath);
   }
+  if ("input" in r && r.input !== undefined && !isGateInput(r.input)) throw new RequestError("the request's input is not { label, secret, pattern, hint } with a pattern that compiles", answerPath);
   const request = parsed as GateRequest;
   // Both go into the receipt's second line as they are; a line break would add a line of the caller's choosing.
   const broken = (["runId", "callId"] as const).filter((key) => /[\r\n\u0085\u2028\u2029]/.test(request[key]));
@@ -131,6 +176,13 @@ export async function readRequest(prompt: string): Promise<GateRequest> {
   if (!sameFile(request.answerPath, answerPath)) throw new RequestError(`the answer path must be ${answerPath}, next to the request`, answerPath);
   if (!insideDir(dir, request.receiptPath) || !request.receiptPath.endsWith(".receipt.txt")) {
     throw new RequestError(`the receipt path must be a *.receipt.txt next to the request, not ${request.receiptPath}`, answerPath);
+  }
+  if (request.input !== undefined) {
+    const inputPath = path.join(dir, `${callId}.input.json`);
+    if (!isString(request.inputPath) || !sameFile(request.inputPath, inputPath)) {
+      throw new RequestError(`an input gate's value goes to ${inputPath}, next to the request`, answerPath);
+    }
+    request.inputPath = inputPath;
   }
   if (contentDigest(request.content) !== request.sha256) throw new RequestError("the content does not match the sha256 the request names", answerPath);
   if (request.receipt !== receiptFor(request)) throw new RequestError("the receipt is not the one the title, run, call and sha256 give", answerPath);

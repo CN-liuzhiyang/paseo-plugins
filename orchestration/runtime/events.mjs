@@ -17,6 +17,9 @@ import { affairProblems } from "./affair.mjs";
 
 export const EVENTS_VERSION = 1;
 
+/** What a secret value is replaced with wherever it would be written (an input gate's value, gate.mjs). */
+const SECRET_MARK = "<已用>";
+
 /** `<logDir>/runs/<runId>.jsonl` */
 export const eventsFile = (dir, runId) => path.join(dir, "runs", `${runId}.jsonl`);
 
@@ -37,12 +40,31 @@ export class EventLog {
     this.seq = 0;
     this.closed = false;
     this.events = [];
+    this.secrets = [];
     mkdirSync(path.dirname(this.file), { recursive: true });
+  }
+
+  /**
+   * From now on a string that contains `value` is written with it replaced, in any field of any event (keys
+   * too), whoever put it there: the flow's logs, its return value, an error message. Both the plain text and
+   * its JSON-escaped spelling are matched, for the value that was logged as part of a JSON string.
+   */
+  addSecret(value) {
+    if (typeof value !== "string" || value === "") return;
+    for (const spelling of new Set([value, JSON.stringify(value).slice(1, -1)])) if (!this.secrets.includes(spelling)) this.secrets.push(spelling);
+  }
+
+  #scrub(node) {
+    if (typeof node === "string") return this.secrets.reduce((text, secret) => text.split(secret).join(SECRET_MARK), node);
+    if (Array.isArray(node)) return node.map((item) => this.#scrub(item));
+    if (node !== null && typeof node === "object") return Object.fromEntries(Object.entries(node).map(([key, item]) => [this.#scrub(key), this.#scrub(item)]));
+    return node;
   }
 
   emit(kind, fields = {}) {
     if (this.closed) return null;
-    const event = { v: EVENTS_VERSION, seq: this.seq++, ts: new Date().toISOString(), runId: this.runId, kind, ...fields };
+    // The envelope (v, seq, ts, runId, kind) is the runtime's own and is not scrubbed: a short value must not eat a timestamp.
+    const event = { v: EVENTS_VERSION, seq: this.seq++, ts: new Date().toISOString(), runId: this.runId, kind, ...(this.secrets.length > 0 ? this.#scrub(fields) : fields) };
     appendFileSync(this.file, `${JSON.stringify(event)}\n`, "utf8");
     this.events.push(event);
     if (kind === "run.end") this.closed = true;
@@ -191,6 +213,10 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         if (event.type === "gate") {
           for (const key of ["brief", "content", "sha256", "timeout"]) need(event, isString(event[key]), `${key} is not a string`);
+          if ("input" in event) {
+            const i = event.input;
+            need(event, isObject(i) && isString(i.label) && typeof i.secret === "boolean" && isNullableString(i.pattern) && isString(i.hint), "input is not { label, secret, pattern, hint }");
+          }
         }
         break;
       }
