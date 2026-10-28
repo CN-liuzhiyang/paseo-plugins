@@ -24,6 +24,10 @@
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
 // `answerAfterMs` is how long after it is spawned the carrier answers (5 by default; a long gate under a mocked clock).
+// A denied card is closed: the carrier does not answer it afterwards (the provider ignores a late allow), unless
+// `answerOnDeny`: the allow had already been taken when the deny came, so its files are written as the deny returns.
+// `lateWrite`: the allow is taken only after the gate has given up on the card and cleaned up -- its files appear
+// when the gate's agent is looked at afterwards (the runner's own sweep is then the only thing that can remove them).
 // `providers` is what providerAvailable reports as available.
 // `workspaces` is the daemon's list of workspaces; two executors given the same
 // array are two clients of one daemon. `workspaceDelayMs` spaces out making one,
@@ -104,6 +108,8 @@ export function fakeExecutor({
   message = "denied from the command line",
   inputValue = "483921",
   answerAfterMs = 5,
+  answerOnDeny = false,
+  lateWrite = false,
   workspaces = [],
   workspaceDelayMs = 0,
   workspaceFails = null,
@@ -169,7 +175,11 @@ export function fakeExecutor({
       checkWorkspace(request, "spawn");
       requests.push(request);
       const id = start(request, "running");
-      if (carrier !== "hang") setTimeout(() => carry(request.prompt).then(() => (agents.get(id).status = "idle")), answerAfterMs);
+      if (carrier !== "hang") {
+        setTimeout(() => {
+          if (!agents.get(id).closed) carry(request.prompt).then(() => (agents.get(id).status = "idle"));
+        }, answerAfterMs);
+      }
       return { agentId: id };
     },
 
@@ -202,6 +212,10 @@ export function fakeExecutor({
     async inspect(agentId) {
       const agent = agents.get(agentId);
       if (!agent) throw new Error(`no agent ${agentId}`);
+      if (lateWrite && agent.closed && !agent.late) {
+        agent.late = true;
+        await carry(agent.request.prompt);
+      }
       return { status: agent.status, usage: { usd, inputTokens: 1200, outputTokens: 300 } };
     },
 
@@ -223,6 +237,10 @@ export function fakeExecutor({
 
     async deny(agentId) {
       denied.push(agentId);
+      const agent = agents.get(agentId);
+      if (!agent || agent.closed) return;
+      agent.closed = true;
+      if (answerOnDeny) await carry(agent.request.prompt);
     },
 
     async stop(agentId) {

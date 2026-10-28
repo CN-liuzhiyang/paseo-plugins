@@ -45,26 +45,82 @@ export class EventLog {
   }
 
   /**
-   * From now on a string that contains `value` is written with it replaced, in any field of any event (keys
-   * too), whoever put it there: the flow's logs, its return value, an error message. Both the plain text and
-   * its JSON-escaped spelling are matched, for the value that was logged as part of a JSON string.
+   * From now on a secret `value` is written as `<已用>` wherever it turns up in an event, whoever put it there:
+   * the flow's logs, its return value, an error message, a key. What is matched, exactly:
+   *   - the value as text, and its JSON-escaped spelling (it was logged as part of a JSON string);
+   *   - for a value of digits, the number it becomes when its leading zeros go (`Number("004839")`);
+   *   - its hex, base64 (padded or not, and the URL-safe one) and URL-encoded spelling, as a whole;
+   *   - a number or bigint whose decimal text contains any of these (the whole number is replaced);
+   *   - an array of single characters or single digits that reads as one of them, and an array or
+   *     index-keyed object of bytes (a Buffer, a Uint8Array after JSON) that decodes to one.
+   * What is not: another case, a part of the value, the value reversed, hashed, split across fields or
+   * written in any other encoding. A flow that transforms the value escapes this (docs/gate-input.md).
    */
   addSecret(value) {
     if (typeof value !== "string" || value === "") return;
-    for (const spelling of new Set([value, JSON.stringify(value).slice(1, -1)])) if (!this.secrets.includes(spelling)) this.secrets.push(spelling);
+    const bytes = Buffer.from(value, "utf8");
+    const spellings = new Set([value, JSON.stringify(value).slice(1, -1), encodeURIComponent(value), bytes.toString("hex"), bytes.toString("base64"), bytes.toString("base64").replace(/=+$/, ""), bytes.toString("base64url")]);
+    if (/^\d+$/.test(value) && value.replace(/^0+/, "").length >= 4) spellings.add(value.replace(/^0+/, ""));
+    for (const spelling of spellings) if (!this.secrets.includes(spelling)) this.secrets.push(spelling);
+    this.secrets.sort((a, b) => b.length - a.length);
   }
 
-  #scrub(node) {
-    if (typeof node === "string") return this.secrets.reduce((text, secret) => text.split(secret).join(SECRET_MARK), node);
-    if (Array.isArray(node)) return node.map((item) => this.#scrub(item));
-    if (node !== null && typeof node === "object") return Object.fromEntries(Object.entries(node).map(([key, item]) => [this.#scrub(key), this.#scrub(item)]));
+  #text(text) {
+    return this.secrets.reduce((result, secret) => result.split(secret).join(SECRET_MARK), text);
+  }
+
+  #hides(text) {
+    return this.#text(text) !== text;
+  }
+
+  #walk(node) {
+    if (typeof node === "string") return this.#text(node);
+    if (typeof node === "number" || typeof node === "bigint") {
+      const text = String(node);
+      return this.#hides(text) ? this.#text(text) : node;
+    }
+    if (Array.isArray(node)) {
+      if (this.#spellsSecret(node)) return SECRET_MARK;
+      return node.map((item) => this.#walk(item));
+    }
+    if (node !== null && typeof node === "object") {
+      const keys = Object.keys(node);
+      // A Uint8Array that went through JSON: { "0": 52, "1": 56, ... }.
+      if (keys.length > 1 && keys.every((key, i) => key === String(i)) && this.#spellsSecret(Object.values(node))) return SECRET_MARK;
+      return Object.fromEntries(Object.entries(node).map(([key, item]) => [this.#text(key), this.#walk(item)]));
+    }
     return node;
+  }
+
+  /** Whether a list reads as the secret: its single characters or digits joined, or its bytes decoded. */
+  #spellsSecret(list) {
+    if (list.length < 2) return false;
+    if (list.every((item) => (typeof item === "string" && [...item].length === 1) || (Number.isInteger(item) && item >= 0 && item <= 9))) {
+      if (this.#hides(list.join(""))) return true;
+    }
+    if (list.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) {
+      const bytes = Buffer.from(list);
+      return this.#hides(bytes.toString("utf8")) || this.#hides(bytes.toString("latin1")) || this.#hides(bytes.toString("utf16le"));
+    }
+    return false;
+  }
+
+  /**
+   * `value` with every secret replaced (a copy; the original is not touched). `keep` names top-level keys the
+   * caller owns and a secret must not reach (numbers like durationMs).
+   */
+  scrub(value, keep = []) {
+    if (this.secrets.length === 0) return value;
+    if (value !== null && typeof value === "object" && !Array.isArray(value) && keep.length > 0) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [this.#text(key), keep.includes(key) ? item : this.#walk(item)]));
+    }
+    return this.#walk(value);
   }
 
   emit(kind, fields = {}) {
     if (this.closed) return null;
     // The envelope (v, seq, ts, runId, kind) is the runtime's own and is not scrubbed: a short value must not eat a timestamp.
-    const event = { v: EVENTS_VERSION, seq: this.seq++, ts: new Date().toISOString(), runId: this.runId, kind, ...(this.secrets.length > 0 ? this.#scrub(fields) : fields) };
+    const event = { v: EVENTS_VERSION, seq: this.seq++, ts: new Date().toISOString(), runId: this.runId, kind, ...this.scrub(fields, ["durationMs", "cost"]) };
     appendFileSync(this.file, `${JSON.stringify(event)}\n`, "utf8");
     this.events.push(event);
     if (kind === "run.end") this.closed = true;

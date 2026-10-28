@@ -295,6 +295,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `"nobody (no card was raised)"` | `error`：内容太长，`model` 载体的 prompt 超限，卡片没起 |
 | `"nobody (the carrier ended without an answer)"` | `error`（后加）：载体被关掉、出错，或者运行时收尾时自己发的拒绝；`provider` 载体没起卡（请求文件对不上）或没留下应答记录；`model` 载体没有写回执路径（`reason` 里带着它说的话）或读不到它的 tool 记录 |
 | `"nobody (the carrier was interrupted)"` | `error`（后加）：卡片被中断关闭，没有裁决 |
+| `"nobody (the run ended)"` | `error`（后加）：运行结束（总超时、`$.stop`、flow 抛错）时这个闸还在等人。运行器对卡片发 deny、停载体，不读任何回执和值，`reason` 写明运行以什么结束 |
 | `"nobody (the receipt and the answer record disagree)"` | `error`（后加）：`provider` 载体有回执，应答记录却不是 `allow`（缺失、出错或是拒绝），`reason` 写明记的是什么；或者反过来，记的是 `allow`、回执却没写出来（`reason` 是 `an allow was recorded but the receipt was not written`） |
 
 ### `caveat`

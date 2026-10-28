@@ -14,7 +14,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { format } from "node:util";
@@ -50,6 +50,8 @@ const AGENT_PROBE_DELAYS = [3_000, 5_000, 10_000, 20_000, 40_000];
 const MAX_TIMEOUT_MS = 2 ** 31 - 1;
 /** run.end.summary is one line for a result bar; longer is cut here, in characters (code points). */
 export const SUMMARY_LIMIT = 200;
+/** How long the runner waits for a closing gate to finish denying its card before it moves on. */
+const GATE_CLOSE_WAIT_MS = 15_000;
 
 const COST_NOTE =
   "per agent, LastUsage: the last turn only (a structured call is one turn). Codex reports CostUsd 0, so totalUsd counts Claude only";
@@ -129,20 +131,32 @@ class RunTimeout extends Error {
 
 const errorOf = (error) => ({ name: error?.name ?? "Error", message: error?.message ?? String(error) });
 
-/** JSON-safe copy: errors as { name, message }, long strings cut to `limit`. */
-export function jsonSafe(value, limit = Infinity) {
+/**
+ * JSON-safe copy: errors as { name, message }, bigints as text. `redact` (the run's secret scrub) is applied to the
+ * whole copy, and only then are strings cut to `limit`: a cut made first could leave half a secret that no longer
+ * matches it.
+ */
+export function jsonSafe(value, limit = Infinity, redact = null) {
   if (value === undefined) return null;
   try {
     const text = JSON.stringify(value, (key, v) => {
       if (v instanceof Error) return errorOf(v);
       if (typeof v === "bigint") return String(v);
-      if (typeof v === "string" && v.length > limit) return `${v.slice(0, limit)}…(truncated ${v.length - limit} chars)`;
       return v;
     });
-    return text === undefined ? null : JSON.parse(text);
+    let plain = text === undefined ? null : JSON.parse(text);
+    if (redact) plain = redact(plain);
+    return Number.isFinite(limit) ? cutStrings(plain, limit) : plain;
   } catch (error) {
     return `[not serializable: ${error.message}]`;
   }
+}
+
+function cutStrings(node, limit) {
+  if (typeof node === "string") return node.length > limit ? `${node.slice(0, limit)}…(truncated ${node.length - limit} chars)` : node;
+  if (Array.isArray(node)) return node.map((item) => cutStrings(item, limit));
+  if (node !== null && typeof node === "object") return Object.fromEntries(Object.entries(node).map(([key, item]) => [key, cutStrings(item, limit)]));
+  return node;
 }
 
 const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -342,6 +356,13 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const caveats = [];
   // Receipt paths of the gates started in this run, resolved.
   const gateHolds = new Set();
+  // Gates waiting on a person right now, and the files an input gate's value may be left in.
+  const openGates = new Set();
+  const inputFiles = new Set();
+  const sweepInputs = () => {
+    for (const file of inputFiles) rmSync(file, { force: true });
+  };
+  const safe = (value, limit) => jsonSafe(value, limit, (v) => log.scrub(v));
   let calls = 0;
   // Set the moment the flow's outcome is decided: when it returns, throws or
   // times out, or when it first calls $.stop. Code still running after that
@@ -557,7 +578,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       } catch (error) {
         failure = error;
       }
-      endCall(record, { ok: !failure, output: jsonSafe(output), error: failure, ...(await settleAgent(record)) });
+      endCall(record, { ok: !failure, output: safe(output), error: failure, ...(await settleAgent(record)) });
       if (failure) throw failure;
       return output;
     },
@@ -573,7 +594,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       log.emit("call.start", { callId: record.callId, type: "do", name, title, phase: currentPhase() });
       try {
         const value = await fn();
-        endCall(record, { ok: true, output: jsonSafe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
+        endCall(record, { ok: true, output: safe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
         return value;
       } catch (error) {
         endCall(record, { ok: false, output: null, error, agentId: null, cost: null });
@@ -665,9 +686,12 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       });
       if (input) {
         caveat(
-          "gate input: the value is typed into a Paseo card, so Paseo's own record of that answer may hold it; " +
-            "this run's events, and everything the runtime writes, do not" +
-            (input.secret ? "" : " (secret: false: the value is in the call's output)"),
+          "gate input: the value is typed into a Paseo card, so Paseo's own record of that answer may hold it. " +
+            (input.secret
+              ? "The run's events, return value, errors, summary and terminal output are scrubbed of the value as given " +
+                "(and of a few exact re-spellings: digits as a number, hex, base64), but a flow that transforms it " +
+                "(another case, a part, split, hashed, other encodings) is not covered, and what the flow itself writes elsewhere is not either"
+              : "secret: false: the value is in the call's output"),
           record.callId,
         );
       }
@@ -699,19 +723,34 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         stop: (agentId) => executor.stop(agentId),
         transcript: (agentId, how) => executor.transcript(agentId, how),
       };
-      let decision;
-      try {
-        decision = await requestApproval(io, prepared, { pollMs: gatePollMs });
-      } catch (error) {
-        endCall(record, { ok: false, output: null, error, ...(await settleAgent(record)) });
-        throw error;
+      // The run can end under this gate (total timeout, a stop, a failure): `controller` closes the card then,
+      // and `done` is what the runner waits on before it settles.
+      const controller = new AbortController();
+      let finished;
+      const entry = { controller, done: new Promise((resolve) => (finished = resolve)) };
+      openGates.add(entry);
+      if (prepared.inputPath) {
+        inputFiles.add(prepared.inputPath);
+        if (!process.listeners("exit").includes(sweepInputs)) process.once("exit", sweepInputs);
       }
-      // The flow gets the value; the record gets a stand-in when it is a secret, and from here on
-      // nothing the run writes may carry it (EventLog scrubs it wherever it turns up).
-      if (typeof decision.input === "string" && input?.secret) log.addSecret(decision.input);
-      const recorded = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
-      endCall(record, { ok: true, output: recorded, error: null, ...(await settleAgent(record)) });
-      return decision;
+      try {
+        let decision;
+        try {
+          decision = await requestApproval(io, prepared, { pollMs: gatePollMs, signal: controller.signal });
+        } catch (error) {
+          endCall(record, { ok: false, output: null, error, ...(await settleAgent(record)) });
+          throw error;
+        }
+        // The flow gets the value; the record gets a stand-in when it is a secret, and from here on
+        // nothing the run writes may carry it (EventLog scrubs it wherever it turns up).
+        if (typeof decision.input === "string" && input?.secret) log.addSecret(decision.input);
+        const recorded = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
+        endCall(record, { ok: true, output: recorded, error: null, ...(await settleAgent(record)) });
+        return decision;
+      } finally {
+        openGates.delete(entry);
+        finished();
+      }
     },
 
     /** Everything fn starts is inside phase `id`. Re-entering a phase is fine; so is running two at once. */
@@ -829,6 +868,18 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     error = null;
   }
 
+  // A gate still waiting on a person is closed first: its card is denied and nothing it is answered with from
+  // here on reaches the flow, which keeps running past a timeout. Then whatever an approval left on disk is swept
+  // (the provider may have taken an allow a moment before the deny), here and again if the process exits.
+  if (openGates.size > 0) {
+    const gates = [...openGates];
+    for (const gate of gates) gate.controller.abort(outcome);
+    let giveUp;
+    await Promise.race([Promise.all(gates.map((gate) => gate.done)), new Promise((resolve) => (giveUp = setTimeout(resolve, GATE_CLOSE_WAIT_MS)))]);
+    clearTimeout(giveUp);
+  }
+  sweepInputs();
+
   // Calls still in flight (a timeout, or a flow that threw without awaiting
   // everything it started) are closed here, so every call.start has its
   // call.end. Their agents are not stopped: whoever runs this decides.
@@ -855,12 +906,16 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     spent.size > 0
       ? { totalUsd: [...spent.values()].reduce((sum, c) => sum + (c?.usd ?? 0), 0), agentCount: spent.size, partial: COST_NOTE }
       : null;
-  const recorded = jsonSafe(value);
+  const recorded = safe(value);
   const summary = outcome === "done" || outcome === "stopped" ? summarizeRun(f, recorded, outcome, log) : null;
   const durationMs = Date.now() - startedAt;
+  // What goes back to the caller as text -- the error, the stop, the summary -- is what the events say.
+  error = log.scrub(error);
+  stop = log.scrub(stop);
   log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats] });
+  process.removeListener("exit", sweepInputs);
 
-  return {
+  const result = {
     ok: outcome === "done" || outcome === "stopped",
     outcome,
     value,
@@ -873,6 +928,10 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     error,
     stop,
   };
+  // How the terminal scrubs the whole result as the events were (orch.mjs `printable`). Not enumerable: it is
+  // a function, and a result that is serialized must not carry it.
+  Object.defineProperty(result, "redact", { value: (v) => log.scrub(v), enumerable: false });
+  return result;
 }
 
 /**
@@ -901,8 +960,10 @@ function summarizeRun(f, value, outcome, log) {
     return null;
   }
   if (line.trim() === "") return null;
-  const chars = [...line];
-  return chars.length > SUMMARY_LIMIT ? `${chars.slice(0, SUMMARY_LIMIT).join("")}…` : line;
+  // Scrubbed before it is cut: a cut through the middle of a secret leaves a piece nothing matches.
+  const clean = log.scrub(line);
+  const chars = [...clean];
+  return chars.length > SUMMARY_LIMIT ? `${chars.slice(0, SUMMARY_LIMIT).join("")}…` : clean;
 }
 
 /** A thrown value as one line, whatever was thrown. */

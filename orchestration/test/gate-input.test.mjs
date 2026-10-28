@@ -10,7 +10,8 @@ import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { runFlow } from "../runtime/run.mjs";
+import { runFlow, SUMMARY_LIMIT } from "../runtime/run.mjs";
+import { printable } from "../runtime/orch.mjs";
 import { flow } from "../runtime/flow.mjs";
 import { readEvents, checkEvents, EventLog } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
@@ -253,4 +254,257 @@ test("a model carrier cannot be asked to prepare an input gate", () => {
     () => prepareGate({ carrier: "model", holdPath: "C:/x/c1.receipt.txt", title: "t", content: "x", runId: "r", callId: "c1", input: { label: "x", secret: true, pattern: null, hint: "" } }),
     /needs the orch-gate provider/,
   );
+});
+
+// --- Review round 2: non-string encodings, the run ending under an open gate, cut-before-scrub, the terminal -------
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** A gate flow that hands the decision to `after` and returns what it returns. */
+const leakFlow = (after, input = INPUT) =>
+  inputFlow(input, async (decision, $) => {
+    $.log.info("after the gate");
+    decision.__returned = await after(decision, $);
+  });
+
+/** Every JSON line of an events file as text, and the parsed events: the thing a secret must not be in. */
+const eventsText = (result) => readFile(result.events, "utf8");
+
+test("a number, a bigint, bytes or digits in an array are scrubbed too, not only the string spelled the same", async () => {
+  const code = "483921";
+  const result = await run(
+    inputFlow(INPUT, async (decision, $) => {
+      const n = Number(decision.input);
+      $.log.info(`n=${n}`);
+      await $.do("numbers", async () => ({
+        asNumber: n,
+        inList: [1, n, 2],
+        asBigint: BigInt(decision.input),
+        embedded: n + 1000000, // 1483921: the decimal text contains the value
+        [n]: "number as a key",
+        asBuffer: Buffer.from(decision.input),
+        asUint8: new Uint8Array(Buffer.from(decision.input)),
+        digits: decision.input.split("").map(Number),
+        base64: Buffer.from(decision.input).toString("base64"),
+        hex: Buffer.from(decision.input).toString("hex"),
+        url: encodeURIComponent(decision.input),
+        chars: decision.input.split(""),
+      }));
+      return { code: n };
+    }),
+    { executor: fakeExecutor({ carrier: "input", inputValue: code }) },
+  );
+  assert.equal(result.outcome, "done");
+  const text = await eventsText(result);
+  for (const [what, needle] of [
+    ["the value", code],
+    ["a number", ":483921"],
+    ["a number in a list", ",483921,"],
+    ["a number inside a longer one", "1483921"],
+    ["a Buffer's bytes", "52,56,51,57,50,49"],
+    ["a Uint8Array's bytes", '"0":52,"1":56'],
+    ["the digits as numbers", "[4,8,3,9,2,1]"],
+    ["its base64", "NDgzOTIx"],
+    ["its hex", "343833393231"],
+    ["the characters as strings", '["4","8","3","9","2","1"]'],
+  ]) {
+    assert.ok(!text.includes(needle), `${what} is in the events file (${needle})`);
+  }
+  const events = readEvents(result.events);
+  assert.deepEqual(checkEvents(events, { strict: true, complete: true }), []);
+  assert.equal(events.find((e) => e.kind === "run.end").value.input, INPUT_REDACTED);
+  // The telemetry numbers the runtime owns are not scrubbed: durationMs stays a number.
+  assert.equal(typeof events.find((e) => e.kind === "call.end").durationMs, "number");
+});
+
+test("a value with leading zeros is scrubbed from the number it becomes", async () => {
+  const result = await run(
+    inputFlow(INPUT, async (decision, $) => {
+      await $.do("n", async () => ({ n: Number(decision.input) }));
+    }),
+    { executor: fakeExecutor({ carrier: "input", inputValue: "004839" }) },
+  );
+  const text = await eventsText(result);
+  assert.ok(!text.includes(":4839"), "the number 4839 is the value 004839 with its zeros gone");
+  assert.ok(!text.includes("004839"));
+});
+
+test("cut after scrub, never before: a value cut in half by the length limit leaves no fragment", async () => {
+  const result = await run(
+    inputFlow(INPUT, async (decision, $) => {
+      await $.do("long", async () => "x".repeat(1996) + decision.input);
+      return "x".repeat(1996) + decision.input;
+    }),
+    { executor: fakeExecutor({ carrier: "input", inputValue: "483921" }) },
+  );
+  const text = await eventsText(result);
+  assert.ok(!text.includes("4839"), `a fragment of the value survived the cut: ${text.match(/.{20}4839.{10}/)?.[0]}`);
+  assert.ok(text.includes(`${"x".repeat(1996)}${INPUT_REDACTED}`), "the stand-in takes the place of the value, then the cut applies");
+});
+
+test("the summary is scrubbed before it is cut to one line, even when the summarizer reaches the value another way", async () => {
+  let remembered = "";
+  const f = flow({
+    name: "summed",
+    description: "d",
+    phases: [{ id: "commit", title: "提交" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: async (_, $) => {
+      const d = await $.phase("commit", () => $.gate({ title: "批准", content: "c" + String.fromCharCode(10), timeout: "1m", input: INPUT }));
+      remembered = d.input; // the summarizer is given the recorded (scrubbed) value; a closure is another way to the real one
+      return { ok: true };
+    },
+    summarize: () => `${"y".repeat(SUMMARY_LIMIT - 4)}${remembered}`,
+  });
+  const result = await run(f, { executor: fakeExecutor({ carrier: "input", inputValue: "483921" }) });
+  const text = await eventsText(result);
+  assert.ok(!text.includes("y".repeat(SUMMARY_LIMIT - 4) + "48"), "the summary leaks a fragment of the value");
+  assert.ok(!/48/.test(result.summary ?? ""), "the returned summary is the scrubbed one");
+  assert.ok((result.summary ?? "").startsWith("y".repeat(SUMMARY_LIMIT - 4)));
+});
+
+test("the terminal prints what the events record: value, error and summary go through the same scrub", async () => {
+  const f = flow({
+    name: "printed",
+    description: "d",
+    phases: [{ id: "commit", title: "提交" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: async (_, $) => {
+      const d = await $.phase("commit", () => $.gate({ title: "批准", content: "c\n", timeout: "1m", input: INPUT }));
+      return { code: d.input, n: Number(d.input), echoed: `got ${d.input}` };
+    },
+    summarize: (value) => `code ${value.code}`,
+  });
+  const done = await run(f, { executor: fakeExecutor({ carrier: "input", inputValue: "483921" }) });
+  assert.equal(done.value.code, "483921", "the caller of runFlow gets the flow's real return value");
+  assert.ok(!JSON.stringify(printable(done)).includes("483921"), "the terminal does not");
+  assert.ok(!JSON.stringify(printable(done)).includes(":483921"));
+  assert.equal(printable(done).value.code, INPUT_REDACTED);
+
+  const failed = await run(inputFlow(INPUT, async (decision) => { throw new Error(`rejected ${decision.input}`); }), { executor: fakeExecutor({ carrier: "input", inputValue: "483921" }) });
+  assert.equal(failed.outcome, "failed");
+  assert.ok(!JSON.stringify(printable(failed)).includes("483921"));
+  assert.ok(!failed.error.message.includes("483921"), "the returned error is the scrubbed one");
+  assert.match(printable(failed).error.message, /rejected <已用>/);
+  // A run with no secret prints as before.
+  const plain = await run(inputFlow({ label: "备注", secret: false }), { executor: fakeExecutor({ carrier: "input", inputValue: "ship it" }) });
+  assert.equal(printable(plain).value.input, "ship it");
+});
+
+test("the caveat says what is and is not covered", async () => {
+  const result = await run(inputFlow(), { executor: fakeExecutor({ carrier: "input" }) });
+  const caveat = result.caveats.find((c) => c.startsWith("gate input:"));
+  assert.match(caveat, /return value, errors, summary and terminal output/);
+  assert.match(caveat, /transform/);
+});
+
+// --- The run ends while a gate is open -----------------------------------------------------------------------
+
+test("a total timeout closes the open gate; a late approval cannot hand the flow the value", async () => {
+  let seen = "never resolved";
+  const executor = fakeExecutor({ carrier: "input", inputValue: "483921", answerAfterMs: 1600 });
+  const f = flow({
+    name: "timeout-gate",
+    description: "d",
+    phases: [{ id: "commit", title: "提交" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: (_, $) =>
+      $.phase("commit", async () => {
+        const d = await $.gate({ title: "批准", content: "c\n", timeout: "1m", input: INPUT });
+        seen = d;
+        return d;
+      }),
+  });
+  const result = await run(f, { executor, timeout: "1s" });
+  assert.equal(result.outcome, "timeout");
+  await sleep(1400); // past the moment the approval would have come
+  assert.ok(executor.denied.length >= 1, "the card was closed with a deny");
+  assert.ok(seen === "never resolved" || (seen.approved === false && seen.input === null), `the flow got ${JSON.stringify(seen)}`);
+  const text = await eventsText(result);
+  assert.ok(!text.includes("483921"));
+  const events = readEvents(result.events);
+  assert.deepEqual(checkEvents(events, { strict: true, complete: true }), []);
+  const end = events.find((e) => e.kind === "call.end");
+  assert.equal(end.output.approved, false);
+  assert.equal(end.output.outcome, "error");
+  assert.match(end.output.reason, /the run ended \(timeout\)/);
+  assert.equal(existsSync(path.join(logDir, "runs", result.runId, "gate", "c1.input.json")), false);
+});
+
+test("a flow that throws with a gate still open closes it; an allow taken just before the deny is swept and not delivered", async () => {
+  let seen = "never resolved";
+  const executor = fakeExecutor({ carrier: "input", inputValue: "483921", answerAfterMs: 60_000, answerOnDeny: true });
+  const f = flow({
+    name: "throw-gate",
+    description: "d",
+    phases: [{ id: "commit", title: "提交" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: (_, $) =>
+      $.phase("commit", async () => {
+        $.gate({ title: "批准", content: "c\n", timeout: "1m", input: INPUT }).then((d) => (seen = d), () => {});
+        await sleep(100);
+        throw new Error("the flow gave up");
+      }),
+  });
+  const result = await run(f, { executor });
+  assert.equal(result.outcome, "failed");
+  assert.equal(executor.denied.length, 1);
+  await sleep(200);
+  assert.ok(seen === "never resolved" || (seen.approved === false && seen.input === null), `the flow got ${JSON.stringify(seen)}`);
+  const gateDir = path.join(logDir, "runs", result.runId, "gate");
+  assert.equal(existsSync(path.join(gateDir, "c1.input.json")), false, "the value the provider wrote as the deny came is not left on disk");
+  assert.ok(!(await eventsText(result)).includes("483921"));
+});
+
+test("an allow the provider takes after the gate has cleaned up is swept by the runner, and never read", async () => {
+  const executor = fakeExecutor({ carrier: "input", inputValue: "483921", answerAfterMs: 60_000, lateWrite: true });
+  const f = flow({
+    name: "late-gate",
+    description: "d",
+    phases: [{ id: "commit", title: "提交" }],
+    inputs: {},
+    grants: ["gate:deny"],
+    run: (_, $) => $.phase("commit", () => $.gate({ title: "批准", content: "c\n", timeout: "1m", input: INPUT })),
+  });
+  const result = await run(f, { executor, timeout: "1s" });
+  assert.equal(result.outcome, "timeout");
+  assert.equal(existsSync(path.join(logDir, "runs", result.runId, "gate", "c1.input.json")), false, "the late value file is gone when the run is over");
+  assert.ok(!(await eventsText(result)).includes("483921"));
+});
+
+test("requestApproval with an aborted signal closes the card and takes nothing, even a receipt that is already there", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-abort-"));
+  const gate = prepareGate({
+    carrier: "provider",
+    holdPath: path.join(dir, "gate", "c1.receipt.txt"),
+    title: "批准",
+    content: "x\n",
+    runId: "r",
+    callId: "c1",
+    timeout: "1m",
+    input: { label: "验证码", secret: true, pattern: null, hint: "" },
+  });
+  const controller = new AbortController();
+  let denied = 0;
+  const io = {
+    spawn: async (prompt) => {
+      await carryAs("input", prompt, { inputValue: CODE }); // the allow was already taken
+      controller.abort("timeout");
+      return "agent";
+    },
+    inspect: async () => ({ status: "running" }),
+    deny: async () => void (denied += 1),
+    stop: async () => {},
+    transcript: async () => "",
+  };
+  const decision = await requestApproval(io, gate, { pollMs: 5, signal: controller.signal });
+  assert.equal(decision.outcome, "error");
+  assert.equal(decision.approved, false);
+  assert.equal(decision.input, null);
+  assert.equal(denied, 1);
+  assert.equal(existsSync(gate.inputPath), false);
 });

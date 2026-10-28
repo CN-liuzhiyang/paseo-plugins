@@ -223,6 +223,18 @@ export function prepareGate(gate) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** A pause that an abort cuts short. */
+const pause = (ms, signal) =>
+  new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
+  });
 const MAX_POLL_FAILURES = 6;
 // A carrier just started may still read idle: the provider starts its turn on its own time.
 const STARTUP_GRACE_MS = 15_000;
@@ -321,7 +333,9 @@ async function takeInput(prepared, answer, decision, base) {
  * @param {{ spawn: (prompt: string) => Promise<string>, inspect: Function, deny: Function, stop: Function,
  *           transcript: Function }} io
  * @param {ReturnType<typeof prepareGate>} prepared
- * @param {{ pollMs?: number, startupGraceMs?: number }} [options]
+ * @param {{ pollMs?: number, startupGraceMs?: number, signal?: AbortSignal }} [options] `signal`: the run is over
+ *   (its total timeout, a stop, a failure). The card is closed and nothing is taken -- not an answer that came in a
+ *   moment before -- and the gate is an error whose reason says so.
  * @returns {Promise<{ outcome: "allowed"|"denied"|"expired"|"mismatch"|"error", approved: boolean,
  *   agentId: string|null, sha256: string, askedAt: string, decidedAt: string, waitedMs: number,
  *   reason: string|null, agentReport: string, by: string, agentStatusAtDecision: string|null,
@@ -336,7 +350,7 @@ export async function requestApproval(io, prepared, options = {}) {
   }
 }
 
-async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min(STARTUP_GRACE_MS, pollMs * 3) } = {}) {
+async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min(STARTUP_GRACE_MS, pollMs * 3), signal } = {}) {
   const { carrier, holdPath, answerPath, requestPath, requestText, digest, receipt, prompt, fits, timeout } = prepared;
   const deadline = Date.now() + parseDuration(timeout);
 
@@ -388,8 +402,13 @@ async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min
   let status = null;
   let started = false;
   let expired = false;
+  let aborted = false;
   let failure = null;
   for (let failures = 0; ; ) {
+    if (signal?.aborted) {
+      aborted = true;
+      break;
+    }
     let detail;
     try {
       detail = await io.inspect(agentId);
@@ -399,14 +418,14 @@ async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min
         failure = error;
         break;
       }
-      await sleep(pollMs);
+      await pause(pollMs, signal);
       continue;
     }
     status = detail?.status ?? null;
     if (status !== "idle") started = true;
     // Idle before it was ever seen at work, with nothing written yet: not finished, not started.
     if (status === "idle" && !started && Date.now() - spawnedAt < startupGraceMs && !(await exists(holdPath)) && !(await exists(answerPath))) {
-      await sleep(pollMs);
+      await pause(pollMs, signal);
       continue;
     }
     if (status === "idle" || status === "error" || status === "closed") break;
@@ -414,7 +433,7 @@ async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min
       expired = true;
       break;
     }
-    await sleep(pollMs);
+    await pause(pollMs, signal);
   }
 
   // Unless the carrier finished on its own, close the card and stop it. Deny
@@ -425,9 +444,20 @@ async function decide(io, prepared, { pollMs = 10_000, startupGraceMs = Math.min
   // person after the script has stopped listening.
   const closeMessage = expired ? `gate expired after ${timeout} without an answer` : "gate closed: the script stopped waiting";
   const closedByScript = status !== "idle" && !expired;
-  if (status !== "idle") {
+  if (status !== "idle" || aborted) {
     await io.deny(agentId, { message: closeMessage }).catch(() => null);
     await io.stop(agentId).catch(() => null);
+  }
+  // The run is over: whatever was answered, the flow is not to be given it. An approval that landed a moment
+  // before the deny is left unread (the value file is deleted on the way out, and the runner sweeps the run's).
+  if (aborted) {
+    return decision({
+      agentId,
+      agentStatusAtDecision: status,
+      outcome: "error",
+      reason: `the run ended (${String(signal.reason ?? "stopped")}) while the gate was waiting; the card was closed and no answer was taken`,
+      by: "nobody (the run ended)",
+    });
   }
 
   const written = await readFile(holdPath, "utf8").catch(() => null);

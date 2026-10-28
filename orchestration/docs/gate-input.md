@@ -104,9 +104,12 @@ provider 的顺序：值文件 → 应答记录 → 回执。任何一步失败�
 
 - `call.start`（`input` 只有 `label/secret/pattern/hint`）、请求文件、应答记录、对话里 provider 说的话（"已记为批准（值不会显示在这里）"）、
   `call.end.output`（`input` 是 `"<已用>"`）都不含值。
-- **兜底**：`EventLog.addSecret(value)`。值一出现（运行时读到它的那一刻），之后写进事件流的**任何字符串**——flow 自己的
-  `$.log`、`$.do` 的返回值、错误信息、`run.end.value`，对象的键也算——凡是包含它（原样或 JSON 转义后的样子）都换成 `<已用>`。
-  信封字段（`v/seq/ts/runId/kind`）不处理，免得一个短值吃掉时间戳。
+- **兜底**：`EventLog.addSecret(value)`。值一出现（运行时读到它的那一刻），之后写进事件流的东西——flow 自己的
+  `$.log`、`$.do` 的返回值、`$.ask` 的结果、错误信息、`run.end.value`、`summary`，对象的键也算——凡是含有它的都换成 `<已用>`。
+  **先屏蔽、后截断**：`$.do` 的输出（2000 字符）和 `summary`（200 字符）是先屏蔽再按长度截的，所以值被长度限制拦腰切开
+  也不会留下一截残片。信封字段（`v/seq/ts/runId/kind`）和 `durationMs`、`cost` 不处理，免得一个短值吃掉时间戳。
+- **终端**：`orch.mjs run` 打印的结果（`value`、`error`、`summary`、`stop`）走同一个屏蔽（`result.redact`，不可枚举，序列化时不带），
+  `runFlow` 返回给程序调用方的 `error`、`summary`、`stop` 也是屏蔽过的；`value` 是 flow 自己的返回值，程序调用方拿到的是真的。
 - `secret: false`：值照常写在 `call.end.output.input` 里，caveat 里也说了。
 
 ### 值经过的地方（照实写）
@@ -119,8 +122,33 @@ provider 的顺序：值文件 → 应答记录 → 回执。任何一步失败�
    运行时不扫这类孤儿文件。值本身有时效（验证码），所以没有为这个做清理。
 3. 运行时内存 → flow。**flow 之后拿它做什么（写文件、放进命令行、传给子进程）运行时管不了。**
    事件流里的兜底只管事件流；flow 自己写出去的文件不在它管的范围内。
-4. 终端里：`orch.mjs run` 结束时打印的 JSON 里的 `value` 是 flow 的返回值，**没经过兜底**（实测，flow 返回了
-   `got: true`，要是返回值里放了验证码，终端上就看得见；事件文件里的 `run.end.value` 有兜底）。flow 别把值放进返回值。
+4. 终端里：`orch.mjs run` 结束时打印的结果和事件流用同一个屏蔽出口，flow 把值放进返回值，终端和事件文件里都是 `<已用>`。
+
+### 边界：兜底匹配什么，不匹配什么
+
+兜底做的是**精确匹配**，不是理解。flow 作者要知道：
+
+| 覆盖（换成 `<已用>`） | 不覆盖 |
+|---|---|
+| 值本身；JSON 转义后的样子（被当作 JSON 字符串的一部分记下来） | **大小写转换**（`toUpperCase()`、`toLowerCase()`） |
+| 对象的键里的值 | **部分值**（`slice`、前几位、后几位、掩码如 `48****`）；被拆进几个字段、几行日志的值 |
+| 数字：`Number(值)`、`BigInt(值)`、加减后十进制文字里仍含有它的数，整个数换成 `<已用>`；纯数字的值带前导零时，去零后的数也认（`004839` → `4839`） | 反转、排序、哈希、加密、加盐、拼上别的东西再哈希 |
+| 整个值的十六进制、base64（带不带 `=`、URL 安全的）、URL 编码 | 别的编码（base32、rot13、unicode 转义、全角数字……）；base64 嵌在更长的数据里（对齐变了，匹配不上） |
+| 单字符或单个数字的数组，连起来读作值（`["4","8",…]`、`[4,8,3,…]`） | 数字之外的拆法（每个字符一个对象、一个字符一个字段） |
+| 字节数组（`Buffer`、`Uint8Array` 经 JSON 后的 `{"0":52,…}`），按 utf8、latin1、utf16le 解出来含有值 | 其他字符集 |
+| 事件流里的任何位置：日志、`$.do` 输出、`$.ask` 结果、错误、`summary`、`run.end.value`、终端打印的结果 | **事件流之外**：flow 自己写的文件、命令行参数、发给模型的 prompt（事件流里的 `call.start.prompt` 是换过的，但模型已经看到了）、flow 调的外部命令、`console.log`（不经运行时） |
+
+所以：**拿到值以后，原样用，别变换、别记录**。变换过的值，运行时认不出来，事件流里会照实留着。caveat 里也这么写了。
+
+### 运行结束时还开着的闸
+
+总超时、`$.stop`、flow 抛错都会让运行结束，而 flow 的代码在超时之后还会在后台继续跑。以前这时开着的卡片没人关，
+之后有人批准，值就交到一个已经"结束"的 flow 手里。现在：运行结束时，**所有还在等人的闸**先被叫停（`requestApproval` 的 `signal`）：
+对卡片发 deny、停载体，闸以 `error` 结束（`reason: the run ended (timeout) while the gate was waiting…`，
+`by: nobody (the run ended)`），**不读任何回执和值**，哪怕批准恰好在 deny 之前到了。然后把本次运行里所有带值闸的
+`<callId>.input.json` 清掉（`runFlow` 里清一次，进程退出时 `process.on("exit")` 再清一次，所以 `orch.mjs` 在打印完直接 `exit` 的路径也走到）。
+残余窗口：写文件的是 provider（另一个进程）。provider 串行处理输入，deny 到达时若还没处理 allow，之后的 allow 会被它忽略；
+若 allow 已经在处理，文件在 deny 返回之前就写好了，会被清掉。provider 在运行器退出**之后**才写这个文件，在这个流程里不会发生，没有专门防。
 
 ### `answeredVia` 的新值
 
@@ -139,7 +167,7 @@ provider 的顺序：值文件 → 应答记录 → 回执。任何一步失败�
 | 问题 | 结论 |
 |---|---|
 | `$.do` 有没有时间上限 | **没有。** `run.mjs` 的 `do` 只是 `await fn()`，没有计时器。4 小时的 `$.do` 照常结束，`call.end.durationMs` 是 4 小时 |
-| 总超时 `--timeout`，flow 里能不能设 | 缺省**没有**总超时。只能由调用方给（`orch.mjs run --timeout`、`runFlow({ timeout })`），范围 1s 到 596h；**flow 自己设不了**。到点运行以 `timeout` 结束，还在跑的调用补一条 `call.end`（`RunEnded`）。调用方要给就得比"最长编译 + 最长等人"大 |
+| 总超时 `--timeout`，flow 里能不能设 | 缺省**没有**总超时。只能由调用方给（`orch.mjs run --timeout`、`runFlow({ timeout })`），范围 1s 到 596h；**flow 自己设不了**。到点运行以 `timeout` 结束，开着的人闸先被关掉（见上），还在跑的别的调用补一条 `call.end`（`RunEnded`）。调用方要给就得比"最长编译 + 最长等人"大 |
 | 长时间没有事件，会不会被误判成卡死/孤儿 | **"活着"不会。** 活着只看 claim 文件（`<runId>.claim`）每 30 秒被 `setInterval` 碰一次，和事件无关；`readRunState` 在 1h/2h/3h 都是 `running`（有测试）。**"可能卡住"会：** `liveness.staleAfterMs` 对一个开着的 `$.do`（`call.start` 里没有 `timeout`）用 15 分钟的底线，所以一个 3 小时一句话不说的 `$.do`，界面和对账会在 15 分钟后说它"可能卡住"。等人闸、`$.ask` 不受影响（它们的 `timeout` 抬高了底线：gate 8h → 8h2m，有测试） |
 | 那个陷阱 | claim 的心跳是**事件循环里的定时器**。`$.do` 里如果同步阻塞几个小时（`execFileSync`、死循环），定时器跑不了，claim 两分钟后就读作"丢了"（`lost`）。长步骤必须是异步的（`spawn`/`await`），别用 `*Sync` |
 | `$.gate` 的 `timeout` 放 8 小时，到点替人拒绝有没有问题 | **没有。** `parseDuration` 认 `8h`；到点 `expired`，`reason: no answer within 8h`，运行时对卡片发一次 deny 再 stop 载体（有测试，8 小时在 mock 钟下 10 秒一步）。8 小时约 2900 次 `paseo inspect`；连续 6 次（约 1 分钟）失败会判 `error`——daemon 重启超过 1 分钟本来就会丢掉 provider 里的卡（会话在内存里），所以这是对的，没改 |

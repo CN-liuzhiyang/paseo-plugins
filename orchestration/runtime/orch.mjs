@@ -158,6 +158,11 @@ function peekRunId(argv) {
   return undefined;
 }
 
+/** What the terminal gets of a result: JSON-safe, and (for a run) scrubbed as its events are. */
+export function printable(result) {
+  return jsonSafe(result, Infinity, typeof result?.redact === "function" ? result.redact : null);
+}
+
 async function run(name, argv) {
   // A caller-given id is taken before the flow is looked up and read, so that whatever
   // goes wrong from here (no such flow, a bad flag, a malformed --affair) is written to the claim
@@ -187,7 +192,7 @@ async function run(name, argv) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, target, ...rest] = process.argv.slice(2);
-  const print = (value) => console.log(JSON.stringify(jsonSafe(value), null, 2));
+  const print = (value) => console.log(JSON.stringify(printable(value), null, 2));
 
   if (command === "list" && target === undefined) {
     try {
