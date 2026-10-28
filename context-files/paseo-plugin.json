@@ -1,0 +1,8 @@
+{
+  "id": "context-files",
+  "description": "Appends files (a shared knowledge index, house rules) to the system prompt of every new agent, read when the agent is created",
+  "requirements": {
+    "paseo": ">=0.11.0"
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
