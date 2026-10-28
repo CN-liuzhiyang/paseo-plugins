@@ -39,6 +39,8 @@ Stored by the daemon in `plugin-settings/context-files/context-files.json` as `{
 ## Limits
 
 - Only new agents get the files. An agent that already exists keeps the prompt it was created with.
+- `claudeWhenClaudeMdDisabled` sees only the create request. A plugin that turns `CLAUDE.md` off later, in its own
+  `agent.session_open` hook, is not seen, and that Claude session gets no files.
 - The files go to the model provider: do not list a file that must not leave the machine.
 
 ## Development
