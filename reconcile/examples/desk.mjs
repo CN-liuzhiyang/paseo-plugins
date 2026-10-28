@@ -223,7 +223,8 @@ export default {
         seen = looks;
         fails = 0;
         fail = null;
-        status = flat(v.status, 60) || status || "看过了";
+        // The look is asked for about 60 characters; what it overshoots by is kept (a sentence cut in the middle reads worse than a long one).
+        status = flat(v.status, 100) || status || "看过了";
         const nextAt = clampNext(ctx, p, domain, v.nextLook);
         next = nextAt.at;
         const entry = { n: looks, at: now, why: woke?.why ?? "", looked: flat(v.looked, 120), status, next, nextWhy: flat(v.nextWhy ?? "", 30), clamp: nextAt.clamp };
@@ -419,7 +420,8 @@ export default {
       return out("watching", "waiting", first ? "正在看第一眼" : `${status || "盯着"}（正在看第 ${looks} 次）`, "system", "正在看", base);
     }
     if (fail && fails > 0) {
-      return out("watching", "waiting", `这次没看成：${fail.why}；${next ? stamp(ctx, next) : "明天"} 再看`, "system", next ? `下次看 ${stamp(ctx, next)}` : "明天再看", base);
+      // The runtime's own words for what went wrong can be long and technical: the list line keeps the start of them, the log keeps all.
+      return out("watching", "waiting", `这次没看成：${flat(fail.why, 50)}；${next ? stamp(ctx, next) : "明天"} 再看`, "system", next ? `下次看 ${stamp(ctx, next)}` : "明天再看", base);
     }
     return out("watching", "waiting", status || "盯着", "system", next ? `下次看 ${stamp(ctx, next)}` : "等下一次看", base);
   },

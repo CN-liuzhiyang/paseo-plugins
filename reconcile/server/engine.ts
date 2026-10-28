@@ -1240,7 +1240,7 @@ export function createEngine(deps: EngineDeps) {
       const problem = checkNote(r, caseId, nowMs);
       if (problem) return reject(problem, caseId);
     } else {
-      target = r.target === "last" ? (Object.values(state.annotations).filter((a) => !a.revoked && r.via && a.via === r.via).sort((a, b) => b.at.localeCompare(a.at))[0] ?? null) : (state.annotations[r.target] ?? null);
+      target = r.target === "last" ? (Object.values(state.annotations).filter((a) => !a.revoked && r.via && a.via === r.via).sort((a, b) => a.at.localeCompare(b.at)).at(-1) ?? null) : (state.annotations[r.target] ?? null);
       if (!target) return reject(r.target === "last" ? "这个对话里没有还在生效的话可撤（用 --id 指明撤哪一条）" : `没有 ${r.target} 这一条`);
       if (target.revoked) return reject(`${target.id} 已经撤过了`, target.caseId);
       caseId = target.caseId;
@@ -1655,6 +1655,11 @@ export function createEngine(deps: EngineDeps) {
     return Object.values(state.items).filter((i) => state.assessments[i.key] && (!source || i.source === source) && !(ruleset?.rules ?? []).some((r) => r.source === i.source)).length;
   };
   const clockOf = (isoText: string) => nowIso(Date.parse(isoText)).slice(5, 16).replace("T", " ");
+  /** A time shown to a person about a matter they told: with the day of the week, worked out here ("10-13 周二 10:00"). */
+  const stampOf = (isoText: string) => {
+    const p = localParts(Date.parse(isoText), tz);
+    return `${p.date.slice(5)} 周${"日一二三四五六"[p.weekday]} ${p.time}`;
+  };
 
   const EMPTY_TITLE = "判断方法目录是空的";
   const brokenTitle = (file: string) => (file ? `判断方法 ${file} 加载不上` : EMPTY_TITLE);
@@ -1840,7 +1845,7 @@ export function createEngine(deps: EngineDeps) {
           health: "done",
           headline: drop
             ? `不再追踪（${personName(drop.by)} ${drop.at.slice(5, 16).replace("T", " ")} ${drop.how === "confirmed" ? "在卡片上确认" : "说"}：「${clip(drop.said, 60)}」）`
-            : `不再盯了（${personName(withdrawn!.revoked!.by)} ${clockOf(withdrawn!.revoked!.at)} 撤销了交代：「${clip(withdrawn!.said, 60)}」）`,
+            : `不再盯了（${personName(withdrawn!.revoked!.by)} ${stampOf(withdrawn!.revoked!.at)} 撤销了交代：「${clip(withdrawn!.said, 60)}」）`,
           next: { actor: "nobody", what: "不再追踪" },
           notice: null,
           stale: false,
