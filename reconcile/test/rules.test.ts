@@ -42,7 +42,8 @@ test("rules load by fingerprint; a broken file is an error, not a crash", async 
 
 test("the example rule: open, closed with a date, closed without one", async () => {
   const set = await loadRules(path.dirname(EXAMPLE_RULE));
-  const rule = set.rules[0]!;
+  // The directory holds every example rule: this one is about the release follow-up.
+  const rule = set.rules.find((r) => r.name === "release-followup")!;
   const ctx = context("2026-10-21 17:00", rule.params);
   const open = judge(rule, { id: "gcp-demo:1", primary: issue(1, { release: "2026-10-23外放" }), items: [], flags: [] }, ctx, set.fingerprint);
   assert.equal(open.assessment.stage, "open");

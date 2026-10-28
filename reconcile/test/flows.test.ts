@@ -354,3 +354,40 @@ test("a run.end line too long to be read whole is still the end, with no value",
     f.close();
   }
 });
+
+// ---- a flow with limits of its own (policy flows.byFlow) ------------------------------------------------------
+
+test("a flow with limits of its own is counted against those only, and counts in no other: neither can fill the other's room", () => {
+  const BY = { ...LIMITS, byFlow: { "glance-flow": { perDay: 2, usdPerDay: 1 } } };
+  const today = (n: number, flow: string, over: Partial<FlowRec> = {}) =>
+    Array.from({ length: n }, (_, i) => rec({ runId: `${flow}-${i}`, flow, caseId: `tracker:${i + 10}`, intentAt: "2026-10-13T09:00:00+08:00", ended: { at: "2026-10-13T09:10:00+08:00", outcome: "done", summary: null, costUsd: 0.1, value: null, valueDropped: false, why: null }, ...over }));
+  const general = { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" };
+  const own = { caseId: "desk:D1", maxUsd: 0.5, flow: "glance-flow" };
+  // the general flows use up their day: the flow with its own limits still has its room
+  assert.ok(limitWhy(today(6, "triage-flow"), [], BY, general, T0, TZ), "the general limit is full for the general flows");
+  assert.equal(limitWhy(today(6, "triage-flow"), [], BY, own, T0, TZ), null, "and none of it is the flow's");
+  // the flow uses up its own: the general flows have their room, and the words say which limit it was
+  const full = today(2, "glance-flow");
+  assert.equal(limitWhy(full, [], BY, general, T0, TZ), null, "two of the other flow's runs do not count in the general day");
+  assert.equal(limitWhy(full, [], { ...BY, perDay: 2, usdPerDay: 1.1 }, general, T0, TZ), null, "not in the general count however narrow it is, nor in its money");
+  const held = limitWhy(full, [], BY, { ...own, caseId: "desk:D9" }, T0, TZ)!;
+  assert.match(held.why, /今天「glance-flow」流程已经起了 2 次（上限 2）/);
+  assert.equal(held.until, "tomorrow");
+  // its own money, in its own words
+  const spent = limitWhy(today(1, "glance-flow", { ended: undefined, maxUsd: 0.8 }), [], BY, own, T0, TZ)!;
+  assert.match(spent.why, /今天「glance-flow」流程花费已到 \$0\.80（上限 \$1），再起一个按 \$0\.5 算会超/);
+  // the same matter, and at the same time: the defaults of a flow with limits of its own are 4 and 1, not the general ones
+  const sameMatter = today(4, "glance-flow", { caseId: "desk:D1" });
+  assert.match(limitWhy(sameMatter, [], { ...BY, byFlow: { "glance-flow": { perDay: 9, usdPerDay: 9 } } }, own, T0, TZ)!.why, /这个事项今天「glance-flow」流程已经起了 4 次（上限 4）/);
+  const going = today(1, "glance-flow", { ended: undefined, maxUsd: 0.1 });
+  const one = limitWhy(going, [], { ...BY, byFlow: { "glance-flow": { perDay: 9, usdPerDay: 9 } } }, { ...own, caseId: "desk:D2" }, T0, TZ)!;
+  assert.match(one.why, /同时在跑的「glance-flow」流程已经有 1 个（上限 1）/);
+  assert.equal(one.until, "later");
+  // the runs asked for earlier in the same round are counted in the room they belong to
+  assert.match(limitWhy([], today(2, "glance-flow"), BY, { ...own, caseId: "desk:D9" }, T0, TZ)!.why, /「glance-flow」/);
+  assert.equal(limitWhy([], today(2, "glance-flow"), BY, general, T0, TZ), null);
+  // a flow named like a property of Object is not a flow with limits of its own
+  assert.equal(limitWhy(today(6, "triage-flow"), [], BY, { caseId: "tracker:1", maxUsd: 1, flow: "constructor" }, T0, TZ)!.why.includes("「"), false);
+  // no byFlow at all: the one room, as before
+  assert.ok(limitWhy(today(6, "glance-flow"), [], LIMITS, own, T0, TZ));
+});
