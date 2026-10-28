@@ -4,6 +4,8 @@
 // Here and not in server/ because the client reads it: the plugin compiler keeps every server/
 // module, type-only imports included, out of the client bundle.
 
+import type { Annotation } from "./model";
+
 export type Ball = "me" | "them" | "system" | "nobody";
 export type StatusTone = "neutral" | "accent" | "success" | "warning" | "danger";
 
@@ -272,6 +274,8 @@ export interface RunView {
   inputDrifted?: boolean;
   /** A run still going that the rule's latest judgment no longer asks for (it is not stopped for that). */
   unwanted?: boolean;
+  /** The rule takes this run's failure itself (rules.ts `selfRetry`): a failure is history, not the item's condition, and has no buttons. */
+  selfRetry?: boolean;
 }
 
 export interface Fact {
@@ -316,7 +320,7 @@ export interface GraphView {
   poll: { what: string; nextAt: string | null } | null;
   links: LinkView[];
   runs: RunView[];
-  said: Array<{ id: string; kind: "drop" | "hold" | "wrong"; label: string; said: string; by: string; at: string; until: string | null; how: "own-words" | "confirmed"; inForce: boolean; revokedAt: string | null }>;
+  said: Array<{ id: string; kind: Annotation["kind"]; label: string; said: string; by: string; at: string; until: string | null; how: "own-words" | "confirmed"; inForce: boolean; revokedAt: string | null }>;
   history: HistoryLine[];
   evidence: {
     facts: Array<{ field: string; value: string; evidence: string | null; at: string; by: string }>;

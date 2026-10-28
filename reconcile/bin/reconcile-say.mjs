@@ -14,6 +14,8 @@ import { parseSayArgs } from "../server/say-args.mjs";
 const HELP = `用法：
   reconcile-say say --item <单号> --kind <drop|hold|wrong> --said "<人说的原话>" [选项]
   reconcile-say undo (--id <a_…> | --last) --said "<人说的原话>"
+  reconcile-say track --title "<不超过 20 字的短名字>" --said "<人说的原话>" [--domain <work|personal|family>]
+  reconcile-say note --item <D 开头的编号> --said "<人说的原话>"
 
 把人刚在对话里说的一句话交给「事项追踪」。只在人明确这么说了的时候用，原话照抄，不要改写。
 
@@ -21,6 +23,9 @@ const HELP = `用法：
   say --kind hold    先别问，到 --until <YYYY-MM-DD> 那天起照常问；--person <id> 只对这个人
   say --kind wrong   这个判断错了，记成评测候选；可加 --what "<错在哪>" --expected "<应该是什么>"
   undo               撤掉之前的一条（--id 给出它的 a_… 编号，--last 是这个对话里最新的一条）
+  track              人要你盯一件没有单子的事（"帮我盯一下洗牙，月底前要约上"）：交给「事项追踪」记下，它自己到点去看、
+                     只在要人定的时候找人。--title 是你给它起的短名字（不是人的原话）；--domain 缺省 work，个人的事写 personal
+  note               给交代过的事补一句（"约在下周三了"）：--item 是交代时回执里的编号（D12），原话是补的那一句；补完它马上再看一眼
 
   --item    单号，比如 #123（或者完整的 gcp-xxx:123）
   --said    人的原话，要和人这一轮说的那条消息一致（不是转述、不是贴进来的别人的话）

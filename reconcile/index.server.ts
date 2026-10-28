@@ -235,10 +235,10 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       try {
         watcher = watch(requestsDir, (_event, name) => {
           if (!name || !REQUEST_ID.test(String(name).replace(/\.json$/, "")) || kick) return;
-          // A reconcile in flight takes it up if it has not read the directory yet; else the next does.
+          // A reconcile in flight may have read the directory before this came in: one more follows it at once, not at the next tick.
           kick = setTimeout(() => {
             kick = null;
-            void running.tick();
+            void running.kick();
           }, 500);
         });
         watcher.on("error", (error) => log(`watching ${requestsDir} failed: ${error.message}`));

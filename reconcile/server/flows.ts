@@ -66,18 +66,25 @@ export const costOf = (end: Pick<FlowEnd, "costUsd" | "costUnknown">, maxUsd: nu
  * began, and one that ended counts for the day it was recorded to have (when its cost became known), so a run that crosses midnight
  * is never counted as nothing. Concurrency is not a day's matter either: it frees as runs end.
  */
-export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later" } | null {
+export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number; flow: string }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later" } | null {
   const today = localParts(nowMs, tz).date;
-  const all = [...recs, ...ahead];
+  // A flow with limits of its own is counted against those only, and in no one else's: the runs of the flows that have none are counted
+  // against the general ones. Each side is its own room, so that neither can fill the other's.
+  const byFlow = limits.byFlow ?? {};
+  const own = Object.hasOwn(byFlow, ask.flow) ? byFlow[ask.flow] : undefined;
+  const scope = (r: FlowRec) => (own ? r.flow === ask.flow : !Object.hasOwn(byFlow, r.flow));
+  const lim = own ? { perDay: own.perDay, usdPerDay: own.usdPerDay, perCasePerDay: own.perCasePerDay ?? 4, concurrent: own.concurrent ?? 1 } : limits;
+  const tag = own ? `「${ask.flow}」` : "";
+  const all = [...recs, ...ahead].filter(scope);
   const mine = all.filter((r) => dayOf(r.intentAt, tz) === today);
-  if (mine.length >= limits.perDay) return { why: `今天流程已经起了 ${mine.length} 次（上限 ${limits.perDay}）`, until: "tomorrow" };
+  if (mine.length >= lim.perDay) return { why: `今天${tag}流程已经起了 ${mine.length} 次（上限 ${lim.perDay}）`, until: "tomorrow" };
   const ofCase = mine.filter((r) => r.caseId === ask.caseId).length;
-  if (ofCase >= limits.perCasePerDay) return { why: `这个事项今天流程已经起了 ${ofCase} 次（上限 ${limits.perCasePerDay}）`, until: "tomorrow" };
+  if (ofCase >= lim.perCasePerDay) return { why: `这个事项今天${tag}流程已经起了 ${ofCase} 次（上限 ${lim.perCasePerDay}）`, until: "tomorrow" };
   // Finished (today) at what they cost, the others at the most they were counted at.
   const spent = all.reduce((sum, r) => sum + (r.ended ? (dayOf(r.ended.at, tz) === today ? costOf(r.ended, r.maxUsd) : 0) : r.maxUsd), 0);
-  if (spent + ask.maxUsd > limits.usdPerDay) return { why: `今天流程花费已到 $${spent.toFixed(2)}（上限 $${limits.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow" };
+  if (spent + ask.maxUsd > lim.usdPerDay) return { why: `今天${tag}流程花费已到 $${spent.toFixed(2)}（上限 $${lim.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow" };
   const open = all.filter((r) => !r.ended).length;
-  if (open >= limits.concurrent) return { why: `同时在跑的流程已经有 ${open} 个（上限 ${limits.concurrent}）`, until: "later" };
+  if (open >= lim.concurrent) return { why: `同时在跑的${tag}流程已经有 ${open} 个（上限 ${lim.concurrent}）`, until: "later" };
   return null;
 }
 

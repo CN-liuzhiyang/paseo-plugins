@@ -1,5 +1,5 @@
 import type { ListRow } from "./graph";
-import type { Assessment, Commitment, SourceHealth } from "./model";
+import type { Annotation, Assessment, Commitment, SourceHealth } from "./model";
 
 // What the controller reports each reconcile: status.json on disk, the overview RPC, the screen.
 // Here and not in server/ because the client reads it: the plugin compiler keeps every server/
@@ -53,8 +53,8 @@ export interface StatusSaid {
   id: string;
   caseId: string;
   title: string;
-  kind: "drop" | "hold" | "wrong";
-  /** How the kind reads: 不再追踪, 先别问, 判断错了. */
+  kind: Annotation["kind"];
+  /** How the kind reads: 不再追踪, 先别问, 判断错了, 交代, 补一句. */
   label: string;
   said: string;
   by: string;

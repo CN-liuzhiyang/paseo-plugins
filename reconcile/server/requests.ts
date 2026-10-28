@@ -1,6 +1,7 @@
 import { lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import type { Annotation } from "../shared/model";
 import { parseSayArgs, type SayArgsRequest } from "./say-args.mjs";
 
 // What a person said in a conversation, handed to the engine as a file. Any session with a shell
@@ -45,6 +46,29 @@ const say = z
   })
   .strict();
 
+/**
+ * A matter with no ticket a person asked to be followed ("盯一下洗牙，月底前要约上"): `said` is their words, `title` the
+ * short name the agent gave it (not their words: it is only checked to be what the command sent). Domain absent: work.
+ */
+export const DESK_TITLE_MAX = 20;
+const track = z
+  .object({
+    ...base,
+    cmd: z.literal("track"),
+    title: z.string().trim().min(1).max(DESK_TITLE_MAX),
+    domain: z.enum(["work", "personal", "family"]).optional(),
+  })
+  .strict();
+
+/** A line added to a matter told before (`desk:D<n>`): `said` is the line. */
+const note = z
+  .object({
+    ...base,
+    cmd: z.literal("note"),
+    item: z.string().trim().min(1).max(80),
+  })
+  .strict();
+
 const undo = z
   .object({
     ...base,
@@ -54,11 +78,13 @@ const undo = z
   })
   .strict();
 
-export const requestSchema = z.discriminatedUnion("cmd", [say, undo]);
+export const requestSchema = z.discriminatedUnion("cmd", [say, track, note, undo]);
 export type Request = z.output<typeof requestSchema>;
 export type SayRequest = Extract<Request, { cmd: "say" }>;
+export type TrackRequest = Extract<Request, { cmd: "track" }>;
+export type NoteRequest = Extract<Request, { cmd: "note" }>;
 
-export const KIND_LABEL: Record<SayRequest["kind"], string> = { drop: "不再追踪", hold: "先别问", wrong: "判断错了" };
+export const KIND_LABEL: Record<Annotation["kind"], string> = { drop: "不再追踪", hold: "先别问", wrong: "判断错了", track: "交代", note: "补一句" };
 
 /** One request file read: a request, or why it was refused (with its id when the name was one). */
 export type Incoming = { id: string; request: Request } | { id: string; error: string };
@@ -438,12 +464,14 @@ export const vouchKey = (via: string, turnId: string, step: number, message: str
  * pasted, and the words must be most of the message, so that a line picked out of someone else's
  * chat does not pass as the person's. What cannot be checked is not taken as theirs.
  */
-export function ownWords(r: Request, conversation: Conversation | null, dataDir: string | null = null): { why: string | null; message: { step: number; text: string } | null } {
+export function ownWords(r: Request, conversation: Conversation | null, dataDir: string | null = null, waiveSource = false): { why: string | null; message: { step: number; text: string } | null } {
   const no = (why: string) => ({ why, message: null });
   if (!conversation) return no("找不到说这句话的对话");
   if (NOT_A_PERSON.some((l) => l in conversation.labels)) return no("这个对话不是人直接在用的（是别的 agent、流程或卡片起的）");
   // A chat channel (or another plugin) starts its conversations with a source label: the host does not say who sent what there.
-  if (conversation.labels.source) return no(`这是从「${clip(conversation.labels.source, 20)}」进来的对话（聊天软件或别的插件），分不清是谁说的`);
+  // `waiveSource`: the caller knows this is the admin's own private chat (adminChat) and that the request is one it may go through
+  // on (engine.ts handle). It waives this one check and no other: each of the ones below still holds.
+  if (conversation.labels.source && !waiveSource) return no(`这是从「${clip(conversation.labels.source, 20)}」进来的对话（聊天软件或别的插件），分不清是谁说的`);
   const turn = conversation.turn;
   if (!turn) return no("说这句话的对话这会儿没在跑，对不上是哪一轮说的");
   const steps = turn.steps;
@@ -467,7 +495,23 @@ export function ownWords(r: Request, conversation: Conversation | null, dataDir:
 }
 
 /** The same check, only why not. */
-export const notOwnWords = (r: Request, conversation: Conversation | null, dataDir: string | null = null): string | null => ownWords(r, conversation, dataDir).why;
+export const notOwnWords = (r: Request, conversation: Conversation | null, dataDir: string | null = null, waiveSource = false): string | null => ownWords(r, conversation, dataDir, waiveSource).why;
+
+/**
+ * Whether a conversation is one of the admin's own private chats, as the deployment says they look (persons.json `chats`: a set of
+ * labels each): it has every label of one of them, with the same value. Always false without a `source` label: that is what a chat
+ * channel starts its conversations with, and a conversation without one is the person's own anyway.
+ */
+export function adminChat(labels: Record<string, string>, chats: ReadonlyArray<Record<string, string>>): boolean {
+  if (!labels.source) return false;
+  return chats.some((chat) => {
+    const keys = Object.keys(chat);
+    return keys.length > 0 && keys.every((k) => labels[k] !== undefined && labels[k] === chat[k]);
+  });
+}
+
+/** What may be said into the admin's own chat without the check of where the conversation came from: telling a matter, a line added to it, and taking either back. */
+export const OPEN_TO_ADMIN_CHAT: ReadonlyArray<Annotation["kind"]> = ["track", "note"];
 
 /** Shortens text from outside (a tracker title, a headline, words said) to one line before it is shown anywhere. */
 export function clip(text: string, max: number): string {

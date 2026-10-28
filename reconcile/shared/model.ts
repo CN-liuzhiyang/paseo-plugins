@@ -5,7 +5,11 @@
 export type Trust = "source" | "derived" | "human" | "agent";
 export type Domain = "work" | "personal" | "family";
 
-/** A cached view of something an outside system owns. The source is the authority, not this. */
+/**
+ * A cached view of something an outside system owns. The source is the authority, not this.
+ * The one exception is source `desk` (DESK_SOURCE): a matter a person told in a conversation has no
+ * outside system, so the controller writes the item itself, from what was said (annotations).
+ */
 export interface Item {
   key: string; // "<source id>:<native id>"
   source: string;
@@ -153,16 +157,27 @@ export interface Commitment {
   reason: string | null;
 }
 
+/** The source of the items a person asked to be followed in a conversation: the controller itself is its source (see Annotation `track`). */
+export const DESK_SOURCE = "desk";
+
 /**
  * What a person said about one item in a conversation, in force until taken back: stop following
  * it, do not ask about it until a day, or this judgment is wrong. It carries the words and who
  * said them, and one sentence takes it back.
+ *
+ * Two kinds are not about an item that is somebody else's: `track` is a person asking for a matter
+ * with no ticket to be followed (the item `desk:D<n>` is made from it, by the controller, in the
+ * same batch), `note` is a line they add to such a matter later. Taking back a `track` stops
+ * following the matter; taking back a `note` makes the matter read as if it had not been said.
  */
 export interface Annotation {
   id: string;
   caseId: string;
-  kind: "drop" | "hold" | "wrong";
+  kind: "drop" | "hold" | "wrong" | "track" | "note";
   said: string;
+  /** track: the short name the matter is called by (at most 20 characters), and which domain it belongs to. */
+  title?: string;
+  domain?: Domain;
   /** The person, by id in persons.json. */
   by: string;
   /** The agent whose conversation it was said in. */
@@ -311,6 +326,8 @@ export interface FlowRec {
   /** The ceiling the day's budget counts it at while it runs; not enforced on the run. */
   maxUsd: number;
   timeout: string | null;
+  /** The rule takes the failure of this run itself (rules.ts `selfRetry`): it is not the item's condition, and has no way out buttons. */
+  selfRetry?: boolean;
   /** What the flow is given; dropped once the run is done or stopped (a run that failed is run again with it). */
   input: Record<string, unknown> | null;
   inputHash: string;

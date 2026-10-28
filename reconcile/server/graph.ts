@@ -1,4 +1,4 @@
-import type { Annotation, Assessment, Commitment, Item } from "../shared/model";
+import { DESK_SOURCE, type Annotation, type Assessment, type Commitment, type Item } from "../shared/model";
 import {
   clockText,
   durationText,
@@ -22,6 +22,7 @@ import {
   type Visit,
 } from "../shared/graph";
 import type { Config } from "./config";
+import { deskNo, isDeskKey } from "./desk";
 import { createJournalBook, type Chain, type Fmt, type JournalBook } from "./journal-book";
 import { reachesAt, type nextStep } from "./policy";
 import { clip, KIND_LABEL } from "./requests";
@@ -67,7 +68,7 @@ export function createGraph(deps: GraphDeps) {
   const personName = (id: string) => config.persons[id]?.name ?? id;
   const fmtOf = (metas: StageMeta[]): Fmt => ({ stage: (id) => metaOf(metas, id).label, person: personName });
   const stamp = (ms: number) => iso(ms, tz);
-  const numberOf = (caseId: string) => `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`;
+  const numberOf = (caseId: string) => (isDeskKey(caseId) ? deskNo(caseId) : `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`);
   const shortTitle = (title: string) => title.replace(/^(【[^】]*】\s*)+/, "").trim() || title;
   const isOpen = (c: Commitment | undefined): c is Commitment => !!c && (c.status === "scheduled" || c.status === "waiting");
 
@@ -266,7 +267,9 @@ export function createGraph(deps: GraphDeps) {
       const seen = newest.get(key);
       if (!seen || Date.parse(r.startedAt) > Date.parse(seen.startedAt)) newest.set(key, r);
     }
-    return [...newest.values()].filter((r) => !r.dismissed).filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted" && r.situation !== "unchecked") || (r.stage ?? stage) === stage);
+    // A run whose rule takes its failure itself (selfRetry) is the item's condition while it goes, not when it broke: the rule asks again.
+    const themselves = (r: RunView) => r.selfRetry === true && r.situation !== "doing" && r.situation !== "done";
+    return [...newest.values()].filter((r) => !r.dismissed && !themselves(r)).filter((r) => (r.situation !== "fail" && r.situation !== "lost" && r.situation !== "slow" && r.situation !== "unreadable" && r.situation !== "notstarted" && r.situation !== "unchecked") || (r.stage ?? stage) === stage);
   }
 
   function factsOf(caseId: string, metas?: StageMeta[]): Facts {
@@ -358,7 +361,8 @@ export function createGraph(deps: GraphDeps) {
       if (id) out.add(id);
     }
     const item = state.items[caseId];
-    if (item) out.add(item.source);
+    // A matter a person told is read from nothing outside the controller: no source to say it was read from, or could not be.
+    if (item && item.source !== DESK_SOURCE) out.add(item.source);
     return [...out];
   }
 
@@ -562,7 +566,7 @@ export function createGraph(deps: GraphDeps) {
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
       { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : null }] : []),
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : null }] : []),
     ]);
     const history: HistoryLine[] = [
       ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),

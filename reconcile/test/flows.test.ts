@@ -71,20 +71,20 @@ test("an input is told apart by what it holds, not by the order its keys were wr
 
 test("a run is held back by whichever of the day's limits it meets first, and the words say which", () => {
   const today = (n: number, over: Partial<FlowRec> = {}) => Array.from({ length: n }, (_, i) => rec({ runId: `r${i}`, caseId: `tracker:${i + 10}`, intentAt: "2026-10-13T09:00:00+08:00", ended: { at: "2026-10-13T09:10:00+08:00", outcome: "done", summary: null, costUsd: 0.1, value: null, valueDropped: false, why: null }, ...over }));
-  const ask = { caseId: "tracker:1", maxUsd: 1 };
+  const ask = { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" };
   assert.equal(limitWhy(today(2), [], LIMITS, ask, T0, TZ), null, "room for one more");
   assert.match(limitWhy(today(6), [], LIMITS, ask, T0, TZ)!.why, /今天流程已经起了 6 次（上限 6）/);
   assert.equal(limitWhy(today(6), [], LIMITS, ask, T0, TZ)!.until, "tomorrow");
   // the same item: three a day
   const mine = today(3, { caseId: "tracker:1" });
   assert.match(limitWhy(mine, [], LIMITS, ask, T0, TZ)!.why, /这个事项今天流程已经起了 3 次（上限 3）/);
-  assert.equal(limitWhy(mine, [], LIMITS, { caseId: "tracker:2", maxUsd: 1 }, T0, TZ), null, "another item is not held for it");
+  assert.equal(limitWhy(mine, [], LIMITS, { caseId: "tracker:2", maxUsd: 1, flow: "triage-flow" }, T0, TZ), null, "another item is not held for it");
   // money: the ones that are over at what they cost, the others at the most they were counted at
   const cheap = today(4, { maxUsd: 4 });
   assert.equal(limitWhy(cheap, [], LIMITS, ask, T0, TZ), null, "four runs that cost $0.10 each, not $4");
   const open = today(2, { maxUsd: 2, ended: undefined });
-  assert.match(limitWhy(open, [], { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 2 }, T0, TZ)!.why, /花费已到 \$4\.00（上限 \$5）/);
-  assert.equal(limitWhy(open, [], { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 1 }, T0, TZ), null, "exactly the limit is allowed");
+  assert.match(limitWhy(open, [], { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 2, flow: "triage-flow" }, T0, TZ)!.why, /花费已到 \$4\.00（上限 \$5）/);
+  assert.equal(limitWhy(open, [], { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" }, T0, TZ), null, "exactly the limit is allowed");
   // at the same time: not a day's matter, so it frees as runs end and yesterday's open run still counts
   const yesterday = today(2, { intentAt: "2026-10-12T09:00:00+08:00", ended: undefined, maxUsd: 0.5 });
   const held = limitWhy(yesterday, [], LIMITS, ask, T0, TZ)!;
@@ -96,7 +96,7 @@ test("a run is held back by whichever of the day's limits it meets first, and th
 test("a new day starts the counts at nothing, in the instance's zone and not UTC", () => {
   // 00:30 +08:00 on the 14th is still the 13th in UTC: the run belongs to the 14th, the day the instance lives in
   const full = Array.from({ length: 6 }, (_, i) => rec({ runId: `r${i}`, caseId: `tracker:${i + 10}`, intentAt: "2026-10-14T00:30:00+08:00", ended: { at: "2026-10-14T00:40:00+08:00", outcome: "done", summary: null, costUsd: 0, value: null, valueDropped: false, why: null } }));
-  const ask = { caseId: "tracker:1", maxUsd: 1 };
+  const ask = { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" };
   assert.ok(limitWhy(full, [], LIMITS, ask, Date.parse("2026-10-14T01:00:00+08:00"), TZ), "the same day, though UTC is still the 13th");
   assert.ok(limitWhy(full, [], LIMITS, ask, Date.parse("2026-10-14T23:59:00+08:00"), TZ));
   assert.equal(limitWhy(full, [], LIMITS, ask, Date.parse("2026-10-15T00:01:00+08:00"), TZ), null, "the next local day");
@@ -105,9 +105,9 @@ test("a new day starts the counts at nothing, in the instance's zone and not UTC
 
 test("the runs asked for earlier in the same round count against the limits, written or not", () => {
   const ahead = [rec({ runId: "a", caseId: "tracker:7" }), rec({ runId: "b", caseId: "tracker:8" })];
-  assert.match(limitWhy([], ahead, LIMITS, { caseId: "tracker:1", maxUsd: 1 }, T0, TZ)!.why, /同时在跑/);
+  assert.match(limitWhy([], ahead, LIMITS, { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" }, T0, TZ)!.why, /同时在跑/);
   const sameItem = [1, 2, 3].map((n) => rec({ runId: `s${n}`, intentAt: "2026-10-13T10:04:00+08:00" }));
-  assert.match(limitWhy([], sameItem, { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 1 }, T0, TZ)!.why, /这个事项今天/);
+  assert.match(limitWhy([], sameItem, { ...LIMITS, concurrent: 9 }, { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" }, T0, TZ)!.why, /这个事项今天/);
 });
 
 // ---- what to do with a run ---------------------------------------------------------------------------------

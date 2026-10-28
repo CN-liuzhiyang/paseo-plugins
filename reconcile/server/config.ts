@@ -31,6 +31,13 @@ const personSchema = z
      * (server.deliver), an address that channel understands, and what to call it on the page.
      */
     notify: z.array(z.object({ channel: z.string().min(1), to: z.string().min(1), label: z.string().min(1).optional() }).strict()).default([]),
+    /**
+     * For the admin: how this person's own private chats look as conversations, as sets of labels the host gives them (a chat
+     * plugin starts its conversations with `source` and its own chat label). Words in such a conversation that tell a matter or
+     * add a line to it (reconcile-say track / note, and taking those back) are taken as the person's own without the check of where
+     * the conversation came from; every other check holds (requests.ts adminChat). Nothing else is let through on it.
+     */
+    chats: z.array(z.record(z.string().min(1), z.string().min(1)).refine((labels) => Object.keys(labels).length > 0, "no labels")).default([]),
   })
   .strict();
 
@@ -199,6 +206,24 @@ const policySchema = z
         usdPerDay: z.number().min(0).max(1000),
         perCasePerDay: z.number().int().min(0).max(100),
         concurrent: z.number().int().min(1).max(20),
+        /**
+         * A flow (by the name the runtime knows it by) with limits of its own: its runs are counted against these only, and
+         * count in no other limit, so that what it uses cannot take another flow's room (nor the other way round).
+         * `perCasePerDay` and `concurrent` absent: 4 and 1 (not the ones above: a change of those would change these without a word).
+         */
+        byFlow: z
+          .record(
+            z.string().regex(/^[a-z][a-z0-9-]*$/),
+            z
+              .object({
+                perDay: z.number().int().min(0).max(100),
+                usdPerDay: z.number().min(0).max(1000),
+                perCasePerDay: z.number().int().min(0).max(100).optional(),
+                concurrent: z.number().int().min(1).max(20).optional(),
+              })
+              .strict(),
+          )
+          .optional(),
       })
       .strict()
       .default({ perDay: 6, usdPerDay: 5, perCasePerDay: 3, concurrent: 2 }),
