@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { Capsule } from "./capsule";
+import { deskNo, isDeskKey } from "./desk";
 import { canonical } from "./observe";
 import { clip, diffFlowDecls, diffOutcomes, noDiff, replayOn, standingOf, type Diff, type ReplayRun, type Unmet } from "./replay";
 import type { LoadedRule } from "./rules";
@@ -69,7 +70,7 @@ export interface ReplayReport {
   selfCheck: Array<CapsuleRef & { fields: string[] }>;
 }
 
-const numberOf = (caseId: string) => `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`;
+const numberOf = (caseId: string) => (isDeskKey(caseId) ? deskNo(caseId) : `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`);
 
 export function refOf(c: Capsule): CapsuleRef {
   const title = (c.kase.primary as { title?: unknown }).title;

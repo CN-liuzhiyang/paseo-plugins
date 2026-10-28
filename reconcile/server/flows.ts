@@ -66,7 +66,7 @@ export const costOf = (end: Pick<FlowEnd, "costUsd" | "costUnknown">, maxUsd: nu
  * began, and one that ended counts for the day it was recorded to have (when its cost became known), so a run that crosses midnight
  * is never counted as nothing. Concurrency is not a day's matter either: it frees as runs end.
  */
-export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number; flow: string }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later" } | null {
+export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number; flow: string; title?: string }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later"; limit: NonNullable<FlowResult["limit"]> } | null {
   const today = localParts(nowMs, tz).date;
   // A flow with limits of its own is counted against those only, and in no one else's: the runs of the flows that have none are counted
   // against the general ones. Each side is its own room, so that neither can fill the other's.
@@ -74,17 +74,18 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
   const own = Object.hasOwn(byFlow, ask.flow) ? byFlow[ask.flow] : undefined;
   const scope = (r: FlowRec) => (own ? r.flow === ask.flow : !Object.hasOwn(byFlow, r.flow));
   const lim = own ? { perDay: own.perDay, usdPerDay: own.usdPerDay, perCasePerDay: own.perCasePerDay ?? 4, concurrent: own.concurrent ?? 1 } : limits;
-  const tag = own ? `「${ask.flow}」` : "";
+  // Named as people name it when the rule gave the flow a title.
+  const what = own ? (ask.title ? `「${ask.title}」` : `「${ask.flow}」流程`) : "流程";
   const all = [...recs, ...ahead].filter(scope);
   const mine = all.filter((r) => dayOf(r.intentAt, tz) === today);
-  if (mine.length >= lim.perDay) return { why: `今天${tag}流程已经起了 ${mine.length} 次（上限 ${lim.perDay}）`, until: "tomorrow" };
+  if (mine.length >= lim.perDay) return { why: `今天${what}已经起了 ${mine.length} 次（上限 ${lim.perDay}）`, until: "tomorrow", limit: "perDay" };
   const ofCase = mine.filter((r) => r.caseId === ask.caseId).length;
-  if (ofCase >= lim.perCasePerDay) return { why: `这个事项今天${tag}流程已经起了 ${ofCase} 次（上限 ${lim.perCasePerDay}）`, until: "tomorrow" };
+  if (ofCase >= lim.perCasePerDay) return { why: `这个事项今天${what}已经起了 ${ofCase} 次（上限 ${lim.perCasePerDay}）`, until: "tomorrow", limit: "perCase" };
   // Finished (today) at what they cost, the others at the most they were counted at.
   const spent = all.reduce((sum, r) => sum + (r.ended ? (dayOf(r.ended.at, tz) === today ? costOf(r.ended, r.maxUsd) : 0) : r.maxUsd), 0);
-  if (spent + ask.maxUsd > lim.usdPerDay) return { why: `今天${tag}流程花费已到 $${spent.toFixed(2)}（上限 $${lim.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow" };
+  if (spent + ask.maxUsd > lim.usdPerDay) return { why: `今天${what}花费已到 $${spent.toFixed(2)}（上限 $${lim.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow", limit: "usd" };
   const open = all.filter((r) => !r.ended).length;
-  if (open >= lim.concurrent) return { why: `同时在跑的${tag}流程已经有 ${open} 个（上限 ${lim.concurrent}）`, until: "later" };
+  if (open >= lim.concurrent) return { why: `同时在跑的${what}已经有 ${open} 个（上限 ${lim.concurrent}）`, until: "later", limit: "concurrent" };
   return null;
 }
 
@@ -221,7 +222,7 @@ export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
 }
 
 /** What a rule is told of a request that was held back for now (no run exists). */
-export const deferredResult = (why: string): FlowResult => ({ state: "deferred", runId: null, round: 0, startedAt: null, endedAt: null, value: null, summary: null, costUsd: 0, why, endedOutcome: null });
+export const deferredResult = (why: string, limit?: FlowResult["limit"]): FlowResult => ({ state: "deferred", runId: null, round: 0, startedAt: null, endedAt: null, value: null, summary: null, costUsd: 0, why, endedOutcome: null, ...(limit ? { limit } : {}) });
 
 /** The word for a run that is not over and the controller reads as in trouble ("fail" is the runtime's, not this). */
 export const WAITING_ON_YOU: ReadonlySet<FlowResult["state"]> = new Set(["failed", "timeout", "lost", "not-started", "refused"]);

@@ -47,7 +47,7 @@ const say = z
   .strict();
 
 /**
- * A matter with no ticket a person asked to be followed ("盯一下洗牙，月底前要约上"): `said` is their words, `title` the
+ * A matter with no ticket a person asked to be followed ("盯一下体检，月底前要约上"): `said` is their words, `title` the
  * short name the agent gave it (not their words: it is only checked to be what the command sent). Domain absent: work.
  */
 export const DESK_TITLE_MAX = 20;
@@ -500,18 +500,29 @@ export const notOwnWords = (r: Request, conversation: Conversation | null, dataD
 /**
  * Whether a conversation is one of the admin's own private chats, as the deployment says they look (persons.json `chats`: a set of
  * labels each): it has every label of one of them, with the same value. Always false without a `source` label: that is what a chat
- * channel starts its conversations with, and a conversation without one is the person's own anyway.
+ * channel starts its conversations with, and a conversation without one is the person's own anyway. A set that is only `source` (or
+ * lacks it) names no one's chat, whatever else it has: it is every conversation of that plugin, and never matches.
  */
 export function adminChat(labels: Record<string, string>, chats: ReadonlyArray<Record<string, string>>): boolean {
   if (!labels.source) return false;
   return chats.some((chat) => {
     const keys = Object.keys(chat);
-    return keys.length > 0 && keys.every((k) => labels[k] !== undefined && labels[k] === chat[k]);
+    return keys.length >= 2 && Object.hasOwn(chat, "source") && keys.every((k) => labels[k] !== undefined && labels[k] === chat[k]);
   });
 }
 
 /** What may be said into the admin's own chat without the check of where the conversation came from: telling a matter, a line added to it, and taking either back. */
 export const OPEN_TO_ADMIN_CHAT: ReadonlyArray<Annotation["kind"]> = ["track", "note"];
+
+/**
+ * Taking back what was told needs no card only just after: the matter or line was told in this very conversation, no more than this
+ * long ago. A chat is one long conversation, and "that one is not wanted" said days later is as likely to mean something else; a matter
+ * ended by it cannot be taken up again, so an older one waits on a card that says which matter it is and when it was told.
+ */
+export const ADMIN_CHAT_UNDO_MS = 10 * 60_000;
+
+/** Whether a thing told is still fresh enough, and from the same conversation, to be taken back in the admin's chat without a card. */
+export const freshInChat = (told: Pick<Annotation, "via" | "at">, via: string | null, nowMs: number): boolean => !!via && told.via === via && nowMs - Date.parse(told.at) <= ADMIN_CHAT_UNDO_MS;
 
 /** Shortens text from outside (a tracker title, a headline, words said) to one line before it is shown anywhere. */
 export function clip(text: string, max: number): string {

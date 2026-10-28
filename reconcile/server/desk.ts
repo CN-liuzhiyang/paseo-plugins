@@ -1,7 +1,7 @@
 import type { Annotation, Item } from "../shared/model";
 import { DESK_SOURCE } from "../shared/model";
 
-// A matter a person told the controller in a conversation ("盯一下洗牙，月底前要约上") has no outside
+// A matter a person told the controller in a conversation ("盯一下体检，月底前要约上") has no outside
 // system to read it from. The controller keeps what was said as annotations (kind `track`, and `note`
 // for a line added later) and makes the item `desk:D<n>` from them in the same batch: the journal is the
 // one place that knows it, and the item is only what those words say, worked out again when they change.
@@ -28,6 +28,16 @@ export function nextDeskKey(names: Iterable<string>): string {
     if (m) max = Math.max(max, Number(m[1]));
   }
   return deskKey(max + 1);
+}
+
+/** What the log of looks (the fact `desk.log`, JSON) says the look `n` chose for the next one: its time, as the rule wrote it; null when it is not there. */
+export function nextLookOf(log: string | undefined, n: string): string | null {
+  try {
+    const entries = JSON.parse(log || "[]") as Array<{ n?: number; next?: string }>;
+    return entries.find((e) => String(e.n) === n)?.next || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Whether two sets of words say the same: case, spaces and punctuation do not tell them apart. */

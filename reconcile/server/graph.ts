@@ -1,6 +1,7 @@
 import { DESK_SOURCE, type Annotation, type Assessment, type Commitment, type Item } from "../shared/model";
 import {
   clockText,
+  clockWeekText,
   durationText,
   normalizeStages,
   plainMd,
@@ -22,7 +23,7 @@ import {
   type Visit,
 } from "../shared/graph";
 import type { Config } from "./config";
-import { deskNo, isDeskKey } from "./desk";
+import { deskNo, isDeskKey, nextLookOf } from "./desk";
 import { createJournalBook, type Chain, type Fmt, type JournalBook } from "./journal-book";
 import { reachesAt, type nextStep } from "./policy";
 import { clip, KIND_LABEL } from "./requests";
@@ -70,6 +71,8 @@ export function createGraph(deps: GraphDeps) {
   const stamp = (ms: number) => iso(ms, tz);
   const numberOf = (caseId: string) => (isDeskKey(caseId) ? deskNo(caseId) : `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`);
   const shortTitle = (title: string) => title.replace(/^(【[^】]*】\s*)+/, "").trim() || title;
+  /** A run as people read it: the title its rule gave the flow, else the flow's name. */
+  const named = (r: Pick<RunView, "title" | "flow">) => (r.title ? `「${r.title}」` : `流程「${r.flow}」`);
   const isOpen = (c: Commitment | undefined): c is Commitment => !!c && (c.status === "scheduled" || c.status === "waiting");
 
   const metaCache = new WeakMap<object, StageMeta[]>();
@@ -451,12 +454,12 @@ export function createGraph(deps: GraphDeps) {
       });
     }
     if (a?.notice) marks.push({ kind: "notice", line: clip(a.notice, 300), since: null, until: null });
-    for (const r of f.deciding) if (r.situation === "unreadable") marks.push({ kind: "unread", line: `流程「${r.flow}」的记录里有 ${r.unreadLines} 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 ${r.runId} 看`, since: null, until: null });
+    for (const r of f.deciding) if (r.situation === "unreadable") marks.push({ kind: "unread", line: `${named(r)}的记录里有 ${r.unreadLines} 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 ${r.runId} 看`, since: null, until: null });
     // A run of its own that the rule has moved on from: said, not acted on (nothing is stopped or run again for it).
     for (const r of f.runs) {
       if (r.dismissed || r.own === false) continue;
-      if (r.inputDrifted) marks.push({ kind: "flow", line: `流程「${r.flow}」${r.round ? `（第 ${r.round + 1} 轮）` : ""}起的时候给的输入，和判断方法现在给的不一样；不会为这个重跑`, since: null, until: null });
-      if (r.unwanted) marks.push({ kind: "flow", line: `流程「${r.flow}」还在跑，但判断方法已经不要它了；不会去停它，结果出来照样记`, since: null, until: null });
+      if (r.inputDrifted) marks.push({ kind: "flow", line: `${named(r)}${r.round ? `（第 ${r.round + 1} 轮）` : ""}起的时候给的输入，和判断方法现在给的不一样；不会为这个重跑`, since: null, until: null });
+      if (r.unwanted) marks.push({ kind: "flow", line: `${named(r)}还在跑，但判断方法已经不要它了；不会去停它，结果出来照样记`, since: null, until: null });
     }
     if (hold) marks.push({ kind: "held", line: `${personName(hold.by)} ${clockText(hold.at)} 说「${clip(hold.said, 60)}」${hold.until ? ` · ${hold.until} 前不问` : ""} · 说一句就撤`, since: hold.at, until: hold.until });
     const wrong = f.said.find((s) => s.kind === "wrong");
@@ -475,11 +478,12 @@ export function createGraph(deps: GraphDeps) {
     let line: string;
     let sub: string;
     const hm = (t: string | null) => (t ? clockText(t) : "");
+    const hmw = (t: string | null) => (t ? clockWeekText(t) : "");
     switch (situation) {
       case "me":
         kicker = ask ? `在等你回答 · 第 ${ask.round} 次问` : "在等你批准";
         line = ask?.question ?? lastRun?.gate?.summary ?? a?.headline ?? "";
-        sub = ask ? `${hm(ask.askedAt)} 问的。${ask.nextAskAt ? `不答的话${ask.nextAskWhat === "nag" ? `${hm(ask.nextAskAt)} 再问` : `${hm(ask.nextAskAt)} 以后不再问`}，最多 ${ask.maxRounds} 次。` : ""}${personNotifies(ask) ?? ""}` : "批准在审批卡上点；这里不替你批。";
+        sub = ask ? `${hmw(ask.askedAt)} 问的。${ask.nextAskAt ? `不答的话${ask.nextAskWhat === "nag" ? `${hmw(ask.nextAskAt)} 再问` : `${hmw(ask.nextAskAt)} 以后不再问`}，最多 ${ask.maxRounds} 次。` : ""}${personNotifies(ask) ?? ""}` : "批准在审批卡上点；这里不替你批。";
         break;
       case "them":
         kicker = `在等别人${a?.next.what ? ` · ${a.next.what}` : ""}`;
@@ -493,8 +497,9 @@ export function createGraph(deps: GraphDeps) {
         break;
       case "doing":
         kicker = "系统在做 · 不用你做什么";
-        line = lastRun ? `流程「${lastRun.flow}」在跑${lastRun.step ? `：${lastRun.step.title}（第 ${lastRun.step.index} 步${lastRun.step.total ? `，共 ${lastRun.step.total} 步` : ""}）` : ""}` : (a?.headline ?? "");
-        sub = lastRun ? `已跑 ${durationText(nowMs - Date.parse(lastRun.startedAt))}，花了 $${lastRun.costUsd.toFixed(2)}（只算已经结束的调用）。` : "";
+        // A flow the rule gave a title to is told as its rule tells it ("正在看第一眼"): the flow's own name and steps are not what people read.
+        line = lastRun ? (lastRun.title ? (a?.headline ?? `${named(lastRun)}在跑`) : `流程「${lastRun.flow}」在跑${lastRun.step ? `：${lastRun.step.title}（第 ${lastRun.step.index} 步${lastRun.step.total ? `，共 ${lastRun.step.total} 步` : ""}）` : ""}`) : (a?.headline ?? "");
+        sub = lastRun ? `已跑 ${durationText(nowMs - Date.parse(lastRun.startedAt))}，花了 $${lastRun.costUsd.toFixed(2)}${lastRun.title ? "" : "（只算已经结束的调用）"}。` : "";
         break;
       case "fail":
       case "lost":
@@ -502,7 +507,7 @@ export function createGraph(deps: GraphDeps) {
       case "notstarted":
       case "unchecked":
         kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : situation === "unchecked" ? "没查成 · 看一眼" : "可能卡住了 · 看一眼";
-        line = lastRun ? `「${lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : situation === "unchecked" ? `没查成：${lastRun.why ?? "没说原因"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
+        line = lastRun ? `「${lastRun.title ?? lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : situation === "unchecked" ? `没查成：${lastRun.why ?? "没说原因"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
         sub = lastRun ? (situation === "notstarted" || situation === "unchecked" ? `${situation === "unchecked" && lastRun.costUsd > 0 ? `已花 $${lastRun.costUsd.toFixed(2)}。` : "没花钱。"}${lastRun.retry ? "可以再跑一次，或者你自己来。" : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
         break;
       case "stuck":
@@ -563,10 +568,16 @@ export function createGraph(deps: GraphDeps) {
       },
     ];
 
+    // A look of a matter a person told ends with the time it chose for the next one, in the line of its end.
+    const nextLook = (r: RunView): string => {
+      const n = isDeskKey(caseId) ? /^look-(\d+)$/.exec((r.request ?? "").split("\0").at(-1) ?? "")?.[1] : undefined;
+      const next = n ? nextLookOf(state.notes[caseId]?.["desk.log"]?.value, n) : null;
+      return next ? `→ 下次看 ${clockWeekText(next)}` : "";
+    };
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
-      { ms: Date.parse(r.startedAt), line: `起了流程「${r.flow}」`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `流程「${r.flow}」${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : null }] : []),
+      { ms: Date.parse(r.startedAt), line: `起了${named(r)}`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `${named(r)}${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: [r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r)].filter(Boolean).join(" ") || null }] : []),
     ]);
     const history: HistoryLine[] = [
       ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),

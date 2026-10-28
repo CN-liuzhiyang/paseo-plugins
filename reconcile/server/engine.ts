@@ -14,7 +14,7 @@ import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, recordingContext, type CommitmentSpec, type ContextInputs, type CtxCall, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import type { CaptureInput } from "./capsule";
-import { adminChat, clip, clipMd, finishRequest, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
+import { adminChat, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { RunProbe } from "./runs";
@@ -608,7 +608,7 @@ export function createEngine(deps: EngineDeps) {
    * `countedUnder`: the rules (fingerprint) whose change the breaker counted it for; carried over for as long as it waits, so that a
    * request counted for a version that was held (and not let through by a person) is counted again by the next version, not forgotten.
    */
-  const deferred = new Map<string, { why: string; caseId: string; label: string; flow: string; maxUsd: number; countedUnder: string }>();
+  const deferred = new Map<string, { why: string; limit?: NonNullable<FlowResult["limit"]>; caseId: string; label: string; flow: string; maxUsd: number; countedUnder: string }>();
   /** Requests another engine had held back for room before this one began (see adoptHeldFlows), with the rules it counted them under: taken as waiting by the first judgment of their item. */
   const adopted = new Map<string, string>();
   /** What the last judgment of each case asked to have run: a person's "run it again" takes its input from here. */
@@ -645,7 +645,7 @@ export function createEngine(deps: EngineDeps) {
     const latest = state.flowKeys?.[at];
     if (!latest) {
       const held = deferred.get(at);
-      return held ? deferredResult(held.why) : null;
+      return held ? deferredResult(held.why, held.limit) : null;
     }
     const rec = state.flows?.[latest.runId];
     return rec ? resultOf(rec, liveOf.get(rec.runId) ?? null) : null;
@@ -678,17 +678,17 @@ export function createEngine(deps: EngineDeps) {
       say("flow", `会起流程${tag}，按 $${decl.maxUsd} 算`);
       return;
     }
-    const hold = (why: string, kind: PlanEntry["kind"] = "skipped") => {
-      deferred.set(at, { why, caseId: item.key, label: req.label, flow: decl.flow, maxUsd: decl.maxUsd, countedUnder: waited.get(at) ?? fingerprint });
+    const hold = (why: string, kind: PlanEntry["kind"] = "skipped", limit?: NonNullable<FlowResult["limit"]>) => {
+      deferred.set(at, { why, ...(limit ? { limit } : {}), caseId: item.key, label: req.label, flow: decl.flow, maxUsd: decl.maxUsd, countedUnder: waited.get(at) ?? fingerprint });
       say(kind, `没起流程${tag}：${why}`);
     };
     if (!deps.flows) return hold("这个实例没有配起流程的命令（flows.json）");
     // A run is started under a log directory the intent fixes (else a config that changed meanwhile could put one id in two places):
     // none to fix, none started. (A rehearsal starts nothing, so needs none.)
     if (deps.flows.dir !== null && !deps.flows.logDir) return hold("不知道运行时的日志目录在哪（这台机器的编排配置读不了），不敢起：起了没法保证以后在同一个地方读到它");
-    const blocked = limitWhy(recs(), ahead, config.policy.flows, { caseId: item.key, maxUsd: decl.maxUsd, flow: decl.flow }, nowMs, tz);
+    const blocked = limitWhy(recs(), ahead, config.policy.flows, { caseId: item.key, maxUsd: decl.maxUsd, flow: decl.flow, ...(decl.title ? { title: decl.title } : {}) }, nowMs, tz);
     if (blocked) {
-      hold(`${blocked.why}，${blocked.until === "tomorrow" ? "明天再起" : "等有空位再起"}`);
+      hold(`${blocked.why}，${blocked.until === "tomorrow" ? "明天再起" : "等有空位再起"}`, "skipped", blocked.limit);
       // Once a day for a request: a limit that keeps it from running is one to look at, not one to say every minute.
       const evalKey = `eval:flow-limit:${at}:${localParts(nowMs, tz).date}`;
       if (!state.ledger[evalKey]) {
@@ -719,6 +719,7 @@ export function createEngine(deps: EngineDeps) {
       maxUsd: decl.maxUsd,
       timeout: decl.timeout ?? null,
       ...(decl.selfRetry ? { selfRetry: true } : {}),
+      ...(decl.title ? { title: decl.title } : {}),
       input: req.input,
       inputHash: hash,
       rules: fingerprint,
@@ -949,6 +950,7 @@ export function createEngine(deps: EngineDeps) {
       ...(unwanted(rec) ? { unwanted: true } : {}),
       retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry ? { round: rec.round + 1, estimateUsd: rec.ended!.costUsd > 0 ? rec.ended!.costUsd : null } : null,
       ...(rec.selfRetry ? { selfRetry: true } : {}),
+      ...(rec.title ? { title: rec.title } : {}),
       actions: actions,
     };
   }
@@ -983,7 +985,7 @@ export function createEngine(deps: EngineDeps) {
     if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
     if (rec.selfRetry) return { ok: false, detail: "这个流程没成的时候，判断方法会自己再起一次，不用手动重跑" };
     if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
-    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow }, nowMs, tz);
+    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}) }, nowMs, tz);
     if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
     const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key)?.input ?? rec.input;
     if (!input) return { ok: false, detail: "上一轮的输入没留下，没法照样再跑" };
@@ -1092,6 +1094,8 @@ export function createEngine(deps: EngineDeps) {
     original?: string;
     /** Taken as the person's own: the message of theirs that vouched for it, and the item it names as written (or ""). */
     vouch?: string;
+    /** Let through without the check of where the conversation came from (the admin's own chat): the journal says which. */
+    waived?: true;
     /** Not taken as the person's own: why, for the journal only. The receipt does not say, so that it does not teach a way round. */
     why?: string;
     /** The receipt says all there is to say now: it is written as soon as the request is handled, not after the reconcile's judgments (telling a matter, adding a line, and every request that was not applied). */
@@ -1196,7 +1200,8 @@ export function createEngine(deps: EngineDeps) {
     if (!ruleset?.rules.some((x) => x.source === DESK_SOURCE)) return "这个实例还没有管「你交代的」事的判断方法";
     const open = Object.values(state.items).filter((i) => i.source === DESK_SOURCE && !deskOver(i.key, nowMs));
     if (open.length >= DESK_OPEN_MAX) return `盯着的事已经有 ${open.length} 件，先放掉几件再交代`;
-    const same = open.find((i) => sameWords(i.fields.said ?? "", r.said) || sameWords(i.title, r.title));
+    // The words say whether it is the same matter. Two matters may be called the same: the title is a short name an agent made up.
+    const same = open.find((i) => sameWords(i.fields.said ?? "", r.said));
     return same ? `已经在盯了：${deskNo(same.key)}「${same.title}」。要补充就用 note` : null;
   }
 
@@ -1213,6 +1218,7 @@ export function createEngine(deps: EngineDeps) {
     if (deps.mode === "dry-run") return "现在是演练";
     if (!deps.flows) return "没有配起流程的命令（flows.json）";
     if (deps.flows.dir !== null && !deps.flows.logDir) return "不知道运行时的日志目录在哪";
+    if (state.rules.held) return "判断方法的改动停着等放行（「事项追踪」页面顶上有放行的按钮），放行以后才会开始看";
     return null;
   }
 
@@ -1250,7 +1256,9 @@ export function createEngine(deps: EngineDeps) {
     const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
     // The admin's own private chat (persons.json `chats`) is let through without the check of where the conversation came from -- for telling
     // a matter, adding a line to one, and taking those back; not for anything else, and every other check still holds.
-    const opens = r.cmd === "track" || r.cmd === "note" || (r.cmd === "undo" && !!target && OPEN_TO_ADMIN_CHAT.includes(target.kind));
+    // Taking one back is without a card only just after it was told, in this conversation (freshInChat): a matter that was followed for days
+    // is not ended by one sentence in a long chat.
+    const opens = r.cmd === "track" || r.cmd === "note" || (r.cmd === "undo" && !!target && OPEN_TO_ADMIN_CHAT.includes(target.kind) && freshInChat(target, r.via, nowMs));
     const waive = opens && !!conversation && adminChat(conversation.labels, admin.chats);
     const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive) : { why: "这个 Paseo 没给插件查对话的接口", message: null };
     let why = checked.why;
@@ -1266,7 +1274,10 @@ export function createEngine(deps: EngineDeps) {
     }
     if (why) return propose(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, why, admin, nowMs);
     const applied = r.cmd === "track" ? applyTrack(r, admin.id, "own-words", nowMs) : r.cmd === "note" ? applyNote(r, caseId!, admin.id, "own-words", nowMs) : applySaid(r, caseId!, target, admin.id, "own-words", nowMs);
-    return { ...applied, vouch };
+    // What was let through on the waiver says so in the journal, on the words it kept and on the request.
+    const waived = waive && applied.outcome === "applied";
+    const events = waived ? applied.events.map((e): EventBody => (e.type === "annotation.added" ? { ...e, annotation: { ...e.annotation, waived: true } } : e)) : applied.events;
+    return { ...applied, events, vouch, ...(waived ? { waived: true as const } : {}) };
   }
 
   function applySaid(r: SayRequest | Extract<Request, { cmd: "undo" }>, caseId: string, target: Annotation | null, by: string, how: Annotation["how"], nowMs: number): Handled {
@@ -1314,13 +1325,13 @@ export function createEngine(deps: EngineDeps) {
     const found = checkTrack(r, nowMs);
     if (found) return { outcome: "rejected", detail: `没收下：${found}`, annotation: null, caseId: null, events: [], immediate: true };
     const key = nextDeskKey([...Object.keys(state.items), ...Object.values(state.annotations).map((a) => a.caseId)]);
-    const annotation: Annotation = { id: `a_${r.id.slice(2)}`, caseId: key, kind: "track", said: r.said, title: r.title, domain: r.domain ?? "work", by, via: r.via, how, at: nowIso(nowMs), until: null, person: null, what: null, expected: null, revoked: null };
+    const annotation: Annotation = { id: `a_${r.id.slice(2)}`, caseId: key, kind: "track", said: r.said, title: clip(r.title, DESK_TITLE_MAX), domain: r.domain ?? "work", by, via: r.via, how, at: nowIso(nowMs), until: null, person: null, what: null, expected: null, revoked: null };
     const n = deskNo(key);
     const why = cannotLook();
     const detail = [
       why === null
-        ? `记下了：${r.title}（${n}）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。`
-        : `记下了：${r.title}（${n}）。不过这里现在不会自己去看（${why}），先记着。不用盯了就说一声。`,
+        ? `记下了：${annotation.title}（${n}）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。`
+        : `记下了：${annotation.title}（${n}）。不过这里现在不会自己去看（${why}），先记着。不用盯了就说一声。`,
       `原话：「${clip(r.said, 100)}」`,
       `要撤销：在同一个对话里说一句（比如"刚才那条不要了"），或者 reconcile-say undo --id ${annotation.id}`,
     ].join("\n");
@@ -1376,10 +1387,14 @@ export function createEngine(deps: EngineDeps) {
       r.cmd === "say"
         ? `${KIND_LABEL[r.kind]} ${n}${r.kind === "hold" ? `（到 ${r.until}）` : ""}`
         : r.cmd === "track"
-          ? `盯「${r.title}」`
+          ? `盯「${clipMd(r.title, DESK_TITLE_MAX)}」`
           : r.cmd === "note"
             ? `给 ${n} 补一句`
-            : `撤掉 ${n}「${KIND_LABEL[target!.kind]}」那条`;
+            : target!.kind === "track"
+              ? `撤掉 ${n}「${clipMd(target!.title ?? "", DESK_TITLE_MAX)}」（${stampOf(target!.at)} 交代的，撤掉就不再盯它）`
+              : target!.kind === "note"
+                ? `撤掉 ${n} 里 ${stampOf(target!.at)} 补的那句「${clipMd(target!.said, 30)}」`
+                : `撤掉 ${n}「${KIND_LABEL[target!.kind]}」那条`;
     const key = `${prefix}${r.id}`;
     const ask = `要${what}${/[0-9A-Za-z]$/.test(what) ? " " : ""}吗`;
     const domain = asked.cmd === "track" ? (asked.domain ?? "work") : domainOf(caseId ?? "");
@@ -1393,7 +1408,7 @@ export function createEngine(deps: EngineDeps) {
       trigger: { at: nowIso(nowMs) },
       ask: {
         person: admin.id,
-        header: (r.cmd === "track" ? `确认：${r.title}` : `确认 ${n}`).slice(0, 40),
+        header: (r.cmd === "track" ? `确认：${clip(r.title, DESK_TITLE_MAX)}` : `确认 ${n}`).slice(0, 40),
         question: `${ask}？`,
         options: [
           { id: "yes", label: "照办", description: "" },
@@ -1478,7 +1493,7 @@ export function createEngine(deps: EngineDeps) {
       const before = new Map(Object.values(state.commitments).filter((c) => handled.caseId && c.caseId === handled.caseId).map((c) => [c.id, c.status] as const));
       append([
         ...handled.events,
-        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}), ...(handled.why ? { why: handled.why } : {}) },
+        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}), ...(handled.why ? { why: handled.why } : {}), ...(handled.waived ? { waived: true as const } : {}) },
       ]);
       plan.push({ at: nowIso(nowMs), kind: "said", person: null, summary: handled.detail.split("\n")[0]! });
       const undoOf = "request" in incoming && incoming.request.cmd === "undo" && handled.outcome === "applied" ? (state.annotations[handled.annotation!]?.kind ?? null) : null;
@@ -1815,6 +1830,11 @@ export function createEngine(deps: EngineDeps) {
     // turns out to be wrong then leaves nothing behind but its judgments.
     const gated: Gated[] = [];
     const staleList = staleNow(nowMs);
+    // The rules are held (a change that made too many changes at once waits for a person to let it through): nothing a rule asks for is
+    // done meanwhile. For an item that asks for a run, what its rule says it is doing (a run going on) would be untrue.
+    const holdsAlready = state.rules.held?.fingerprint === set.fingerprint;
+    const asRead = new Map<string, Assessment>();
+    const holdsRun = new Map<string, string>();
     const diff: RulesDiff = { changed: [], newCommitments: [], droppedCommitments: [], changedCommitments: [], reopenedCommitments: [] };
     const creations: Commitment[] = [];
     // What a rule taken away (or an item gone) asked to have watched is not watched any more:
@@ -1926,7 +1946,15 @@ export function createEngine(deps: EngineDeps) {
       lastReads.set(item.key, reads);
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);
       // Judged on what may be old: its own source, a switch file, or an item it looked up is not fresh.
-      const assessment: Assessment = { ...judged.assessment, stale: blockers(reads, staleList).length > 0 };
+      let assessment: Assessment = { ...judged.assessment, stale: blockers(reads, staleList).length > 0 };
+      // A run it asks for that nothing will start while the rules are held: the line must not say it is going on (see heldLine).
+      const startsRun = judged.output ? (judged.output.run ?? []).find((req) => !state.flowKeys?.[flowKeyOf(item.key, req.flow, rule.flows?.[req.flow]?.flow ?? "", req.key)] && !!rule.flows?.[req.flow]) : undefined;
+      if (startsRun) {
+        asRead.set(item.key, assessment);
+        const title = rule.flows![startsRun.flow]!.title;
+        holdsRun.set(item.key, title ? `「${title}」` : "它要起的流程");
+        if (holdsAlready) assessment = heldLine(assessment, holdsRun.get(item.key)!);
+      }
       const before = state.assessments[item.key];
       if (!sameAssessment(before, assessment)) {
         events.push({ type: "assessment", assessment });
@@ -2080,6 +2108,14 @@ export function createEngine(deps: EngineDeps) {
         events.push({ type: "eval.candidate", kind: "rule-breaker", subject: set.fingerprint, detail: `判断方法改动会一下子${describeChanges(changes)}` });
       }
     }
+    // Held by this very change: the lines written above, before it was known, are written again as the truth.
+    if (!holdsAlready && events.some((e) => e.type === "rules.held")) {
+      for (const [caseId, what] of holdsRun) {
+        for (let i = events.length - 1; i >= 0; i--) if (events[i]!.type === "assessment" && (events[i] as { assessment: Assessment }).assessment.caseId === caseId) events.splice(i, 1);
+        const told = heldLine(asRead.get(caseId)!, what);
+        if (!sameAssessment(state.assessments[caseId], told)) events.push({ type: "assessment", assessment: told });
+      }
+    }
     append(events);
     const held = state.rules.held?.fingerprint === set.fingerprint;
     const done: EventBody[] = [];
@@ -2094,6 +2130,9 @@ export function createEngine(deps: EngineDeps) {
     }
     append(done);
   }
+
+  /** What the line of an item says while the rules are held and the run its rule asks for is not going to start: what is waited for, and by whom. */
+  const heldLine = (a: Assessment, what: string): Assessment => ({ ...a, headline: `判断方法的改动停着，要在「事项追踪」页面顶上放行，才会开始${what}`, next: { actor: "me", what: "放行判断方法的改动" } });
 
   const sameAssessment = (a: Assessment | undefined, b: Assessment) =>
     !!a && a.stage === b.stage && a.health === b.health && a.headline === b.headline && a.next.what === b.next.what && a.next.actor === b.next.actor && (a.next.since ?? null) === (b.next.since ?? null) && (a.notice ?? null) === (b.notice ?? null) && a.error === b.error && a.stale === b.stale && a.rulesFingerprint === b.rulesFingerprint;

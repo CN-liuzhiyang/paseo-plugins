@@ -110,6 +110,8 @@ const flowDecl = z
     timeout: z.string().refine((t) => parseDuration(t) !== null, "not a duration such as 45m").optional(),
     maxUsd: z.number().positive().max(1000),
     notify: z.boolean().default(false),
+    /** What people call this flow where the page and a limit's reason name it ("看一眼"); absent: the flow's own name. */
+    title: z.string().min(1).max(30).optional(),
     /**
      * The rule takes the failure of a run of this flow itself (it asks again under another key when it has to): a run that
      * came to no result is not the item's condition on the page, has no way-out buttons, and is not run again by a person.

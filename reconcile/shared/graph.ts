@@ -276,6 +276,8 @@ export interface RunView {
   unwanted?: boolean;
   /** The rule takes this run's failure itself (rules.ts `selfRetry`): a failure is history, not the item's condition, and has no buttons. */
   selfRetry?: boolean;
+  /** What people call the flow (rules.ts `title`); absent: its name. */
+  title?: string;
 }
 
 export interface Fact {
@@ -489,6 +491,12 @@ export function durationText(ms: number): string {
 
 /** "10-23 15:11" from an ISO instant that carries its own offset (the plugin writes them in the instance's zone). */
 export const clockText = (iso: string): string => iso.slice(5, 16).replace("T", " ");
+
+/** The same with the day of the week, worked out from the date it carries: "10-23 周四 15:11". */
+export const clockWeekText = (iso: string): string => {
+  const [y, m, d] = iso.slice(0, 10).split("-").map(Number);
+  return `${iso.slice(5, 10)} 周${"日一二三四五六"[new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay()]} ${iso.slice(11, 16)}`;
+};
 
 /** What the page calls a run that came to no result (or went quiet), in a word. */
 export const troubleWord = (situation: RunView["situation"]): string =>

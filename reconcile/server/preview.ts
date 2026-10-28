@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { deskNo, isDeskKey } from "./desk";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -437,7 +438,7 @@ export async function preview(options: PreviewOptions): Promise<Preview> {
   const label = (caseId: string | null) => {
     if (!caseId) return "（不属于哪个事项）";
     const item = base.store.state.items[caseId];
-    return `#${caseId.slice(caseId.lastIndexOf(":") + 1)}${item ? ` ${item.title}` : ""}`;
+    return `${isDeskKey(caseId) ? deskNo(caseId) : `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`}${item ? ` ${item.title}` : ""}`;
   };
   const when = (ms: number) => (ms === nowMs ? "现在" : iso(ms, tz).slice(5, 16).replace("T", " "));
   // The stages each side's rules declare, for their names and for what the page shows of them.

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { adminChat, ownWords, type Conversation, type Request } from "../server/requests";
+import { ADMIN_CHAT_UNDO_MS, adminChat, freshInChat, ownWords, type Conversation, type Request } from "../server/requests";
 import type { World } from "./helpers";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { loadConfig } from "../server/config";
+import { TEST_POLICY } from "./helpers";
 import { chat, commandFor, item, note, own, PERSONS, say, track, undoLast, withDesk } from "./desk-kit";
 
 // The admin's own private chat (persons.json `chats`): there, telling a matter, adding a line to it and taking those back need no
@@ -10,7 +15,7 @@ import { chat, commandFor, item, note, own, PERSONS, say, track, undoLast, withD
 
 const MINE = { source: "chatapp", "chatapp-chat": "p2p:owner" };
 const ADMIN = () => PERSONS({ chats: [MINE] });
-const SAID = "帮我盯一下洗牙，月底前要约上";
+const SAID = "帮我盯一下体检，月底前要约上";
 const why = (w: World, id: string) => w.store.state.requests[id]!.why ?? "";
 const outcome = (w: World, id: string) => w.receipt(id)!.outcome;
 
@@ -21,12 +26,12 @@ const withAdmin = <T>(body: (w: World) => Promise<T>) => withDesk(body, { person
 test("in the admin's own chat a matter is told, a line is added, and both are taken back, with no card", () =>
   withAdmin(async (w) => {
     chat(w, MINE, SAID);
-    const told = say(w, track(SAID, "定期洗牙", "personal"));
+    const told = say(w, track(SAID, "年度体检", "personal"));
     await w.engine.tick();
     assert.equal(outcome(w, told), "applied");
     assert.equal(w.cards.length, 0);
     assert.equal(Object.values(w.store.state.annotations)[0]!.how, "own-words");
-    assert.equal(item(w, 1)!.title, "定期洗牙");
+    assert.equal(item(w, 1)!.title, "年度体检");
 
     chat(w, MINE, "约在下周三下午了");
     const added = say(w, note("D1", "约在下周三下午了"));
@@ -40,31 +45,145 @@ test("in the admin's own chat a matter is told, a line is added, and both are ta
     assert.equal(outcome(w, noteBack), "applied");
     assert.equal(item(w, 1)!.fields["note.0"], undefined);
 
-    chat(w, MINE, "洗牙不用盯了");
-    const trackBack = say(w, undoLast("洗牙不用盯了"));
+    chat(w, MINE, "体检不用盯了");
+    const trackBack = say(w, undoLast("体检不用盯了"));
     await w.engine.tick();
     assert.equal(outcome(w, trackBack), "applied");
     assert.equal(item(w, 1)!.closed, true);
     assert.equal(w.cards.length, 0, "not one card in all of it");
   }));
 
+const MIN = 60_000;
+
+test("taking back in the admin's chat needs no card only just after it was told, here: ten minutes; later it waits on a card that says which matter and when", () =>
+  withAdmin(async (w) => {
+    chat(w, MINE, SAID);
+    say(w, track(SAID, "年度体检", "personal"));
+    await w.engine.tick();
+    // a few days on, in the same long chat, "that one is not wanted" (it may mean anything): the matter is not ended by it
+    w.clock.now += 3 * 24 * 60 * MIN;
+    chat(w, MINE, "刚才那个不要了");
+    const late = say(w, undoLast("刚才那个不要了"));
+    await w.engine.tick();
+    assert.equal(outcome(w, late), "proposed");
+    assert.match(why(w, late), /^这是从「/);
+    assert.equal(item(w, 1)!.closed, false, "still followed");
+    const card = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:desk:D1:undo:"))!;
+    assert.equal(card.ask.question, "要撤掉 D1「年度体检」（10-13 周二 10:00 交代的，撤掉就不再盯它）吗？", "which matter, and when it was told");
+    assert.equal(w.receipt(late)!.text, "先不生效：「撤掉 D1「年度体检」（10-13 周二 10:00 交代的，撤掉就不再盯它）」已改成确认卡，等 测试用户 在卡上确认。");
+    // and a yes on it ends the matter, as said
+    await w.engine.tick();
+    w.answer({ "确认 D1": "照办" });
+    await w.engine.tick();
+    assert.equal(item(w, 1)!.closed, true);
+  }));
+
+test("just after: a matter told ten minutes ago is taken back with no card, one told eleven minutes ago is not; the same for a line added; the limit is the one conversation", () =>
+  withAdmin(async (w) => {
+    chat(w, MINE, SAID);
+    say(w, track(SAID, "年度体检", "personal"));
+    await w.engine.tick();
+    w.clock.now += 11 * MIN;
+    chat(w, MINE, "刚才那个不要了");
+    const eleven = say(w, undoLast("刚才那个不要了"));
+    await w.engine.tick();
+    assert.equal(outcome(w, eleven), "proposed", "eleven minutes is not just after");
+
+    chat(w, MINE, "另外盯一下续费，到期前要办好");
+    say(w, track("另外盯一下续费，到期前要办好", "续费", "personal"));
+    await w.engine.tick();
+    w.clock.now += 10 * MIN;
+    chat(w, MINE, "续费那个不用盯了");
+    const ten = say(w, undoLast("续费那个不用盯了"));
+    await w.engine.tick();
+    assert.equal(outcome(w, ten), "applied", "ten minutes is");
+    assert.equal(item(w, 2)!.closed, true);
+
+    // (one question a day for each matter and kind: D1 has had its card)
+    chat(w, MINE, "再盯一下报名，周五截止");
+    say(w, track("再盯一下报名，周五截止", "报名", "personal"));
+    await w.engine.tick();
+    chat(w, MINE, "约在下周三下午了");
+    say(w, note("D3", "约在下周三下午了"));
+    await w.engine.tick();
+    w.clock.now += 20 * MIN;
+    chat(w, MINE, "刚才那句补充不要了");
+    const oldNote = say(w, undoLast("刚才那句补充不要了"));
+    await w.engine.tick();
+    assert.equal(outcome(w, oldNote), "proposed", "a line added twenty minutes ago waits on a card too");
+    assert.equal(Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:desk:D3:undo:"))!.ask.question, "要撤掉 D3 里 10-13 周二 10:21 补的那句「约在下周三下午了」吗？");
+    assert.equal(item(w, 3)!.fields["note.0"], "约在下周三下午了", "still there");
+  }));
+
+test("freshInChat: told in this very conversation, no longer ago than the limit", () => {
+  const told = { via: "agent-me", at: "2026-10-13T10:00:00+08:00" };
+  const at = Date.parse(told.at);
+  assert.equal(freshInChat(told, "agent-me", at + ADMIN_CHAT_UNDO_MS), true);
+  assert.equal(freshInChat(told, "agent-me", at + ADMIN_CHAT_UNDO_MS + 1), false);
+  assert.equal(freshInChat(told, "agent-other", at), false, "another conversation");
+  assert.equal(freshInChat(told, null, at), false, "none");
+  assert.equal(freshInChat({ ...told, via: null }, null, at), false);
+});
+
+test("what went through on the waiver says so in the journal: on the words it kept and on the request; nothing of the kind where there was no source label to waive", () =>
+  withAdmin(async (w) => {
+    chat(w, MINE, SAID);
+    const told = say(w, track(SAID, "年度体检", "personal"));
+    await w.engine.tick();
+    const [annotation] = Object.values(w.store.state.annotations);
+    assert.equal(annotation!.waived, true);
+    assert.equal(w.store.state.requests[told]!.waived, true);
+    assert.equal(annotation!.how, "own-words");
+    own(w, "约在下周三下午了");
+    const added = say(w, note("D1", "约在下周三下午了"));
+    await w.engine.tick();
+    const second = Object.values(w.store.state.annotations).find((x) => x.kind === "note")!;
+    assert.equal(second.waived, undefined, "in the person's own conversation (no source label) there was nothing to waive");
+    assert.equal(w.store.state.requests[added]!.waived, undefined);
+    // the page does not carry it
+    assert.ok(w.statuses.length > 0 && !JSON.stringify(w.statuses[w.statuses.length - 1]).includes("waived"), "the page's list of what was said does not show it");
+  }));
+
 test("a conversation with more labels than the ones persons.json names is the same chat; fewer, or a different value, is not", () =>
   withAdmin(async (w) => {
     chat(w, { ...MINE, extra: "x" }, SAID);
-    const more = say(w, track(SAID, "定期洗牙", "personal"));
+    const more = say(w, track(SAID, "年度体检", "personal"));
     await w.engine.tick();
     assert.equal(outcome(w, more), "applied", "the host may add labels of its own");
   }));
 
 test("adminChat: every key and value of one of the chats must be there; none configured, no source label, or an empty set is never a chat", () => {
-  const chats: Array<Record<string, string>> = [{ source: "chatapp", "chatapp-chat": "p2p:owner" }, { source: "other" }];
+  const chats: Array<Record<string, string>> = [{ source: "chatapp", "chatapp-chat": "p2p:owner" }, { source: "other", "other-chat": "p2p:x" }, { source: "alone" }];
   assert.equal(adminChat({ source: "chatapp", "chatapp-chat": "p2p:owner" }, chats), true);
-  assert.equal(adminChat({ source: "other", whatever: "1" }, chats), true, "the second set is just the source");
+  assert.equal(adminChat({ source: "other", "other-chat": "p2p:x", whatever: "1" }, chats), true, "the second set, with more labels besides");
+  assert.equal(adminChat({ source: "alone", whatever: "1" }, chats), false, "a set that is only the source is every conversation of that plugin: it is no one's chat");
+  assert.equal(adminChat({ "chatapp-chat": "p2p:owner", other: "x" }, [{ "chatapp-chat": "p2p:owner", other: "x" }]), false, "and a set without the source label is none either");
   assert.equal(adminChat({ source: "chatapp", "chatapp-chat": "p2p:someone" }, chats), false);
   assert.equal(adminChat({ source: "chatapp" }, chats), false, "one key short");
   assert.equal(adminChat({ "chatapp-chat": "p2p:owner" }, chats), false, "no source label: that is a conversation the person is in themselves, nothing to waive");
   assert.equal(adminChat({ source: "chatapp", "chatapp-chat": "p2p:owner" }, []), false);
   assert.equal(adminChat({ source: "chatapp" }, [{}]), false, "a chat with no labels would be every chat");
+});
+
+test("persons.json: a chat is named by its source and at least one label more; the source alone is every conversation of that plugin and does not load", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "desk-chats-"));
+  try {
+    const write = (chats: unknown) => {
+      writeFileSync(path.join(dir, "persons.json"), JSON.stringify(PERSONS({ chats })));
+      writeFileSync(path.join(dir, "sources.json"), "[]");
+      writeFileSync(path.join(dir, "policy.json"), JSON.stringify(TEST_POLICY));
+    };
+    write([MINE]);
+    assert.deepEqual(loadConfig(dir).persons.owner!.chats, [MINE]);
+    write([]);
+    assert.deepEqual(loadConfig(dir).persons.owner!.chats, []);
+    for (const bad of [[{ source: "chatapp" }], [{ "chatapp-chat": "p2p:owner" }], [MINE, { source: "chatapp" }], [{}]]) {
+      write(bad);
+      assert.throws(() => loadConfig(dir), /source/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---- what still waits on a card -------------------------------------------------------------------------------------
@@ -93,7 +212,7 @@ test("from a group, another person's chat, or a chat short of one label, the sam
 test("stop following, hold off and 'this is wrong' said in the admin's chat still wait on a card, and so does taking one of them back", () =>
   withAdmin(async (w) => {
     chat(w, MINE, SAID);
-    say(w, track(SAID, "定期洗牙", "personal"));
+    say(w, track(SAID, "年度体检", "personal"));
     await w.engine.tick();
     for (const [kind, extra] of [["drop", {}], ["hold", { until: "2026-10-20" }], ["wrong", { what: "不对", expected: "对" }]] as const) {
       const said = `说一句关于它的话：${kind}`;
@@ -148,18 +267,18 @@ test("every other check holds in the admin's chat: words they did not say, a com
 
 test("a request with no conversation to look at is no one's words", () =>
   withAdmin(async (w) => {
-    const none = w.say(track(SAID, "定期洗牙", "personal"));
+    const none = w.say(track(SAID, "年度体检", "personal"));
     await w.engine.tick();
     assert.equal(outcome(w, none), "proposed");
     assert.match(why(w, none), /找不到说这句话的对话/);
   }));
 
 test("ownWords itself: the source check is the only one the waiver drops", () => {
-  const request = { v: 1, id: "r_000000000001", at: "x", via: "agent-me", cmd: "track", said: SAID, title: "定期洗牙" } as unknown as Request;
+  const request = { v: 1, id: "r_000000000001", at: "x", via: "agent-me", cmd: "track", said: SAID, title: "年度体检" } as unknown as Request;
   const conversation = (labels: Record<string, string>): Conversation => ({
     labels,
     cwd: "/work",
-    turn: { id: "t1", steps: [{ kind: "person", text: SAID }, { kind: "command", text: commandFor({ cmd: "track", said: SAID, title: "定期洗牙" }) }] },
+    turn: { id: "t1", steps: [{ kind: "person", text: SAID }, { kind: "command", text: commandFor({ cmd: "track", said: SAID, title: "年度体检" }) }] },
   });
   assert.match(ownWords(request, conversation(MINE), null).why ?? "", /^这是从「/);
   assert.equal(ownWords(request, conversation(MINE), null, true).why, null);

@@ -1,4 +1,4 @@
-// Example rule: follow a matter a person told in a conversation ("盯一下洗牙，月底前要约上"), one that has no ticket in
+// Example rule: follow a matter a person told in a conversation ("盯一下体检，月底前要约上"), one that has no ticket in
 // any system. The controller keeps what was said as the item `desk:D<n>` (source "desk"); this rule decides, with no model and
 // nothing read from outside, WHEN to look at it, and a flow ("item-glance", one agent, read only) does the looking.
 //
@@ -11,6 +11,9 @@
 //             and, for work, inside `workHours` on a workday; a question put to the person in the last `dedupeDays` days is not
 //             put again; "it is done" is a question to the person, never an ending by itself.
 //   states    every state says in words what it is and what happens next; times are shown with the day of the week, worked out here.
+//   input     what a look is given is kept inside `inputBytes` (the runtime refuses more than 16 KB): the oldest of what was before goes first.
+//   held      while a change of these rules waits for a person to let it through, a look that was asked for is not started; the line of the
+//             matter says that, and who has to do what, instead of saying it is going on.
 //
 // All the state is in facts (desk.*). Copy it into <config>/rules/ and set `params` (the directories a look runs in, and what to tell
 // it about where to read, per domain).
@@ -20,7 +23,7 @@ const WEEKDAYS = "日一二三四五六";
 const FACTS = ["looks", "woke", "seen", "next", "status", "log", "ask", "asked", "answered", "fails", "fail", "finish"];
 
 export const flows = {
-  look: { flow: "item-glance", timeout: "20m", maxUsd: 0.5, notify: false, selfRetry: true },
+  look: { flow: "item-glance", title: "看一眼", timeout: "20m", maxUsd: 0.5, notify: false, selfRetry: true },
 };
 
 const json = (text, fallback) => {
@@ -93,19 +96,53 @@ function clampNext(ctx, p, domain, proposed) {
     clamp = `太远了，拉到 ${p.maxLookDays} 天内`;
   }
   at = ctx.local(new Date(t).toISOString());
-  if (domain === "work") {
-    const [from, to] = p.workHours.split("-");
-    const date = dateOf(ctx, at);
-    const clock = clockOf(ctx, at);
-    if (!isWorkday(ctx, date) || clock > to) {
-      at = nextWorkday(ctx, at, p.retryAt);
-      clamp = `${clamp ? `${clamp}；` : ""}不在工作时间，挪到下一个工作日 ${p.retryAt}`;
-    } else if (clock < from) {
-      at = ctx.at(date, p.retryAt);
-      clamp = `${clamp ? `${clamp}；` : ""}不在工作时间，挪到当天 ${p.retryAt}`;
-    }
+  const worked = inWorkHours(ctx, p, domain, at);
+  if (worked.moved) clamp = `${clamp ? `${clamp}；` : ""}${worked.moved}`;
+  return { at: worked.at, clamp };
+}
+
+/** For work, a time inside working hours on a workday: a time outside them is moved (`moved` says how); the other domains have no working hours. */
+function inWorkHours(ctx, p, domain, at) {
+  if (domain !== "work") return { at, moved: null };
+  const [from, to] = p.workHours.split("-");
+  const date = dateOf(ctx, at);
+  const clock = clockOf(ctx, at);
+  if (!isWorkday(ctx, date) || clock > to) return { at: nextWorkday(ctx, at, p.retryAt), moved: `不在工作时间，挪到下一个工作日 ${p.retryAt}` };
+  if (clock < from) return { at: ctx.at(date, p.retryAt), moved: `不在工作时间，挪到当天 ${p.retryAt}` };
+  return { at, moved: null };
+}
+
+// ---- the input of a look is kept inside what the runtime takes ---------------------------------
+
+const bytesOf = (value) => {
+  let n = 0;
+  for (const ch of JSON.stringify(value)) {
+    const c = ch.codePointAt(0);
+    n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
   }
-  return { at, clamp };
+  return n;
+};
+
+/**
+ * Brings the input inside `budget` bytes (the runtime takes 16 KB; a look is never lost to an input that is too big), by leaving out the least needed first: a long hint, then the oldest of the earlier looks, lines
+ * and answers, then each of what is left shorter, and at the last only the words of the matter itself. The same input gives the same
+ * result in every round, so a look that is on its way is not seen as changed.
+ */
+function fitInput(input, budget) {
+  const over = () => bytesOf(input) > budget;
+  if (!over()) return input;
+  input.hint = flat(input.hint, 1500);
+  for (const key of ["log", "notes", "answers"]) while (over() && input[key].length > 1) input[key].shift();
+  if (over()) {
+    input.log = input.log.map((e) => ({ ...e, looked: flat(e.looked, 60), status: flat(e.status, 60) }));
+    input.notes = input.notes.map((n) => ({ ...n, text: flat(n.text, 100) }));
+    input.answers = input.answers.map((a) => ({ ...a, question: flat(a.question, 60), answer: flat(a.answer, 100) }));
+    input.hint = flat(input.hint, 600);
+    input.said = flat(input.said, 300);
+    input.askQuestion = flat(input.askQuestion, 100);
+  }
+  if (over()) Object.assign(input, { log: [], notes: [], answers: [], hint: flat(input.hint, 200), said: flat(input.said, 200), askQuestion: "", askOptions: [], status: flat(input.status, 60) });
+  return input;
 }
 
 /** Whether a commitment of this rule is still to be answered. */
@@ -127,8 +164,10 @@ export default {
     // A question is reminded `askNagMax` times at most, once a workday, and lapses after `backstopWorkdays` workdays.
     askNagMax: 2,
     backstopWorkdays: 5,
-    // "过 3 天再看": this many workdays.
-    laterWorkdays: 3,
+    // The most a look's input may come to, in bytes: what is more is left out, the oldest first (the runtime refuses an input over 16384).
+    inputBytes: 14000,
+    // "过 3 天再看": this many days on (calendar days, at `retryAt`; for work, then inside working hours on a workday).
+    laterDays: 3,
     // The same question is not put again within this many days.
     dedupeDays: 3,
     // Where a look runs, and what it is told about where to read, by domain; empty: the run's own directory, nothing told.
@@ -274,9 +313,9 @@ export default {
       const closing = finish && openAsk({ key: doneKey(finish) });
       if (looks === 0) wake = "first";
       else if (latest && latest.a.option === "later3") {
-        // The person asked to wait: the next look is that many workdays on, and the answer cost nothing.
+        // The person asked to wait: the next look is that many days on, and the answer cost nothing.
         answered = latest.a.at;
-        next = ctx.addWorkdays(latest.a.at, p.laterWorkdays, p.retryAt);
+        next = inWorkHours(ctx, p, domain, ctx.at(shiftDate(dateOf(ctx, latest.a.at), p.laterDays), p.retryAt)).at;
         fail = null;
       } else if (latest) wake = "answer";
       else if (noteAt > lastWoke) wake = "note";
@@ -310,25 +349,30 @@ export default {
           key: `look-${w.n}`,
           label: `第 ${w.n} 次看一眼`,
           ...(owner ? { owner } : {}),
-          input: {
-            id: did,
-            title,
-            said: flat(item.fields.said ?? "", 500),
-            domain,
-            n: w.n,
-            why: w.why,
-            now: fullStamp(ctx, w.at),
-            tz: ctx.tz,
-            status,
-            log: log.slice(-5).map((e) => ({ at: fullStamp(ctx, e.at), looked: e.looked, status: e.status })),
-            askQuestion: ask ? ask.question : "",
-            askOptions: ask ? ask.options : [],
-            askAt: ask ? fullStamp(ctx, ask.at) : "",
-            answers: history,
-            notes: lines.filter((l) => ms(l.at) <= upTo).slice(-10).map((l) => ({ at: fullStamp(ctx, l.at), text: flat(l.text, 300) })),
-            hint: p.hints?.[domain] ?? "",
-            workdir: p.cwd?.[domain] ?? "",
-          },
+          input: fitInput(
+            {
+              id: did,
+              title,
+              said: flat(item.fields.said ?? "", 500),
+              domain,
+              n: w.n,
+              why: w.why,
+              now: fullStamp(ctx, w.at),
+              tz: ctx.tz,
+              status,
+              log: log.slice(-5).map((e) => ({ at: fullStamp(ctx, e.at), looked: e.looked, status: e.status })),
+              askQuestion: ask ? ask.question : "",
+              askOptions: ask ? ask.options : [],
+              askAt: ask ? fullStamp(ctx, ask.at) : "",
+              answers: history,
+              notes: lines.filter((l) => ms(l.at) <= upTo).slice(-10).map((l) => ({ at: fullStamp(ctx, l.at), text: flat(l.text, 300) })),
+              minLookMinutes: p.minLookMinutes,
+              maxLookDays: p.maxLookDays,
+              hint: p.hints?.[domain] ?? "",
+              workdir: p.cwd?.[domain] ?? "",
+            },
+            p.inputBytes,
+          ),
         },
       ];
     }
@@ -367,7 +411,7 @@ export default {
           question: flat(ask.question, 300),
           options: [
             ...ask.options.map((label, i) => ({ id: `p${i + 1}`, label, description: "" })),
-            { id: "later3", label: `过 ${p.laterWorkdays} 天再看`, description: "" },
+            { id: "later3", label: `过 ${p.laterDays} 天再看`, description: "" },
             { id: "drop", label: "不用盯了", description: "" },
           ],
           allowOther: true,
@@ -413,7 +457,14 @@ export default {
     }
     if (looks > seen) {
       if (inFlight?.state === "deferred") {
-        return out("watching", "waiting", `这次「看一眼」先没起：${flat(inFlight.why ?? "额度不够", 120)}`, "system", "等有空位自己再看", base);
+        // Why it did not start, in words for the person; the controller's own words for it are for the log.
+        const held = {
+          concurrent: ["另一件事正在看，排在它后面", "排在后面，轮到了自己看"],
+          perDay: ["今天看的次数用完了，明天再看", "明天自己再看"],
+          perCase: ["这件事今天看的次数用完了，明天再看", "明天自己再看"],
+          usd: ["今天看一眼用的钱用完了，明天再看", "明天自己再看"],
+        }[inFlight.limit] ?? ["这里现在没法自己去看（要看一下配置），先记着", "配好以后自己再看"];
+        return out("watching", "waiting", `这次「看一眼」先没起：${held[0]}`, "system", held[1], base);
       }
       if (inFlight?.state === "slow") return out("watching", "waiting", "这次看一眼很久没动静了，等它到时限收场，再按明天重来", "system", "等这次看完", base);
       const first = looks === 1 && !status;

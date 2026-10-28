@@ -184,6 +184,8 @@ export interface Annotation {
   via: string | null;
   /** The person's own words in their own conversation, or a card they answered yes to. */
   how: "own-words" | "confirmed";
+  /** Let through without the check of where the conversation came from (the admin's own chat: persons.json `chats`); absent for the rest. */
+  waived?: true;
   at: string;
   /** hold: asking starts again on this day (YYYY-MM-DD, local). */
   until: string | null;
@@ -328,6 +330,8 @@ export interface FlowRec {
   timeout: string | null;
   /** The rule takes the failure of this run itself (rules.ts `selfRetry`): it is not the item's condition, and has no way out buttons. */
   selfRetry?: boolean;
+  /** What people call the flow on the page (rules.ts `title`); absent: its name. */
+  title?: string;
   /** What the flow is given; dropped once the run is done or stopped (a run that failed is run again with it). */
   input: Record<string, unknown> | null;
   inputHash: string;
@@ -364,6 +368,8 @@ export interface FlowResult {
   costUsd: number;
   /** In words: why it did not come to a result, or why it was held back. */
   why: string | null;
+  /** For a request held back by one of the day's limits (state "deferred"): which, so that a rule can say it in its own words. */
+  limit?: "perDay" | "perCase" | "usd" | "concurrent";
   /** For a run a person set aside ("dismissed"): how it ended, or null when it has not. */
   endedOutcome: FlowOutcome | null;
 }

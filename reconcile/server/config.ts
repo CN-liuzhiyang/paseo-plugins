@@ -37,7 +37,14 @@ const personSchema = z
      * add a line to it (reconcile-say track / note, and taking those back) are taken as the person's own without the check of where
      * the conversation came from; every other check holds (requests.ts adminChat). Nothing else is let through on it.
      */
-    chats: z.array(z.record(z.string().min(1), z.string().min(1)).refine((labels) => Object.keys(labels).length > 0, "no labels")).default([]),
+    chats: z
+      .array(
+        z
+          .record(z.string().min(1), z.string().min(1))
+          // `source` alone is every conversation of that plugin (groups, other people's chats): the label that says whose chat it is must be there too.
+          .refine((labels) => Object.hasOwn(labels, "source") && Object.keys(labels).length >= 2, "a chat needs its `source` label and at least one more that says whose chat it is (the plugin's own chat label)"),
+      )
+      .default([]),
   })
   .strict();
 
