@@ -14,7 +14,7 @@ import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, recordingContext, type CommitmentSpec, type ContextInputs, type CtxCall, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import type { CaptureInput } from "./capsule";
-import { adminChat, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
+import { ADMIN_CHAT_UNDO_MS, adminChat, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { RunProbe } from "./runs";
@@ -1258,10 +1258,17 @@ export function createEngine(deps: EngineDeps) {
     // a matter, adding a line to one, and taking those back; not for anything else, and every other check still holds.
     // Taking one back is without a card only just after it was told, in this conversation (freshInChat): a matter that was followed for days
     // is not ended by one sentence in a long chat.
-    const opens = r.cmd === "track" || r.cmd === "note" || (r.cmd === "undo" && !!target && OPEN_TO_ADMIN_CHAT.includes(target.kind) && freshInChat(target, r.via, nowMs));
-    const waive = opens && !!conversation && adminChat(conversation.labels, admin.chats);
-    const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive) : { why: "这个 Paseo 没给插件查对话的接口", message: null };
+    const ofOpen = r.cmd === "undo" && !!target && OPEN_TO_ADMIN_CHAT.includes(target.kind);
+    const fresh = !!target && freshInChat(target, r.via, nowMs);
+    const opens = r.cmd === "track" || r.cmd === "note" || (ofOpen && fresh);
+    const inChat = !!conversation && adminChat(conversation.labels, admin.chats);
+    const waive = opens && inChat;
+    // A taking back of one told in the admin's chat that is not just after is judged as it would be if it were: whatever else fails is
+    // the reason that is kept, and when nothing does, the reason is that it is too old (not the one about where the chat came from).
+    const tooOld = ofOpen && !fresh && inChat;
+    const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive || tooOld) : { why: "这个 Paseo 没给插件查对话的接口", message: null };
     let why = checked.why;
+    if (!why && tooOld) why = target!.via !== r.via ? "要撤的是另一个对话里记下的话，只有在记下它的那个对话里、刚说完才免确认" : `要撤的是 ${ago(nowMs - Date.parse(target!.at))}记下的话，只有刚说完（${Math.round(ADMIN_CHAT_UNDO_MS / 60_000)} 分钟内）才免确认`;
     let vouch: string | undefined;
     // One message of the person's lets one request through, however it is reworded; a message that
     // names several items as written lets one through for each of them.
@@ -1330,8 +1337,8 @@ export function createEngine(deps: EngineDeps) {
     const why = cannotLook();
     const detail = [
       why === null
-        ? `记下了：${annotation.title}（${n}）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。`
-        : `记下了：${annotation.title}（${n}）。不过这里现在不会自己去看（${why}），先记着。不用盯了就说一声。`,
+        ? `记下了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。`
+        : `记下了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。不过这里现在不会自己去看（${why}），先记着。不用盯了就说一声。`,
       `原话：「${clip(r.said, 100)}」`,
       `要撤销：在同一个对话里说一句（比如"刚才那条不要了"），或者 reconcile-say undo --id ${annotation.id}`,
     ].join("\n");
@@ -1408,7 +1415,7 @@ export function createEngine(deps: EngineDeps) {
       trigger: { at: nowIso(nowMs) },
       ask: {
         person: admin.id,
-        header: (r.cmd === "track" ? `确认：${clip(r.title, DESK_TITLE_MAX)}` : `确认 ${n}`).slice(0, 40),
+        header: headerOf(r.cmd === "track" ? `确认：${clipMd(r.title, DESK_TITLE_MAX)}` : `确认 ${n}`),
         question: `${ask}？`,
         options: [
           { id: "yes", label: "照办", description: "" },
@@ -1671,6 +1678,10 @@ export function createEngine(deps: EngineDeps) {
   };
   const clockOf = (isoText: string) => nowIso(Date.parse(isoText)).slice(5, 16).replace("T", " ");
   /** A time shown to a person about a matter they told: with the day of the week, worked out here ("10-13 周二 10:00"). */
+  /** How long ago, as people say it. */
+  const ago = (ms: number) => (ms < 120 * 60_000 ? `${Math.max(1, Math.round(ms / 60_000))} 分钟前` : ms < 48 * 3_600_000 ? `${Math.round(ms / 3_600_000)} 小时前` : `${Math.round(ms / 86_400_000)} 天前`);
+  /** A card's header is at most 40 characters: cut so that no escape is left without what it escapes. */
+  const headerOf = (text: string) => (text.length <= 40 ? text : text.slice(0, 40).replace(/\\+$/, (m) => (m.length % 2 ? m.slice(1) : m)));
   const stampOf = (isoText: string) => {
     const p = localParts(Date.parse(isoText), tz);
     return `${p.date.slice(5)} 周${"日一二三四五六"[p.weekday]} ${p.time}`;
@@ -1947,8 +1958,9 @@ export function createEngine(deps: EngineDeps) {
       for (const spec of judged.output?.commitments ?? []) lastUses.set(commitmentId(spec.key), spec.uses ? [item.source, ...spec.uses] : null);
       // Judged on what may be old: its own source, a switch file, or an item it looked up is not fresh.
       let assessment: Assessment = { ...judged.assessment, stale: blockers(reads, staleList).length > 0 };
-      // A run it asks for that nothing will start while the rules are held: the line must not say it is going on (see heldLine).
-      const startsRun = judged.output ? (judged.output.run ?? []).find((req) => !state.flowKeys?.[flowKeyOf(item.key, req.flow, rule.flows?.[req.flow]?.flow ?? "", req.key)] && !!rule.flows?.[req.flow]) : undefined;
+      // A run it asks for that nothing will start while the rules are held: the line must not say it is going on (see heldLine). Only
+      // for a matter a person told, whose line says what is being done: what any other item's rule says of it is left as it is.
+      const startsRun = judged.output && item.source === DESK_SOURCE ? (judged.output.run ?? []).find((req) => !state.flowKeys?.[flowKeyOf(item.key, req.flow, rule.flows?.[req.flow]?.flow ?? "", req.key)] && !!rule.flows?.[req.flow]) : undefined;
       if (startsRun) {
         asRead.set(item.key, assessment);
         const title = rule.flows![startsRun.flow]!.title;

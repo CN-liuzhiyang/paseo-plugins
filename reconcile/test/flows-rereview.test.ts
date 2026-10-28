@@ -7,6 +7,7 @@ import type { RunView } from "../shared/graph";
 import { endedMessage, unfinishedWhy } from "../server/flows";
 import { createOutReader, probeFromRunnerOutput } from "../server/runs";
 import { at } from "./helpers";
+import { rowOf } from "./item-flow";
 import { advance, asks, failedProbe, finished, first, flowsOf, headline, idFor, look, OWNER, POLICY, req, RULE, withFlows } from "./flows-kit";
 
 // What the second review of the flows engine found (N7B-01 to N7B-11): a run whose files were cleaned out is not run again,
@@ -243,3 +244,28 @@ test("N7B-09: when the machine's orchestration config cannot be read nothing new
     assert.equal(w.flows.launcher.started.length, 2, "and nothing is started");
     assert.ok(w.engine.heldFlows().every((h) => /编排配置读不了/.test(h.why)), JSON.stringify(w.engine.heldFlows()));
   }));
+
+// ---- review R2: the held rules tell only a matter a person told that it is held ------------------------------------------
+
+test("a ticket's line, ball and group are what its rule says while the rules are held: the 'held' line is for matters a person told only", () =>
+  withFlows(
+    async (w) => {
+      asks(w, 1, [], { Extra: "1" });
+      await advance(w, 10);
+      const rowBefore = rowOf(w, 1);
+      const before = w.store.state.assessments["gcp-demo:1"]!;
+      assert.equal(before.next.actor, "them");
+      // a change of the rules that makes it ask for a run, held (the limit is 0)
+      writeFileSync(rulesFile(w), EXTRA);
+      await look(w, 60);
+      assert.ok(w.store.state.rules.held, "held");
+      assert.equal(w.flows.launcher.started.length, 0, "nothing was started");
+      const now = w.store.state.assessments["gcp-demo:1"]!;
+      assert.equal(now.headline, "r ", "the rule's own words for it, as the rule wrote them");
+      assert.deepEqual([now.next.actor, now.next.what], [before.next.actor, before.next.what]);
+      assert.equal(rowOf(w, 1).group, rowBefore.group, "the same group on the list");
+      assert.doesNotMatch(JSON.stringify([now, rowOf(w, 1)]), /判断方法的改动停着|放行/);
+      assert.equal(w.engine.graph("gcp-demo:1")!.situation, "them");
+    },
+    { policy: { ...POLICY({}), ruleBreakerChanges: 0 } },
+  ));

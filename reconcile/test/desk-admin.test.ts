@@ -66,7 +66,7 @@ test("taking back in the admin's chat needs no card only just after it was told,
     const late = say(w, undoLast("刚才那个不要了"));
     await w.engine.tick();
     assert.equal(outcome(w, late), "proposed");
-    assert.match(why(w, late), /^这是从「/);
+    assert.equal(why(w, late), "要撤的是 3 天前记下的话，只有刚说完（10 分钟内）才免确认", "the log says why: how long ago it was told, not the sentence about the source label");
     assert.equal(item(w, 1)!.closed, false, "still followed");
     const card = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:desk:D1:undo:"))!;
     assert.equal(card.ask.question, "要撤掉 D1「年度体检」（10-13 周二 10:00 交代的，撤掉就不再盯它）吗？", "which matter, and when it was told");
@@ -88,6 +88,7 @@ test("just after: a matter told ten minutes ago is taken back with no card, one 
     const eleven = say(w, undoLast("刚才那个不要了"));
     await w.engine.tick();
     assert.equal(outcome(w, eleven), "proposed", "eleven minutes is not just after");
+    assert.equal(why(w, eleven), "要撤的是 11 分钟前记下的话，只有刚说完（10 分钟内）才免确认");
 
     chat(w, MINE, "另外盯一下续费，到期前要办好");
     say(w, track("另外盯一下续费，到期前要办好", "续费", "personal"));
@@ -113,6 +114,28 @@ test("just after: a matter told ten minutes ago is taken back with no card, one 
     assert.equal(outcome(w, oldNote), "proposed", "a line added twenty minutes ago waits on a card too");
     assert.equal(Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:desk:D3:undo:"))!.ask.question, "要撤掉 D3 里 10-13 周二 10:21 补的那句「约在下周三下午了」吗？");
     assert.equal(item(w, 3)!.fields["note.0"], "约在下周三下午了", "still there");
+  }));
+
+test("taking back what another conversation told, even a minute ago, waits on a card, and the log says it was another conversation", () =>
+  withAdmin(async (w) => {
+    chat(w, MINE, SAID);
+    say(w, track(SAID, "年度体检", "personal"));
+    await w.engine.tick();
+    w.clock.now += 1 * MIN;
+    // a second conversation of the same chat, with its own turn
+    const [told] = Object.keys(w.store.state.annotations);
+    const elsewhere = "刚才那个不要了";
+    chat(w, MINE, elsewhere);
+    w.conversations.set("agent-other", w.conversations.get("agent-me")!);
+    w.conversations.delete("agent-me");
+    // ("last" is the newest of the conversation's own; this one has none, so it names the one it means)
+    const request = { cmd: "undo", target: told, said: elsewhere };
+    w.conversations.get("agent-other")!.turn!.steps.push({ kind: "command", text: commandFor(request) });
+    const id = w.say({ ...request, via: "agent-other" });
+    await w.engine.tick();
+    assert.equal(outcome(w, id), "proposed");
+    assert.equal(why(w, id), "要撤的是另一个对话里记下的话，只有在记下它的那个对话里、刚说完才免确认");
+    assert.equal(item(w, 1)!.closed, false);
   }));
 
 test("freshInChat: told in this very conversation, no longer ago than the limit", () => {

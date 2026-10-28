@@ -185,7 +185,7 @@ test("a title is a short name to read: on one line, and what would make a link o
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "applied");
     assert.equal(item(w, 1)!.title, "体检 [点我](http://e.xy)", "one line");
-    assert.match(w.receipt(id)!.text, /^记下了：体检 \[点我\]\(http:\/\/e\.xy\)（D1）/);
+    assert.match(w.receipt(id)!.text, /^记下了：体检 \\\[点我\\\]\\\(http:\/\/e\.xy\\\)（D1）/, "and in the receipt it is escaped too");
     // asked on a card (a conversation that cannot be shown to be theirs): the card does not make it a link
     chat(w, { source: "other-channel", "other-chat": "p2p:someone" }, "盯一下续费的事，月底要办好");
     const card = say(w, track("盯一下续费的事，月底要办好", "[点](http://e.xy)\n# 标", "personal"));
@@ -193,7 +193,14 @@ test("a title is a short name to read: on one line, and what would make a link o
     assert.equal(w.receipt(card)!.outcome, "proposed", w.receipt(card)!.text);
     const confirm = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:"))!;
     assert.equal(confirm.ask.question, "要盯「\\[点\\]\\(http://e.xy\\) \\# 标」吗？");
-    assert.ok(!confirm.ask.header.includes("\n"));
+    assert.equal(confirm.ask.header, "确认：\\[点\\]\\(http://e.xy\\) \\# 标", "and in the header of the card");
+    // a header is cut at 40 characters, and never in the middle of an escape
+    chat(w, { source: "other-channel", "other-chat": "p2p:someone" }, "盯一下另一件事，下周要办好");
+    const cut = say(w, track("盯一下另一件事，下周要办好", "[".repeat(20), "personal"));
+    await w.engine.tick();
+    assert.equal(w.receipt(cut)!.outcome, "proposed");
+    const header = Object.values(w.store.state.commitments).map((c) => c.ask.header).find((h) => h.startsWith("确认：\\[\\["))!;
+    assert.ok(header.length <= 40 && !/(^|[^\\])(\\\\)*\\$/.test(header), header);
   }));
 
 test("a line added to a matter is kept with the matter: the item is read again, the receipt says a look is coming", () =>
