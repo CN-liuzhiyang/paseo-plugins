@@ -250,7 +250,10 @@ test("a look that failed is the rule's to ask again, tomorrow: told as that, no 
     w.flows.probes.set(idOf(1, 1), failedProbe());
     await pass(w, 5);
     const a = assessed(w, 1)!;
-    assert.match(a.headline, /^这次没看成：.+；10-14 周三 10:00 再看$/);
+    // in words for a person: not the runtime's (OutputMismatch, what it says about the answer), which the log and the run's page keep
+    assert.equal(a.headline, "这次没看成：交回来的格式不对；10-14 周三 10:00 再看");
+    assert.doesNotMatch(JSON.stringify([a, w.engine.graph("desk:D1")!.hero, w.engine.graph("desk:D1")!.history]), /OutputMismatch|回答不合格式/);
+    assert.match(w.engine.graph("desk:D1")!.history.map((h) => h.line + " " + (h.detail ?? "")).join(" | "), /「看一眼」失败了 → 下次看 10-14 周三 10:00/);
     assert.deepEqual([a.next.actor, a.next.what], ["system", "下次看 10-14 周三 10:00"]);
     assert.equal(a.stage, "watching");
     assert.equal(fact(w, 1, "fails"), "1");
@@ -264,6 +267,7 @@ test("a look that failed is the rule's to ask again, tomorrow: told as that, no 
     assert.equal(refused.ok, false);
     assert.match(refused.detail, /会自己再起一次/);
     assert.match(log(w)[0]!.looked, /^没看成：/);
+    assert.match(w.engine.graph("desk:D1")!.runs[0]!.error?.plain ?? w.engine.graph("desk:D1")!.runs[0]!.why ?? "", /.+/, "the run's own page still has its words");
     // tomorrow: the next key, and a look that comes back clears it
     await pass(w, 24 * 60, 60);
     assert.equal(w.flows.launcher.started.length, 2);
@@ -273,6 +277,17 @@ test("a look that failed is the rule's to ask again, tomorrow: told as that, no 
     assert.equal(fact(w, 1, "fails"), "0");
     assert.doesNotMatch(assessed(w, 1)!.headline, /没看成/);
   }));
+
+test("a look that ran out of time says so in words", async () => {
+  for (const [probe, words] of [[finished(null, { outcome: "timeout" }, 0.1), "超时了"]] as const) {
+    await withDesk(async (w) => {
+      await tell(w, SAID, "年度体检");
+      w.flows.probes.set(idOf(1, 1), probe);
+      await pass(w, 5);
+      assert.equal(assessed(w, 1)!.headline, `这次没看成：${words}；10-14 周三 10:00 再看`);
+    });
+  }
+});
 
 test("a look the day's limits keep back is said with the reason, and it starts when there is room", () =>
   withDesk(

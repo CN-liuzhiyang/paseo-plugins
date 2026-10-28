@@ -145,6 +145,10 @@ function fitInput(input, budget) {
   return input;
 }
 
+/** What a run that came to nothing says for a person, by how it ended; the runtime's own words for it (technical) are for the log. */
+const FAIL_WORDS = { failed: "运行出错了", timeout: "超时了", lost: "中途断了", "not-started": "没起来", refused: "被拒绝了", dismissed: "被收起了" };
+const failWords = (state, why) => (state === "done" || state === "stopped" || /OutputMismatch|格式/.test(why ?? "") ? "交回来的格式不对" : FAIL_WORDS[state] ?? "没成功");
+
 /** Whether a commitment of this rule is still to be answered. */
 const isOpen = (c) => c.status === "scheduled" || c.status === "waiting";
 
@@ -293,7 +297,7 @@ export default {
         fails += 1;
         const why = flat(r.why || v?.why || (r.state === "done" || r.state === "stopped" ? "它交回来的东西读不懂" : r.state), 120);
         next = domain === "work" ? nextWorkday(ctx, now, p.retryAt) : tomorrow(ctx, now, p.retryAt);
-        fail = { at: now, why };
+        fail = { at: now, why, words: failWords(r.state, r.why || v?.why) };
         log = [...log, { n: looks, at: now, why: woke?.why ?? "", looked: `没看成：${why}`, status, next, nextWhy: "", clamp: null }].slice(-10);
       } else {
         inFlight = r;
@@ -471,8 +475,8 @@ export default {
       return out("watching", "waiting", first ? "正在看第一眼" : `${status || "盯着"}（正在看第 ${looks} 次）`, "system", "正在看", base);
     }
     if (fail && fails > 0) {
-      // The runtime's own words for what went wrong can be long and technical: the list line keeps the start of them, the log keeps all.
-      return out("watching", "waiting", `这次没看成：${flat(fail.why, 50)}；${next ? stamp(ctx, next) : "明天"} 再看`, "system", next ? `下次看 ${stamp(ctx, next)}` : "明天再看", base);
+      // The runtime's own words for what went wrong are technical (and carry local paths): the line says it in words, the log keeps theirs.
+      return out("watching", "waiting", `这次没看成：${fail.words ?? "没成功"}；${next ? stamp(ctx, next) : "明天"} 再看`, "system", next ? `下次看 ${stamp(ctx, next)}` : "明天再看", base);
     }
     return out("watching", "waiting", status || "盯着", "system", next ? `下次看 ${stamp(ctx, next)}` : "等下一次看", base);
   },

@@ -568,7 +568,8 @@ export function createGraph(deps: GraphDeps) {
       },
     ];
 
-    // A look of a matter a person told ends with the time it chose for the next one, in the line of its end.
+    // A look of a matter a person told ends with the time it chose for the next one, in the line of its end. (A flow that has a title for
+    // people does not say here how it failed in the runtime's own words: the run's page has them.)
     const nextLook = (r: RunView): string => {
       const n = isDeskKey(caseId) ? /^look-(\d+)$/.exec((r.request ?? "").split("\0").at(-1) ?? "")?.[1] : undefined;
       const next = n ? nextLookOf(state.notes[caseId]?.["desk.log"]?.value, n) : null;
@@ -577,7 +578,7 @@ export function createGraph(deps: GraphDeps) {
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
       { ms: Date.parse(r.startedAt), line: `起了${named(r)}`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `${named(r)}${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: [r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r)].filter(Boolean).join(" ") || null }] : []),
+      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `${named(r)}${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: [r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r)].filter(Boolean).join(" ") || null }] : []),
     ]);
     const history: HistoryLine[] = [
       ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),
