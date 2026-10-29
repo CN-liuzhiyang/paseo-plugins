@@ -42,7 +42,7 @@ test("the entry registers, starts in dry-run, reconciles once, writes status and
   };
   const cleanup = contribute(fake, io);
   try {
-    assert.deepEqual([...handlers.keys()].sort(), ["reconcile.answer", "reconcile.flow", "reconcile.graph", "reconcile.overview", "reconcile.rules.release", "reconcile.test-card", "reconcile.tick"]);
+    assert.deepEqual([...handlers.keys()].sort(), ["reconcile.answer", "reconcile.attention", "reconcile.flow", "reconcile.graph", "reconcile.overview", "reconcile.rules.release", "reconcile.test-card", "reconcile.tick"]);
     assert.deepEqual(providers.map((p) => p.id), ["reconcile"]);
     type Overview = { state: string; status: { lastTickAt: string | null; mode: string; problems: string[] } | null };
     const read = async () => (await handlers.get("reconcile.overview")!({})) as Overview;

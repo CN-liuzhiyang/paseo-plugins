@@ -15,6 +15,14 @@ export const overviewRpc = defineRpc({
   }),
 });
 
+// How many things wait for the person (the list's group "要你做的" and the cards that belong to no item): the number on the
+// sidebar's row. Small on purpose -- the sidebar asks it every few seconds, the page's overview is not its business.
+export const attentionRpc = defineRpc({
+  name: "reconcile.attention",
+  input: z.object({}),
+  output: z.object({ count: z.number().int().min(0) }),
+});
+
 export const tickRpc = defineRpc({
   name: "reconcile.tick",
   input: z.object({}),

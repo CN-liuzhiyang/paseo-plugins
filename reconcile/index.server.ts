@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import { answerRpc, flowRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
+import { answerRpc, attentionRpc, flowRpc, graphRpc, overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "./shared/rpc";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createCarrier } from "./server/carrier";
@@ -267,6 +267,8 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
     if (!engine) return { state: problem.state, detail: problem.detail, status: null };
     return { state: "running" as const, detail: "", status: engine.status() as unknown as Record<string, unknown> };
   });
+
+  server.handle(attentionRpc, async () => ({ count: engine ? engine.attention() : 0 }));
 
   server.handle(tickRpc, async () => {
     if (!engine) return { ok: false, detail: problem.detail || "没在运行" };

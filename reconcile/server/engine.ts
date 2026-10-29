@@ -7,7 +7,7 @@ import { DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, 
 import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
-import { describeChanges, type PlanEntry, type Status } from "../shared/status";
+import { attentionOf, describeChanges, type PlanEntry, type Status } from "../shared/status";
 import { backstopPassed, cardsToday, confirmsToday, dueNow, mayReach, nextStep, type Due } from "./policy";
 import { createGraph, type Graph } from "./graph";
 import { heatOf, listedAt } from "./heat";
@@ -3030,6 +3030,11 @@ export function createEngine(deps: EngineDeps) {
     },
 
     status,
+
+    /** How many things want the person now (shared/status.ts attentionOf): the number on the sidebar's row. */
+    attention(): number {
+      return attentionOf(status());
+    },
   };
   return api;
 

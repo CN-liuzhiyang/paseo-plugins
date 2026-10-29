@@ -94,6 +94,19 @@ export function troubleOf(status: Status): { late: boolean; stuck: boolean; sour
   return { late, stuck, sources: status.sources.filter((s) => s.state !== "ok" || s.lastError) };
 }
 
+/**
+ * How many things want the person now: the items in the list's group "要你做的", and the cards raised that belong to no item (the test card).
+ * The sidebar's number, and the same as what the page shows under that heading.
+ */
+export function attentionOf(status: Pick<Status, "cases" | "cards">): number {
+  const items = status.cases.filter((k) => k.row?.group === "me").length;
+  const loose = status.cards.filter((c) => c.agentId && c.caseIds.length === 0).length;
+  return items + loose;
+}
+
+/** The number as the sidebar's badge writes it: "9+" past nine, so that the badge stays small. */
+export const countLabel = (count: number): string => (count > 9 ? "9+" : String(count));
+
 export interface Status {
   instanceId: string;
   mode: "live" | "dry-run";
