@@ -78,7 +78,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title` | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败。缺省不归档：像 dev-task 那样事后还有人要接着翻、接着聊的会话，由 flow 自己决定 | `call.start`/`call.agent`/`call.end`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath?, input? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。`input: { label, secret?, pattern?, hint? }`：批准的同时带一个值（验证码），见下「批准并附一个值」。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |

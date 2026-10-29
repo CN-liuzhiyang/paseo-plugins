@@ -13,9 +13,10 @@
 //   transcript(agentId, { tail, filter })   the agent's timeline as text
 //   deny(agentId, { message })              deny every pending permission request
 //   stop(agentId)                           interrupt it
+//   archiveAgent(agentId)                   archive it (soft-delete; refused while it is still running)
 //   providerAvailable(family)               true when Paseo lists it as available and enabled
 //   listWorkspaces()                        [{ workspaceId, name, cwd }], hidden ones too
-//   createWorkspace({ cwd, title })         { workspaceId } of a new visible workspace on cwd
+//   createWorkspace({ cwd, title })         { workspaceId } of a new background workspace on cwd
 //
 // A request is { provider, thinking, mode, title, labels, prompt, cwd } plus,
 // for ask, { schema, timeout }, and `workspace` (a workspace id) when the agent
@@ -44,9 +45,12 @@ function agentArgs({ provider, thinking, title, mode, labels, workspace }) {
 /**
  * The executor over the `paseo` CLI.
  *
- * @param {{ host?: string | null }} [options]
+ * @param {{ host?: string | null, cli?: { runPaseo: typeof runPaseo, runPaseoJson: typeof runPaseoJson } }} [options]
+ *   `cli`: how a command is run -- a test hands in a recorder to see the arguments the CLI would get
  */
-export function paseoExecutor({ host = null } = {}) {
+export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } = {}) {
+  const runJson = cli.runPaseoJson;
+  const runText = cli.runPaseo;
   // Locally the agent's directory is the CLI's own. On another host it is a
   // path there, which this process cannot start in, so it goes as --cwd.
   const opts = (cwd) => ({ cwd: host ? undefined : cwd, host: host ?? undefined });
@@ -55,7 +59,7 @@ export function paseoExecutor({ host = null } = {}) {
     // `--output-schema` makes stdout the agent's structured output, with no
     // agent id in it; the runner finds the agent again by its labels.
     ask: (request) =>
-      runPaseoJson(
+      runJson(
         ["run", ...agentArgs(request), ...where(request.cwd), "--wait-timeout", request.timeout, "--output-schema", JSON.stringify(request.schema), request.prompt],
         opts(request.cwd),
       ),
@@ -63,7 +67,7 @@ export function paseoExecutor({ host = null } = {}) {
     // Paseo rejects --output-schema with --background, so only unstructured
     // agents (the gate's carrier) are spawned.
     spawn: async (request) => {
-      const started = await runPaseoJson(["run", "--background", ...agentArgs(request), ...where(request.cwd), request.prompt], opts(request.cwd));
+      const started = await runJson(["run", "--background", ...agentArgs(request), ...where(request.cwd), request.prompt], opts(request.cwd));
       return { agentId: started.agentId };
     },
 
@@ -73,7 +77,7 @@ export function paseoExecutor({ host = null } = {}) {
     findAgent: async (labels) => {
       const args = ["ls", "-g", "-a"];
       for (const [key, value] of Object.entries(labels)) args.push("--label", `${key}=${value}`);
-      const found = (await runPaseoJson(args, opts())) ?? [];
+      const found = (await runJson(args, opts())) ?? [];
       return found[0]?.id ?? null;
     },
 
@@ -81,7 +85,7 @@ export function paseoExecutor({ host = null } = {}) {
     // last turn, which for one structured call is the whole call. Codex
     // reports CostUsd 0 with real token counts; it is passed on as is.
     inspect: async (agentId) => {
-      const detail = await runPaseoJson(["inspect", agentId], opts());
+      const detail = await runJson(["inspect", agentId], opts());
       const usage = detail?.LastUsage ?? null;
       return {
         status: detail?.Status ?? null,
@@ -94,38 +98,46 @@ export function paseoExecutor({ host = null } = {}) {
     transcript: async (agentId, { tail = 50, filter = "text" } = {}) => {
       const args = ["logs", agentId, "--filter", filter];
       if (tail) args.push("--tail", String(tail));
-      return (await runPaseo(args, opts())).stdout;
+      return (await runText(args, opts())).stdout;
     },
 
     deny: async (agentId, { message } = {}) => {
       const args = ["permit", "deny", agentId, "--all"];
       if (message) args.push("--message", message);
-      await runPaseoJson(args, opts());
+      await runJson(args, opts());
     },
 
     stop: async (agentId) => {
-      await runPaseoJson(["stop", agentId], opts());
+      await runJson(["stop", agentId], opts());
+    },
+
+    // No --force: an agent still running is refused (exit code 1), not interrupted. A call that handed in its answer
+    // has stopped; one that has not is left as it is, and the runner says so in a caveat (run.mjs).
+    archiveAgent: async (agentId) => {
+      await runJson(["archive", agentId], opts());
     },
 
     // `provider ls --json` rows are { provider, status: "available" | ..., enabled: "Enabled" | "Disabled" }
     // (cli/src/commands/provider/ls.ts). Plugin providers are listed with the rest.
     providerAvailable: async (family) => {
-      const rows = (await runPaseoJson(["provider", "ls"], opts())) ?? [];
+      const rows = (await runJson(["provider", "ls"], opts())) ?? [];
       return rows.some((row) => row.provider === family && row.status === "available" && row.enabled === "Enabled");
     },
 
     // `workspace ls --json` rows are { workspaceId, project, name, isolation, cwd, background }.
-    // `--background` includes hidden ones: a person who hid the affair's workspace has not archived it.
-    // `create` is given `--no-background` so that it is visible even when the caller's own workspace is hidden.
+    // `--background` includes hidden ones, and the affair's workspace is one: `create` is given `--background` (2026-10-29), because the
+    // place a person follows an affair is its page in the reconcile plugin, not a workspace in the sidebar that grows by one for every
+    // matter. Hiding only keeps it out of the sidebar and the default lists: the permission requests of the agents in it still raise
+    // the app's notifications, and its links and Ctrl+K still open it. Which it is, is decided when it is made and cannot be changed.
     // Neither is for another host: runs with --host keep their agents where Paseo puts them (workspaces.mjs).
     listWorkspaces: async () => {
-      const rows = (await runPaseoJson(["workspace", "ls", "--background"], { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS })) ?? [];
+      const rows = (await runJson(["workspace", "ls", "--background"], { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS })) ?? [];
       return rows.map((row) => ({ workspaceId: row.workspaceId, name: row.name, cwd: row.cwd }));
     },
 
     createWorkspace: async ({ cwd, title }) => {
-      const made = await runPaseoJson(
-        ["workspace", "create", "--isolation", "local", "--path", cwd, "--title", cutTitle(title), "--no-background"],
+      const made = await runJson(
+        ["workspace", "create", "--isolation", "local", "--path", cwd, "--title", cutTitle(title), "--background"],
         { ...opts(), timeoutMs: WORKSPACE_CALL_TIMEOUT_MS },
       );
       if (typeof made?.workspaceId !== "string") throw new Error("paseo workspace create returned no workspaceId");

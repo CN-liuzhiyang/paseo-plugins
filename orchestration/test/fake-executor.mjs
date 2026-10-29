@@ -37,6 +37,8 @@
 // archives the workspace of the first such start, as a person might between the
 // executor's listing and the start; `workspaceFlag: false` is a CLI that does not know
 // --workspace. A title is cut to 120 characters, by code point, as the real one is.
+// `archiveAgent` archives an agent (`archivedAgents` lists them, in order); like the CLI without --force it refuses one that is still
+// running, and `archiveFails` ("refuse": as for a running agent, "error": any other failure) makes it fail for every agent.
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -115,7 +117,9 @@ export function fakeExecutor({
   workspaceFails = null,
   archiveOnStart = false,
   workspaceFlag = true,
+  archiveFails = null,
 } = {}) {
+  const archivedAgents = [];
   const refused = [];
   let archived = false;
   /** What the real CLI does with --workspace before it makes an agent; `form` is how it was asked (ask: structured; spawn: --background). */
@@ -151,6 +155,7 @@ export function fakeExecutor({
 
   return {
     agents,
+    archivedAgents,
     requests,
     refused,
     denied,
@@ -194,7 +199,8 @@ export function fakeExecutor({
       // Counted on the shared array, not taken from its length: an archived workspace's id is not made again.
       workspaces.made = (workspaces.made ?? 0) + 1;
       const workspaceId = `fake-ws-${workspaces.made}`;
-      workspaces.push({ workspaceId, cwd, title: [...title].slice(0, 120).join("") });
+      // Like the real executor (executor.mjs): the affair's workspace is made in the background.
+      workspaces.push({ workspaceId, cwd, title: [...title].slice(0, 120).join(""), background: true });
       return { workspaceId };
     },
 
@@ -241,6 +247,18 @@ export function fakeExecutor({
       if (!agent || agent.closed) return;
       agent.closed = true;
       if (answerOnDeny) await carry(agent.request.prompt);
+    },
+
+    async archiveAgent(agentId) {
+      const agent = agents.get(agentId);
+      if (!agent) throw new Error(`no agent ${agentId}`);
+      if (archiveFails === "error") throw new Error("fake failure of archive");
+      if (archiveFails === "refuse" || agent.status === "running") {
+        throw new PaseoCliError("paseo archive failed", { argv: ["archive", agentId], exitCode: 1, stdout: "", stderr: `Agent ${agentId} is still running; use --force to archive it
+` });
+      }
+      agent.archived = true;
+      archivedAgents.push(agentId);
     },
 
     async stop(agentId) {

@@ -121,7 +121,9 @@ export default flow({
   async run(input, $) {
     // The model of every look is the role's: a missing role is found before anything is spent.
     $.ctx.role(ROLE);
-    return $.ask(glance, input, { role: ROLE, ...(input.workdir === "" ? {} : { cwd: input.workdir }) });
+    // Archived once it has handed in its look (`archive: "after"`): each look would otherwise leave an agent behind. What it was
+    // given and what it handed back are in the run's events, which the matter's page links to; a look that failed keeps its agent.
+    return $.ask(glance, input, { role: ROLE, archive: "after", ...(input.workdir === "" ? {} : { cwd: input.workdir }) });
   },
 
   summarize: (value) => (value?.looked ? `看了一眼：${value.looked}` : "没有结果"),

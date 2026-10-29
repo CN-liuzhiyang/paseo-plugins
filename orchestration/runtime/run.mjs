@@ -486,6 +486,26 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     timer.unref?.();
   };
 
+  // The agent of an ask that came out well, archived (`archive: "after"`): what it was given and what it handed back are in the events,
+  // so the agent itself is not a place anyone needs to open. It never makes the run fail: an agent that cannot be found, or that is
+  // still running (the CLI refuses that without --force, and --force would interrupt it), is left as it is, with a caveat saying so.
+  const archiveAfter = async (record, agentId) => {
+    if (!agentId) {
+      caveat(`archive: the agent of ${record.callId} could not be found, so it was not archived`, record.callId);
+      return;
+    }
+    if (typeof executor.archiveAgent !== "function") {
+      caveat("archive: the executor cannot archive an agent, so the agents asked to be archived are left as they are", record.callId);
+      return;
+    }
+    try {
+      await executor.archiveAgent(agentId);
+    } catch (error) {
+      const why = String(error?.stderr?.trim() || error?.message || error).replace(/\s+/g, " ").slice(0, 200);
+      caveat(`archive: agent ${agentId} of ${record.callId} was not archived (${why})`, record.callId);
+    }
+  };
+
   const endCall = (record, { ok, output, error, agentId, cost }) => {
     // Already closed when the run ended with this call in flight.
     if (!open.delete(record.callId)) return;
@@ -518,7 +538,10 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       if (Object.hasOwn(callOptions ?? {}, "mode")) {
         throw new TypeError(`$.ask: mode is gone. The step declares effects ("${step.effects}"), and runtime/fences.mjs picks the mode`);
       }
-      checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout"]);
+      checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive"]);
+      if (callOptions.archive !== undefined && callOptions.archive !== "after") {
+        throw new TypeError(`$.ask(${step.name}): archive can only be "after" (archive the agent once the call has handed in its answer), not ${JSON.stringify(callOptions.archive)}`);
+      }
       const bound = bindRole(roster, callOptions);
       const fence = fenceFor(bound.provider, step.effects);
       const prompt = composePrompt(bound, step.for(stepInput));
@@ -578,8 +601,11 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       } catch (error) {
         failure = error;
       }
-      endCall(record, { ok: !failure, output: safe(output), error: failure, ...(await settleAgent(record)) });
+      const settled = await settleAgent(record);
+      endCall(record, { ok: !failure, output: safe(output), error: failure, ...settled });
       if (failure) throw failure;
+      // Only a call that came out well, and only when the flow asked for it: a call that failed keeps its agent to be looked into.
+      if (callOptions.archive === "after") await archiveAfter(record, settled.agentId);
       return output;
     },
 

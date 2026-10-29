@@ -70,6 +70,11 @@ export interface AskOptions {
   title?: string;
   cwd?: string;
   timeout?: Duration;
+  /**
+   * "after": archive the call's agent once it has handed in its answer (not when the call failed). What it was given and what it
+   * handed back are in the run's events, so the agent is not a place anyone needs to open. Absent: it is left for a person to archive.
+   */
+  archive?: "after";
   /** Gone: the step's `effects` choose the mode, through runtime/fences.mjs. */
   mode?: never;
 }
