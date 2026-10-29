@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { activity, byLabel, fenceLabel, formatDuration } from "../shared/format";
+import { activity, archiveLine, byLabel, fenceLabel, formatDuration } from "../shared/format";
 import {
   callStatus,
   caveatsOf,
@@ -213,4 +213,24 @@ test("byLabel: the runtime's by values read as sentences, unknown ones as they a
   assert.equal(byLabel("nobody (the carrier ended without an answer)"), "没有人：载体没等到应答就结束了");
   assert.equal(byLabel("feishu:ou_x"), "feishu:ou_x");
   assert.equal(byLabel(null), "不知道是谁（判定里没有 by）");
+});
+
+test("call.archive is a known event: it is kept on its call, said in one line, and does not count as an event nobody knows", () => {
+  const t = "2026-10-29T07:38:00.000Z";
+  const base = { v: 1, runId: "r1", ts: t };
+  const events = [
+    { ...base, seq: 0, kind: "run.start", flow: { name: "f", phases: [] }, input: {}, cwd: "/x", pid: 1, hostname: "h" },
+    { ...base, seq: 1, kind: "call.start", callId: "c1", type: "ask", name: "glance", title: "看一眼", phase: null, archive: "after" },
+    { ...base, seq: 2, kind: "call.end", callId: "c1", ok: true, durationMs: 5, output: {}, error: null, agentId: "agent-1", cost: null },
+    { ...base, seq: 3, kind: "call.archive", callId: "c1", agentId: "agent-1", ok: false, code: "AGENT_NOT_FOUND", message: "Agent not found: agent-1" },
+    { ...base, seq: 4, kind: "call.archive", callId: "nope", agentId: null, ok: false, code: "NO_AGENT", message: null },
+  ];
+  const run = foldEvents(events);
+  assert.deepEqual(run.unknownKinds, {});
+  assert.deepEqual(run.calls.get("c1")!.archive, { ok: false, code: "AGENT_NOT_FOUND", message: "Agent not found: agent-1" });
+  assert.equal(run.problems.length, 1, "one for a call.archive that has no call");
+  assert.match(run.problems[0]!, /call\.archive 没有对得上的调用/);
+  assert.match(archiveLine(run.calls.get("c1")!.archive!), /后台 workspace.*留给起这次流程的插件归档/);
+  assert.equal(archiveLine({ ok: true, code: null, message: null }), "已归档这个 agent");
+  assert.match(archiveLine({ ok: false, code: "AGENT_RUNNING", message: null }), /AGENT_RUNNING.*留给起这次流程的插件归档/);
 });

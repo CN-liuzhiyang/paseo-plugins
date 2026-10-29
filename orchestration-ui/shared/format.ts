@@ -217,3 +217,9 @@ export function callStatusText(call: CallState, status: RunStatus): string {
       return "没有结束记录";
   }
 }
+
+/** One line for what became of the archive the flow asked for: done, or left to the plugin that started the run. */
+export function archiveLine(archive: NonNullable<CallState["archive"]>): string {
+  if (archive.ok) return "已归档这个 agent";
+  return archive.code === "AGENT_NOT_FOUND" ? "没归档：这个 agent 在后台 workspace 里，命令行找不到它，留给起这次流程的插件归档" : `没归档（${archive.code ?? "原因不明"}），留给起这次流程的插件归档`;
+}

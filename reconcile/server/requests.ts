@@ -594,7 +594,7 @@ export function answerWords(
   conversation: Conversation | null,
   dataDir: string | null = null,
   waiveSource = false,
-): { why: string } | { typed: string; tags: string[] } {
+): { why: string } | { typed: string; tags: string[]; message: { step: number; text: string } } {
   const found = commandInTurn(r, conversation, dataDir, waiveSource);
   if ("why" in found) return found;
   const { steps, run } = found;
@@ -604,7 +604,7 @@ export function answerWords(
   const { typed, tags } = splitReply((steps[said] as { text: string }).text);
   if (typed === "") return { why: "这条消息里没有人自己写的字（只是引用了推送）" };
   if (looksPasted(typed)) return { why: "人写的那一段像是贴进来的（太长、行数多或有代码块），不算本人回答" };
-  return { typed, tags };
+  return { typed, tags, message: { step: said, text: (steps[said] as { text: string }).text } };
 }
 
 /**

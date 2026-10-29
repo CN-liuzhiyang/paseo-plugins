@@ -108,6 +108,8 @@ export type Deliver = (channelId: string, message: { to: string; idempotencyKey:
 
 /** A card's message to one of its person's channels is tried this many times, once per reconcile. */
 const MAX_NOTIFY_TRIES = 3;
+/** The ids of options a rule gives a question that end the matter it is about (examples/desk.mjs: "不用盯了"): not taken from a guess at which question the words answer. */
+const ENDS_THE_MATTER: ReadonlySet<string> = new Set(["drop"]);
 /**
  * The agent of a call that asked to be archived is tried this many times, no sooner than ARCHIVE_RETRY_MS after the last try; a run that ended
  * longer ago than ARCHIVE_WINDOW_MS is not looked at, nor are more than ARCHIVE_PER_TICK agents in one reconcile.
@@ -1389,6 +1391,8 @@ export function createEngine(deps: EngineDeps) {
     const appears = (no: string) => mentions(typed, no.toLowerCase());
     const hits = Object.values(state.commitments).filter((c) => appears(noOf(c)));
     let pointed: Commitment | undefined;
+    // Neither a number in the words nor a quote: the question is guessed from what is waiting (below), and a guess does not settle everything.
+    let guessed = false;
     if (hits.length > 1) return reject(`他的话里提到了好几个问题（${hits.map(noOf).join("、")}），一句话只答一个，问他先答哪个`);
     if (hits.length === 1) pointed = hits[0];
     else if (words.tags.length > 1) return reject(`他引用的推送里有 ${words.tags.length} 个问题（${words.tags.join("、")}），没说答的是哪个。请他回「编号 答案」，比如「${words.tags[0]} 选 1」`);
@@ -1397,6 +1401,7 @@ export function createEngine(deps: EngineDeps) {
       if (!pointed) return reject(`他引用的推送里的编号 ${words.tags[0]} 不是这里的问题`);
     } else {
       // No number at all: the matter he names, or the only question waiting for him.
+      guessed = true;
       const waiting = Object.values(state.commitments).filter((c) => c.status === "waiting" && c.ask.person === admin.id);
       const named = [...new Set(waiting.flatMap((c) => (c.caseId && appears(numberOf(c.caseId)) ? [c.caseId] : [])))];
       if (named.length > 1) return reject(`他的话里提到了好几件事（${named.map(numberOf).join("、")}），问他答的是哪个问题`);
@@ -1414,8 +1419,17 @@ export function createEngine(deps: EngineDeps) {
     const late = notWaiting(c);
     if (late) return reject(`${noOf(c)} ${late.detail}`, c.caseId);
 
+    // One message of the person's answers one question, unless the words write the number of another: the same message run through again
+    // (a retry, or taken for the answer to the next question) must not be recorded as a second answer.
+    const message = vouchKey(r.via, conversation!.turn!.id, words.message.step, words.message.text);
+    const usedBefore = Object.values(state.requests).some((q) => q.vouch?.startsWith(`${message}\u0001`));
+    if (usedBefore && hits.length === 0) return reject("人的这条消息这一轮里已经答过一个问题了。要答另一个问题，得是他在话里写了那个问题的编号", c.caseId);
+    // What takes effect on a guess is not taken: a confirmation (does this sentence count as the person's own) needs the quote or its number,
+    // and so does an option that ends a matter.
+    if (guessed && isConfirm(c)) return reject(`${noOf(c)} 是一句话要不要算数的确认，得是他引用那条推送回复，或者在话里写上「${noOf(c)}」才算。问他是哪一个`, c.caseId);
     const pick = chooseOption(c, words.typed, [noOf(c), c.caseId ? numberOf(c.caseId) : ""]);
     if ("error" in pick) return reject(pick.error, c.caseId);
+    if (guessed && "option" in pick && ENDS_THE_MATTER.has(pick.option.id)) return reject(`「${pick.option.label}」会结束这件事，可是他没引用推送、话里也没写是哪个问题的编号。问他是哪个问题`, c.caseId);
     const at = nowIso(nowMs);
     const via = conversation!.labels.source ? `chat:${clip(conversation!.labels.source, 20)}` : "chat";
     const { events, label } = answerEvents(c, "option" in pick ? pick.option.label : pick.other, at, via, `chat\u0000${c.id}\u0000${c.rounds}`, personName(c.ask.person));
@@ -1426,7 +1440,7 @@ export function createEngine(deps: EngineDeps) {
         ? `${head}你选了「${label}」，下一次检查（一分钟内）就照办。`
         : `${head}你回的是${"option" in pick ? `「${label}」` : label}，不是「照办」，那句话不会生效。`
       : `${head}${"option" in pick ? `你选了「${label}」` : `你说${label}`}。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。`;
-    return { outcome: "applied", detail, annotation: null, caseId: c.caseId, events, immediate: true, ...(waive && !!conversation?.labels.source ? { waived: true as const } : {}) };
+    return { outcome: "applied", detail, annotation: null, caseId: c.caseId, events, immediate: true, vouch: `${message}\u0001a:${c.id}`, ...(waive && !!conversation?.labels.source ? { waived: true as const } : {}) };
   }
 
   function applySaid(r: SayRequest | Extract<Request, { cmd: "undo" }>, caseId: string, target: Annotation | null, by: string, how: Annotation["how"], nowMs: number): Handled {
@@ -2359,7 +2373,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   /**
-   * A card's title: of one question a rule asked, which matter it is about and the question ("定期洗牙（D1）：约上了吗？"), unless the question
+   * A card's title: of one question a rule asked, which matter it is about and the question ("年度体检（D1）：约上了吗？"), unless the question
    * says it (it names the header or the item's number); of one the controller asks of itself (a confirmation, a source that is down) the
    * question, which says what it is about; of several, how many and about what.
    */

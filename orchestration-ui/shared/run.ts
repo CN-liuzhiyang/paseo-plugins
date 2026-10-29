@@ -128,6 +128,8 @@ export interface CallState {
   end: CallEnd | null;
   /** From call.agent while the call runs, or from call.end. */
   agentId: string | null;
+  /** From call.archive: what became of the archive the flow asked for once the call had handed in (ok: done; else the CLI's code, which the plugin that started the run takes over). */
+  archive: { ok: boolean; code: string | null; message: string | null } | null;
   caveats: string[];
 }
 
@@ -303,6 +305,7 @@ function callFor(run: RunState, callId: string): CallState {
       gate: null,
       end: null,
       agentId: null,
+      archive: null,
       caveats: [],
     };
     run.calls.set(callId, call);
@@ -496,6 +499,15 @@ export function applyEvent(run: RunState, raw: unknown): void {
         cost: costOf(raw.cost),
       };
       call.agentId ??= call.end.agentId;
+      return;
+    }
+    case "call.archive": {
+      const callId = str(raw.callId);
+      if (callId === null || !run.calls.has(callId)) {
+        problem(run, `第 ${seq ?? "?"} 条 call.archive 没有对得上的调用`);
+        return;
+      }
+      callFor(run, callId).archive = { ok: raw.ok === true, code: str(raw.code), message: str(raw.message) };
       return;
     }
     case "caveat": {

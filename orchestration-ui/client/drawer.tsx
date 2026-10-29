@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import {
   activity,
+  archiveLine,
   byLabel,
   EFFECTS_LABEL,
   formatDuration,
@@ -581,6 +582,7 @@ function AskBody({
             <CopyButton text={call.agentId} />
           </View>
         ) : null}
+        {call.archive ? <Text style={ui.styles.small}>{archiveLine(call.archive)}</Text> : null}
       </Sec>
     </>
   );

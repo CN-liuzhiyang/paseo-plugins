@@ -189,7 +189,7 @@ test("one message releases one request: a second command on the same message goe
   withDesk(async (w) => {
     own(w, SAID);
     const first = say(w, track(FROM_CHAT, "年度体检", "personal"));
-    const second = say(w, track(FROM_CHAT, "洗牙", "personal"));
+    const second = say(w, track(FROM_CHAT, "体检", "personal"));
     await w.engine.tick();
     assert.equal(outcome(w, first), "applied");
     assert.equal(outcome(w, second), "proposed", "the same message does not let a second matter through");

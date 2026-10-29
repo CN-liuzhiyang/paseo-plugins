@@ -434,7 +434,7 @@ test("an answer in the chat shows on the page and in the item's history as given
     assert.equal(handled.waived, true, "let through on the admin's chat waiver, and the journal says so");
     assert.equal(handled.request?.cmd ?? "answer", "answer");
     const history = w.engine.graph("gcp-demo:1")!.history.map((h) => h.line);
-    assert.ok(history.some((l) => /在 POPO 里|在对话里/.test(l) || /回答：过 3 天再看/.test(l)), history.join("\n"));
+    assert.ok(history.some((l) => /在对话里/.test(l) || /回答：过 3 天再看/.test(l)), history.join("\n"));
   }));
 
 test("the observation of the answer is the same as the page's (a rule reads it the same way)", async () =>

@@ -159,7 +159,7 @@ export interface Commitment {
 }
 
 /** Where an answer was given, as the pages say it (`Commitment.answer.via`). */
-export const answeredWhere = (via: string): string => (via === "page" ? "在事项页上" : via === "chat:popo" ? "在 POPO 里" : via.startsWith("chat") ? "在对话里" : "在问题卡上");
+export const answeredWhere = (via: string): string => (via === "page" ? "在事项页上" : via.startsWith("chat") ? "在对话里" : "在问题卡上");
 
 /** The source of the items a person asked to be followed in a conversation: the controller itself is its source (see Annotation `track`). */
 export const DESK_SOURCE = "desk";
