@@ -40,7 +40,25 @@ test("what a person says to agree: a yes word first, then at most a short remark
   for (const no of ["", "不要", "不用了", "别", "没有", "算了", "取消", "等等", "先别", "好的，不过别太频繁", "要吗？先等等", "好像不太对", "对不起", "是不是", "要不要", "行不行", "好，你确定吗", "可以吗", "好的，但是先等一下", "要，不过晚点", "记下", "盯", "我觉得要，月底前约上，这样比较稳妥一点点点"]) assert.equal(isYes(no), false, no);
 });
 
-test("the real conversation: a drop said with --said - in the admin's own chat, run through powershell, is asked, confirmed and applied", () =>
+test("a drop said with --said - in the admin's own chat, run through powershell, takes effect at once on the message itself", () =>
+  withAdmin(async (w) => {
+    let c = converse(w, MINE, [{ kind: "person", text: "帮我盯一下年检，月底前要约上" }]);
+    c.turn!.steps.push({ kind: "command", text: ps(`${SAY} track --title 年检 --domain personal --said -`) });
+    w.say({ cmd: "track", said: "-", title: "年检", domain: "personal" });
+    await w.engine.tick();
+    const words = "算了，年检那个事不用管了。";
+    c = converse(w, MINE, [{ kind: "person", text: words }]);
+    c.turn!.steps.push({ kind: "command", text: ps(`${SAY} say --item D1 --kind drop --said -`) });
+    const id = w.say({ cmd: "say", item: "D1", kind: "drop", said: "-" });
+    await w.engine.tick();
+    assert.equal(w.receipt(id)!.outcome, "applied", w.receipt(id)!.text);
+    assert.match(w.receipt(id)!.text, /要撤销/);
+    const drop = Object.values(w.store.state.annotations).find((a) => a.kind === "drop")!;
+    assert.deepEqual([drop.said, drop.how, drop.waived], [words, "own-words", true]);
+    assert.equal(w.store.state.requests[id]!.waived, true);
+  }));
+
+test("the real conversation: words the agent copied, in the admin's own chat, run through powershell, are asked, confirmed and applied", () =>
   withAdmin(async (w) => {
     const run = (c: ReturnType<typeof converse>, line: string, request: Record<string, unknown>) => {
       c.turn!.steps.push({ kind: "command", text: line });
@@ -52,9 +70,9 @@ test("the real conversation: a drop said with --said - in the admin's own chat, 
     await w.engine.tick();
     assert.equal(item(w, 1)?.title, "年检");
     // "算了，年检那个事不用管了。": --said - is read in the chat although drop is not let through on its own words there
-    const words = "算了，年检那个事不用管了。";
-    c = converse(w, MINE, [{ kind: "person", text: words }]);
-    const id = run(c, ps(`${SAY} say --item D1 --kind drop --said -`), { cmd: "say", item: "D1", kind: "drop", said: "-" });
+    const words = "他说年检那个事不用管了";
+    c = converse(w, MINE, [{ kind: "person", text: "算了，年检那个事不用管了。" }]);
+    const id = run(c, ps(`${SAY} say --item D1 --kind drop --said '${words}'`), { cmd: "say", item: "D1", kind: "drop", said: words });
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "asked", w.receipt(id)!.text);
     const question = w.store.state.requests[id]!.question!;
@@ -93,8 +111,8 @@ test("a confirm that was refused leaves the question to run out, and after 30 mi
     w.say({ cmd: "track", said: "-", title: "年检", domain: "personal" });
     await w.engine.tick();
     c = converse(w, MINE, [{ kind: "person", text: "算了，年检那个事不用管了。" }]);
-    c.turn!.steps.push({ kind: "command", text: ps(`${SAY} say --item D1 --kind drop --said -`) });
-    const id = w.say({ cmd: "say", item: "D1", kind: "drop", said: "-" });
+    c.turn!.steps.push({ kind: "command", text: ps(`${SAY} say --item D1 --kind drop --said '他说年检不用管了'`) });
+    const id = w.say({ cmd: "say", item: "D1", kind: "drop", said: "他说年检不用管了" });
     await w.engine.tick();
     const question = w.store.state.requests[id]!.question!;
     c = converse(w, MINE, [{ kind: "person", text: "不要" }], question);

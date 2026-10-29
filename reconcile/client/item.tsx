@@ -319,7 +319,7 @@ function Side({ view, openCase }: { view: GraphView; openCase(caseId: string): v
             <Text style={ui.styles.small}>
               {s.by} {clockText(s.at)} 说 · {s.label}
               {s.until ? ` 到 ${s.until}` : ""}
-              {s.how === "confirmed" ? " · 在卡片上确认的" : ""}
+              {s.how === "confirmed" ? " · 在卡片上确认的" : s.how === "confirmed-here" ? " · 在对话里确认的" : ""}
               {s.inForce ? " · 说一句就撤" : s.revokedAt ? ` · ${clockText(s.revokedAt)} 撤了` : " · 过期了"}
             </Text>
           </View>

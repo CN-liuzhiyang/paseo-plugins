@@ -187,7 +187,7 @@ export interface Annotation {
   /** The agent whose conversation it was said in. */
   via: string | null;
   /** The person's own words in their own conversation, or a card they answered yes to. */
-  how: "own-words" | "confirmed";
+  how: "own-words" | "confirmed" | "confirmed-here";
   /** Let through without the check of where the conversation came from (the admin's own chat: persons.json `chats`); absent for the rest. */
   waived?: true;
   at: string;

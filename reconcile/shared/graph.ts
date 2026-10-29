@@ -322,7 +322,7 @@ export interface GraphView {
   poll: { what: string; nextAt: string | null } | null;
   links: LinkView[];
   runs: RunView[];
-  said: Array<{ id: string; kind: Annotation["kind"]; label: string; said: string; by: string; at: string; until: string | null; how: "own-words" | "confirmed"; inForce: boolean; revokedAt: string | null }>;
+  said: Array<{ id: string; kind: Annotation["kind"]; label: string; said: string; by: string; at: string; until: string | null; how: "own-words" | "confirmed" | "confirmed-here"; inForce: boolean; revokedAt: string | null }>;
   history: HistoryLine[];
   evidence: {
     facts: Array<{ field: string; value: string; evidence: string | null; at: string; by: string }>;

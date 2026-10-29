@@ -257,7 +257,7 @@ function Body({ status, busy, onOpen, onRelease }: { status: Status; busy: strin
                 {a.inForce ? "" : a.revokedAt ? `（${clock(a.revokedAt)} 撤了）` : "（过期了）"}
               </Text>
               <Text style={ui.styles.small} selectable>
-                {a.by} {clock(a.at)} 说：「{a.said}」{a.how === "confirmed" ? "（在卡片上确认的）" : ""} · {a.id}
+                {a.by} {clock(a.at)} 说：「{a.said}」{a.how === "confirmed" ? "（在卡片上确认的）" : a.how === "confirmed-here" ? "（在对话里确认的）" : ""} · {a.id}
               </Text>
             </View>
           ))}

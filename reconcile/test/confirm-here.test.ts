@@ -191,18 +191,19 @@ test("in a group chat nobody can be asked in place: the card, as before", () =>
     { persons: mine() },
   ));
 
-test("in the admin's own chat the matter is asked in place too (not told: the chat's own words are not let through for this)", () =>
+test("in the admin's own chat words the agent copied, that cannot be checked against the message, are asked in place too", () =>
   withHere(
     async (w) => {
       await tell(w, "帮我盯一下体检，月底前要约上", "年度体检");
       assert.equal(tracked(w), 1);
       converse(w, MINE, [{ kind: "person", text: "不用盯体检了" }]);
-      const id = say(w, { cmd: "say", kind: "drop", item: "D1", said: "-" });
+      // the agent copied the words as it understood them (not the message itself): it cannot be checked, so it is asked
+      const id = say(w, { cmd: "say", kind: "drop", item: "D1", said: "他说体检不用盯了" });
       await w.engine.tick();
       const receipt = w.receipt(id)!;
       assert.equal(receipt.outcome, "asked", receipt.text);
       const question = w.store.state.requests[id]!.question!;
-      assert.match(question, /不再追踪 D1/);
+      assert.match(question, /不再追踪「年度体检」（D1）/);
       assert.notEqual(assessed(w, 1)?.stage, "dropped");
       const done = await reply(w, id, "要的", question, MINE);
       assert.equal(done.outcome, "applied", done.text);
@@ -228,7 +229,7 @@ test("the matter ended another way in the minutes after it was asked to end: the
     async (w) => {
       await tell(w, "帮我盯一下体检，月底前要约上", "年度体检");
       converse(w, MINE, [{ kind: "person", text: "不用盯体检了" }]);
-      const id = say(w, { cmd: "say", kind: "drop", item: "D1", said: "-" });
+      const id = say(w, { cmd: "say", kind: "drop", item: "D1", said: "他说体检不用盯了" });
       await w.engine.tick();
       const question = w.store.state.requests[id]!.question!;
       // the same thing, said in the person's own conversation and taken at once

@@ -60,7 +60,7 @@ export interface StatusSaid {
   by: string;
   at: string;
   until: string | null;
-  how: "own-words" | "confirmed";
+  how: "own-words" | "confirmed" | "confirmed-here";
   inForce: boolean;
   revokedAt: string | null;
 }

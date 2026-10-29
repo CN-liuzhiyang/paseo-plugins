@@ -1321,7 +1321,10 @@ export function createEngine(deps: EngineDeps) {
     const fresh = !!target && freshInChat(target, r.via, nowMs);
     const opens = r.cmd === "track" || r.cmd === "note" || (ofOpen && fresh);
     const inChat = !!conversation && adminChat(conversation.labels, admin.chats);
-    const waive = opens && inChat;
+    // `--said -` in the admin's own chat: the words are the message itself, taken from the conversation by the same checks (the same turn, this
+    // very command, no agent's message between, not pasted), so a thing said about a matter (end it, hold it, call a judgment wrong) is let
+    // through as the other things told there are. Words the agent copied cannot be checked that way and are asked about (askInPlace).
+    const waive = (opens || (r.cmd === "say" && r.said === SAID_FROM_CHAT)) && inChat;
     // A taking back of one told in the admin's chat that is not just after is judged as it would be if it were: whatever else fails is
     // the reason that is kept, and when nothing does, the reason is that it is too old (not the one about where the chat came from).
     const tooOld = ofOpen && !fresh && inChat;
@@ -1498,7 +1501,7 @@ export function createEngine(deps: EngineDeps) {
       expected: r.expected ?? null,
       revoked: null,
     };
-    const events: EventBody[] = [{ type: "annotation.added", annotation }];
+    const events: EventBody[] = [{ type: "annotation.added", annotation }, ...withdrawMoot(caseId, annotation, r.id, nowMs)];
     const first =
       r.kind === "drop"
         ? `已记下（${annotation.id}）：不再追踪 ${n}。`
@@ -1566,12 +1569,15 @@ export function createEngine(deps: EngineDeps) {
   /** What a request does, as a verb phrase ("盯「体检」", "不再追踪 D1", "撤掉 D1 …"): what a confirmation card and the question asked in a conversation both say. */
   function whatOf(r: Exclude<Request, AnswerRequest | ConfirmRequest>, caseId: string | null, target: Annotation | null): string {
     const n = caseId ? numberOf(caseId) : "";
+    // The matter by its name as well as its number ("「年度体检」（D2）"): a number alone says nothing to the person.
+    const title = caseId ? state.items[caseId]?.title : undefined;
+    const named = title ? `「${clipMd(title, DESK_TITLE_MAX)}」（${n}）` : n;
     return r.cmd === "say"
-      ? `${KIND_LABEL[r.kind]} ${n}${r.kind === "hold" ? `（到 ${r.until}）` : ""}`
+      ? `${KIND_LABEL[r.kind]}${named.startsWith("「") ? "" : " "}${named}${r.kind === "hold" ? `（到 ${r.until}）` : ""}`
       : r.cmd === "track"
         ? `盯「${clipMd(r.title, DESK_TITLE_MAX)}」`
         : r.cmd === "note"
-          ? `给 ${n} 补一句`
+          ? (named.startsWith("「") ? `给${named}补一句` : `给 ${named} 补一句`)
           : target!.kind === "track"
             ? `撤掉 ${n}「${clipMd(target!.title ?? "", DESK_TITLE_MAX)}」（${stampOf(target!.at)} 交代的，撤掉就不再盯它）`
             : target!.kind === "note"
@@ -1602,21 +1608,50 @@ export function createEngine(deps: EngineDeps) {
     const detail = [
       `还没记下：我核对不上这是不是他这一轮自己说的。请把下面这句原样问他（一个字不改），然后停下来等他回：`,
       question,
-      `他回的整条消息就是一个「要」以后，跑：reconcile-say confirm --id ${asked.id} --said -`,
+      `他回了同意以后（比如「要」「对」），在前台跑：reconcile-say confirm --id ${asked.id} --said -`,
       `他回的是别的，或者 ${Math.round(CONFIRM_ASK_MS / 60_000)} 分钟内没回，这条不会就这么算数，会改成一张确认卡发给他，不用再跑。`,
     ].join("\n");
     return { outcome: "asked", detail, annotation: null, caseId, events: [], request: r, question, why, immediate: true, ...(askedAt ? { askedAt } : {}) };
   }
 
+  /**
+   * The questions asked to confirm a thing said about a matter (a confirmation card) that has become moot because the same thing is now in force:
+   * the matter is dropped (or held until the same day) and a card still asks whether to drop (or hold) it. They are taken back, with the reason
+   * "已办", so that the page, the sidebar count and the plan do not go on listing them. `except`: the request that is being applied now.
+   */
+  function withdrawMoot(caseId: string, said: Pick<Annotation, "kind" | "until">, except: string | null, nowMs: number): EventBody[] {
+    if (said.kind !== "drop" && said.kind !== "hold") return [];
+    const events: EventBody[] = [];
+    for (const c of Object.values(state.commitments)) {
+      if (c.origin.by !== "controller" || c.origin.who !== "confirm" || c.caseId !== caseId || !isOpen(c.status)) continue;
+      const id = c.key.slice(c.key.lastIndexOf(":") + 1);
+      if (id === except) continue;
+      const q = state.requests[id]?.request;
+      if (!q || q.cmd !== "say" || q.kind !== said.kind || (q.kind === "hold" && (q.until ?? null) !== (said.until ?? null))) continue;
+      events.push({ type: "commitment.changed", id: c.id, patch: { status: "cancelled", reason: `已办：${KIND_LABEL[said.kind]}已经生效了`, updatedAt: nowIso(nowMs) } });
+    }
+    return events;
+  }
+
+  /** The same, for what was in force before this code ran, or got there another way: a card that asks about a thing already in force is taken back. */
+  function sweepMoot(nowMs: number): void {
+    const events: EventBody[] = [];
+    for (const a of Object.values(state.annotations)) {
+      if (a.revoked || (a.kind !== "drop" && a.kind !== "hold")) continue;
+      events.push(...withdrawMoot(a.caseId, a, null, nowMs).filter((e) => e.type === "commitment.changed" && !events.some((x) => x.type === "commitment.changed" && x.id === e.id)));
+    }
+    if (events.length > 0) append(events);
+  }
+
   /** What \`confirm\` does once the yes is checked, and what a confirmation card's yes does: the request as it was asked, now. */
-  function applyConfirmed(r: Exclude<Request, AnswerRequest | ConfirmRequest>, cardCase: string | null, admin: Person & { id: string }, nowMs: number): Handled {
+  function applyConfirmed(r: Exclude<Request, AnswerRequest | ConfirmRequest>, cardCase: string | null, admin: Person & { id: string }, nowMs: number, how: "confirmed" | "confirmed-here" = "confirmed"): Handled {
     const target = r.cmd === "undo" ? (state.annotations[r.target] ?? null) : null;
     const found = r.cmd === "say" ? resolveItem(r.item) : r.cmd === "note" ? resolveDesk(r.item) : null;
     if (r.cmd === "undo" && (!target || target.revoked)) return { outcome: "rejected", detail: `确认了，但 ${r.target} 已经不在生效了`, annotation: null, caseId: cardCase, events: [] };
     if (found && "error" in found) return { outcome: "rejected", detail: `确认了，但${found.error}`, annotation: null, caseId: cardCase, events: [] };
-    if (r.cmd === "track") return applyTrack(r, admin.id, "confirmed", nowMs);
-    if (r.cmd === "note") return applyNote(r, (found as { caseId: string }).caseId, admin.id, "confirmed", nowMs);
-    return applySaid(r, target?.caseId ?? (found as { caseId: string }).caseId, target, admin.id, "confirmed", nowMs);
+    if (r.cmd === "track") return applyTrack(r, admin.id, how, nowMs);
+    if (r.cmd === "note") return applyNote(r, (found as { caseId: string }).caseId, admin.id, how, nowMs);
+    return applySaid(r, target?.caseId ?? (found as { caseId: string }).caseId, target, admin.id, how, nowMs);
   }
 
   /** The person's yes to a question asked in the conversation (askInPlace): the checks of confirmWords, once, in the same conversation, soon enough. */
@@ -1640,7 +1675,7 @@ export function createEngine(deps: EngineDeps) {
       recheck = "error" in found ? found.error : q.cmd === "say" ? checkSay(q, found.caseId, nowMs) : checkNote(q, found.caseId, nowMs);
     }
     if (recheck) return reject(recheck);
-    return { ...applyConfirmed(q, null, admin, nowMs), request: r, vouch: `${message}\u0001c:${r.pending}` };
+    return { ...applyConfirmed(q, null, admin, nowMs, "confirmed-here"), request: r, vouch: `${message}\u0001c:${r.pending}` };
   }
 
   function propose(asked: Exclude<Request, AnswerRequest | ConfirmRequest>, caseId: string | null, target: Annotation | null, why: string, admin: Person & { id: string }, nowMs: number): Handled {
@@ -1767,6 +1802,7 @@ export function createEngine(deps: EngineDeps) {
   /** Reads the requests waiting: each is handled once, even if the receipt was lost to a crash. */
   async function ingest(nowMs: number, plan: PlanEntry[]): Promise<void> {
     settleConfirmed(nowMs, plan);
+    sweepMoot(nowMs);
     expireAsks(nowMs, plan);
     const dir = deps.requestsDir;
     if (!dir) return;
@@ -2166,7 +2202,7 @@ export function createEngine(deps: EngineDeps) {
           stage: "dropped",
           health: "done",
           headline: drop
-            ? `不再追踪（${personName(drop.by)} ${drop.at.slice(5, 16).replace("T", " ")} ${drop.how === "confirmed" ? "在卡片上确认" : "说"}：「${clip(drop.said, 60)}」）`
+            ? `不再追踪（${personName(drop.by)} ${drop.at.slice(5, 16).replace("T", " ")} ${drop.how === "confirmed" ? "在卡片上确认" : drop.how === "confirmed-here" ? "在对话里确认" : "说"}：「${clip(drop.said, 60)}」）`
             : `不再盯了（${personName(withdrawn!.revoked!.by)} ${stampOf(withdrawn!.revoked!.at)} 撤销了交代：「${clip(withdrawn!.said, 60)}」）`,
           next: { actor: "nobody", what: "不再追踪" },
           notice: null,
