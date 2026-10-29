@@ -537,3 +537,58 @@ test("a reply that is not 照办 to a confirmation: recorded, and the receipt sa
   ));
 
 void [own, deskRule, DESK_RULE];
+
+// ---- a question that has to be chosen from ---------------------------------------------------------------------------------------------
+
+test("a question that takes no words of their own: a sentence that is none of the options is not recorded, a number or the option's words are", async () => {
+  const fixed = mini.replace("allowOther: true", "allowOther: false");
+  const w = await makeWorld({ start: "2026-10-13 10:00", config: { rules: { "mini.mjs": fixed }, persons } });
+  try {
+    w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
+    await w.run("2026-10-14 18:30");
+    assert.match(push(w), /^b\n1 A\n2 过 3 天再看\n引用这条回一个数字。（问题 #1-1）$/, "and the push does not offer to write");
+    const refused = await answerIn(w, MINE, reply(w, "随便哪个"), "#1-1");
+    assert.equal(refused.outcome, "rejected");
+    assert.equal(refused.text, "没收下：这个问题只能从选项里选（1 A；2 过 3 天再看），他写的「随便哪个」对不上任何一项");
+    assert.equal(answersOf(w).length, 0);
+    const taken = await answerIn(w, MINE, reply(w, "A"), "#1-1");
+    assert.equal(taken.outcome, "applied");
+    assert.equal(commitment(w, 1).answer!.option, "a");
+  } finally {
+    w.close();
+  }
+});
+
+test("only the number: a message that is the question's number and nothing else says no answer", async () =>
+  withQuestions([1], async (w) => {
+    const receipt = await answerIn(w, MINE, "#1-1", "#1-1");
+    assert.equal(receipt.outcome, "rejected");
+    assert.equal(receipt.text, "没收下：他只写了编号，没写答案");
+  }));
+
+test("words that name two questions answer neither: one sentence answers one question, and the receipt says so", async () =>
+  withQuestions([1, 2], async (w) => {
+    const receipt = await answerIn(w, MINE, "#1-1 选 1，#2-1 选 2", "#1-1");
+    assert.equal(receipt.outcome, "rejected");
+    assert.equal(receipt.text, "没收下：他的话里提到了好几个问题（#1-1、#2-1），一句话只答一个，问他先答哪个");
+    assert.equal(answersOf(w).length, 0);
+  }));
+
+test("words that name two matters and no question number answer neither", async () =>
+  withQuestions([1, 2], async (w) => {
+    const receipt = await answerIn(w, MINE, "#1 和 #2 都选 1", "#1-1");
+    assert.equal(receipt.outcome, "rejected");
+    assert.equal(receipt.text, "没收下：他的话里提到了好几件事（#1、#2），问他答的是哪个问题");
+    assert.equal(answersOf(w).length, 0);
+  }));
+
+test("a person's message that comes only after the command is not what the command answers", async () =>
+  withQuestions([1], async (w) => {
+    chat(w, MINE);
+    w.conversations.get("agent-me")!.turn!.steps.push({ kind: "command", text: commandFor({ cmd: "answer", ask: "#1-1", said: "-" }) }, { kind: "person", text: "2" });
+    const id = w.say({ cmd: "answer", ask: "#1-1", said: "-" });
+    await w.engine.tick();
+    assert.equal(w.receipt(id)!.outcome, "rejected");
+    assert.equal(w.store.state.requests[id]!.why, "这条命令之前，这一轮里没有人发的消息");
+    assert.equal(answersOf(w).length, 0);
+  }));

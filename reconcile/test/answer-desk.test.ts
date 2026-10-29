@@ -91,7 +91,7 @@ test("plan.md: the questions waiting with their numbers, then the list by group 
       const text = planText(status);
       assert.match(text, /^# 事项追踪（test，正式）\n/);
       assert.match(text, /\n## 没答的问题（1）\n答的时候用编号：推送最后一行「（问题 D1-1）」就是它；在聊天里答，让对话里的 agent 跑 `reconcile-say answer --ask <编号> --said -`。\n- D1-1 · 年度体检（D1）：体检约上了吗？ — 1 已约上了；2 还没约；3 过 3 天再看；4 不用盯了；或者自己写一句 · \d\d-\d\d \d\d:\d\d 问的\n/);
-      assert.match(text, /\n## 要你做的（1）\n- D1 年度体检：任务还没完成（等你定：体检约上了吗？）（.+）\n/);
+      assert.match(text, /\n## 要你做的（1）\n- D1 年度体检：任务还没完成（等你定：体检约上了吗？） · 你 · .+\n/);
       assert.match(text, /\n {2}- 热：/);
       assert.match(text, /\n {2}- 第 1 次看（\d\d-\d\d \d\d:\d\d）：读了飞书任务，没有预约记录 → 任务还没完成；下次 10-15 10:00\n/);
       assert.ok(text.indexOf("## 没答的问题") < text.indexOf("## 要你做的"), "what waits for the person comes first");

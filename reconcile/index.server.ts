@@ -45,7 +45,7 @@ const PLAN_GROUPS: Array<Group | "other"> = ["me", "errors", "them", "system", "
 /** One case as plan.md says it: the line, then what stands under it. Text from outside (titles, rule output, a model's) is clipped and escaped. */
 function planCase(c: EngineStatus["cases"][number]): string[] {
   const row = c.row;
-  const who = row?.who.label ? `（${clipMd(row.who.label, 60)}）` : "";
+  const who = row?.who.label ? ` · ${clipMd(row.who.label, 60)}` : "";
   const lines = [`- ${clipMd(row?.number ?? c.caseId, 40)} ${clipMd(row?.title ?? c.title, 60)}：${c.assessment ? clipMd(c.assessment.headline, 200) : "（还没判断）"}${who}`];
   if (c.assessment?.notice) lines.push(`  - ⚠ ${c.assessment.notice}`);
   lines.push(`  - 热：${c.hot.join("；")}`);

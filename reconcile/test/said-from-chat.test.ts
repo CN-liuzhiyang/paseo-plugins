@@ -253,3 +253,12 @@ test("a dash in a command line is read as the dash by the plugin the way the com
     assert.deepEqual(sayCalls(line).map((c) => c.request.said), ["-"], line);
   }
 });
+
+test("of several messages of the person's before the command, the last is the words", () =>
+  withDesk(async (w) => {
+    own(w, "先说一句别的", SAID);
+    const id = say(w, track(FROM_CHAT, "年度体检", "personal"));
+    await w.engine.tick();
+    assert.equal(outcome(w, id), "applied");
+    assert.equal(annotations(w)[0]!.said, SAID);
+  }));
