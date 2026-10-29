@@ -1,5 +1,5 @@
 import type { Action, Annotation, Assessment, Card, Commitment, EvalKind, FlowEnd, FlowRec, Item, Note, Observation, ObserveRequest, SourceHealth } from "../shared/model";
-import type { Request } from "./requests";
+import type { AskedAt, Request } from "./requests";
 import { unfinishedWhy } from "./flows";
 import type { RulesHeld } from "../shared/status";
 
@@ -34,7 +34,7 @@ export type EventBody =
   | { type: "annotation.added"; annotation: Annotation }
   | { type: "annotation.revoked"; id: string; said: string; by: string }
   /** A request from a conversation, handled: its outcome, and for one waiting on a card, the request itself. */
-  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "asked" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string; why?: string; waived?: true; question?: string }
+  | { type: "request.handled"; id: string; outcome: "applied" | "proposed" | "asked" | "rejected"; detail: string; annotation: string | null; request?: Request; original?: string; vouch?: string; why?: string; waived?: true; question?: string; askedAt?: AskedAt }
   /** The intent to start a flow for a case, written before the process is started (server/flows.ts). */
   | { type: "flow.intent"; rec: FlowRec }
   /** The process was started (its pid, when the system gave one). */
@@ -85,7 +85,7 @@ export interface State {
    * item it names (one request a message, or one an item it names). why: for words not taken as
    * theirs, why not; only here, the receipt does not say.
    */
-  requests: Record<string, { outcome: "applied" | "proposed" | "asked" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string; waived?: true; question?: string }>;
+  requests: Record<string, { outcome: "applied" | "proposed" | "asked" | "rejected"; detail: string; annotation: string | null; at: string; request?: Request; vouch?: string; why?: string; waived?: true; question?: string; askedAt?: AskedAt }>;
   /** By case: what its rule asks to have watched, and since when it asks that. Absent in states from before it was kept. */
   observing?: Record<string, { at: string; requests: ObserveRequest[] }>;
   /** The runs of flows started for cases, by run id. Absent in states from before flows were. */
@@ -202,7 +202,7 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     }
     case "request.handled":
-      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}), ...(event.vouch ? { vouch: event.vouch } : {}), ...(event.why ? { why: event.why } : {}), ...(event.waived ? { waived: true as const } : {}), ...(event.question ? { question: event.question } : {}) };
+      state.requests[event.id] = { outcome: event.outcome, detail: event.detail, annotation: event.annotation, at: event.at, ...(event.request ? { request: event.request } : {}), ...(event.vouch ? { vouch: event.vouch } : {}), ...(event.why ? { why: event.why } : {}), ...(event.waived ? { waived: true as const } : {}), ...(event.question ? { question: event.question } : {}), ...(event.askedAt ? { askedAt: event.askedAt } : {}) };
       return;
     case "workspace":
       state.workspaceId = event.workspaceId;

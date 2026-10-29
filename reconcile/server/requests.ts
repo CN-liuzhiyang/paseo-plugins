@@ -528,9 +528,18 @@ function commandInTurn(r: Request, conversation: Conversation | null, dataDir: s
   if (!turn) return { why: "说这句话的对话这会儿没在跑，对不上是哪一轮说的" };
   const steps = turn.steps;
   if (!steps.some((s) => s.kind === "person")) return { why: "这一轮不是人发消息开始的（比如被通知或定时叫醒），不算本人说的" };
-  const run = steps.findLastIndex((s) => s.kind === "command" && sayCalls(s.text).some((call) => sent(call, r, dataDir)));
+  const run = commandStep(r, steps, dataDir);
   if (run < 0) return { why: "这一轮里找不到这次的 reconcile-say 调用（命令里的事项、改动和原话要和这次的一致）" };
   return { steps, run };
+}
+
+/** The step of the turn that is the last command to send this very request; -1 when there is none. */
+export const commandStep = (r: Request, steps: TurnStep[], dataDir: string | null): number => steps.findLastIndex((s) => s.kind === "command" && sayCalls(s.text).some((call) => sent(call, r, dataDir)));
+
+/** Where a question was put to the person: the turn of the conversation, and the step of the command that made it (null: not found). */
+export interface AskedAt {
+  turn: string;
+  step: number | null;
 }
 
 /** Why words are not taken when another agent's message came into the turn between the person's message and the command. */
@@ -636,9 +645,12 @@ export function answerWords(
 /** Text as compared when checking that the agent asked the controller's question: whitespace, Markdown marks and quote styles do not count. */
 export const plain = (text: string) => text.normalize("NFKC").replace(/[\s\\`*_~#>[\]()<>|"'“”‘’「」『』«»]/g, "").toLowerCase();
 
-/** Words that say yes and nothing else (a particle may follow, and a mark). */
-const YES = new Set(["要", "是", "对", "好", "嗯", "行", "可以", "确认", "照办", "记下", "盯", "ok", "okay", "yes", "y"]);
-const YES_PARTICLES = /(?:的|吧|啊|呀|哦|啦|了|呢)+$/;
+/**
+ * Words that say yes and nothing else (a particle may follow, and a mark): the ones the question names ("回「要」就办"), and no everyday
+ * "好" or "嗯", which a person says to anything.
+ */
+const YES = new Set(["要", "确认", "照办"]);
+const YES_PARTICLES = /(?:的|吧)$/;
 const NOT_YES = /不|别|没|算了|取消|等等|先|再/;
 
 /** Whether a message is a yes and nothing else: one of the yes words, in six characters at most, with no part of a no. */
@@ -646,7 +658,7 @@ export function isYes(message: string): boolean {
   const flat = message.normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
   if ([...flat].length === 0 || [...flat].length > 6 || NOT_YES.test(flat)) return false;
   const stem = flat.replace(YES_PARTICLES, "");
-  return YES.has(stem) || (stem.length > 1 && [...stem].every((ch) => ch === stem[0]) && YES.has(stem[0]!));
+  return YES.has(stem);
 }
 
 /**
@@ -661,6 +673,7 @@ export function confirmWords(
   question: string,
   dataDir: string | null = null,
   waiveSource = false,
+  asked: AskedAt | null = null,
 ): { why: string } | { message: { step: number; text: string } } {
   const found = commandInTurn(r, conversation, dataDir, waiveSource);
   if ("why" in found) return found;
@@ -668,6 +681,9 @@ export function confirmWords(
   const said = steps.findLastIndex((s, i) => i < run && s.kind === "person");
   if (said < 0) return { why: "这条命令之前，这一轮里没有人发的消息" };
   if (steps.slice(said + 1, run).some((s) => s.kind === "agent")) return { why: AGENT_CAME_IN };
+  // The yes is to a question that is already there: in the turn the question was made in, the person's message has to come after the command that made it
+  // (and where that command is not known, no message of that turn does). A yes said before the question was there was said to something else.
+  if (asked && conversation!.turn!.id === asked.turn && (asked.step === null || said <= asked.step)) return { why: "他的这条消息在问话建出来之前（同一轮里，要在建出待确认的那条命令之后）" };
   const text = (steps[said] as { text: string }).text;
   if (!isYes(text)) return { why: "他回的不是一个「要」（整条只是一个肯定词才算）" };
   // What the agent said right before it: its messages in this turn up to the person's, and, when those begin the turn, the end of the turn before.

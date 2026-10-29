@@ -15,7 +15,7 @@ import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, recordingContext, type CommitmentSpec, type ContextInputs, type CtxCall, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import type { CaptureInput } from "./capsule";
-import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, confirmWords, personsOwn, type AnswerRequest, type ConfirmRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
+import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, confirmWords, personsOwn, commandStep, type AskedAt, type AnswerRequest, type ConfirmRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { AgentArchiver } from "./archive";
@@ -1119,6 +1119,8 @@ export function createEngine(deps: EngineDeps) {
     events: EventBody[];
     /** For one that is asked of the person in the conversation (outcome "asked"): the sentence the agent is to ask, word for word. */
     question?: string;
+    /** For the same: the turn and the command that made the question, which the person's yes must come after. */
+    askedAt?: AskedAt;
     /** For one waiting on a card: the request as it will be applied on yes. */
     request?: Request;
     /** The words as sent, when the card shows them shortened. */
@@ -1351,7 +1353,12 @@ export function createEngine(deps: EngineDeps) {
     }
     // The person is in this conversation (not another agent's, a flow's or a card's; one of a chat app's only when it is the admin's own
     // chat): asked there, through the agent, and not by a card that is somewhere else. Where nobody is, a card, as before.
-    if (why && conversation && deps.askHere !== false && personsOwn(conversation, admin.chats)) return askInPlace(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, why, nowMs);
+    if (why && conversation && deps.askHere !== false && personsOwn(conversation, admin.chats)) {
+      // Where the question is made: a yes said before this command was not said to it. (`asked` is the request as the agent ran it.)
+      const step = conversation.turn ? commandStep(asked, conversation.turn.steps, dataDir) : -1;
+      const askedAt: AskedAt | null = conversation.turn ? { turn: conversation.turn.id, step: step < 0 ? null : step } : null;
+      return askInPlace(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, why, nowMs, askedAt);
+    }
     if (why) return propose(r.cmd === "undo" ? { ...r, target: target!.id } : r, caseId, target, why, admin, nowMs);
     const applied = r.cmd === "track" ? applyTrack(r, admin.id, "own-words", nowMs) : r.cmd === "note" ? applyNote(r, caseId!, admin.id, "own-words", nowMs) : applySaid(r, caseId!, target, admin.id, "own-words", nowMs);
     // What was let through on the waiver says so in the journal, on the words it kept and on the request.
@@ -1574,24 +1581,31 @@ export function createEngine(deps: EngineDeps) {
 
   /** How long a question asked in the conversation can be answered with a yes. */
   const CONFIRM_ASK_MS = 30 * 60_000;
+  /** How much of the words a question shows (and so records). */
+  const ASKED_WORDS_MAX = 200;
 
   /**
    * Words that may not be the person's own, said in a conversation the person is in: not a card, but a question the agent asks them
    * there, word for word as written here. Their "yes" in the next message, with the question in what the agent said right before it,
    * is what \`confirm\` checks. The request is kept in the journal as it will be applied.
    */
-  function askInPlace(asked: Exclude<Request, AnswerRequest | ConfirmRequest>, caseId: string | null, target: Annotation | null, why: string, nowMs: number): Handled {
-    const r = { ...asked, said: clip(asked.said, 200) };
+  function askInPlace(asked: Exclude<Request, AnswerRequest | ConfirmRequest>, caseId: string | null, target: Annotation | null, why: string, nowMs: number, askedAt: AskedAt | null): Handled {
+    // What is recorded is what the person is shown, as it is shown: the words, cut to the same length for both (the agent's own copy of what they said
+    // may not be what they said, and asking only about the matter would let them say yes to words they never saw).
+    const r = { ...asked, said: clip(asked.said, ASKED_WORDS_MAX), ...("what" in asked && asked.what !== undefined ? { what: clip(asked.what, ASKED_WORDS_MAX) } : {}), ...("expected" in asked && asked.expected !== undefined ? { expected: clip(asked.expected, ASKED_WORDS_MAX) } : {}) };
+    const longer = (text: string | undefined) => text !== undefined && text.replace(/\s+/g, " ").trim().length > ASKED_WORDS_MAX;
+    const cut = longer(asked.said) || ("what" in asked && longer(asked.what)) || ("expected" in asked && longer(asked.expected));
     const what = whatOf(r, caseId, target);
+    const words = [`记下的原话是「${r.said}」`, ...("what" in r && r.what ? [`哪里不对：「${r.what}」`] : []), ...("expected" in r && r.expected ? [`应该是：「${r.expected}」`] : [])].join("；");
     // Plain text, said to a person: no Markdown escapes.
-    const question = `要我${what.replace(/\\(.)/g, "$1")}${/[0-9A-Za-z]$/.test(what) ? " " : ""}吗？（回「要」就办）`;
+    const question = `要我${what.replace(/\\(.)/g, "$1")}${/[0-9A-Za-z]$/.test(what) ? " " : ""}吗？${words}${cut ? `（话太长，只到前 ${ASKED_WORDS_MAX} 字，记下的也只是这一段）` : ""}（回「要」就办）`;
     const detail = [
       `还没记下：我核对不上这是不是他这一轮自己说的。请把下面这句原样问他（一个字不改），然后停下来等他回：`,
       question,
       `他回的整条消息就是一个「要」以后，跑：reconcile-say confirm --id ${asked.id} --said -`,
-      `他回的是别的，或者 ${Math.round(CONFIRM_ASK_MS / 60_000)} 分钟内没回，这件事就不算数，不用再跑。`,
+      `他回的是别的，或者 ${Math.round(CONFIRM_ASK_MS / 60_000)} 分钟内没回，这条不会就这么算数，会改成一张确认卡发给他，不用再跑。`,
     ].join("\n");
-    return { outcome: "asked", detail, annotation: null, caseId, events: [], request: r, question, why, immediate: true };
+    return { outcome: "asked", detail, annotation: null, caseId, events: [], request: r, question, why, immediate: true, ...(askedAt ? { askedAt } : {}) };
   }
 
   /** What \`confirm\` does once the yes is checked, and what a confirmation card's yes does: the request as it was asked, now. */
@@ -1615,7 +1629,7 @@ export function createEngine(deps: EngineDeps) {
     if (nowMs - Date.parse(pending.at) > CONFIRM_ASK_MS) return reject(`问了已经超过 ${Math.round(CONFIRM_ASK_MS / 60_000)} 分钟，作废了。要办的话让他重新说一遍`);
     if (Object.values(state.requests).some((x) => x.request?.cmd === "confirm" && x.request.pending === r.pending && x.vouch)) return reject("这条话已经确认过了，一条只用一次");
     const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
-    const words = deps.conversation ? confirmWords(r, conversation, pending.question, deps.requestsDir ? path.dirname(deps.requestsDir) : null, !!conversation && adminChat(conversation.labels, admin.chats)) : { why: "这个 Paseo 没给插件查对话的接口" };
+    const words = deps.conversation ? confirmWords(r, conversation, pending.question, deps.requestsDir ? path.dirname(deps.requestsDir) : null, !!conversation && adminChat(conversation.labels, admin.chats), pending.askedAt ?? null) : { why: "这个 Paseo 没给插件查对话的接口" };
     if ("why" in words) return reject("对不上他刚在这个对话里对那句问话回了「要」，不记。要办的话让他重新说一遍", words.why);
     const message = vouchKey(r.via, conversation!.turn!.id, words.message.step, words.message.text);
     if (Object.values(state.requests).some((x) => x.vouch?.startsWith(`${message}\u0001`))) return reject("他的这条消息这一轮里已经用来放行过一条了", "message used");
@@ -1712,9 +1726,48 @@ export function createEngine(deps: EngineDeps) {
     }
   }
 
+  /**
+   * A question asked in the conversation that nobody confirmed in time (the agent did not run confirm, the yes did not check out, the person did not
+   * answer) does not just lapse: it becomes the confirmation card it would have been, with the words on it. Once: the record is replaced.
+   */
+  function expireAsks(nowMs: number, plan: PlanEntry[]): void {
+    const admin = Object.values(config.persons).find((p) => p.admin);
+    if (!admin) return;
+    for (const [id, rec] of Object.entries(state.requests)) {
+      const q = rec.request;
+      if (rec.outcome !== "asked" || !rec.question || !q || q.cmd === "answer" || q.cmd === "confirm") continue;
+      if (nowMs - Date.parse(rec.at) <= CONFIRM_ASK_MS) continue;
+      if (Object.values(state.requests).some((x) => x.request?.cmd === "confirm" && x.request.pending === id && x.vouch)) continue;
+      const lead = "当场问没确认上，改发卡";
+      let caseId: string | null = null;
+      let target: Annotation | null = null;
+      let problem: string | null = null;
+      if (q.cmd === "say" || q.cmd === "note") {
+        const found = q.cmd === "say" ? resolveItem(q.item) : resolveDesk(q.item);
+        if ("error" in found) problem = found.error;
+        else {
+          caseId = found.caseId;
+          problem = q.cmd === "say" ? checkSay(q, caseId, nowMs) : checkNote(q, caseId, nowMs);
+        }
+      } else if (q.cmd === "undo") {
+        target = state.annotations[q.target] ?? null;
+        if (!target || target.revoked) problem = `${q.target} 已经不在生效了`;
+        else caseId = target.caseId;
+      }
+      const handled: Handled = problem ? { outcome: "rejected", detail: `没收下：${lead}，但${problem}`, annotation: null, caseId, events: [] } : propose(q, caseId, target, rec.why ?? "", admin, nowMs);
+      const detail = handled.outcome === "proposed" ? `${lead}。${handled.detail}` : problem ? handled.detail : `没收下：${lead}，但${handled.detail.replace(/^没收下：/, "")}`;
+      const why = `${lead}${rec.why ? `（${rec.why}）` : ""}`;
+      append([...handled.events, { type: "request.handled", id, outcome: handled.outcome, detail, annotation: null, ...(handled.outcome === "proposed" ? { request: handled.request! } : {}), ...(handled.original ? { original: handled.original } : {}), why }]);
+      deps.log(`the question for ${id} was not confirmed in the conversation: ${handled.outcome}`);
+      plan.push({ at: nowIso(nowMs), kind: "said", person: null, summary: detail.split("\n")[0]! });
+      if (q.via) toldQueue.push({ via: q.via, requestId: id, text: `事项追踪：${clip(detail.split("\n")[0]!, 200)}` });
+    }
+  }
+
   /** Reads the requests waiting: each is handled once, even if the receipt was lost to a crash. */
   async function ingest(nowMs: number, plan: PlanEntry[]): Promise<void> {
     settleConfirmed(nowMs, plan);
+    expireAsks(nowMs, plan);
     const dir = deps.requestsDir;
     if (!dir) return;
     sweepRequests(dir, nowMs);
@@ -1738,7 +1791,7 @@ export function createEngine(deps: EngineDeps) {
       const before = new Map(Object.values(state.commitments).filter((c) => handled.caseId && c.caseId === handled.caseId).map((c) => [c.id, c.status] as const));
       append([
         ...handled.events,
-        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}), ...(handled.why ? { why: handled.why } : {}), ...(handled.waived ? { waived: true as const } : {}), ...(handled.question ? { question: handled.question } : {}) },
+        { type: "request.handled", id: incoming.id, outcome: handled.outcome, detail: handled.detail, annotation: handled.annotation, ...(handled.request ? { request: handled.request } : {}), ...(handled.original ? { original: handled.original } : {}), ...(handled.vouch ? { vouch: handled.vouch } : {}), ...(handled.why ? { why: handled.why } : {}), ...(handled.waived ? { waived: true as const } : {}), ...(handled.question ? { question: handled.question } : {}), ...(handled.askedAt ? { askedAt: handled.askedAt } : {}) },
       ]);
       plan.push({ at: nowIso(nowMs), kind: "said", person: null, summary: handled.detail.split("\n")[0]! });
       const undoOf = "request" in incoming && incoming.request.cmd === "undo" && handled.outcome === "applied" ? (state.annotations[handled.annotation!]?.kind ?? null) : null;
@@ -3067,6 +3120,9 @@ export function createEngine(deps: EngineDeps) {
   const THREAD_TRIES = 5;
   const THREAD_PER_TICK = 12;
 
+  /** The labels of the admin's own private chats (persons.json). */
+  const adminChats = () => Object.values(config.persons).find((p) => p.admin)?.chats ?? [];
+
   /** The conversation a question belongs to: the one the person last spoke of its matter in (for a confirmation: said the words in). */
   function threadVia(c: Commitment): string | null {
     if (isConfirm(c)) return state.requests[c.key.slice(c.key.lastIndexOf(":") + 1)]?.request?.via ?? null;
@@ -3082,7 +3138,7 @@ export function createEngine(deps: EngineDeps) {
     let agent: string | null = null;
     if (via && deps.conversation) {
       const conversation = await deps.conversation(via).catch(() => null);
-      if (conversation && !conversation.labels.source) agent = via;
+      if (conversation && !conversation.labels.source && personsOwn(conversation, adminChats())) agent = via;
     }
     threadWhere.set(c.id, { agent, at: nowMs });
     return agent;
@@ -3130,7 +3186,7 @@ export function createEngine(deps: EngineDeps) {
     }
     for (const told of toldQueue.splice(0)) {
       const conversation = deps.conversation ? await deps.conversation(told.via).catch(() => null) : null;
-      if (!conversation || conversation.labels.source) continue;
+      if (!conversation || conversation.labels.source || !personsOwn(conversation, adminChats())) continue;
       await put(told.via, { type: "plugin", id: lineItemId(told.requestId), kind: THREAD_KIND, version: THREAD_VERSION, data: { shape: "line", text: told.text } }).catch((error: unknown) => deps.log(`telling ${told.via} how a confirmation ended failed: ${(error as Error).message}`));
     }
   }

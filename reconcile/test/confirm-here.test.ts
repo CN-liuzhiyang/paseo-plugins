@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { TurnStep } from "../server/requests";
+import { isYes, type TurnStep } from "../server/requests";
 import type { World } from "./helpers";
-import { assessed, converse, item, own, PERSONS, say, tell, track, withDesk } from "./desk-kit";
+import { assessed, converse, item, note, own, PERSONS, say, tell, track, withDesk } from "./desk-kit";
 
 // Words that cannot be taken as the person's own, said in a conversation the person is in, are not put on a card: the agent is given a
 // sentence to ask them there, and their yes (confirm) is checked against the conversation. Each check of that yes has a test that fails
@@ -56,9 +56,9 @@ test("their yes after the question was asked word for word tells the matter, as 
 
 test("Markdown, quote styles and spaces in the agent's wording do not matter; a particle after the yes does not either", () =>
   withHere(async (w) => {
-    const { id } = await asked(w);
-    const said = '**要我盯 "年度体检" 吗？**（回 “要” 就办）';
-    const done = await reply(w, id, "好的呀", said);
+    const { id, question } = await asked(w);
+    const said = `**${question.replace("吗？", "吗？ ").replace(/「/g, ' "').replace(/」/g, '" ')}**`;
+    const done = await reply(w, id, "要的", said);
     assert.equal(done.outcome, "applied", done.text);
   }));
 
@@ -83,7 +83,7 @@ test("the question said only after their message (the yes came before it was ask
 test("the question said in the same turn, right before their yes, counts as much as one said in the turn before", () =>
   withHere(async (w) => {
     const { id, question } = await asked(w);
-    const done = await confirmIn(w, id, [{ kind: "text", text: question }, { kind: "person", text: "好的" }]);
+    const done = await confirmIn(w, id, [{ kind: "text", text: question }, { kind: "person", text: "要吧" }]);
     assert.equal(done.outcome, "applied", done.text);
   }));
 
@@ -130,7 +130,6 @@ test("after 30 minutes it is no longer asked: the yes is not taken", () =>
     w.clock.now += 31 * 60_000;
     const done = await reply(w, id, "要", question);
     assert.equal(done.outcome, "rejected", done.text);
-    assert.match(done.text, /30 分钟/);
     assert.equal(tracked(w), 0);
   }));
 
@@ -255,3 +254,178 @@ test("a request that was put on a card (nobody could be asked) cannot be confirm
     },
     { persons: mine() },
   ));
+
+// ---- fix B: what is asked is what is recorded; the yes comes after the question; few yes words; no silent lapse ------------------------
+
+test("the question carries the words that will be recorded as theirs, and what is recorded is those words", () =>
+  withHere(async (w) => {
+    const AGENT_WORDS = "已经约好了，不用再盯，也不要再问我";
+    converse(w, {}, [{ kind: "person", text: "随便聊聊，月底前要约上体检" }]);
+    const id = say(w, track(AGENT_WORDS, "年度体检", "personal"));
+    await w.engine.tick();
+    const question = w.store.state.requests[id]!.question!;
+    assert.ok(question.includes(`「${AGENT_WORDS}」`), question);
+    assert.ok(w.receipt(id)!.text.includes(question));
+    assert.equal((await reply(w, id, "要", question)).outcome, "applied");
+    assert.equal(Object.values(w.store.state.annotations).find((a) => a.kind === "track")?.said, AGENT_WORDS);
+  }));
+
+test("a line added to a matter: the person is shown the line", () =>
+  withHere(async (w) => {
+    converse(w, {}, [{ kind: "person", text: "帮我盯一下体检，月底前要约上" }]);
+    say(w, track("-", "年度体检", "personal"));
+    await w.engine.tick();
+    assert.ok(item(w, 1), "told");
+    const LINE = "体检已经做完了，这件事结束";
+    converse(w, {}, [{ kind: "person", text: "补一句，下周三下午去" }]);
+    const id = say(w, note("D1", LINE));
+    await w.engine.tick();
+    assert.ok(w.store.state.requests[id]!.question!.includes(`「${LINE}」`));
+  }));
+
+test("a judgment said to be wrong: the question carries what is wrong and what it should be", () =>
+  withHere(async (w) => {
+    converse(w, {}, [{ kind: "person", text: "帮我盯一下体检，月底前要约上" }]);
+    say(w, track("-", "年度体检", "personal"));
+    await w.engine.tick();
+    converse(w, {}, [{ kind: "person", text: "这个判断好像不太对" }]);
+    const id = say(w, { cmd: "say", kind: "wrong", item: "D1", said: "判断不对", what: "阶段说成了已约上", expected: "还没约" });
+    await w.engine.tick();
+    const question = w.store.state.requests[id]!.question!;
+    assert.match(question, /「阶段说成了已约上」/);
+    assert.match(question, /「还没约」/);
+  }));
+
+test("words too long to show are cut, the question says so, and what is recorded is what was shown", () =>
+  withHere(async (w) => {
+    const LONG = `这是一段很长的话。${"约上体检，".repeat(80)}`;
+    converse(w, {}, [{ kind: "person", text: "随便聊聊，月底前要约上体检" }]);
+    const id = say(w, track(LONG, "年度体检", "personal"));
+    await w.engine.tick();
+    const question = w.store.state.requests[id]!.question!;
+    assert.match(question, /话太长/);
+    const shown = w.store.state.requests[id]!.request!.said;
+    assert.ok(shown.length <= 200 && question.includes(`「${shown}」`));
+    assert.equal((await reply(w, id, "要", question)).outcome, "applied");
+    assert.equal(Object.values(w.store.state.annotations).find((a) => a.kind === "track")?.said, shown);
+  }));
+
+test("the question said ahead of time and a 要 said to something else, with the command run after both: not their yes to it", () =>
+  withHere(async (w) => {
+    const PRE_SAID = "顺便一说：要我盯「年度体检」吗？记下的原话是「帮我盯一下体检」（回「要」就办）你先看看别的，晚点回我。";
+    converse(w, {}, [{ kind: "person", text: "要" }], PRE_SAID);
+    const id = say(w, track("帮我盯一下体检", "年度体检", "personal"));
+    await w.engine.tick();
+    assert.equal(w.receipt(id)!.outcome, "asked");
+    const cid = say(w, { cmd: "confirm", pending: id, said: "-" });
+    await w.engine.tick();
+    assert.equal(w.receipt(cid)!.outcome, "rejected", w.receipt(cid)!.text);
+    assert.equal(tracked(w), 0);
+  }));
+
+test("the same with a 好 (not a yes word at all)", () =>
+  withHere(async (w) => {
+    const PRE_SAID = "顺便一说：要我盯「年度体检」吗？记下的原话是「帮我盯一下体检」（回「要」就办）你先看看别的，晚点回我。";
+    converse(w, {}, [{ kind: "person", text: "好" }], PRE_SAID);
+    const id = say(w, track("帮我盯一下体检", "年度体检", "personal"));
+    await w.engine.tick();
+    const cid = say(w, { cmd: "confirm", pending: id, said: "-" });
+    await w.engine.tick();
+    assert.notEqual(w.receipt(cid)!.outcome, "applied");
+    assert.equal(tracked(w), 0);
+  }));
+
+test("in the turn the question was made in, their yes after the command that made it counts", () =>
+  withHere(async (w) => {
+    const c = converse(w, {}, [{ kind: "person", text: "随便聊聊，月底前要约上体检" }]);
+    const id = say(w, track(NOT_THEIRS, "年度体检", "personal"));
+    await w.engine.tick();
+    const question = w.store.state.requests[id]!.question!;
+    c.turn!.steps.push({ kind: "text", text: question }, { kind: "person", text: "要" });
+    const cid = say(w, { cmd: "confirm", pending: id, said: "-" });
+    await w.engine.tick();
+    assert.equal(w.receipt(cid)!.outcome, "applied", w.receipt(cid)!.text);
+  }));
+
+test("only the words the question names are a yes", () => {
+  for (const yes of ["要", "要的", "要吧", "要。", "照办", "确认", "确认！"]) assert.equal(isYes(yes), true, yes);
+  for (const no of ["好", "好的", "行", "嗯", "对", "是", "可以", "ok", "yes", "记下", "盯", "要要", "要不要", "不要", "要，月底前约上", ""]) assert.equal(isYes(no), false, no);
+});
+
+test("the person's 好 to the question is not the yes it asked for", () =>
+  withHere(async (w) => {
+    const { id, question } = await asked(w);
+    for (const text of ["好", "好的", "行", "嗯"]) assert.equal((await reply(w, id, text, question)).outcome, "rejected", text);
+    assert.equal(tracked(w), 0);
+  }));
+
+/** The asked one is past its 30 minutes and the reconcile has run: what became of it. */
+const lapsed = async (w: World, id: string) => {
+  w.clock.now += 31 * 60_000;
+  await w.engine.tick();
+  return w.store.state.requests[id]!;
+};
+const cards = (w: World) => Object.values(w.store.state.commitments).filter((c) => c.origin.who === "confirm");
+
+test("a question nobody confirmed in 30 minutes becomes a confirmation card with the words on it, and the log and the receipt say so", () =>
+  withHere(async (w) => {
+    const { id } = await asked(w);
+    assert.equal(cards(w).length, 0);
+    const rec = await lapsed(w, id);
+    assert.equal(rec.outcome, "proposed", rec.detail);
+    assert.match(rec.detail, /当场问没确认上，改发卡/);
+    assert.match(rec.why ?? "", /当场问没确认上，改发卡/);
+    assert.equal(rec.question, undefined, "it can no longer be confirmed in the conversation");
+    assert.equal(cards(w).length, 1);
+    assert.match(cards(w)[0]!.brief, new RegExp(NOT_THEIRS));
+    assert.equal(tracked(w), 0, "and nothing is told until the card is answered");
+    // once: later reconciles do not make more
+    await w.engine.tick();
+    assert.equal(cards(w).length, 1);
+  }));
+
+test("a card made that way, answered yes, tells the matter as asked", () =>
+  withHere(async (w) => {
+    const { id } = await asked(w);
+    await lapsed(w, id);
+    const card = cards(w)[0]!;
+    assert.equal(w.engine.answerQuestion(card.id, card.rounds, { option: "yes" }).ok, true);
+    await w.engine.tick();
+    assert.equal(item(w, 1)?.title, "年度体检");
+  }));
+
+test("a question confirmed in time is not made a card", () =>
+  withHere(async (w) => {
+    const { id, question } = await asked(w);
+    assert.equal((await reply(w, id, "要", question)).outcome, "applied");
+    w.clock.now += 31 * 60_000;
+    await w.engine.tick();
+    assert.equal(cards(w).length, 0);
+    assert.equal(w.store.state.requests[id]!.outcome, "asked");
+  }));
+
+test("a confirm that did not check out leaves the question to run out, and then it is a card", () =>
+  withHere(async (w) => {
+    const { id, question } = await asked(w);
+    assert.equal((await reply(w, id, "好", question)).outcome, "rejected");
+    assert.equal(cards(w).length, 0, "no card at once");
+    assert.equal((await lapsed(w, id)).outcome, "proposed");
+    assert.equal(cards(w).length, 1);
+  }));
+
+test("a question for a matter that is gone by then is closed, not carded", () =>
+  withHere(async (w) => {
+    converse(w, {}, [{ kind: "person", text: "帮我盯一下体检，月底前要约上" }]);
+    say(w, track("-", "年度体检", "personal"));
+    await w.engine.tick();
+    converse(w, {}, [{ kind: "person", text: "补一句，下周三下午去" }]);
+    const id = say(w, note("D1", "体检已经做完了"));
+    await w.engine.tick();
+    assert.equal(w.store.state.requests[id]!.outcome, "asked");
+    converse(w, {}, [{ kind: "person", text: "不用盯体检了" }]);
+    say(w, { cmd: "say", kind: "drop", item: "D1", said: "不用盯体检了" });
+    await w.engine.tick();
+    const rec = await lapsed(w, id);
+    assert.equal(rec.outcome, "rejected", rec.detail);
+    assert.match(rec.detail, /当场问没确认上/);
+  }));

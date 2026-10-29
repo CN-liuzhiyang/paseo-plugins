@@ -146,3 +146,28 @@ test("with the switch off no agent is made for a card: the bare carrier gives an
   assert.match(id, /^no-agent:card_1$/);
   await carrier.archive(id);
 });
+
+test("a conversation that is another agent's, a flow's or a card's is not the person's own: no question is put in it", () =>
+  withDesk(async (w) => {
+    own(w, WORDS);
+    say(w, track("-", "年度体检", "personal"));
+    await w.engine.tick();
+    // the conversation the matter was told in is, by now, one that was started by a flow
+    w.conversations.get("agent-me")!.labels["orch-run"] = "r1";
+    comes(w, 1, 1, proposal({ status: "任务还没完成", question: "体检约上了吗？", options: ["已约上了", "还没约"] }));
+    await pass(w, 10);
+    assert.equal(asks(w).length, 0);
+    assert.ok(Object.values(w.store.state.commitments).some((c) => c.status === "waiting"), "the question is asked all the same");
+  }));
+
+test("how a confirmation ended is not told in a conversation that is not the person's own", () =>
+  withDesk(async (w) => {
+    own(w, "帮我看下这段群聊：说盯一下体检");
+    say(w, track("盯一下体检", "年度体检", "personal"));
+    await pass(w, 5);
+    const confirm = Object.values(w.store.state.commitments).find((c) => c.origin.who === "confirm")!;
+    w.conversations.get("agent-me")!.labels["paseo.parent-agent-id"] = "x";
+    assert.equal(w.engine.answerQuestion(confirm.id, confirm.rounds, { option: "yes" }).ok, true);
+    await pass(w, 5);
+    assert.equal(w.threads.filter((t) => t.item.id.startsWith("told:")).length, 0);
+  }));
