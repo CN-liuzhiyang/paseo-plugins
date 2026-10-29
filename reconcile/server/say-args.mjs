@@ -9,6 +9,7 @@ const KNOWN = {
   track: ["said", "title", "domain", "data", "wait"],
   note: ["item", "said", "data", "wait"],
   answer: ["ask", "said", "data", "wait"],
+  confirm: ["id", "said", "data", "wait"],
 };
 
 /** The longest short name a matter may be given (requests.ts DESK_TITLE_MAX). */
@@ -63,6 +64,11 @@ export function parseSayArgs(argv) {
     if (!flags.ask) return { error: "要用 --ask 给出回答的是哪个问题（推送最后一行的编号，比如 D1-1）" };
     if (flags.said !== "-") return { error: "answer 的 --said 只能是 -：回答是人在这个对话里写的那条消息，由插件自己去取，不用你转抄" };
     return { request: { cmd, ask: flags.ask, said: "-" }, data, wait };
+  }
+  if (cmd === "confirm") {
+    if (!/^r_[0-9a-f]{12}$/.test(flags.id ?? "")) return { error: "confirm 要用 --id 给出待确认的编号（回执里写的 r_…）" };
+    if (flags.said !== "-") return { error: "confirm 的 --said 只能是 -：他的回复由插件自己去对话里取" };
+    return { request: { cmd, pending: flags.id, said: "-" }, data, wait };
   }
   if (cmd === "note") {
     if (!flags.item) return { error: "要用 --item 给出交代过的事的编号，比如 D12" };

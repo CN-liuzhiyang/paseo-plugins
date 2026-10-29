@@ -70,6 +70,13 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
             disabled={settings.saving}
             onValueChange={(live) => void settings.save({ ...values, mode: live ? "live" : "dry-run" }, revision)}
           />
+          <SettingsSwitch
+            label="问题卡也起一张 Paseo 卡"
+            hint="开着：每个问题在后台起一个卡片 agent，Paseo 为它弹系统通知、推手机（不进侧边栏）。关着：问题只在「事项追踪」页面、你交代它的那个对话和聊天软件的推送里，Paseo 不再为它弹通知，侧边栏「事项追踪」那一行的件数照常变。"
+            value={values.questionCard}
+            disabled={settings.saving}
+            onValueChange={(on) => void settings.save({ ...values, questionCard: on }, revision)}
+          />
         </SettingsCard>
       </SettingsSection>
       <SettingsSection title="设置">

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runIdOf } from "../server/flows";
-import type { Conversation } from "../server/requests";
+import type { Conversation, TurnStep } from "../server/requests";
 import { probeOf, makeWorld, TEST_POLICY, TZ, type World } from "./helpers";
 import { finished, flowsOf } from "./flows-kit";
 
@@ -23,10 +23,11 @@ export const POLICY = (byFlow: Record<string, unknown> | null = { "item-glance":
   flows: { perDay: 9, usdPerDay: 50, perCasePerDay: 9, concurrent: 9, ...general, ...(byFlow ? { byFlow } : {}) },
 });
 
-export async function withDesk<T>(body: (w: World) => Promise<T>, options: { start?: string; persons?: unknown; policy?: unknown; params?: Record<string, unknown>; rule?: string; flows?: boolean } = {}): Promise<T> {
+export async function withDesk<T>(body: (w: World) => Promise<T>, options: { askHere?: boolean; start?: string; persons?: unknown; policy?: unknown; params?: Record<string, unknown>; rule?: string; flows?: boolean } = {}): Promise<T> {
   const w = await makeWorld({
     start: options.start ?? START,
     flows: options.flows ?? true,
+    askHere: options.askHere,
     config: {
       rules: { "desk.mjs": options.rule ?? deskRule(options.params) },
       persons: options.persons ?? PERSONS(),
@@ -45,6 +46,7 @@ const quoted = (v: unknown) => `"${String(v).replace(/["\\]/g, "\\$&")}"`;
 export const commandFor = (r: Record<string, unknown>): string => {
   const flags = [
     ...(r.cmd === "undo" ? [r.target === "last" ? "--last" : `--id ${r.target}`] : []),
+    ...(r.cmd === "confirm" ? [`--id ${r.pending}`] : []),
     ...["item", "kind", "title", "domain", "until", "person", "what", "expected", "ask"].filter((k) => r[k] !== undefined).map((k) => `--${k} ${quoted(r[k])}`),
   ];
   return `node D:/plugins/reconcile/bin/reconcile-say.mjs ${r.cmd} ${flags.join(" ")} --said ${quoted(r.said)}`;
@@ -59,6 +61,13 @@ export const chat = (w: World, labels: Record<string, string>, ...messages: stri
   const c: Conversation = { labels: { ...labels }, cwd: "/work", turn: { id: `t${++turns}`, steps: messages.map((text) => ({ kind: "person" as const, text })) } };
   owned.add(c);
   w.conversations.set("agent-me", c);
+};
+/** A conversation as a turn of it stands: these steps (the person's messages, what the agent said), and what the agent said at the end of the turn before. */
+export const converse = (w: World, labels: Record<string, string>, steps: TurnStep[], before?: string) => {
+  const c: Conversation = { labels: { ...labels }, cwd: "/work", turn: { id: `t${++turns}`, steps: [...steps] }, ...(before ? { before } : {}) };
+  owned.add(c);
+  w.conversations.set("agent-me", c);
+  return c;
 };
 /** A request from the agent's conversation; its command is run in the turn first (the person's own words are what a check looks for). */
 export const say = (w: World, request: Record<string, unknown>) => {

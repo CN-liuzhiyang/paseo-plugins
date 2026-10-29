@@ -97,12 +97,26 @@ const answer = z
   })
   .strict();
 
-export const requestSchema = z.discriminatedUnion("cmd", [say, track, note, undo, answer]);
+/**
+ * The person's "yes" to a question the controller asked through the agent, in the conversation (`pending` is the id of the request that
+ * was not let through and got that question instead). The words are the person's reply, taken from the conversation.
+ */
+const confirm = z
+  .object({
+    ...base,
+    said: z.literal(SAID_FROM_CHAT),
+    cmd: z.literal("confirm"),
+    pending: z.string().regex(REQUEST_ID),
+  })
+  .strict();
+
+export const requestSchema = z.discriminatedUnion("cmd", [say, track, note, undo, answer, confirm]);
 export type Request = z.output<typeof requestSchema>;
 export type SayRequest = Extract<Request, { cmd: "say" }>;
 export type TrackRequest = Extract<Request, { cmd: "track" }>;
 export type NoteRequest = Extract<Request, { cmd: "note" }>;
 export type AnswerRequest = Extract<Request, { cmd: "answer" }>;
+export type ConfirmRequest = Extract<Request, { cmd: "confirm" }>;
 
 export const KIND_LABEL: Record<Annotation["kind"], string> = { drop: "不再追踪", hold: "先别问", wrong: "判断错了", track: "交代", note: "补一句" };
 
@@ -177,7 +191,7 @@ export function readRequests(dir: string, known: (id: string) => boolean, limit 
 
 export interface Receipt {
   id: string;
-  outcome: "applied" | "proposed" | "rejected";
+  outcome: "applied" | "proposed" | "asked" | "rejected";
   text: string;
   annotation: string | null;
 }
@@ -227,7 +241,7 @@ export function sweepRequests(dir: string, nowMs: number): void {
 }
 
 /** One thing in a turn, in the order the timeline has it: a person's message, a command run, a message from another agent. */
-export type TurnStep = { kind: "person"; text: string } | { kind: "command"; text: string } | { kind: "agent" };
+export type TurnStep = { kind: "person"; text: string } | { kind: "command"; text: string } | { kind: "agent" } | { kind: "text"; text: string };
 
 /** The conversation a request came from, as the host shows it. */
 export interface Conversation {
@@ -237,6 +251,8 @@ export interface Conversation {
   turn: { id: string; steps: TurnStep[] } | null;
   /** The host says the agent is running (it can be without a turn the host names); absent where a host did not say. */
   running?: boolean;
+  /** What the agent said right before this turn began (the run of its messages ending where the turn's first entry is): where a question asked at the end of the last turn is. */
+  before?: string;
 }
 
 /** A timeline entry as far as the turn matters. */
@@ -248,6 +264,8 @@ export interface TurnEntry {
   command?: string;
   /** A message another agent sent into the conversation (the host shows it as a tool call). */
   agent?: boolean;
+  /** What the agent itself said (an assistant message): its text. */
+  reply?: string;
   turnId?: string;
 }
 
@@ -278,6 +296,7 @@ export function currentTurn(entries: TurnEntry[], turnId: string | null): Conver
     if (e.type === "user_message" && e.text) steps.push({ kind: "person", text: e.text });
     else if (e.agent) steps.push({ kind: "agent" });
     else if (e.command) steps.push({ kind: "command", text: e.command });
+    else if (e.reply) steps.push({ kind: "text", text: e.reply });
   }
   return { id: turnId, steps };
 }
@@ -327,10 +346,15 @@ export async function readConversation<C>(ref: ConversationSource<C>): Promise<C
       text: item?.type === "user_message" && typeof item.text === "string" ? item.text : undefined,
       command: commandOf(e.item),
       agent: item?.type === "tool_call" && item.name === "agent_message",
+      reply: item?.type === "assistant_message" && typeof item.text === "string" ? item.text : undefined,
       turnId: e.turnId,
     };
   });
-  return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(turn, turnId), running: agent.status === "running" };
+  // What the agent said right before the turn began: the run of its messages that ends where the turn's first entry is.
+  const first = turnId ? turn.findIndex((e) => e.turnId === turnId) : -1;
+  const said: string[] = [];
+  for (let i = first - 1; first > 0 && i >= 0 && turn[i]!.reply; i--) said.unshift(turn[i]!.reply!);
+  return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(turn, turnId), running: agent.status === "running", ...(said.length > 0 ? { before: said.join("\n") } : {}) };
 }
 
 /** Labels of agents that are not a person's own conversation: started by another agent, a flow, or a card. */
@@ -607,6 +631,54 @@ export function answerWords(
   return { typed, tags, message: { step: said, text: (steps[said] as { text: string }).text } };
 }
 
+// ---- a yes to a question asked in the conversation ----------------------------------------------------------------
+
+/** Text as compared when checking that the agent asked the controller's question: whitespace, Markdown marks and quote styles do not count. */
+export const plain = (text: string) => text.normalize("NFKC").replace(/[\s\\`*_~#>[\]()<>|"'“”‘’「」『』«»]/g, "").toLowerCase();
+
+/** Words that say yes and nothing else (a particle may follow, and a mark). */
+const YES = new Set(["要", "是", "对", "好", "嗯", "行", "可以", "确认", "照办", "记下", "盯", "ok", "okay", "yes", "y"]);
+const YES_PARTICLES = /(?:的|吧|啊|呀|哦|啦|了|呢)+$/;
+const NOT_YES = /不|别|没|算了|取消|等等|先|再/;
+
+/** Whether a message is a yes and nothing else: one of the yes words, in six characters at most, with no part of a no. */
+export function isYes(message: string): boolean {
+  const flat = message.normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+  if ([...flat].length === 0 || [...flat].length > 6 || NOT_YES.test(flat)) return false;
+  const stem = flat.replace(YES_PARTICLES, "");
+  return YES.has(stem) || (stem.length > 1 && [...stem].every((ch) => ch === stem[0]) && YES.has(stem[0]!));
+}
+
+/**
+ * Whether the request carries the person's yes to `question`, the sentence the controller wrote for the agent to ask: the checks of any
+ * words (commandInTurn: the person's conversation, a turn they began, this very command), the last message of the person's before the
+ * command with no agent's message between, a message that is only a yes (isYes), and, in what the agent said right before that message,
+ * the question word for word (plain). The agent can say what it likes, but it cannot make a person say yes to a question it did not ask.
+ */
+export function confirmWords(
+  r: ConfirmRequest,
+  conversation: Conversation | null,
+  question: string,
+  dataDir: string | null = null,
+  waiveSource = false,
+): { why: string } | { message: { step: number; text: string } } {
+  const found = commandInTurn(r, conversation, dataDir, waiveSource);
+  if ("why" in found) return found;
+  const { steps, run } = found;
+  const said = steps.findLastIndex((s, i) => i < run && s.kind === "person");
+  if (said < 0) return { why: "这条命令之前，这一轮里没有人发的消息" };
+  if (steps.slice(said + 1, run).some((s) => s.kind === "agent")) return { why: AGENT_CAME_IN };
+  const text = (steps[said] as { text: string }).text;
+  if (!isYes(text)) return { why: "他回的不是一个「要」（整条只是一个肯定词才算）" };
+  // What the agent said right before it: its messages in this turn up to the person's, and, when those begin the turn, the end of the turn before.
+  const told: string[] = [];
+  let i = said - 1;
+  for (; i >= 0 && steps[i]!.kind === "text"; i--) told.unshift((steps[i] as { text: string }).text);
+  if (i < 0 && conversation!.before) told.unshift(conversation!.before);
+  if (!plain(told.join("\n")).includes(plain(question))) return { why: "人回「要」之前，agent 说的话里没有原样的那句问话" };
+  return { message: { step: said, text } };
+}
+
 /**
  * Whether a conversation is one of the admin's own private chats, as the deployment says they look (persons.json `chats`: a set of
  * labels each): it has every label of one of them, with the same value. Always false without a `source` label: that is what a chat
@@ -620,6 +692,13 @@ export function adminChat(labels: Record<string, string>, chats: ReadonlyArray<R
     return keys.length >= 2 && Object.hasOwn(chat, "source") && keys.every((k) => labels[k] !== undefined && labels[k] === chat[k]);
   });
 }
+
+/**
+ * Whether the person themself is in this conversation, so that a question can be put to them there: it is not another agent's, a flow's or a
+ * card's, and, when it comes from a chat app, it is the admin's own private chat.
+ */
+export const personsOwn = (conversation: Conversation, chats: ReadonlyArray<Record<string, string>>): boolean =>
+  !NOT_A_PERSON.some((l) => l in conversation.labels) && (!conversation.labels.source || adminChat(conversation.labels, chats));
 
 /**
  * What may be said into the admin's own chat without the check of where the conversation came from: telling a matter, a line added to it,

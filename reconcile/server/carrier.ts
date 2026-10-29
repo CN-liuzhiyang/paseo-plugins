@@ -87,3 +87,19 @@ export function createCarrier(deps: {
     },
   };
 }
+
+/** The id the carrier of a card gets when no agent is started for it (settings: 问题卡也起一张 Paseo 卡 is off). */
+const NO_AGENT = "no-agent:";
+
+/**
+ * A carrier that starts nothing: the card is up as far as the controller is concerned (the page, the conversation it was told in, the chat
+ * apps' pushes all show it), and no agent is made for it, so the host raises no notification of its own for it.
+ */
+export function createBareCarrier(): Carrier {
+  return {
+    async raise(card) {
+      return `${NO_AGENT}${card.id}`;
+    },
+    async archive() {},
+  };
+}

@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "../server/config";
 import { createEngine, type CardAnswer, type CardContent, type Carrier, type Engine, type EngineDeps } from "../server/engine";
+import type { ThreadItem } from "../shared/thread";
 import type { RunView } from "../shared/graph";
 import type { Card, FlowRec, Item } from "../shared/model";
 import { recordingLauncher, type Launcher, type LaunchSpec } from "../server/flows";
@@ -165,12 +166,14 @@ export interface World {
   clock: { now: number };
   cards: Array<{ card: Card; content: CardContent; attempt: number; agentId: string }>;
   archived: string[];
+  /** What the engine put into conversations' timelines (EngineDeps.thread), in order; `fail.thread` makes it fail. */
+  threads: Array<{ agentId: string; item: ThreadItem }>;
   /** Times the engine made sure of the cards' workspace. */
   ensured: number;
   /** Runs inside the carrier, while a card is being raised (the engine is waiting for it): a person answering at that moment. */
   hooks: { raise: ((card: Card) => void | Promise<void>) | null };
   /** files: switch files (by name) that fail to read while the others do. */
-  fail: { source: Error | null; carrier: Error | null; files: Set<string>; deliver: Error | null };
+  fail: { source: Error | null; carrier: Error | null; files: Set<string>; deliver: Error | null; thread: Error | null };
   /** What server.deliver was handed, failed tries included. */
   deliveries: Array<{ channel: string; to: string; idempotencyKey: string; title: string; text: string; status: string; ok: boolean }>;
   polls: number;
@@ -217,6 +220,8 @@ export async function makeWorld(options: {
   capture?: EngineDeps["capture"];
   /** What archives the agents of calls that asked for it (EngineDeps.archiveAgent); absent, none. */
   archiveAgent?: EngineDeps["archiveAgent"];
+  /** Words that do not check out are asked about in the conversation (EngineDeps.askHere). The world's own default is a card: that is the path most tests of the checks look at. */
+  askHere?: boolean;
 }): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
@@ -229,7 +234,8 @@ export async function makeWorld(options: {
   const clock = { now: at(options.start) };
   const cards: World["cards"] = [];
   const archived: string[] = [];
-  const fail: World["fail"] = { source: null, carrier: null, files: new Set(), deliver: null };
+  const fail: World["fail"] = { source: null, carrier: null, files: new Set(), deliver: null, thread: null };
+  const threads: World["threads"] = [];
   const deliveries: World["deliveries"] = [];
   const logs: string[] = [];
   const statuses: unknown[] = [];
@@ -240,7 +246,7 @@ export async function makeWorld(options: {
   let requests = 0;
 
   const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), outs: new Map(), archives: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
-  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
+  const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, threads, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
 
   const source: Source = {
     id: "gcp-demo",
@@ -318,6 +324,11 @@ export async function makeWorld(options: {
       tickSeconds: 60,
       requestsDir,
       conversation: async (agentId) => conversations.get(agentId) ?? null,
+      askHere: options.askHere ?? false,
+      thread: async (agentId, item) => {
+        if (fail.thread) throw fail.thread;
+        threads.push({ agentId, item: structuredClone(item) });
+      },
       rulesKeep: { dir: path.join(dataDir, "rules-last-good"), write: true, now: () => clock.now },
       runs: options.runs ?? null,
       flows: typeof options.flows === "object"

@@ -18,6 +18,9 @@ export const settingsDefinition = defineSettings({
     tickSeconds: z.number().int().min(15).max(3600).default(60),
     // Where the journal lives. Empty: <PASEO_HOME>/plugin-data/reconcile.
     dataDir: z.string().default(""),
+    // Whether a question also starts an agent in the background workspace, which is what makes the app raise its own notification (and the
+    // phone's). Off: the page, the conversation the matter was told in and the chat apps are where a question is.
+    questionCard: z.boolean().default(true),
   }),
 });
 

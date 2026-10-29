@@ -8,7 +8,7 @@ import { GROUP_LABEL, type Group } from "./shared/graph";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
 import { createAgentArchiver } from "./server/archive";
-import { createCarrier } from "./server/carrier";
+import { createBareCarrier, createCarrier } from "./server/carrier";
 import { ConfigError, loadConfig } from "./server/config";
 import { createEngine, type Deliver, type Engine, type EngineStatus } from "./server/engine";
 import { RULES_KEPT } from "./server/rules";
@@ -199,7 +199,9 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       // Rehearsing has no carrier at all: nothing that missed a mode check could raise a card.
       const carrier =
         paseo && mode === "live"
-          ? createCarrier({
+          ? !values.questionCard
+            ? createBareCarrier()
+            : createCarrier({
               paseo,
               workspaceDir: path.join(dataDir, "workspace"),
               workspaceId: () => opened.state.workspaceId,
@@ -242,6 +244,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         deliver,
         requestsDir,
         conversation,
+        thread: paseo && mode === "live" ? async (agentId, item) => void (await paseo.agents.ref(agentId).timeline.append(item)) : null,
         archiveAgent,
         rulesKeep: { dir: path.join(dataDir, RULES_KEPT), write: true },
         runs,

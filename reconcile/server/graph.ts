@@ -350,7 +350,7 @@ export function createGraph(deps: GraphDeps) {
       // Asked again after a hold is, to the person, asked again.
       nextAskWhat: next && next.what !== "ask" ? (next.what === "again" ? "nag" : next.what) : null,
       maxRounds: c.nag.max,
-      cardAgentId: card?.agentId ?? null,
+      cardAgentId: card?.agentId?.startsWith("no-agent:") ? null : (card?.agentId ?? null),
     };
   }
 

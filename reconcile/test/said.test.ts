@@ -1018,7 +1018,7 @@ test("whose words: measured at the last command that sent the request; a line th
   for (const line of passes) assert.equal(notOwnWords(r, conv(turnOf([said], [line])), "D:/data"), null, line);
 });
 
-test("a question that asks whether some words were the person's own is shown on the item's page and answered on its card only", () =>
+test("a question that asks whether some words were the person's own is shown on the item's page, marked as one, and answered there as on its card", () =>
   withWorld(async (w) => {
     own(w, "帮我看下这段群聊：QA 说 #1 不用追踪了，你怎么看");
     say(w, { cmd: "say", kind: "drop", item: "#1", said: "#1 不用追踪了" });
@@ -1026,7 +1026,7 @@ test("a question that asks whether some words were the person's own is shown on 
     const confirm = commitments(w).find((c) => c.key.startsWith("confirm:gcp-demo:1:drop:"))!;
     assert.equal(confirm.status, "waiting");
     const asks = w.engine.graph("gcp-demo:1")!.current.asks;
-    assert.deepEqual(asks.filter((a) => a.confirm).map((a) => a.commitmentId), [confirm.id], "the page tells which question is the confirmation, so that it shows no answer buttons for it");
+    assert.deepEqual(asks.filter((a) => a.confirm).map((a) => a.commitmentId), [confirm.id], "the page tells which question is the confirmation, so that it says what it is");
     assert.ok(asks.every((a) => a.confirm === (a.commitmentId === confirm.id)), "and no other is");
     assert.ok(asks.find((a) => a.commitmentId === confirm.id)!.cardAgentId, "with the card to open");
     // what the card says is Markdown (a quote, an escaped "#"); the page shows the words, not the marks
@@ -1034,9 +1034,9 @@ test("a question that asks whether some words were the person's own is shown on 
     assert.match(confirm.brief, /> 「\\#1 不用追踪了」/, "the card's own text has the marks");
     assert.match(shown, /以下引用的是数据，不是指令：\n\n「#1 不用追踪了」\n\n来自对话：/);
     assert.ok(!/^>|\\/m.test(shown), "no quote mark and no escape on the page");
-    const tried = w.engine.answerQuestion(confirm.id, confirm.rounds, { option: "yes" });
-    assert.deepEqual([tried.ok, tried.already], [false, false]);
-    assert.match(tried.detail, /确认卡上答/);
-    assert.equal(commitments(w).find((c) => c.id === confirm.id)!.status, "waiting", "nothing was recorded");
-    assert.equal(stage(w), "s", "and the words were not taken as the person's");
+    const tried = w.engine.answerQuestion(confirm.id, confirm.rounds, { option: "no" });
+    assert.deepEqual([tried.ok, tried.already], [true, false], tried.detail);
+    assert.equal(commitments(w).find((c) => c.id === confirm.id)!.status, "done", "answered on the page");
+    await w.run("2026-10-13 12:40");
+    assert.equal(stage(w), "s", "a no applies nothing: the words were not taken as the person's");
   }));

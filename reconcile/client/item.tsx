@@ -180,7 +180,7 @@ function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolea
 
 // ---- answering a question here ----------------------------------------------------------------
 
-function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boolean; text: string }): void }) {
+export function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boolean; text: string }): void }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const answer = useRpc(answerRpc);
@@ -204,32 +204,10 @@ function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boolean; t
       },
     );
   };
-  if (ask.confirm) {
-    // Whether some words were the person's own is told on the card it was sent on, not on a page: shown here, not answerable.
-    return (
-      <View style={{ borderRadius: 12, borderWidth: 1, borderColor: color, backgroundColor: c.surface1, overflow: "hidden" }}>
-        <View style={{ paddingHorizontal: 12, paddingVertical: 7, backgroundColor: tint(color, 0.12) }}>
-          <Text style={{ color, fontSize: 12, fontWeight: "700" }}>要你确认 · 第 {ask.round} 次问</Text>
-        </View>
-        <View style={{ padding: 12, gap: 8 }}>
-          <Text style={[ui.styles.strong, { fontSize: 15 }]} selectable>
-            {ask.question}
-          </Text>
-          {ask.brief ? (
-            <Text style={ui.styles.muted} selectable>
-              {ask.brief}
-            </Text>
-          ) : null}
-          <Text style={ui.styles.small}>这是在确认某句话是不是本人说的，只能在它的确认卡上答。</Text>
-          {ask.cardAgentId ? <OpenAgent agentId={ask.cardAgentId} label="去确认卡上答" primary /> : <Text style={ui.styles.small}>确认卡还没有起来；起来以后这里会有按钮。</Text>}
-        </View>
-      </View>
-    );
-  }
   return (
     <View style={{ borderRadius: 12, borderWidth: 1, borderColor: color, backgroundColor: c.surface1, overflow: "hidden" }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 6, paddingHorizontal: 12, paddingVertical: 7, backgroundColor: tint(color, 0.12) }}>
-        <Text style={{ color, fontSize: 12, fontWeight: "700" }}>问你 · 第 {ask.round} 次</Text>
+        <Text style={{ color, fontSize: 12, fontWeight: "700" }}>{ask.confirm ? "要你确认某句话是不是你说的" : "问你"} · 第 {ask.round} 次</Text>
         <Text style={ui.styles.small}>回答会记进日志；问题卡上答也一样，先到的算</Text>
       </View>
       <View style={{ padding: 12, gap: 8 }}>
