@@ -489,17 +489,24 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // The agent of an ask that came out well, archived (`archive: "after"`): what it was given and what it handed back are in the events,
   // so the agent itself is not a place anyone needs to open. It never makes the run fail: an agent that cannot be found, or that is
   // still running (the CLI refuses that without --force, and --force would interrupt it), is left as it is, with a caveat saying so.
+  // Every try is written as a `call.archive` event, done or not, so that whoever started the run can tell from the events which agents
+  // are still to be archived (a plugin can archive one the CLI cannot, EVENTS.md) without reading the caveat's words.
   const archiveAfter = async (record, agentId) => {
+    const written = (ok, code, message) =>
+      log.emit("call.archive", { callId: record.callId, agentId: agentId || null, ok, code, message: message === null ? null : message.replace(/\s+/g, " ").slice(0, 200) });
     if (!agentId) {
       caveat(`archive: the agent of ${record.callId} could not be found, so it was not archived`, record.callId);
+      written(false, "NO_AGENT", null);
       return;
     }
     if (typeof executor.archiveAgent !== "function") {
       caveat("archive: the executor cannot archive an agent, so the agents asked to be archived are left as they are", record.callId);
+      written(false, "NO_ARCHIVE", null);
       return;
     }
     try {
       await executor.archiveAgent(agentId);
+      written(true, null, null);
     } catch (error) {
       const raw = String(error?.stderr?.trim() || error?.stdout?.trim() || error?.message || error);
       let code = "";
@@ -513,9 +520,14 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         // Not JSON: as it came.
       }
       // Measured 2026-10-29 (fork CLI 1.4.1): `paseo archive` looks the agent up in a list that leaves out the agents of a background
-      // workspace, and the affair's workspace is one: it says the agent is not found when it is there. Said so, that it is no mystery.
-      const hint = code === "AGENT_NOT_FOUND" ? "; the agent exists, but this CLI's archive does not list the agents of a background workspace, so it cannot find it" : "";
+      // workspace, and the affair's workspace is one: it says the agent is not found when it is there. Said so, that it is no mystery,
+      // and that it is not left to nobody: the plugin that started the run archives it (it reads call.archive for the ones not done).
+      const hint =
+        code === "AGENT_NOT_FOUND"
+          ? "; the agent exists, but this CLI's archive does not list the agents of a background workspace, so it cannot find it: it is left to the plugin that started the run to archive (call.archive says it was not done)"
+          : "";
       caveat(`archive: agent ${agentId} of ${record.callId} was not archived (${said.replace(/\s+/g, " ").slice(0, 200)})${hint}`, record.callId);
+      written(false, code || "ERROR", said);
     }
   };
 
@@ -586,6 +598,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         schema: step.schema,
         schemaFingerprint: step.fingerprint,
         timeout,
+        archive: callOptions.archive ?? null,
       });
       if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
       probeAgent(record);

@@ -231,3 +231,96 @@ test("an agent is archived with `paseo archive <id>`, never forced: a running on
   assert.deepEqual(calls[0].args, ["archive", "agent-7"]);
   assert.ok(!calls[0].args.includes("--force"));
 });
+
+// ---- the record of an archive: call.archive -------------------------------------------------------------------------------
+
+const archiveEvents = (events) => events.filter((e) => e.kind === "call.archive");
+
+test("every try to archive is written down: call.start says it was asked for, call.archive says whether it was done", async () => {
+  const done = await run(asking({ archive: "after" }), fakeExecutor({ answer: () => ({ said: "hi" }) }));
+  const events = eventsOf(done);
+  assert.equal(events.find((e) => e.kind === "call.start").archive, "after");
+  const [archived] = archiveEvents(events);
+  assert.equal(archiveEvents(events).length, 1);
+  assert.deepEqual({ callId: archived.callId, agentId: archived.agentId, ok: archived.ok, code: archived.code, message: archived.message }, { callId: "c1", agentId: "fake-agent-1", ok: true, code: null, message: null });
+  const kinds = events.map((e) => e.kind);
+  assert.ok(kinds.indexOf("call.end") < kinds.indexOf("call.archive") && kinds.indexOf("call.archive") < kinds.indexOf("run.end"));
+
+  const plain = await run(asking({}), fakeExecutor({ answer: () => ({ said: "hi" }) }));
+  const plainEvents = eventsOf(plain);
+  assert.equal(plainEvents.find((e) => e.kind === "call.start").archive, null, "a call that did not ask says so");
+  assert.deepEqual(archiveEvents(plainEvents), []);
+
+  const failed = await run(asking({ archive: "after" }), fakeExecutor({ answer: () => { throw new Error("the agent failed"); } }));
+  assert.deepEqual(archiveEvents(eventsOf(failed)), [], "a call that failed keeps its agent and has no archive to tell of");
+});
+
+test("an archive that was not done says why in a field of its own, not only in the caveat: what the CLI answered, or what the runtime found", async () => {
+  const fail = (code, message) => async function archiveAgent() {
+    throw Object.assign(new Error("paseo archive failed"), { stderr: JSON.stringify({ error: { code, message } }) });
+  };
+  const notDone = async (executor, options = {}) => {
+    const result = await run(asking({ archive: "after" }), executor, options);
+    assert.equal(result.outcome, "done");
+    const [event, ...rest] = archiveEvents(eventsOf(result));
+    assert.deepEqual(rest, []);
+    return event;
+  };
+
+  const hidden = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  hidden.archiveAgent = fail("AGENT_NOT_FOUND", "Agent not found: fake-agent-1");
+  const a = await notDone(hidden, { affair: AFFAIR });
+  assert.deepEqual({ agentId: a.agentId, ok: a.ok, code: a.code, message: a.message }, { agentId: "fake-agent-1", ok: false, code: "AGENT_NOT_FOUND", message: "Agent not found: fake-agent-1" });
+
+  const running = fakeExecutor({ answer: () => ({ said: "hi" }), archiveFails: "refuse" });
+  const b = await notDone(running);
+  assert.equal(b.code, "ERROR", "a CLI that gave no code");
+  assert.match(b.message, /still running/);
+
+  const other = fakeExecutor({ answer: () => ({ said: "hi" }), archiveFails: "error" });
+  assert.deepEqual([(await notDone(other)).ok, (await notDone(other)).message], [false, "fake failure of archive"]);
+
+  const lost = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  lost.findAgent = async () => null;
+  const c = await notDone(lost);
+  assert.deepEqual({ agentId: c.agentId, ok: c.ok, code: c.code, message: c.message }, { agentId: null, ok: false, code: "NO_AGENT", message: null });
+
+  const plain = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  delete plain.archiveAgent;
+  const d = await notDone(plain);
+  assert.deepEqual({ agentId: d.agentId, ok: d.ok, code: d.code }, { agentId: "fake-agent-1", ok: false, code: "NO_ARCHIVE" });
+});
+
+test("the caveat on an agent the CLI cannot find in a background workspace says it is left to the plugin that started the run", async () => {
+  const hidden = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  hidden.archiveAgent = async () => {
+    throw Object.assign(new Error("paseo archive failed"), { stderr: JSON.stringify({ error: { code: "AGENT_NOT_FOUND", message: "Agent not found: fake-agent-1" } }) });
+  };
+  const result = await run(asking({ archive: "after" }), hidden, { affair: AFFAIR });
+  assert.match(archiveCaveats(result)[0], /left to the plugin that started the run to archive \(call\.archive says it was not done\)$/);
+});
+
+test("checkEvents holds call.archive to the contract: only for a call that asked, that came out well, once, after its call.end", async () => {
+  const result = await run(asking({ archive: "after" }), fakeExecutor({ answer: () => ({ said: "hi" }) }));
+  const events = eventsOf(result);
+  const at = events.findIndex((e) => e.kind === "call.archive");
+  const renumber = (list) => list.map((e, i) => ({ ...e, seq: i }));
+  const check = (list) => checkEvents(renumber(list), { strict: true, complete: true }).join("\n");
+  const archive = events[at];
+
+  assert.equal(check(events), "");
+  assert.match(check([...events.slice(0, at), archive, ...events.slice(at)]), /second call\.archive for this call/);
+  const endAt = events.findIndex((e) => e.kind === "call.end");
+  const before = [...events.slice(0, endAt), archive, ...events.slice(endAt, at), ...events.slice(at + 1)];
+  assert.match(check(before), /no call\.end, or whose call\.end is not ok/);
+  assert.match(check(events.map((e) => (e.kind === "call.start" ? { ...e, archive: null } : e))), /did not ask for archive/);
+  assert.match(check(events.map((e) => (e.kind === "call.end" ? { ...e, ok: false, output: null, error: { name: "Error", message: "x" } } : e))), /whose call\.end is not ok/);
+  assert.match(check(events.map((e) => (e.kind === "call.archive" ? { ...e, ok: true, code: "ERROR" } : e))), /ok and code disagree/);
+  assert.match(check(events.map((e) => (e.kind === "call.archive" ? { ...e, ok: false, code: null } : e))), /ok and code disagree/);
+  assert.match(check(events.map((e) => (e.kind === "call.archive" ? { ...e, agentId: 7 } : e))), /agentId is not string \| null/);
+  assert.match(check(events.map((e) => (e.kind === "call.start" ? { ...e, archive: "now" } : e))), /archive is not null \| "after"/);
+  // A file from before the field: a reader of old files is not bothered, the runtime's own output is held to it.
+  const old = events.filter((e) => e.kind !== "call.archive").map(({ archive, ...e }) => e);
+  assert.equal(checkEvents(renumber(old), { complete: true }).join("\n"), "");
+  assert.match(checkEvents(renumber(old), { strict: true, complete: true }).join("\n"), /archive is missing/);
+});

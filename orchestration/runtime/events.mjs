@@ -184,6 +184,8 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const calls = new Map(); // callId -> call.start
   const ended = new Set();
   const agents = new Map(); // callId -> agentId from call.agent
+  const endedOk = new Set(); // calls whose call.end said ok
+  const archived = new Set(); // calls that have a call.archive
   const caveatTexts = new Set();
   let runEnd = null;
 
@@ -266,6 +268,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
             event.headline === null || (isString(event.headline) && Object.hasOwn(event.schema?.properties ?? {}, event.headline)),
             "headline is not null or a field of schema",
           );
+          added(event, "archive", event.archive === null || event.archive === "after", 'archive is not null | "after"');
         }
         if (event.type === "gate") {
           for (const key of ["brief", "content", "sha256", "timeout"]) need(event, isString(event[key]), `${key} is not a string`);
@@ -297,6 +300,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         need(event, !ended.has(event.callId), "second call.end for this call");
         ended.add(event.callId);
+        if (event.ok === true) endedOk.add(event.callId);
         need(event, typeof event.ok === "boolean", "ok is not a boolean");
         need(event, typeof event.durationMs === "number" && event.durationMs >= 0, "durationMs is not a number");
         need(event, "output" in event, "output is missing");
@@ -318,6 +322,23 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           need(event, isObject(output) && GATE_FIELDS.every((key) => key in output), `gate output lacks ${GATE_FIELDS.filter((k) => !(k in (output ?? {}))).join(", ")}`);
           need(event, GATE_OUTCOMES.includes(output?.outcome), `gate outcome "${output?.outcome}" is unknown`);
         }
+        break;
+      }
+      case "call.archive": {
+        const start = calls.get(event.callId);
+        if (!start) {
+          bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
+          break;
+        }
+        need(event, start.type === "ask" && start.archive === "after", 'call.archive for a call that did not ask for archive: "after"');
+        need(event, endedOk.has(event.callId), "call.archive for a call that has no call.end, or whose call.end is not ok");
+        need(event, !archived.has(event.callId), "second call.archive for this call");
+        archived.add(event.callId);
+        need(event, typeof event.ok === "boolean", "ok is not a boolean");
+        need(event, isNullableString(event.agentId), "agentId is not string | null");
+        need(event, isNullableString(event.code) && isNullableString(event.message), "code / message are not string | null");
+        need(event, event.ok === (event.code === null), "ok and code disagree: code is null when it was done, a string when it was not");
+        if (event.ok === true) need(event, isString(event.agentId) && event.agentId !== "", "an archive that was done names its agent");
         break;
       }
       case "workspace":

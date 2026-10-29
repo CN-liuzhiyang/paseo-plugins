@@ -185,6 +185,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `schema` | object | 输出 JSON Schema；字段的 `description` 可用作界面标签 |
 | `schemaFingerprint` | string | |
 | `timeout` | string | |
+| `archive` | `"after"` \| null | 调用点的 `$.ask(step, input, { archive })`：flow 要求这次调用交卷以后归档它的 agent。没要求为 null。后加的字段（2026-10-29），旧文件没有，读者按 null 处理 |
 | `headline` | string \| null | step 的 `define({ headline })`：`schema.properties` 里的一个键，说明回答里哪个字段可以当这次调用的一句话（界面在节点上显示 `call.end.output[headline]`）。step 没声明时为 null。运行时写的每条 `ask` 都有这个字段；之前写的文件没有，读者按 null 处理 |
 
 `type: "gate"` 另有：
@@ -298,6 +299,22 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `"nobody (the run ended)"` | `error`（后加）：运行结束（总超时、`$.stop`、flow 抛错）时这个闸还在等人。运行器对卡片发 deny、停载体，不读任何回执和值，`reason` 写明运行以什么结束 |
 | `"nobody (the receipt and the answer record disagree)"` | `error`（后加）：`provider` 载体有回执，应答记录却不是 `allow`（缺失、出错或是拒绝），`reason` 写明记的是什么；或者反过来，记的是 `allow`、回执却没写出来（`reason` 是 `an allow was recorded but the receipt was not written`） |
 
+### `call.archive`
+
+`$.ask` 带 `archive: "after"` 且这次调用成功（`call.end.ok` 为 true）时，运行时在交卷之后试着归档它的 agent（`paseo archive`，不加 `--force`），**不管成没成都写一条**。后加的事件（2026-10-29）。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId` | string | |
+| `agentId` | string \| null | 要归档的 agent，即 `call.end.agentId`；没找到为 null |
+| `ok` | boolean | 归档成了 |
+| `code` | string \| null | 没成时的原因：`NO_AGENT`（没找到这次调用的 agent）、`NO_ARCHIVE`（执行层不会归档），或 CLI 自己报的代码：`AGENT_RUNNING`（agent 还在跑，CLI 不加 `--force` 不肯）、`AGENT_NOT_FOUND`（CLI 找不到它；实测 fork CLI 1.4.1 对**后台 workspace 里的 agent** 就是这样，agent 明明在）等；CLI 没给代码时是 `ERROR`。成了为 null |
+| `message` | string \| null | 没成时 CLI 的原话，一行，最长 200 字符。成了为 null |
+
+- 每个调用最多一条，在它的 `call.end` 之后、`run.end` 之前；没有 `archive: "after"` 的调用、失败的调用没有这条。
+- **起这次运行的一方靠它认出"要求了归档、没归成"的 agent**，不必解析 `caveat` 的文字：`call.start.archive` 是 `"after"`、`call.end.ok` 为 true、`call.end.agentId` 有值，而没有 `ok: true` 的 `call.archive`——包括根本没有这条（进程在交卷和归档之间死了）——就是还没归档的。CLI 归档不了后台 workspace 里的 agent，所以带事项（`affair`）的运行里这是常态，归档由起运行的插件来做（reconcile：运行结束以后读事件文件，按 agent 的标签核对它是这次调用的 agent、没在跑，再用宿主的接口归档；见 `docs/affair-workspace.md`）。
+- 运行时自己不再试第二次，也不因为没归成让运行失败。
+
 ### `caveat`
 
 | 字段 | 类型 | 含义 |
@@ -332,7 +349,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

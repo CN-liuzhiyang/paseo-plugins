@@ -189,12 +189,19 @@ workspace 的 agent，于是 agent 明明在（`inspect` 能看到、`ls -a -g` 
 | 没有 affair，agent 在 Paseo 自己选的（可见）workspace 里，调用成功 | 归档成功（`ls -a` 里是 `closed`），没有 caveat |
 | 调用失败 | 不归档，agent 留着（`idle`） |
 | agent 还在跑（不加 `--force` 被拒） | 不归档，一条 caveat（`AGENT_RUNNING`），运行照常成功 |
-| **带 affair，agent 在事项的后台 workspace 里，调用成功** | **归档不成功**：一条 caveat（`AGENT_NOT_FOUND`，并说明是后台 workspace 的缘故），运行照常成功，agent 留在后台 workspace 里 |
+| **带 affair，agent 在事项的后台 workspace 里，调用成功** | **运行时自己归档不成功**：一条 caveat 和一条 `call.archive`（`ok: false`，`AGENT_NOT_FOUND`，并说明是后台 workspace 的缘故），运行照常成功，agent 留在后台 workspace 里，等起运行的插件归档（下面） |
 
-最后一行就是「看一眼」的实际情形：agent 不会进侧边栏（workspace 在后台），但也还没有被归档。要让它真归档，两条路，由人选：
-（1）fork 的 CLI 改一行（`archive.ts:60` 的 filter 加 `includeBackground: true`）并更新在用的安装；运行时这边不用改，下一次就归档得成；
-（2）归档交给 reconcile 插件做（插件的 `server.paseo.agents.ref(id).archive()` 对后台 workspace 里的 agent 是好用的，卡片载体就是这样归档的），
-它读运行的事件文件就知道每次调用的 agent id。这条要改插件，不在这一轮。
+最后一行就是「看一眼」的实际情形：agent 不会进侧边栏（workspace 在后台），运行时自己归档不了它。**定了（2026-10-29）：交给起这次运行的插件**，fork 的 CLI 不动
+（fork 刚发过版，再加一行要重新发版、重装 App；`archive.ts:60` 的 filter 加 `includeBackground: true` 记作 fork 的待办，下次发版顺带，到时运行时这边不用改，CLI 就归档得成）：
+
+- 运行时每次试都写一条 `call.archive` 事件（`EVENTS.md`：`ok`、CLI 的 `code` 和原话），`call.start` 里有 `archive: "after"`；起运行的一方不用解析 caveat 的文字，
+  就能认出"要求了归档、调用成功、没归成"的 agent。caveat 的文字也改了，说明这是后台 workspace 的缘故，留给起它的插件。
+- reconcile 在它起的运行**结束以后**（journal 里记了 `flow.ended`，不管怎么结束）读这次运行的事件文件，对每个这样的调用：核对 agent 的标签是
+  这次调用的（`orch-run`、`orch-call` 和事件里的一样），没在跑，再用 `server.paseo.agents.ref(id).archive()` 归档——这个接口对后台 workspace 里的 agent 是好用的，
+  卡片载体就是这样归档的。成了记一条账（ledger，`archive:<runId>:<callId>`）；没成只记日志，隔一阵下一轮再试，最多试 5 次，之后放弃（agent 留着，
+  由人归档）。这一步排在每轮检查的最后，试不成不影响任何事项的判断。
+- 这条路径只认自己起的运行（journal 里有它的 runId），而且只归档事件文件里**同一个调用**既声明了 `archive: "after"`、又成功交了卷的那个 agent；
+  事件文件是可写的，所以 agent 的标签要对得上才归档，对不上的不动。
 
 workspace 本身仍然不自动归档、不自动删：它是后台的，不占侧边栏，人从事项页链接能打开；登记文件也不清理（一条几百字节）。
 
