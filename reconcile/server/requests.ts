@@ -443,6 +443,9 @@ const NODE = /^(?:.*[\\/])?node(?:\.exe)?$/i;
 /** Node's options that leave the script it runs alone; any other (-e, -p, --check, --require …) and it is not a run of it. */
 const NODE_OPTIONS = /^--(?:no-warnings|no-deprecation|enable-source-maps|trace-warnings|trace-deprecation|disable-warning=\S+|max-old-space-size=\d+|stack-trace-limit=\d+)$/;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** A shell that runs a command line given as an argument, and the argument that gives it (PowerShell: -Command / -c; sh and bash: -c, also -lc; cmd: /c, /k). */
+const SHELL = /^(?:.*[\\/])?(?:powershell|pwsh|bash|sh|zsh|cmd)(?:\.exe)?$/i;
+const SHELL_RUNS = /^(?:-command|-[a-z]*c|\/c|\/k)$/i;
 /** Variables that would send the request elsewhere or under another conversation's name. */
 const STEERING = /^(?:PASEO_AGENT_ID|PASEO_HOME|RECONCILE_DATA_DIR)=/i;
 
@@ -452,11 +455,17 @@ const STEERING = /^(?:PASEO_AGENT_ID|PASEO_HOME|RECONCILE_DATA_DIR)=/i;
  * may be variables set for it, node and the options of node that leave the script alone; grep,
  * cat, echo, a comment, --help, an argument the command refuses: not a run.
  */
-export function sayCalls(line: string): Array<{ request: SayArgsRequest; data: string | null }> {
+export function sayCalls(line: string, depth = 0): Array<{ request: SayArgsRequest; data: string | null }> {
   const calls: Array<{ request: SayArgsRequest; data: string | null }> = [];
   for (const words of commandWords(line)) {
     let i = 0;
     while (i < words.length && (words[i] === "env" || (ASSIGNMENT.test(words[i]!) && !STEERING.test(words[i]!)))) i++;
+    // A shell asked to run a command line (`powershell.exe -NoProfile -Command "node …"`, `bash -c '…'`, `cmd /c …`): the line it runs is read the same way.
+    if (depth < 3 && i < words.length && SHELL.test(words[i]!)) {
+      const at = words.findIndex((w, k) => k > i && SHELL_RUNS.test(w));
+      if (at > i) calls.push(...sayCalls(words.slice(at + 1).join(" "), depth + 1));
+      continue;
+    }
     if (i < words.length && NODE.test(words[i]!)) for (i++; i < words.length && NODE_OPTIONS.test(words[i]!); ) i++;
     if (i >= words.length || !SAY_PROGRAM.test(words[i]!)) continue;
     const args = parseSayArgs(words.slice(i + 1));
@@ -646,19 +655,17 @@ export function answerWords(
 export const plain = (text: string) => text.normalize("NFKC").replace(/[\s\\`*_~#>[\]()<>|"'“”‘’「」『』«»]/g, "").toLowerCase();
 
 /**
- * Words that say yes and nothing else (a particle may follow, and a mark): the ones the question names ("回「要」就办"), and no everyday
- * "好" or "嗯", which a person says to anything.
+ * A yes to the question: it begins with a word that says yes (the question names 要, 确认, 照办; people also say these), right after which comes
+ * the end of the message, a mark or a space (so 好像, 对不起, 要不要, 是不是 are not), then at most a short remark. No more than 20 characters,
+ * no question, and nothing in it that takes the yes back or puts it off ("不要", "别", "没", "算了", "取消", "等等", "先别", "不过"…).
  */
-const YES = new Set(["要", "确认", "照办"]);
-const YES_PARTICLES = /(?:的|吧)$/;
-const NOT_YES = /不|别|没|算了|取消|等等|先|再/;
+const YES_LEAD = /^(?:要|对|是|好|行|嗯|可以|确认|照办|okay|ok|yes)+[的吧啊呀哦啦了呢嘛]*(?=$|[\s\p{P}\p{S}])/u;
+const TAKES_BACK = /不要|不用|不是|不行|不对|不可以|不能|不想|不必|不过|别|没|算了|取消|等等|先别|先不|再说|但是|但|可是|[?？]|吗/;
 
-/** Whether a message is a yes and nothing else: one of the yes words, in six characters at most, with no part of a no. */
+/** Whether a message is a yes: a yes word first and nothing in it that takes it back (see YES_LEAD). */
 export function isYes(message: string): boolean {
-  const flat = message.normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
-  if ([...flat].length === 0 || [...flat].length > 6 || NOT_YES.test(flat)) return false;
-  const stem = flat.replace(YES_PARTICLES, "");
-  return YES.has(stem);
+  const flat = message.normalize("NFKC").trim().toLowerCase();
+  return [...flat].length > 0 && [...flat].length <= 20 && YES_LEAD.test(flat) && !TAKES_BACK.test(flat);
 }
 
 /**
@@ -685,7 +692,7 @@ export function confirmWords(
   // (and where that command is not known, no message of that turn does). A yes said before the question was there was said to something else.
   if (asked && conversation!.turn!.id === asked.turn && (asked.step === null || said <= asked.step)) return { why: "他的这条消息在问话建出来之前（同一轮里，要在建出待确认的那条命令之后）" };
   const text = (steps[said] as { text: string }).text;
-  if (!isYes(text)) return { why: "他回的不是一个「要」（整条只是一个肯定词才算）" };
+  if (!isYes(text)) return { why: "他回的不是一个肯定（要 / 对 / 好 / 行 / 确认 / 照办…开头，不超过 20 个字，没有否定或疑问）" };
   // What the agent said right before it: its messages in this turn up to the person's, and, when those begin the turn, the end of the turn before.
   const told: string[] = [];
   let i = said - 1;

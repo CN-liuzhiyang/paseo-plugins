@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isYes, type TurnStep } from "../server/requests";
+import type { TurnStep } from "../server/requests";
 import type { World } from "./helpers";
 import { assessed, converse, item, note, own, PERSONS, say, tell, track, withDesk } from "./desk-kit";
 
@@ -90,7 +90,7 @@ test("the question said in the same turn, right before their yes, counts as much
 test("a reply that is more than a yes is not a yes: words of their own, a no, a yes with a condition", () =>
   withHere(async (w) => {
     const { id, question } = await asked(w);
-    for (const text of ["要，月底前约上", "不要", "要吗？先等等", "好的，不过别太频繁"]) {
+    for (const text of ["不要", "要吗？先等等", "好的，不过别太频繁", "好像不太对", "随便"]) {
       const done = await reply(w, id, text, question);
       assert.equal(done.outcome, "rejected", `${text}: ${done.text}`);
     }
@@ -323,7 +323,7 @@ test("the question said ahead of time and a 要 said to something else, with the
     assert.equal(tracked(w), 0);
   }));
 
-test("the same with a 好 (not a yes word at all)", () =>
+test("the same with a 好: before the command that made the question, it is not their answer to it", () =>
   withHere(async (w) => {
     const PRE_SAID = "顺便一说：要我盯「年度体检」吗？记下的原话是「帮我盯一下体检」（回「要」就办）你先看看别的，晚点回我。";
     converse(w, {}, [{ kind: "person", text: "好" }], PRE_SAID);
@@ -347,16 +347,10 @@ test("in the turn the question was made in, their yes after the command that mad
     assert.equal(w.receipt(cid)!.outcome, "applied", w.receipt(cid)!.text);
   }));
 
-test("only the words the question names are a yes", () => {
-  for (const yes of ["要", "要的", "要吧", "要。", "照办", "确认", "确认！"]) assert.equal(isYes(yes), true, yes);
-  for (const no of ["好", "好的", "行", "嗯", "对", "是", "可以", "ok", "yes", "记下", "盯", "要要", "要不要", "不要", "要，月底前约上", ""]) assert.equal(isYes(no), false, no);
-});
-
-test("the person's 好 to the question is not the yes it asked for", () =>
+test("a 好 that comes in answer to the question is a yes (what is a yes: wrapped-commands.test.ts)", () =>
   withHere(async (w) => {
     const { id, question } = await asked(w);
-    for (const text of ["好", "好的", "行", "嗯"]) assert.equal((await reply(w, id, text, question)).outcome, "rejected", text);
-    assert.equal(tracked(w), 0);
+    assert.equal((await reply(w, id, "好的", question)).outcome, "applied");
   }));
 
 /** The asked one is past its 30 minutes and the reconcile has run: what became of it. */
@@ -407,7 +401,7 @@ test("a question confirmed in time is not made a card", () =>
 test("a confirm that did not check out leaves the question to run out, and then it is a card", () =>
   withHere(async (w) => {
     const { id, question } = await asked(w);
-    assert.equal((await reply(w, id, "好", question)).outcome, "rejected");
+    assert.equal((await reply(w, id, "不要", question)).outcome, "rejected");
     assert.equal(cards(w).length, 0, "no card at once");
     assert.equal((await lapsed(w, id)).outcome, "proposed");
     assert.equal(cards(w).length, 1);
