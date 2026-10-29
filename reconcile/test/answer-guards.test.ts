@@ -79,6 +79,21 @@ test("a message that wrote the number of one question is not the answer to anoth
     assert.equal(answersOf(w).length, 1);
   }));
 
+test("a message that already let a matter through still answers a question whose number its words write, and only that one", () =>
+  withDesk(
+    async (w) => {
+      await asked(w);
+      const words = "D1-1 选 3，另外帮我盯一下续费的事";
+      chat(w, MINE, words);
+      const told = say(w, track(words, "续费", "personal"));
+      await w.engine.tick();
+      assert.equal(w.receipt(told)!.outcome, "applied", w.receipt(told)!.text);
+      const named = await answerAgain(w, "D1-1");
+      assert.equal(named.outcome, "applied", named.text);
+    },
+    { persons: mine() },
+  ));
+
 // ---- a guess does not settle a confirmation, nor an option that ends a matter --------------------------------------------------------
 
 const WORDS = "帮我盯一下体检，月底前要约上";
