@@ -605,7 +605,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
       scan();
       const run = files.get(`${runId}.jsonl`)?.run;
       if (!run) return [];
-      return [...run.calls.values()].flatMap((c) => (c.type === "ask" && c.archive && !c.archived && c.end?.ok === true && c.agentId ? [{ callId: c.id, agentId: c.agentId }] : []));
+      return [...run.calls.values()].flatMap((c) => (c.archive && !c.archived && c.end?.ok === true && c.agentId ? [{ callId: c.id, agentId: c.agentId }] : []));
     },
     forCase(caseId) {
       scan();

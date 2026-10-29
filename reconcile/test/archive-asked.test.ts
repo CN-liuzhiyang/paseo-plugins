@@ -148,7 +148,8 @@ test("an agent that is the call's and is not running is archived", async () => {
 });
 
 test("an agent whose labels are another run's, another call's or none is left alone for good, and says what the labels are", async () => {
-  for (const labels of [{ "orch-run": "other-run", "orch-call": OF.callId }, { "orch-run": OF.runId, "orch-call": "c9" }, {}, { "orch-run": OF.runId }, { source: "feishu" }]) {
+  const others: Array<Record<string, string>> = [{ "orch-run": "other-run", "orch-call": OF.callId }, { "orch-run": OF.runId, "orch-call": "c9" }, {}, { "orch-run": OF.runId }, { source: "feishu" }];
+  for (const labels of others) {
     const { archiver, archived } = archiverOver(agentOf({ labels }));
     const outcome = await archiver("agent-3", OF);
     assert.equal(outcome.done, "not-theirs", JSON.stringify(labels));
