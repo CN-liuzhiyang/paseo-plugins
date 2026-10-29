@@ -65,6 +65,32 @@ export interface StatusSaid {
   revokedAt: string | null;
 }
 
+/** One look of a matter a person told (desk.log): when, what it read, the status it left, and the time it chose for the next. */
+export interface StatusPass {
+  n: number;
+  at: string;
+  looked: string;
+  status: string;
+  next: string;
+}
+
+/** A question asked and waiting for an answer: its number is what a reply names (engine.ts questionNumbers). */
+export interface StatusQuestion {
+  no: string;
+  commitmentId: string;
+  /** The item it is about; null for what the controller asks of itself. */
+  item: string | null;
+  itemTitle: string | null;
+  header: string;
+  question: string;
+  options: string[];
+  allowOther: boolean;
+  /** When it was last asked (put on a card). */
+  askedAt: string | null;
+  /** How many times it has been asked. */
+  round: number;
+}
+
 export interface StatusCase {
   caseId: string;
   title: string;
@@ -79,6 +105,8 @@ export interface StatusCase {
   hot: string[];
   /** What the list shows of it (shared/graph.ts); null when the item is unknown to the book. */
   row: ListRow | null;
+  /** A matter a person told: its last three looks, oldest first (the log keeps ten); absent for the rest. */
+  passes?: StatusPass[];
 }
 
 /**
@@ -128,6 +156,8 @@ export interface Status {
   problems: string[];
   cards: Array<{ id: string; person: string; title: string; agentId: string | null; status: string; raisedAt: string; questions: number; caseIds: string[] }>;
   cases: StatusCase[];
+  /** The questions waiting for an answer, oldest first, with their numbers. */
+  questions: StatusQuestion[];
   /** Cases not judged this reconcile: nothing about them matters now. */
   cold: Array<{ caseId: string; title: string; status: string; observedAt: string }>;
   openCommitments: number;

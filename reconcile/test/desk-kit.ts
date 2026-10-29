@@ -45,7 +45,7 @@ const quoted = (v: unknown) => `"${String(v).replace(/["\\]/g, "\\$&")}"`;
 export const commandFor = (r: Record<string, unknown>): string => {
   const flags = [
     ...(r.cmd === "undo" ? [r.target === "last" ? "--last" : `--id ${r.target}`] : []),
-    ...["item", "kind", "title", "domain", "until", "person", "what", "expected"].filter((k) => r[k] !== undefined).map((k) => `--${k} ${quoted(r[k])}`),
+    ...["item", "kind", "title", "domain", "until", "person", "what", "expected", "ask"].filter((k) => r[k] !== undefined).map((k) => `--${k} ${quoted(r[k])}`),
   ];
   return `node D:/plugins/reconcile/bin/reconcile-say.mjs ${r.cmd} ${flags.join(" ")} --said ${quoted(r.said)}`;
 };

@@ -21,6 +21,12 @@ const NAMES_PER_TICK = 200;
 const STALE_TMP_MS = 3_600_000;
 const RECEIPT_KEEP_MS = 7 * 86_400_000;
 
+/**
+ * `--said -`: the words are the message the person sent in the conversation the command ran in, taken from there by the engine
+ * and not copied by the agent. An answer's words are always so.
+ */
+export const SAID_FROM_CHAT = "-";
+
 const base = {
   v: z.literal(1),
   id: z.string().regex(REQUEST_ID),
@@ -78,11 +84,25 @@ const undo = z
   })
   .strict();
 
-export const requestSchema = z.discriminatedUnion("cmd", [say, track, note, undo]);
+/**
+ * A question answered by the person in a conversation (a chat they were pushed the question into): `ask` is the number the push
+ * printed on its last line (D1-1, #123-2, 确认-1). The words are the person's message, taken from the conversation (`said` is "-").
+ */
+const answer = z
+  .object({
+    ...base,
+    said: z.literal(SAID_FROM_CHAT),
+    cmd: z.literal("answer"),
+    ask: z.string().trim().min(1).max(60),
+  })
+  .strict();
+
+export const requestSchema = z.discriminatedUnion("cmd", [say, track, note, undo, answer]);
 export type Request = z.output<typeof requestSchema>;
 export type SayRequest = Extract<Request, { cmd: "say" }>;
 export type TrackRequest = Extract<Request, { cmd: "track" }>;
 export type NoteRequest = Extract<Request, { cmd: "note" }>;
+export type AnswerRequest = Extract<Request, { cmd: "answer" }>;
 
 export const KIND_LABEL: Record<Annotation["kind"], string> = { drop: "不再追踪", hold: "先别问", wrong: "判断错了", track: "交代", note: "补一句" };
 
@@ -449,8 +469,48 @@ export function mentions(text: string, item: string): boolean {
   return false;
 }
 
+/** The text with every standalone mention of `item` (see `mentions`) taken out. */
+export function withoutMention(text: string, item: string): string {
+  const it = item.trim();
+  if (!it) return text;
+  let out = "";
+  let from = 0;
+  for (let at = text.indexOf(it); at >= 0; at = text.indexOf(it, at + 1)) {
+    if (at < from || /[0-9A-Za-z_]/.test(text[at - 1] ?? "") || /[0-9A-Za-z_]/.test(text[at + it.length] ?? "")) continue;
+    out += text.slice(from, at);
+    from = at + it.length;
+  }
+  return out + text.slice(from);
+}
+
 /** A message of the person's in a turn: what vouches for a request (see the engine's ingest). */
 export const vouchKey = (via: string, turnId: string, step: number, message: string) => `${via}\u0000${turnId}\u0000${step}\u0000${squash(message)}`;
+
+/**
+ * The checks every reading of a conversation starts with, said once: whose conversation it is, which turn, and which command of that
+ * turn sent this very request. `steps` and the index of that command (the last one that sent it: an earlier line that only looks like
+ * one cannot hide what came in after it), or why not.
+ */
+function commandInTurn(r: Request, conversation: Conversation | null, dataDir: string | null, waiveSource: boolean): { why: string } | { steps: TurnStep[]; run: number } {
+  if (!conversation) return { why: "找不到说这句话的对话" };
+  if (NOT_A_PERSON.some((l) => l in conversation.labels)) return { why: "这个对话不是人直接在用的（是别的 agent、流程或卡片起的）" };
+  // A chat channel (or another plugin) starts its conversations with a source label: the host does not say who sent what there.
+  // `waiveSource`: the caller knows this is the admin's own private chat (adminChat) and that the request is one it may go through
+  // on (engine.ts handle). It waives this one check and no other: each of the ones below still holds.
+  if (conversation.labels.source && !waiveSource) return { why: `这是从「${clip(conversation.labels.source, 20)}」进来的对话（聊天软件或别的插件），分不清是谁说的` };
+  const turn = conversation.turn;
+  if (!turn) return { why: "说这句话的对话这会儿没在跑，对不上是哪一轮说的" };
+  const steps = turn.steps;
+  if (!steps.some((s) => s.kind === "person")) return { why: "这一轮不是人发消息开始的（比如被通知或定时叫醒），不算本人说的" };
+  const run = steps.findLastIndex((s) => s.kind === "command" && sayCalls(s.text).some((call) => sent(call, r, dataDir)));
+  if (run < 0) return { why: "这一轮里找不到这次的 reconcile-say 调用（命令里的事项、改动和原话要和这次的一致）" };
+  return { steps, run };
+}
+
+/** Why words are not taken when another agent's message came into the turn between the person's message and the command. */
+const AGENT_CAME_IN = "人说完这句话以后，这一轮里进来过别的 agent 的消息，分不清是谁的意思";
+/** A message that is long, many lines or has a code block reads as pasted, not as what a person typed. */
+const looksPasted = (text: string) => text.length > MAX_MESSAGE || text.split("\n").length > 3 || text.includes("```");
 
 /**
  * Whether the request carries the person's own words, said just now in their own conversation:
@@ -463,39 +523,87 @@ export const vouchKey = (via: string, turnId: string, step: number, message: str
  * the last command that sent it; a message that is long, many lines or has a code block reads as
  * pasted, and the words must be most of the message, so that a line picked out of someone else's
  * chat does not pass as the person's. What cannot be checked is not taken as theirs.
+ *
+ * `--said -` (SAID_FROM_CHAT): the agent does not copy the words, they are the message itself: the last of the person's messages
+ * before the command. Nothing else is loosened: the same turn, the same command, no agent in between, not pasted. `said` is then
+ * the words, as the engine goes on with them.
  */
-export function ownWords(r: Request, conversation: Conversation | null, dataDir: string | null = null, waiveSource = false): { why: string | null; message: { step: number; text: string } | null } {
-  const no = (why: string) => ({ why, message: null });
-  if (!conversation) return no("找不到说这句话的对话");
-  if (NOT_A_PERSON.some((l) => l in conversation.labels)) return no("这个对话不是人直接在用的（是别的 agent、流程或卡片起的）");
-  // A chat channel (or another plugin) starts its conversations with a source label: the host does not say who sent what there.
-  // `waiveSource`: the caller knows this is the admin's own private chat (adminChat) and that the request is one it may go through
-  // on (engine.ts handle). It waives this one check and no other: each of the ones below still holds.
-  if (conversation.labels.source && !waiveSource) return no(`这是从「${clip(conversation.labels.source, 20)}」进来的对话（聊天软件或别的插件），分不清是谁说的`);
-  const turn = conversation.turn;
-  if (!turn) return no("说这句话的对话这会儿没在跑，对不上是哪一轮说的");
-  const steps = turn.steps;
-  if (!steps.some((s) => s.kind === "person")) return no("这一轮不是人发消息开始的（比如被通知或定时叫醒），不算本人说的");
+export function ownWords(
+  r: Request,
+  conversation: Conversation | null,
+  dataDir: string | null = null,
+  waiveSource = false,
+): { why: string | null; message: { step: number; text: string } | null; said: string | null } {
+  const no = (why: string) => ({ why, message: null, said: null });
+  const found = commandInTurn(r, conversation, dataDir, waiveSource);
+  if ("why" in found) return no(found.why);
+  const { steps, run } = found;
+  const fromChat = r.said === SAID_FROM_CHAT;
   const words = r.said.trim();
-  // The last command that sent it: an earlier line that only looks like one cannot hide what came in after it.
-  const run = steps.findLastIndex((s) => s.kind === "command" && sayCalls(s.text).some((call) => sent(call, r, dataDir)));
-  if (run < 0) return no("这一轮里找不到这次的 reconcile-say 调用（命令里的事项、改动和原话要和这次的一致）");
-  // The message the words come from: of those before the command that have them, the closest fit.
   let said = -1;
-  for (let i = 0; i < run; i++) {
-    const step = steps[i]!;
-    if (step.kind === "person" && step.text.includes(words) && (said < 0 || step.text.length < (steps[said] as { text: string }).text.length)) said = i;
+  if (fromChat) {
+    said = steps.findLastIndex((s, i) => i < run && s.kind === "person");
+    if (said < 0) return no("这条命令之前，这一轮里没有人发的消息");
+  } else {
+    // The message the words come from: of those before the command that have them, the closest fit.
+    for (let i = 0; i < run; i++) {
+      const step = steps[i]!;
+      if (step.kind === "person" && step.text.includes(words) && (said < 0 || step.text.length < (steps[said] as { text: string }).text.length)) said = i;
+    }
+    if (said < 0) return no("这一轮对话里找不到这句原话");
   }
-  if (said < 0) return no("这一轮对话里找不到这句原话");
-  if (steps.slice(said + 1, run).some((s) => s.kind === "agent")) return no("人说完这句话以后，这一轮里进来过别的 agent 的消息，分不清是谁的意思");
+  if (steps.slice(said + 1, run).some((s) => s.kind === "agent")) return no(AGENT_CAME_IN);
   const text = (steps[said] as { text: string }).text.trim();
-  if (text.length > MAX_MESSAGE || text.split("\n").length > 3 || text.includes("```")) return no("原话所在的消息像是贴进来的一段，不算本人说的");
-  if (words.length < MIN_COVER * text.length) return no("原话只是那条消息里的一小段，不算本人说的");
-  return { why: null, message: { step: said, text } };
+  if (looksPasted(text)) return no("原话所在的消息像是贴进来的一段，不算本人说的");
+  if (!fromChat && words.length < MIN_COVER * text.length) return no("原话只是那条消息里的一小段，不算本人说的");
+  return { why: null, message: { step: said, text }, said: text };
 }
 
 /** The same check, only why not. */
 export const notOwnWords = (r: Request, conversation: Conversation | null, dataDir: string | null = null, waiveSource = false): string | null => ownWords(r, conversation, dataDir, waiveSource).why;
+
+// ---- an answer in a chat ------------------------------------------------------------------------------------------
+
+/**
+ * The line a push ends each question with, which comes back with the push when a person replies to it: "（问题 D1-1）". What is
+ * between the parentheses is the number of the question (engine.ts questionNumbers).
+ */
+export const QUESTION_TAG = /（问题 ([^\s（）]{1,40})）/g;
+
+/**
+ * A reply as it reaches the agent: what is quoted comes first, then what the person typed. The quote ends at the last question tag in
+ * it (what the push printed last), so the typed part is what follows; a message without a tag is all typed. `tags` are the numbers in
+ * the quote, each once.
+ */
+export function splitReply(message: string): { typed: string; tags: string[] } {
+  const found = [...message.matchAll(QUESTION_TAG)];
+  const last = found.at(-1);
+  if (!last) return { typed: message.trim(), tags: [] };
+  return { typed: message.slice(last.index + last[0].length).trim(), tags: [...new Set(found.map((m) => m[1]!))] };
+}
+
+/**
+ * The words of an answer: what the person typed in their reply, whose conversation, turn and command are checked as for any words
+ * (commandInTurn), with no agent's message in between, and the typed part (not the quote above it, which is the controller's own
+ * text) not long, many lines or with a code block. Nothing typed is not an answer.
+ */
+export function answerWords(
+  r: AnswerRequest,
+  conversation: Conversation | null,
+  dataDir: string | null = null,
+  waiveSource = false,
+): { why: string } | { typed: string; tags: string[] } {
+  const found = commandInTurn(r, conversation, dataDir, waiveSource);
+  if ("why" in found) return found;
+  const { steps, run } = found;
+  const said = steps.findLastIndex((s, i) => i < run && s.kind === "person");
+  if (said < 0) return { why: "这条命令之前，这一轮里没有人发的消息" };
+  if (steps.slice(said + 1, run).some((s) => s.kind === "agent")) return { why: AGENT_CAME_IN };
+  const { typed, tags } = splitReply((steps[said] as { text: string }).text);
+  if (typed === "") return { why: "这条消息里没有人自己写的字（只是引用了推送）" };
+  if (looksPasted(typed)) return { why: "人写的那一段像是贴进来的（太长、行数多或有代码块），不算本人回答" };
+  return { typed, tags };
+}
 
 /**
  * Whether a conversation is one of the admin's own private chats, as the deployment says they look (persons.json `chats`: a set of
@@ -511,8 +619,11 @@ export function adminChat(labels: Record<string, string>, chats: ReadonlyArray<R
   });
 }
 
-/** What may be said into the admin's own chat without the check of where the conversation came from: telling a matter, a line added to it, and taking either back. */
-export const OPEN_TO_ADMIN_CHAT: ReadonlyArray<Annotation["kind"]> = ["track", "note"];
+/**
+ * What may be said into the admin's own chat without the check of where the conversation came from: telling a matter, a line added to it,
+ * and taking either back (the kinds of annotation); and an answer to a question (`answer`: it is the chat a push is answered in).
+ */
+export const OPEN_TO_ADMIN_CHAT: ReadonlyArray<Annotation["kind"] | "answer"> = ["track", "note", "answer"];
 
 /**
  * Taking back what was told needs no card only just after: the matter or line was told in this very conversation, no more than this

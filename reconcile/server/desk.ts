@@ -40,6 +40,16 @@ export function nextLookOf(log: string | undefined, n: string): string | null {
   }
 }
 
+/** The last `count` looks the log (`desk.log`, JSON) tells of, oldest first. Text from a model: shown only clipped and escaped. */
+export function passesOf(log: string | undefined, count: number): Array<{ n: number; at: string; looked: string; status: string; next: string }> {
+  try {
+    const entries = JSON.parse(log || "[]") as Array<{ n?: unknown; at?: unknown; looked?: unknown; status?: unknown; next?: unknown }>;
+    return entries.slice(-count).map((e) => ({ n: Number(e.n) || 0, at: String(e.at ?? ""), looked: String(e.looked ?? ""), status: String(e.status ?? ""), next: String(e.next ?? "") }));
+  } catch {
+    return [];
+  }
+}
+
 /** Whether two sets of words say the same: case, spaces and punctuation do not tell them apart. */
 export const sameWords = (a: string, b: string): boolean => {
   const flat = (text: string) => text.toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");

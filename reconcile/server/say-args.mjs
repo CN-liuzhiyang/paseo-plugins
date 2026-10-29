@@ -8,6 +8,7 @@ const KNOWN = {
   undo: ["id", "last", "said", "data", "wait"],
   track: ["said", "title", "domain", "data", "wait"],
   note: ["item", "said", "data", "wait"],
+  answer: ["ask", "said", "data", "wait"],
 };
 
 /** The longest short name a matter may be given (requests.ts DESK_TITLE_MAX). */
@@ -57,6 +58,11 @@ export function parseSayArgs(argv) {
     const request = { cmd, title: flags.title, said: flags.said };
     if (flags.domain !== undefined) request.domain = flags.domain;
     return { request, data, wait };
+  }
+  if (cmd === "answer") {
+    if (!flags.ask) return { error: "要用 --ask 给出回答的是哪个问题（推送最后一行的编号，比如 D1-1）" };
+    if (flags.said !== "-") return { error: "answer 的 --said 只能是 -：回答是人在这个对话里写的那条消息，由插件自己去取，不用你转抄" };
+    return { request: { cmd, ask: flags.ask, said: "-" }, data, wait };
   }
   if (cmd === "note") {
     if (!flags.item) return { error: "要用 --item 给出交代过的事的编号，比如 D12" };

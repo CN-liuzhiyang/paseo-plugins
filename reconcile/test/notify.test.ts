@@ -48,15 +48,18 @@ test("a raised card is sent to the person's channel at once: its title, the ques
     assert.equal(w.deliveries.length, 1);
     const [d] = w.deliveries;
     assert.deepEqual([d!.channel, d!.to, d!.title, d!.status], ["im", "p2p:someone", w.cards[0]!.card.title, "succeeded"]);
-    assert.equal(d!.text, "#1 外放了吗？\n- 外放了\n- 还没：过两天再问\n- 其他（自己写）\n\n在 Paseo「事项追踪」里回答");
+    // The title says what it is about and the question; the text is the situation, the numbered options, and the number of the question last.
+    assert.equal(d!.title, "#1 外放了吗？");
+    assert.equal(d!.text, "b\n1 外放了\n2 还没：过两天再问\n引用这条回一个数字，或者直接写一句。（问题 #1-1）");
     assert.match(d!.idempotencyKey, new RegExp(`^test:notify:${w.cards[0]!.card.id}:im:`));
   }));
 
-test("a statement goes in full, with nothing to answer", () =>
+test("a statement goes in full, with its one option to answer by", () =>
   withWorld({}, async (w) => {
     w.items.set("gcp-demo:2", issue(2, { release: "2026-10-14", status: "提醒" }));
     await w.run("2026-10-14 18:00");
-    assert.equal(w.deliveries[0]!.text, "#2 没进封版\n\n#2 在 stable 上的 R-170 不在这次复制里，后续要单独 merge。");
+    assert.equal(w.deliveries[0]!.title, "#2 没进封版");
+    assert.equal(w.deliveries[0]!.text, "#2 在 stable 上的 R-170 不在这次复制里，后续要单独 merge。\n1 知道了\n引用这条回一个数字，或者直接写一句。（问题 #2-1）");
   }));
 
 test("a restart raises the same card again without sending it again; a new card is sent", () =>

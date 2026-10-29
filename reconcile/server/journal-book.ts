@@ -1,6 +1,6 @@
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync } from "node:fs";
 import path from "node:path";
-import type { Annotation, Assessment, Commitment, Note } from "../shared/model";
+import { answeredWhere, type Annotation, type Assessment, type Commitment, type Note } from "../shared/model";
 import type { Ball, Cause, HistoryLine } from "../shared/graph";
 import { clip, KIND_LABEL } from "./requests";
 import type { JournalEvent } from "./state";
@@ -299,7 +299,7 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
         if (patch.answer) {
           const a = patch.answer;
           const said = a.text ?? a.label;
-          const where = a.via === "page" ? "在事项页上" : "在问题卡上";
+          const where = answeredWhere(a.via);
           entry(chain, { at: a.at, seq, kind: "answer", text: (f) => `${f.person(info.owner)}${where}回答：${clip(said, 80)}`, detail: null });
         } else if (patch.status === "cancelled" || patch.status === "expired") {
           const why = patch.reason;

@@ -3,8 +3,8 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
 import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
-import { DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
-import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, sameWords } from "./desk";
+import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
+import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, passesOf, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
 import { attentionOf, describeChanges, type PlanEntry, type Status } from "../shared/status";
@@ -14,7 +14,7 @@ import { heatOf, listedAt } from "./heat";
 import { linksOf, vocabularyOf, type FlagLink, type Vocabulary } from "./links";
 import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outputCheck, recordingContext, type CommitmentSpec, type ContextInputs, type CtxCall, type KeepRules, type LoadedRule, type RuleOutput, type RuleSet } from "./rules";
 import type { CaptureInput } from "./capsule";
-import { ADMIN_CHAT_UNDO_MS, adminChat, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, sweepRequests, vouchKey, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
+import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, type AnswerRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { RunProbe } from "./runs";
@@ -1111,6 +1111,25 @@ export function createEngine(deps: EngineDeps) {
   const isConfirm = (c: Commitment) => c.origin.by === "controller" && c.origin.who === "confirm";
   const isConfirmCard = (card: Card) => card.kind === "confirm";
 
+  /**
+   * The number each question is asked by: the item's number and which question of its own this is ("D1-1", "#123-2"); "确认-<n>" for
+   * the controller's confirmations, "通知-<n>" for what it tells without an item. Counted in the order the questions were made, over all
+   * of them, answered or not, so that a number means one question for good. A push prints it on its last line ("（问题 D1-1）"), and a
+   * person's reply to the push brings it back (requests.ts QUESTION_TAG).
+   */
+  function questionNumbers(): Map<string, string> {
+    const out = new Map<string, string>();
+    const counts = new Map<string, number>();
+    const made = Object.values(state.commitments).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.key.localeCompare(b.key));
+    for (const c of made) {
+      const prefix = isConfirm(c) ? "确认" : c.caseId ? numberOf(c.caseId) : "通知";
+      const n = (counts.get(prefix) ?? 0) + 1;
+      counts.set(prefix, n);
+      out.set(c.id, `${prefix}-${n}`);
+    }
+    return out;
+  }
+
   /** A case's annotations of one kind in force now. */
   function inForce(caseId: string, kind: Annotation["kind"], nowMs: number): Annotation[] {
     return Object.values(state.annotations).filter((a) => a.caseId === caseId && a.kind === kind && !a.revoked && (kind !== "hold" || nowMs < holdEnd(a)));
@@ -1222,10 +1241,13 @@ export function createEngine(deps: EngineDeps) {
     return null;
   }
 
-  async function handle(r: Request, nowMs: number): Promise<Handled> {
+  async function handle(asked: Request, nowMs: number): Promise<Handled> {
     const admin = Object.values(config.persons).find((p) => p.admin);
     const reject = (why: string, caseId: string | null = null): Handled => ({ outcome: "rejected", detail: `没收下：${why}`, annotation: null, caseId, events: [] });
     if (!admin) return reject("persons.json 里没有 admin，不知道这些事项是谁的");
+    if (asked.cmd === "answer") return handleAnswer(asked, admin, nowMs);
+    // `--said -` is made into the person's words below, once the conversation has been read; until then the words are not known.
+    let r: Exclude<Request, AnswerRequest> = asked;
     let target: Annotation | null = null;
     // null: a matter being told, which has no key until it is let through.
     let caseId: string | null;
@@ -1253,7 +1275,8 @@ export function createEngine(deps: EngineDeps) {
     }
     // Not run in a Paseo conversation: there is nobody whose words these could be, and nobody to ask about them.
     if (!r.via) return reject("命令不是在 Paseo 的对话里跑的（没有 PASEO_AGENT_ID）", caseId);
-    const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
+    const via = r.via;
+    const conversation = deps.conversation ? await deps.conversation(via).catch(() => null) : null;
     // The admin's own private chat (persons.json `chats`) is let through without the check of where the conversation came from -- for telling
     // a matter, adding a line to one, and taking those back; not for anything else, and every other check still holds.
     // Taking one back is without a card only just after it was told, in this conversation (freshInChat): a matter that was followed for days
@@ -1266,14 +1289,20 @@ export function createEngine(deps: EngineDeps) {
     // A taking back of one told in the admin's chat that is not just after is judged as it would be if it were: whatever else fails is
     // the reason that is kept, and when nothing does, the reason is that it is too old (not the one about where the chat came from).
     const tooOld = ofOpen && !fresh && inChat;
-    const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive || tooOld) : { why: "这个 Paseo 没给插件查对话的接口", message: null };
+    const checked = deps.conversation ? ownWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive || tooOld) : { why: "这个 Paseo 没给插件查对话的接口", message: null, said: null };
+    // `--said -`: the words are the message itself. Where they cannot be taken from the conversation there is no sentence to put on a card
+    // (the agent was asked not to copy one): it is told so, and that it can write the words itself, which goes the way words did before (a card).
+    if (r.said === SAID_FROM_CHAT) {
+      if (checked.why !== null || checked.said === null) return { ...reject("用 --said - 没能从对话里取到人说的原话。把原话照抄进 --said \"…\" 再跑一遍，那样会先发一张确认卡给 admin", caseId), why: checked.why ?? "no message" };
+      r = { ...r, said: clip(checked.said, 500) };
+    }
     let why = checked.why;
     if (!why && tooOld) why = target!.via !== r.via ? "要撤的是另一个对话里记下的话，只有在记下它的那个对话里、刚说完才免确认" : `要撤的是 ${ago(nowMs - Date.parse(target!.at))}记下的话，只有刚说完（${Math.round(ADMIN_CHAT_UNDO_MS / 60_000)} 分钟内）才免确认`;
     let vouch: string | undefined;
     // One message of the person's lets one request through, however it is reworded; a message that
     // names several items as written lets one through for each of them.
     if (!why && checked.message && conversation?.turn) {
-      const message = vouchKey(r.via, conversation.turn.id, checked.message.step, checked.message.text);
+      const message = vouchKey(via, conversation.turn.id, checked.message.step, checked.message.text);
       const item = r.cmd === "say" && mentions(checked.message.text, r.item) ? caseId! : "";
       const used = Object.values(state.requests).flatMap((q) => (q.vouch?.startsWith(`${message}\u0001`) ? [q.vouch.slice(message.length + 1)] : []));
       if (used.length > 0 && (item === "" || used.includes("") || used.includes(item))) why = "人的这条消息这一轮里已经放行过一条请求了（写明了几个单号的，每个单号一条）";
@@ -1285,6 +1314,100 @@ export function createEngine(deps: EngineDeps) {
     const waived = waive && applied.outcome === "applied";
     const events = waived ? applied.events.map((e): EventBody => (e.type === "annotation.added" ? { ...e, annotation: { ...e.annotation, waived: true } } : e)) : applied.events;
     return { ...applied, events, vouch, ...(waived ? { waived: true as const } : {}) };
+  }
+
+  /**
+   * What the receipt says when the words could not be taken as the person's own. Not why: the journal has that (`why`), so that the
+   * receipt does not teach a way round.
+   */
+  const NOT_THEIR_ANSWER = "对不上这是他本人这一轮自己写的回答，不记。请他在 Paseo「事项追踪」里答，或者在他自己的单聊里引用那条推送再回一次";
+
+  /** What a person typed to a question as one of its options: the n-th by number, or the one with these words; else, where it may be, words of their own. */
+  function chooseOption(c: Commitment, typed: string, numbersMentioned: string[]): { option: Commitment["ask"]["options"][number] } | { other: string } | { error: string } {
+    // The numbers that say which question it is are not the answer ("D1-1 选 2" answers 2).
+    let bare = typed.normalize("NFKC").toLowerCase();
+    for (const no of numbersMentioned) bare = withoutMention(bare, no.toLowerCase());
+    const squeeze = (text: string) => text.normalize("NFKC").toLowerCase().replace(/[\s\p{P}\p{S}]/gu, "");
+    const flat = squeeze(bare);
+    if (flat === "") return { error: "他只写了编号，没写答案" };
+    const options = c.ask.options;
+    const nth = options.length > 0 ? /^(?:选|第)?([1-9][0-9]?)(?:个|项|条|号)?$/.exec(flat) : null;
+    if (nth) {
+      const option = options[Number(nth[1]) - 1];
+      return option ? { option } : { error: `他回的是 ${nth[1]}，可是这个问题的选项只有 1 到 ${options.length}` };
+    }
+    const same = options.find((o) => squeeze(o.label) === flat);
+    if (same) return { option: same };
+    if (!c.ask.allowOther) return { error: `这个问题只能从选项里选（${options.map((o, i) => `${i + 1} ${o.label}`).join("；")}），他写的「${clip(typed, 60)}」对不上任何一项` };
+    return { other: typed.trim() };
+  }
+
+  /**
+   * A person's answer to a question, written in a chat the question was pushed to (a reply to the push, or words of their own): the
+   * checks of what makes it their answer and which question it is for, and then the same recording as on the page (answerEvents).
+   * Nothing here proposes a card: an answer that cannot be taken as the person's is not recorded, and the receipt sends them to the
+   * page, which is where they could always answer.
+   */
+  async function handleAnswer(r: AnswerRequest, admin: Person & { id: string }, nowMs: number): Promise<Handled> {
+    const reject = (why: string, caseId: string | null = null, journal?: string): Handled => ({ outcome: "rejected", detail: `没收下：${why}`, annotation: null, caseId, events: [], immediate: true, ...(journal ? { why: journal } : {}) });
+    if (!r.via) return reject("命令不是在 Paseo 的对话里跑的（没有 PASEO_AGENT_ID）");
+    const conversation = deps.conversation ? await deps.conversation(r.via).catch(() => null) : null;
+    // A push is answered in the chat it was pushed to: the admin's own private one (persons.json `chats`), where the check of where the
+    // conversation came from is waived for an answer (OPEN_TO_ADMIN_CHAT) and for nothing else; every other check holds.
+    const waive = OPEN_TO_ADMIN_CHAT.includes("answer") && !!conversation && adminChat(conversation.labels, admin.chats);
+    const words = deps.conversation ? answerWords(r, conversation, deps.requestsDir ? path.dirname(deps.requestsDir) : null, waive) : { why: "这个 Paseo 没给插件查对话的接口" };
+    if ("why" in words) return reject(NOT_THEIR_ANSWER, null, words.why);
+
+    // Which question: the number in the person's words, else the one in the push they quoted, else the only one there is.
+    const numbers = questionNumbers();
+    const noOf = (c: Commitment) => numbers.get(c.id)!;
+    const canon = (no: string) => no.trim().replace(/^[#＃]/, "").toLowerCase();
+    const byNumber = new Map(Object.values(state.commitments).map((c) => [canon(noOf(c)), c] as const));
+    const asked = byNumber.get(canon(r.ask));
+    if (!asked) return reject(`没有 ${clip(r.ask, 40)} 这个问题（编号在推送最后一行，像「（问题 D1-1）」）`);
+    const typed = words.typed.normalize("NFKC").toLowerCase();
+    // As the push printed it (a bare "1" is an option, not the matter #1).
+    const appears = (no: string) => mentions(typed, no.toLowerCase());
+    const hits = Object.values(state.commitments).filter((c) => appears(noOf(c)));
+    let pointed: Commitment | undefined;
+    if (hits.length > 1) return reject(`他的话里提到了好几个问题（${hits.map(noOf).join("、")}），一句话只答一个，问他先答哪个`);
+    if (hits.length === 1) pointed = hits[0];
+    else if (words.tags.length > 1) return reject(`他引用的推送里有 ${words.tags.length} 个问题（${words.tags.join("、")}），没说答的是哪个。请他回「编号 答案」，比如「${words.tags[0]} 选 1」`);
+    else if (words.tags.length === 1) {
+      pointed = byNumber.get(canon(words.tags[0]!));
+      if (!pointed) return reject(`他引用的推送里的编号 ${words.tags[0]} 不是这里的问题`);
+    } else {
+      // No number at all: the matter he names, or the only question waiting for him.
+      const waiting = Object.values(state.commitments).filter((c) => c.status === "waiting" && c.ask.person === admin.id);
+      const named = [...new Set(waiting.flatMap((c) => (c.caseId && appears(numberOf(c.caseId)) ? [c.caseId] : [])))];
+      if (named.length > 1) return reject(`他的话里提到了好几件事（${named.map(numberOf).join("、")}），问他答的是哪个问题`);
+      if (named.length === 1) {
+        const ofThat = waiting.filter((c) => c.caseId === named[0]);
+        if (ofThat.length !== 1) return reject(`${numberOf(named[0]!)} 有 ${ofThat.length} 个问题没答（${ofThat.map(noOf).join("、")}），问他答的是哪个`);
+        pointed = ofThat[0];
+      } else if (waiting.length === 1) pointed = waiting[0];
+      else if (waiting.length === 0) return reject("现在没有在等他回答的问题");
+      else return reject(`他还有 ${waiting.length} 个问题没答（${waiting.map(noOf).join("、")}），问他答的是哪个`);
+    }
+    const c = pointed!;
+    if (c.id !== asked.id) return reject(`你给的是 ${noOf(asked)}，可是他的话指的是 ${noOf(c)}。按他的话重新跑一遍；拿不准就问他`, c.caseId);
+    if (c.ask.person !== admin.id) return reject(`${noOf(c)} 问的不是 ${admin.name}`, c.caseId);
+    const late = notWaiting(c);
+    if (late) return reject(`${noOf(c)} ${late.detail}`, c.caseId);
+
+    const pick = chooseOption(c, words.typed, [noOf(c), c.caseId ? numberOf(c.caseId) : ""]);
+    if ("error" in pick) return reject(pick.error, c.caseId);
+    const at = nowIso(nowMs);
+    const via = conversation!.labels.source ? `chat:${clip(conversation!.labels.source, 20)}` : "chat";
+    const { events, label } = answerEvents(c, "option" in pick ? pick.option.label : pick.other, at, via, `chat\u0000${c.id}\u0000${c.rounds}`, personName(c.ask.person));
+    events.push(...closingCards(c, at));
+    const head = `记下了：${noOf(c)}「${clip(c.ask.header, 40)}」，`;
+    const detail = isConfirm(c)
+      ? "option" in pick && pick.option.id === "yes"
+        ? `${head}你选了「${label}」，下一次检查（一分钟内）就照办。`
+        : `${head}你回的是${"option" in pick ? `「${label}」` : label}，不是「照办」，那句话不会生效。`
+      : `${head}${"option" in pick ? `你选了「${label}」` : `你说${label}`}。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。`;
+    return { outcome: "applied", detail, annotation: null, caseId: c.caseId, events, immediate: true, ...(waive && !!conversation?.labels.source ? { waived: true as const } : {}) };
   }
 
   function applySaid(r: SayRequest | Extract<Request, { cmd: "undo" }>, caseId: string, target: Annotation | null, by: string, how: Annotation["how"], nowMs: number): Handled {
@@ -1377,7 +1500,7 @@ export function createEngine(deps: EngineDeps) {
    * Words that may not be the person's own become a question to the admin: yes applies them as
    * said. One a day per item and kind, so that a chat full of "有点问题" is not a card each.
    */
-  function propose(asked: Request, caseId: string | null, target: Annotation | null, why: string, admin: Person & { id: string }, nowMs: number): Handled {
+  function propose(asked: Exclude<Request, AnswerRequest>, caseId: string | null, target: Annotation | null, why: string, admin: Person & { id: string }, nowMs: number): Handled {
     const tag = asked.cmd === "say" ? asked.kind : asked.cmd;
     // A matter being told has no key yet: it is asked about by its words (the same words asked again within a day are one question).
     const subject = caseId ?? `desk-new:${hash(asked.said.replace(/[\s\p{P}\p{S}]/gu, "").toLowerCase()).slice(0, 12)}`;
@@ -1388,7 +1511,7 @@ export function createEngine(deps: EngineDeps) {
     if (waiting >= MAX_OPEN_CONFIRMS) return { outcome: "rejected", detail: `没收下：已经有 ${waiting} 句话在等 ${admin.name} 确认，先处理完那些`, annotation: null, caseId, events: [], why };
     // What the card shows is what a yes applies: one line, as long as the card shows it. The words
     // as sent stay in the journal with the request.
-    const r: Request = { ...asked, said: clip(asked.said, 200) };
+    const r: Exclude<Request, AnswerRequest> = { ...asked, said: clip(asked.said, 200) };
     const n = caseId ? numberOf(caseId) : "";
     const what =
       r.cmd === "say"
@@ -1457,6 +1580,7 @@ export function createEngine(deps: EngineDeps) {
       const pending = state.requests[id];
       if (pending?.outcome !== "proposed" || !pending.request) continue;
       const r = pending.request;
+      if (r.cmd === "answer") continue; // an answer is never put on a card
       let handled: Handled;
       if (c.status === "done" && c.answer?.option === "yes" && admin) {
         const target = r.cmd === "undo" ? (state.annotations[r.target] ?? null) : null;
@@ -2215,8 +2339,17 @@ export function createEngine(deps: EngineDeps) {
     return { title: card.title, brief: briefs.join("\n\n"), questions };
   }
 
+  /**
+   * A card's title: of one question a rule asked, which matter it is about and the question ("定期洗牙（D1）：约上了吗？"), unless the question
+   * says it (it names the header or the item's number); of one the controller asks of itself (a confirmation, a source that is down) the
+   * question, which says what it is about; of several, how many and about what.
+   */
   function cardTitle(commitments: Commitment[]): string {
-    if (commitments.length === 1) return commitments[0]!.ask.question;
+    if (commitments.length === 1) {
+      const c = commitments[0]!;
+      const says = c.ask.question.includes(c.ask.header) || (!!c.caseId && mentions(c.ask.question, numberOf(c.caseId)));
+      return c.origin.by !== "rule" || says ? c.ask.question : `${c.ask.header}：${c.ask.question}`;
+    }
     const headers = headersOf(commitments.map((c) => c.id));
     return `${commitments.length} 件事要你回答：${commitments.map((c) => headers.get(c.id)).join("、")}`;
   }
@@ -2634,17 +2767,43 @@ export function createEngine(deps: EngineDeps) {
     return out;
   };
 
-  /** What a card says on a channel where it cannot be answered: statements in full, questions with their options. */
+  /** Markdown as a chat shows it: no emphasis marks, and the escapes of the characters Markdown would take taken off. */
+  const plainText = (text: string) => text.replace(/\*\*/g, "").replace(/\\([\\`*_[\]()<>#|~!])/g, "$1");
+
+  /**
+   * What a push says of a question before its options. A statement (one option, to be acknowledged): all of it, the brief included.
+   * Otherwise the situation in a line or two (the first paragraph of the brief), and, for a confirmation, the words it is about.
+   */
+  function leadOf(c: Commitment, statement: boolean): string {
+    if (statement) {
+      const full = plainText(c.brief).trim();
+      return full.length > 600 ? `${full.slice(0, 599)}…` : full;
+    }
+    const paragraphs = c.brief.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    const picked = isConfirm(c) ? paragraphs.filter((p, i) => i === 0 || p.startsWith(">")) : paragraphs.slice(0, 1);
+    return picked.map((p) => clip(plainText(p.replace(/^>\s*/, "")), 200)).join("\n");
+  }
+
+  /**
+   * What a card says on a channel where it cannot be answered in place, so that it is answered by replying to it: statements in full,
+   * questions with numbered options, and as the very last line of each question its number ("（问题 D1-1）"), which comes back with the push
+   * when it is quoted and tells which question the reply is to (requests.ts splitReply). Nothing may follow the last number: what follows
+   * it is taken as what the person typed.
+   */
   function notifyText(card: Card): string {
     const content = contentOf(card);
-    const asks = content.questions.some((q) => q.options.length > 1);
-    const parts = content.questions.map((q) => {
+    const numbers = questionNumbers();
+    const several = content.questions.length > 1;
+    const blocks = content.questions.map((q, i) => {
       const c = state.commitments[q.commitmentId];
-      // A question with one option is a statement to acknowledge: all of it, the brief included.
-      if (q.options.length === 1) return [q.question, ...(c?.brief ? ["", c.brief] : [])].join("\n");
-      return [q.question, ...q.options.map((o) => `- ${o.label}${o.description ? `：${o.description}` : ""}`), ...(q.allowOther ? ["- 其他（自己写）"] : [])].join("\n");
+      const lead = c ? leadOf(c, q.options.length === 1) : "";
+      const options = q.options.map((o, k) => `${k + 1} ${o.label}${o.description ? `：${clip(o.description, 80)}` : ""}`);
+      const how = q.allowOther || q.options.length === 0 ? "引用这条回一个数字，或者直接写一句。" : "引用这条回一个数字。";
+      const tag = `（问题 ${numbers.get(q.commitmentId)}）`;
+      return [several ? `${i + 1}. ${q.header}：${q.question}` : "", lead, ...options, several ? tag : `${how}${tag}`].filter(Boolean).join("\n");
     });
-    return [...parts.map((p, i) => (content.questions.length > 1 ? `${i + 1}. ${p}` : p)), ...(asks ? ["在 Paseo「事项追踪」里回答"] : [])].join("\n\n");
+    const first = numbers.get(content.questions[0]?.commitmentId ?? "");
+    return [...(several ? [`引用这条回复，写明答的是哪个问题：编号加答案，比如「${first} 选 1」，一次答一个。`] : []), ...blocks].join("\n\n");
   }
 
   /**
@@ -2724,7 +2883,21 @@ export function createEngine(deps: EngineDeps) {
     return { events, label: option ? option.label : `「${raw}」` };
   }
 
-  const answeredWhere = (via: string) => (via === "page" ? "在事项页上" : "在问题卡上");
+  /** Why a question cannot be answered now, in the words of an answer that came too late; null when it is waiting to be answered. */
+  function notWaiting(c: Commitment): { already: boolean; detail: string } | null {
+    if (c.status === "done" && c.answer) return { already: true, detail: `已经答过了：${c.answer.text ?? c.answer.label}（${answeredWhere(c.answer.via)} ${c.answer.at.slice(5, 16).replace("T", " ")}），这次的没有记下` };
+    if (c.status === "expired" || c.status === "cancelled") return { already: false, detail: `这个问题已经${c.status === "expired" ? "过期" : "收回"}了，没有记下` };
+    if (c.status !== "waiting") return { already: false, detail: "这个问题还没有问到，到时候再答" };
+    return null;
+  }
+
+  /** The events that end a card whose last open question `c` was; a card with others still open is cut down at the next reconcile (pruneCards). */
+  function closingCards(c: Commitment, at: string): EventBody[] {
+    return openCards()
+      .filter((card) => card.commitments.some(({ id }) => id === c.id) && card.commitments.every(({ id }) => id === c.id || !isOpen(state.commitments[id]?.status)))
+      .map((card): EventBody => ({ type: "card.changed", id: card.id, patch: { status: "answered", closedAt: at } }));
+  }
+
   /** What the card's form asked that was answered already (on the page, or another card), for telling the person their answer came second. */
   function answeredAlready(card: Card, answer: Exclude<CardAnswer, { kind: "closed" | "dismissed" }>): string[] {
     const headers = headersOf(card.commitments.map(({ id }) => id));
@@ -2980,9 +3153,8 @@ export function createEngine(deps: EngineDeps) {
       const at = nowIso(nowMs);
       const no = (detail: string) => ({ ok: false, already: false, detail });
       if (!c) return no("这个问题已经不在了，没有记下");
-      if (c.status === "done" && c.answer) return { ok: false, already: true, detail: `已经答过了：${c.answer.text ?? c.answer.label}（${answeredWhere(c.answer.via)} ${c.answer.at.slice(5, 16).replace("T", " ")}），这次的没有记下` };
-      if (c.status === "expired" || c.status === "cancelled") return no(`这个问题已经${c.status === "expired" ? "过期" : "收回"}了，没有记下`);
-      if (c.status !== "waiting") return no("这个问题还没有问到，到时候再答");
+      const late = notWaiting(c);
+      if (late) return { ok: false, ...late };
       // Whether some words were the person's own is for the admin to say on the card it was sent on, not on a page anyone with the app can open.
       if (isConfirm(c)) return no("这是在确认「某句话是不是本人说的」，只能在它的确认卡上答（页面上有打开那张卡的按钮）");
       if (c.rounds !== round) return no(`这个问题已经又问了一轮（第 ${c.rounds} 次），页面上的是旧的，刷新后再答`);
@@ -2996,10 +3168,7 @@ export function createEngine(deps: EngineDeps) {
         raw = input.text.trim();
       } else return no("先选一个答案，或者写一句");
       const { events, label } = answerEvents(c, raw, at, "page", `page\0${c.id}\0${round}`, personName(c.ask.person));
-      // A card that has nothing left to ask is over; one with others still open is cut down at the next reconcile (pruneCards).
-      for (const card of openCards()) {
-        if (card.commitments.some(({ id }) => id === c.id) && card.commitments.every(({ id }) => id === c.id || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: card.id, patch: { status: "answered", closedAt: at } });
-      }
+      events.push(...closingCards(c, at));
       append(events);
       return { ok: true, already: false, detail: `已记下：${label}。接下来怎么追踪，下一次检查时决定` };
     },
@@ -3096,8 +3265,25 @@ export function createEngine(deps: EngineDeps) {
         open: commitments.some((c) => c.status === "scheduled" || c.status === "waiting"),
         hot: heat(item.key),
         row: listRow(item.key),
+        ...(isDeskKey(item.key) ? { passes: passesOf(state.notes[item.key]?.["desk.log"]?.value, 3) } : {}),
       };
     });
+    const numbers = questionNumbers();
+    const questions = Object.values(state.commitments)
+      .filter((c) => c.status === "waiting")
+      .sort((a, b) => Date.parse(a.lastAskedAt ?? a.createdAt) - Date.parse(b.lastAskedAt ?? b.createdAt) || a.key.localeCompare(b.key))
+      .map((c) => ({
+        no: numbers.get(c.id)!,
+        commitmentId: c.id,
+        item: c.caseId,
+        itemTitle: c.caseId ? (state.items[c.caseId]?.title ?? null) : null,
+        header: c.ask.header,
+        question: c.ask.question,
+        options: c.ask.options.map((o) => o.label),
+        allowOther: c.ask.allowOther,
+        askedAt: c.lastAskedAt,
+        round: c.rounds,
+      }));
     // Most urgent first: a rule error, then what is wrong, then what waits, then what is fine.
     const rank = (k: (typeof cases)[number]) => (k.assessment?.error ? 0 : k.commitments.some((c) => c.status === "waiting") ? 1 : (SEVERITY[k.assessment?.health ?? ""] ?? 9));
     cases.sort((a, b) => rank(a) - rank(b));
@@ -3149,6 +3335,7 @@ export function createEngine(deps: EngineDeps) {
         caseIds: [...new Set(c.commitments.map(({ id }) => state.commitments[id]?.caseId).filter((k): k is string => !!k))],
       })),
       cases,
+      questions,
       cold,
       openCommitments: openCommitments.length,
       plan: lastPlan,

@@ -130,7 +130,7 @@ test("the cards each side raises now, when they differ", () =>
       put(candidate, "persons.json", JSON.stringify(person("workdays 09:30-17:00")));
       w.clock.now = at("2026-10-16 18:20");
       const p = await look(w, candidate);
-      assert.deepEqual(p.cardsNow, { inUse: [{ person: "测试用户", title: "q?", questions: ["gcp-demo:1"], channels: [] }], candidate: [] });
+      assert.deepEqual(p.cardsNow, { inUse: [{ person: "测试用户", title: "gcp-demo:1：q?", questions: ["gcp-demo:1"], channels: [] }], candidate: [] });
       assert.match(previewText(p), /现在就会发的卡（按不打扰时段和每天的上限算）：\n- 在用：发给 测试用户「q\?」（gcp-demo:1）\n- 候选：不发/);
       put(candidate, "persons.json", JSON.stringify(person()));
       assert.equal((await look(w, candidate)).cardsNow, null, "the same card on both sides");
