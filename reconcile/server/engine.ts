@@ -17,6 +17,7 @@ import type { CaptureInput } from "./capsule";
 import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, type AnswerRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
 import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
+import type { AgentArchiver } from "./archive";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
 import type { Store } from "./store";
@@ -67,6 +68,11 @@ export interface EngineDeps {
   rulesKeep?: KeepRules | null;
   /** The conversation of an agent, to check that words are the person's own; absent on a host without server.paseo. */
   conversation?: ((agentId: string) => Promise<Conversation | null>) | null;
+  /**
+   * Archives the agent of a call of a run this engine started, when the runtime could not (server/archive.ts checks it is that call's agent, and
+   * not running, before it does); absent (rehearsing, a host without server.paseo): none is archived.
+   */
+  archiveAgent?: AgentArchiver | null;
   /** The runs of flows started for an item (server/runs.ts); absent, an item has none. */
   runs?: ((caseId: string) => RunView[]) | null;
   /**
@@ -80,6 +86,11 @@ export interface EngineDeps {
     dir: string | null;
     logDir?: string | null;
     probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe;
+    /**
+     * The agents of a run's calls that the flow asked to have archived once they had handed in and that the runtime did not archive
+     * (server/runs.ts archives); absent: this engine archives none.
+     */
+    archives?(runId: string, logDir: string | null): Array<{ callId: string; agentId: string }>;
     /** What the run printed when it got to its end (the runner's output file, the controller's own): the evidence the runtime's log directory cannot take away. */
     readOut?(runId: string): RunProbe | null;
   } | null;
@@ -97,6 +108,14 @@ export type Deliver = (channelId: string, message: { to: string; idempotencyKey:
 
 /** A card's message to one of its person's channels is tried this many times, once per reconcile. */
 const MAX_NOTIFY_TRIES = 3;
+/**
+ * The agent of a call that asked to be archived is tried this many times, no sooner than ARCHIVE_RETRY_MS after the last try; a run that ended
+ * longer ago than ARCHIVE_WINDOW_MS is not looked at, nor are more than ARCHIVE_PER_TICK agents in one reconcile.
+ */
+const MAX_ARCHIVE_TRIES = 5;
+const ARCHIVE_RETRY_MS = 5 * 60_000;
+const ARCHIVE_WINDOW_MS = 3 * 86_400_000;
+const ARCHIVE_PER_TICK = 6;
 
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const commitmentId = (key: string) => `c_${hash(key).slice(0, 16)}`;
@@ -2834,6 +2853,50 @@ export function createEngine(deps: EngineDeps) {
     }
   }
 
+  /**
+   * The agents of the calls of ended runs that asked to be archived once they had handed in, and that the runtime could not archive itself (its CLI
+   * does not find an agent of a background workspace, EVENTS.md `call.archive`): archived here, for the runs this engine started. A try that does not
+   * come to anything is a line in the log and another try later, up to MAX_ARCHIVE_TRIES; it is the last thing a reconcile does and holds nothing up.
+   */
+  async function archiveAsked(nowMs: number): Promise<void> {
+    const archive = deps.archiveAgent;
+    const archives = deps.flows?.archives;
+    if (!archive || !archives || deps.mode !== "live") return;
+    let budget = ARCHIVE_PER_TICK;
+    for (const rec of recs()) {
+      if (!rec.ended || nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > ARCHIVE_WINDOW_MS) continue;
+      let asked: Array<{ callId: string; agentId: string }>;
+      try {
+        asked = archives(rec.runId, logDirOf(rec));
+      } catch (error) {
+        deps.log(`flow ${rec.runId}: reading which agents were to be archived failed: ${(error as Error).message}`);
+        continue;
+      }
+      for (const { callId, agentId } of asked) {
+        if (stopped || budget <= 0) return;
+        const key = `archive:${rec.runId}:${callId}`;
+        const before = state.ledger[key];
+        if (before && (before.status === "done" || before.status === "suppressed")) continue;
+        const tries = before?.tries ?? 0;
+        if (tries >= MAX_ARCHIVE_TRIES || (before && nowMs - Date.parse(before.at) < ARCHIVE_RETRY_MS)) continue;
+        budget -= 1;
+        const summary = `归档「${rec.label}」的 agent ${agentId.slice(0, 8)}`;
+        try {
+          const outcome = await archive(agentId, { runId: rec.runId, callId });
+          const [status, reason]: [Action["status"], string | null] =
+            outcome.done === "archived" ? ["done", null] : outcome.done === "gone" ? ["done", "宿主里已经没有这个 agent"] : outcome.done === "not-theirs" ? ["suppressed", outcome.why] : ["failed", "agent 还在跑"];
+          if (status === "failed") deps.log(`flow ${rec.runId}: ${callId}: the agent ${agentId} is running, so it was not archived (${tries + 1}/${MAX_ARCHIVE_TRIES})`);
+          if (status === "suppressed") deps.log(`flow ${rec.runId}: ${callId}: the agent ${agentId} was not archived: ${reason}`);
+          append([{ type: "action", action: { ...action(key, "archive", rec.runId, summary, status, reason, nowMs), tries: tries + 1 } }]);
+        } catch (error) {
+          const why = (error as Error).message.slice(0, 300);
+          deps.log(`flow ${rec.runId}: ${callId}: archiving the agent ${agentId} failed (${tries + 1}/${MAX_ARCHIVE_TRIES}): ${why}`);
+          append([{ type: "action", action: { ...action(key, "archive", rec.runId, summary, "failed", why, nowMs), tries: tries + 1 } }]);
+        }
+      }
+    }
+  }
+
   async function archiveFinished(): Promise<void> {
     if (!deps.carrier || deps.mode === "dry-run") return;
     for (const card of Object.values(state.cards)) {
@@ -2984,6 +3047,7 @@ export function createEngine(deps: EngineDeps) {
           if (!stopped) await tellFlows(nowMs, plan);
           if (!stopped) await askDue(nowMs, plan);
           if (!stopped) await archiveFinished();
+          if (!stopped) await archiveAsked(nowMs);
         } catch (error) {
           deps.log(`tick failed: ${(error as Error).stack ?? error}`);
           lastProblems.push(`这次检查出错：${(error as Error).message}`);

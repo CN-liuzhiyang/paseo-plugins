@@ -135,6 +135,8 @@ export interface FlowsKit {
   probes: Map<string, Partial<RunProbe>>;
   /** What a run printed when it got to its end (the controller's own output file for it), by id; a run not set here printed nothing. */
   outs: Map<string, Partial<RunProbe>>;
+  /** The agents of a run's calls that were asked to be archived and are not yet (what the runtime's events say, RunReader.archives), by run id. */
+  archives: Map<string, Array<{ callId: string; agentId: string }>>;
   /** Runs the probe was asked about, in order. */
   asked: string[];
   /** The log directory new runs go to (the engine's `flows.logDir`), and the ones the probe was asked to read from, in order. */
@@ -213,6 +215,8 @@ export async function makeWorld(options: {
   flows?: boolean | { launcher: Launcher; dir: string; logDir?: string | null; probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe };
   /** Offered every judgment the engine makes (EngineDeps.capture). */
   capture?: EngineDeps["capture"];
+  /** What archives the agents of calls that asked for it (EngineDeps.archiveAgent); absent, none. */
+  archiveAgent?: EngineDeps["archiveAgent"];
 }): Promise<World> {
   const dir = mkdtempSync(path.join(os.tmpdir(), "reconcile-test-"));
   const configDir = path.join(dir, "config");
@@ -235,7 +239,7 @@ export async function makeWorld(options: {
   const requestsDir = path.join(dataDir, "requests");
   let requests = 0;
 
-  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), outs: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
+  const kit: FlowsKit = { launcher: recordingLauncher(), dir: path.join(dir, "flows"), probes: new Map(), outs: new Map(), archives: new Map(), asked: [], logDir: path.join(dir, "logs-a"), askedDirs: [], failStarts: { count: 0, error: new Error("spawn failed") }, onStart: null };
   const world = { dir, configDir, dataDir, items, flags, innerFlags, versions, lastPoll: null, clock, cards, archived, fail, deliveries, polls: 0, hold: null, logs, statuses, conversations, ensured: 0, hooks: { raise: null }, flows: kit } as World;
 
   const source: Source = {
@@ -338,6 +342,9 @@ export async function makeWorld(options: {
               const out = kit.outs.get(runId);
               return out ? probeOf(out) : null;
             },
+            archives(runId) {
+              return kit.archives.get(runId) ?? [];
+            },
             probe(runId, _spawnedAtMs, logDir) {
               kit.asked.push(runId);
               kit.askedDirs.push(logDir);
@@ -348,6 +355,7 @@ export async function makeWorld(options: {
           }
         : null,
       capture: options.capture ?? null,
+      archiveAgent: options.archiveAgent ?? null,
       now: () => clock.now,
       log: (m) => logs.push(m),
       writeStatus: (s) => statuses.push(s),

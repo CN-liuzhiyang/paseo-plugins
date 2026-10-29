@@ -7,6 +7,7 @@ import { answerRpc, attentionRpc, flowRpc, graphRpc, overviewRpc, releaseRulesRp
 import { GROUP_LABEL, type Group } from "./shared/graph";
 import { PLAN_LABEL } from "./shared/status";
 import { settingsDefinition, type Settings } from "./shared/settings";
+import { createAgentArchiver } from "./server/archive";
 import { createCarrier } from "./server/carrier";
 import { ConfigError, loadConfig } from "./server/config";
 import { createEngine, type Deliver, type Engine, type EngineStatus } from "./server/engine";
@@ -216,6 +217,9 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       const requestsDir = path.join(dataDir, "requests");
       mkdirSync(requestsDir, { recursive: true });
       const conversation = paseo ? (agentId: string) => readConversation(paseo.agents.ref(agentId)) : null;
+      // The agents of the calls of the runs started here that asked to be archived once they had handed in, which the runtime's CLI cannot find when the
+      // call ran in a background workspace (the affair's): archived through the host, after it has been checked that they are those calls' agents.
+      const archiveAgent = paseo && conversation && mode === "live" ? createAgentArchiver({ conversation, archive: async (agentId) => void (await paseo.agents.ref(agentId).archive()) }) : null;
       // Flows started for an item show on its page: read from the runtime's event files, never written.
       // The log directory is fixed here, for the life of this plugin: new runs are started under it (the process is told it) and each
       // intent keeps it, so a run is read from where it was started even after the config points elsewhere.
@@ -224,7 +228,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
       if (wiring.logDir === null) log("flows: the machine's orchestration config could not be read, so there is no log directory to start runs under: none is started (the ones already going are still read)");
       // Flows are started only where the config says how (flows.json); a run is started only when the runs can be read back (a log directory is known).
       const flowsDir = path.join(dataDir, "flows");
-      const flows = config.launcher ? { launcher: createLauncher(config.launcher), dir: flowsDir, logDir: wiring.logDir, probe: wiring.probe, readOut: createOutReader(flowsDir) } : null;
+      const flows = config.launcher ? { launcher: createLauncher(config.launcher), dir: flowsDir, logDir: wiring.logDir, probe: wiring.probe, archives: wiring.archives, readOut: createOutReader(flowsDir) } : null;
       engine = createEngine({
         store,
         config,
@@ -238,6 +242,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
         deliver,
         requestsDir,
         conversation,
+        archiveAgent,
         rulesKeep: { dir: path.join(dataDir, RULES_KEPT), write: true },
         runs,
         flows,

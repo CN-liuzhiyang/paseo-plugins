@@ -1,4 +1,5 @@
 import type { RunView } from "../shared/graph";
+import type { EngineDeps } from "../server/engine";
 import type { RunProbe } from "../server/runs";
 import { runIdOf, SUSPECT_MS } from "../server/flows";
 import { at, issue, makeWorld, probeOf, TEST_POLICY, TZ, type World } from "./helpers";
@@ -42,12 +43,13 @@ export const req = (key: string, input: Record<string, unknown> = { n: 1 }, flow
 export const idFor = (n: number, key: string, name: keyof typeof FLOW_OF = "triage", round = 0) => runIdOf("test", `gcp-demo:${n}`, name, FLOW_OF[name], key, round);
 export const asks = (w: World, n: number, reqs: unknown[], extra: Record<string, string> = {}) => set(w, n, { Runs: JSON.stringify(reqs), ...extra });
 
-export async function withFlows<T>(body: (w: World) => Promise<T>, options: { start?: string; storeSkewMs?: number; policy?: unknown; persons?: unknown; rule?: string; mode?: "live" | "dry-run"; flows?: boolean; runs?: (caseId: string) => RunView[] } = {}): Promise<T> {
+export async function withFlows<T>(body: (w: World) => Promise<T>, options: { start?: string; storeSkewMs?: number; policy?: unknown; persons?: unknown; rule?: string; mode?: "live" | "dry-run"; flows?: boolean; runs?: (caseId: string) => RunView[]; archiveAgent?: EngineDeps["archiveAgent"] } = {}): Promise<T> {
   const w = await makeWorld({
     start: options.start ?? START,
     storeSkewMs: options.storeSkewMs,
     mode: options.mode,
     runs: options.runs,
+    archiveAgent: options.archiveAgent,
     flows: options.flows ?? true,
     config: { rules: { "flow.mjs": options.rule ?? RULE }, ...(options.policy ? { policy: options.policy } : {}), ...(options.persons ? { persons: options.persons } : {}) },
   });

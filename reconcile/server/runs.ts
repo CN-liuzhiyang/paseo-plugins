@@ -91,6 +91,9 @@ interface CallRec {
   carrier: string | null;
   summary: string | null;
   agentId: string | null;
+  /** The flow asked for the agent to be archived once it had handed in (call.start's `archive: "after"`), and whether a `call.archive` says it was done. */
+  archive: boolean;
+  archived: boolean;
   end: { at: number; ok: boolean; error: RunError | null; usd: number; outcome: string | null } | null;
 }
 
@@ -180,8 +183,17 @@ function fold(run: RunRec, e: Record<string, unknown>) {
         carrier: str(e.carrier),
         summary: cleanText(e.summary, 200),
         agentId: null,
+        archive: type === "ask" && e.archive === "after",
+        archived: false,
         end: null,
       });
+      return;
+    }
+    case "call.archive": {
+      // The runtime wrote down that it archived the agent. One that it did not (the CLI cannot find the agents of a background workspace) is not
+      // marked, nor is one for which no line was written (the process died between the call's end and its archive): those are the ones left.
+      const call = run.calls.get(str(e.callId) ?? "");
+      if (call && e.ok === true) call.archived = true;
       return;
     }
     case "call.agent": {
@@ -362,6 +374,13 @@ export interface RunProbe {
 export interface RunReader {
   /** The runs started for the item, newest first. */
   forCase(caseId: string): RunView[];
+  /**
+   * The agents of a run's calls that the flow asked to have archived once they had handed in, whose call came out well and for which no
+   * `call.archive` says it was done (EVENTS.md): what the runtime could not archive itself, left to whoever started the run. Empty for a run
+   * that is not read (not this plugin's, or not there). Which agent it is, is the file's word, and a file is not trusted: the caller checks the
+   * agent before it touches it.
+   */
+  archives(runId: string): Array<{ callId: string; agentId: string }>;
   /**
    * One run by its id, whoever it was started for: the runtime's table over its claim and events, with `spawnedAtMs`
    * (when this controller started its process; null if it does not know) to tell "just started" from "never came up".
@@ -582,6 +601,12 @@ export function createRunReader(deps: RunsDeps): RunReader {
         slow: view?.situation === "slow",
       };
     },
+    archives(runId) {
+      scan();
+      const run = files.get(`${runId}.jsonl`)?.run;
+      if (!run) return [];
+      return [...run.calls.values()].flatMap((c) => (c.type === "ask" && c.archive && !c.archived && c.end?.ok === true && c.agentId ? [{ callId: c.id, agentId: c.agentId }] : []));
+    },
     forCase(caseId) {
       scan();
       const out: RunView[] = [];
@@ -709,6 +734,7 @@ export function createRunsWiring(opts: { tz: string; now(): number; log(message:
   logDir: string | null;
   runs(caseId: string): RunView[];
   probe(runId: string, spawnedAtMs: number | null, logDir: string | null): RunProbe;
+  archives(runId: string, logDir: string | null): Array<{ callId: string; agentId: string }>;
 } {
   const logDir = resolveLogDir(opts.env, opts.home);
   const forDir = readersOf({ tz: opts.tz, now: opts.now, affair: HOME_SCREEN, view: RUN_SCREEN });
@@ -726,6 +752,10 @@ export function createRunsWiring(opts: { tz: string; now(): number; log(message:
     probe: (runId, spawnedAtMs, runLogDir) => {
       const dir = runLogDir ?? logDir;
       return dir === null ? NOWHERE : forDir(dir).probe(runId, spawnedAtMs);
+    },
+    archives: (runId, runLogDir) => {
+      const dir = runLogDir ?? logDir;
+      return dir === null ? [] : forDir(dir).archives(runId);
     },
   };
 }

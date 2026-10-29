@@ -251,13 +251,13 @@ export type ActionStatus = "planned" | "done" | "failed" | "in-doubt" | "suppres
 
 export interface Action {
   key: string;
-  kind: "ask" | "note.set" | "commitment.ensure" | "commitment.cancel" | "card.close" | "notify";
+  kind: "ask" | "note.set" | "commitment.ensure" | "commitment.cancel" | "card.close" | "notify" | "archive";
   subject: string;
   summary: string;
   status: ActionStatus;
   reason: string | null;
   at: string;
-  /** For a notify: how many times it was tried. */
+  /** For a notify or an archive: how many times it was tried. */
   tries?: number;
 }
 

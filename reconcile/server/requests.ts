@@ -235,6 +235,8 @@ export interface Conversation {
   cwd: string | null;
   /** The turn the session is running now; null when it is not running one. */
   turn: { id: string; steps: TurnStep[] } | null;
+  /** The host says the agent is running (it can be without a turn the host names); absent where a host did not say. */
+  running?: boolean;
 }
 
 /** A timeline entry as far as the turn matters. */
@@ -328,7 +330,7 @@ export async function readConversation<C>(ref: ConversationSource<C>): Promise<C
       turnId: e.turnId,
     };
   });
-  return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(turn, turnId) };
+  return { labels: agent.labels ?? {}, cwd: agent.cwd ?? null, turn: currentTurn(turn, turnId), running: agent.status === "running" };
 }
 
 /** Labels of agents that are not a person's own conversation: started by another agent, a flow, or a card. */
