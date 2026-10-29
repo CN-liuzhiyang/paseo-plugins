@@ -180,6 +180,22 @@ agent 本身不是需要人去翻的地方，留着只会在 App 里越攒越多
 找不到 agent、agent 还在跑（CLI 拒绝，我们不用 `--force` 去打断它）、归档报错，都只记一条 `caveat`（`archive: …`），不让运行失败。
 缺省不归档，由 flow 自己声明：dev-task 这类会话事后还有人要接着翻、接着聊，原来的理由对它们仍成立。
 
+**实测限制（2026-10-29，临时 `PASEO_HOME` 的开发 daemon，fork CLI 1.4.1）：事项的 workspace 是后台的，而 `paseo archive <id>` 找不到后台 workspace 里的 agent。**
+`archive` 命令用 `includeArchived: true` 列 agent 再按 id 找（fork `cli/src/commands/agent/archive.ts:60`），没带 `includeBackground`，服务端默认的列表又不含后台
+workspace 的 agent，于是 agent 明明在（`inspect` 能看到、`ls -a -g` 能列出），却报 `AGENT_NOT_FOUND`。所以：
+
+| 情形 | 实测结果 |
+|---|---|
+| 没有 affair，agent 在 Paseo 自己选的（可见）workspace 里，调用成功 | 归档成功（`ls -a` 里是 `closed`），没有 caveat |
+| 调用失败 | 不归档，agent 留着（`idle`） |
+| agent 还在跑（不加 `--force` 被拒） | 不归档，一条 caveat（`AGENT_RUNNING`），运行照常成功 |
+| **带 affair，agent 在事项的后台 workspace 里，调用成功** | **归档不成功**：一条 caveat（`AGENT_NOT_FOUND`，并说明是后台 workspace 的缘故），运行照常成功，agent 留在后台 workspace 里 |
+
+最后一行就是「看一眼」的实际情形：agent 不会进侧边栏（workspace 在后台），但也还没有被归档。要让它真归档，两条路，由人选：
+（1）fork 的 CLI 改一行（`archive.ts:60` 的 filter 加 `includeBackground: true`）并更新在用的安装；运行时这边不用改，下一次就归档得成；
+（2）归档交给 reconcile 插件做（插件的 `server.paseo.agents.ref(id).archive()` 对后台 workspace 里的 agent 是好用的，卡片载体就是这样归档的），
+它读运行的事件文件就知道每次调用的 agent id。这条要改插件，不在这一轮。
+
 workspace 本身仍然不自动归档、不自动删：它是后台的，不占侧边栏，人从事项页链接能打开；登记文件也不清理（一条几百字节）。
 
 ## 事件

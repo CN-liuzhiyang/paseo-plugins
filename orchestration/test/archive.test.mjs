@@ -89,6 +89,23 @@ test("an agent that is still running is not archived (the CLI refuses it without
   assert.equal(archiveCaveats(result).length, 1);
 });
 
+test("what the CLI said, as it said it (a JSON error): a running agent in its words; an agent it cannot find in a background workspace with the reason, measured on the fork CLI", async () => {
+  const fail = (code, message) => async function archiveAgent() {
+    throw Object.assign(new Error("paseo archive failed"), { stderr: JSON.stringify({ error: { code, message, details: "…" } }, null, 2) });
+  };
+  const running = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  running.archiveAgent = fail("AGENT_RUNNING", "Agent fake-ag is currently running");
+  const a = await run(asking({ archive: "after" }), running);
+  assert.equal(a.outcome, "done");
+  assert.match(archiveCaveats(a)[0], /^archive: agent fake-agent-1 of c1 was not archived \(Agent fake-ag is currently running\)$/);
+
+  const hidden = fakeExecutor({ answer: () => ({ said: "hi" }) });
+  hidden.archiveAgent = fail("AGENT_NOT_FOUND", "Agent not found: fake-agent-1");
+  const b = await run(asking({ archive: "after" }), hidden, { affair: AFFAIR });
+  assert.equal(b.outcome, "done", "and the run is whole all the same");
+  assert.match(archiveCaveats(b)[0], /was not archived \(Agent not found: fake-agent-1\); the agent exists, but this CLI's archive does not list the agents of a background workspace/);
+});
+
 test("any other failure of the archive is a caveat too, never a failed run", async () => {
   const executor = fakeExecutor({ answer: () => ({ said: "hi" }), archiveFails: "error" });
   const result = await run(asking({ archive: "after" }), executor);

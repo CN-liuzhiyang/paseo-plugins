@@ -501,8 +501,21 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     try {
       await executor.archiveAgent(agentId);
     } catch (error) {
-      const why = String(error?.stderr?.trim() || error?.message || error).replace(/\s+/g, " ").slice(0, 200);
-      caveat(`archive: agent ${agentId} of ${record.callId} was not archived (${why})`, record.callId);
+      const raw = String(error?.stderr?.trim() || error?.stdout?.trim() || error?.message || error);
+      let code = "";
+      let said = raw;
+      try {
+        // The CLI says why as JSON: { error: { code, message } }.
+        const parsed = JSON.parse(raw.slice(raw.indexOf("{")));
+        code = String(parsed?.error?.code ?? "");
+        said = String(parsed?.error?.message ?? raw);
+      } catch {
+        // Not JSON: as it came.
+      }
+      // Measured 2026-10-29 (fork CLI 1.4.1): `paseo archive` looks the agent up in a list that leaves out the agents of a background
+      // workspace, and the affair's workspace is one: it says the agent is not found when it is there. Said so, that it is no mystery.
+      const hint = code === "AGENT_NOT_FOUND" ? "; the agent exists, but this CLI's archive does not list the agents of a background workspace, so it cannot find it" : "";
+      caveat(`archive: agent ${agentId} of ${record.callId} was not archived (${said.replace(/\s+/g, " ").slice(0, 200)})${hint}`, record.callId);
     }
   };
 
