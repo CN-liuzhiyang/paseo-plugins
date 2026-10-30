@@ -1014,7 +1014,7 @@ export function createEngine(deps: EngineDeps) {
     if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
     if (rec.selfRetry) return { ok: false, detail: "这个流程没成的时候，判断方法会自己再起一次，不用手动重跑" };
     if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
-    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}) }, nowMs, tz);
+    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}), byPerson: true }, nowMs, tz);
     if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
     const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key)?.input ?? rec.input;
     if (!input) return { ok: false, detail: "上一轮的输入没留下，没法照样再跑" };

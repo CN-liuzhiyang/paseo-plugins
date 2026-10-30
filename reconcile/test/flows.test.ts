@@ -93,6 +93,24 @@ test("a run is held back by whichever of the day's limits it meets first, and th
   assert.equal(limitWhy(yesterday.slice(0, 1), [], LIMITS, ask, T0, TZ), null);
 });
 
+test("a run that never ran and cost nothing is not counted in a day's number of runs; a person's own retry is not held by the item's count", () => {
+  const ended = (outcome: FlowRec["ended"] extends infer E ? (E extends { outcome: infer O } ? O : never) : never, costUsd: number, more: object = {}) => ({ at: "2026-10-13T09:10:00+08:00", outcome, summary: null, costUsd, value: null, valueDropped: false, why: null, ...more });
+  const ask = { caseId: "tracker:1", maxUsd: 1, flow: "triage-flow" };
+  const of = (e: ReturnType<typeof ended>, i = 0) => rec({ runId: `n${i}`, caseId: "tracker:1", intentAt: "2026-10-13T09:00:00+08:00", ended: e });
+  // 10-30 #987735: the runtime refused the run before it started ($0); the person's 重新跑一次 was told the item had had its one run today
+  const nothing = [of(ended("refused", 0), 1), of(ended("not-started", 0), 2), of(ended("refused", 0), 3)];
+  assert.equal(limitWhy(nothing, [], LIMITS, ask, T0, TZ), null, "three refused or never started at $0: the item has not run today");
+  assert.equal(limitWhy(Array.from({ length: 6 }, (_, i) => of(ended("refused", 0), i)), [], LIMITS, { ...ask, caseId: "tracker:2" }, T0, TZ), null, "nor the day");
+  // what did run, or may have cost, still counts
+  assert.match(limitWhy([of(ended("refused", 0.2), 1), of(ended("failed", 0), 2), of(ended("done", 0), 3)], [], LIMITS, ask, T0, TZ)!.why, /这个事项今天流程已经起了 3 次/);
+  assert.match(limitWhy([1, 2, 3].map((i) => of(ended("not-started", 0, { costUnknown: true }), i)), [], LIMITS, ask, T0, TZ)!.why, /这个事项今天/, "a cost not known is not nothing");
+  // a person asking again is not held by the item's count; the day's count, money and concurrency still hold
+  const three = [1, 2, 3].map((i) => of(ended("failed", 0.1), i));
+  assert.equal(limitWhy(three, [], LIMITS, { ...ask, byPerson: true }, T0, TZ), null);
+  const six = Array.from({ length: 6 }, (_, i) => of(ended("failed", 0.1), i));
+  assert.match(limitWhy(six, [], LIMITS, { ...ask, byPerson: true }, T0, TZ)!.why, /今天流程已经起了 6 次/);
+});
+
 test("a new day starts the counts at nothing, in the instance's zone and not UTC", () => {
   // 00:30 +08:00 on the 14th is still the 13th in UTC: the run belongs to the 14th, the day the instance lives in
   const full = Array.from({ length: 6 }, (_, i) => rec({ runId: `r${i}`, caseId: `tracker:${i + 10}`, intentAt: "2026-10-14T00:30:00+08:00", ended: { at: "2026-10-14T00:40:00+08:00", outcome: "done", summary: null, costUsd: 0, value: null, valueDropped: false, why: null } }));

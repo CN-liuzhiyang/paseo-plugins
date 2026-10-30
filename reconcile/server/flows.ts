@@ -64,9 +64,11 @@ export const costOf = (end: Pick<FlowEnd, "costUsd" | "costUnknown">, maxUsd: nu
  * `ahead`: the ones asked for earlier in this round whose intents are not written yet. The number of runs in a day is by the
  * instance's local date of their intents. What a day spent is what it was told: a run not over holds its ceiling whichever day it
  * began, and one that ended counts for the day it was recorded to have (when its cost became known), so a run that crosses midnight
- * is never counted as nothing. Concurrency is not a day's matter either: it frees as runs end.
+ * is never counted as nothing. Concurrency is not a day's matter either: it frees as runs end. A run that ended refused or not started at a known
+ * $0 is not one of the day's runs: nothing ran (10-30 a refused run took the item's one run of the day and held the person's retry). `byPerson`:
+ * a person asked for it again by hand, so the item's own count does not hold it; the day's count, money and concurrency still do.
  */
-export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number; flow: string; title?: string }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later"; limit: NonNullable<FlowResult["limit"]> } | null {
+export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, ask: { caseId: string; maxUsd: number; flow: string; title?: string; byPerson?: boolean }, nowMs: number, tz: string): { why: string; until: "tomorrow" | "later"; limit: NonNullable<FlowResult["limit"]> } | null {
   const today = localParts(nowMs, tz).date;
   // A flow with limits of its own is counted against those only, and in no one else's: the runs of the flows that have none are counted
   // against the general ones. Each side is its own room, so that neither can fill the other's.
@@ -77,10 +79,11 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
   // Named as people name it when the rule gave the flow a title.
   const what = own ? (ask.title ? `「${ask.title}」` : `「${ask.flow}」流程`) : "流程";
   const all = [...recs, ...ahead].filter(scope);
-  const mine = all.filter((r) => dayOf(r.intentAt, tz) === today);
+  const ranNothing = (r: FlowRec) => r.ended !== undefined && (r.ended.outcome === "refused" || r.ended.outcome === "not-started") && r.ended.costUsd === 0 && !r.ended.costUnknown;
+  const mine = all.filter((r) => dayOf(r.intentAt, tz) === today && !ranNothing(r));
   if (mine.length >= lim.perDay) return { why: `今天${what}已经起了 ${mine.length} 次（上限 ${lim.perDay}）`, until: "tomorrow", limit: "perDay" };
   const ofCase = mine.filter((r) => r.caseId === ask.caseId).length;
-  if (ofCase >= lim.perCasePerDay) return { why: `这个事项今天${what}已经起了 ${ofCase} 次（上限 ${lim.perCasePerDay}）`, until: "tomorrow", limit: "perCase" };
+  if (!ask.byPerson && ofCase >= lim.perCasePerDay) return { why: `这个事项今天${what}已经起了 ${ofCase} 次（上限 ${lim.perCasePerDay}）`, until: "tomorrow", limit: "perCase" };
   // Finished (today) at what they cost, the others at the most they were counted at.
   const spent = all.reduce((sum, r) => sum + (r.ended ? (dayOf(r.ended.at, tz) === today ? costOf(r.ended, r.maxUsd) : 0) : r.maxUsd), 0);
   if (spent + ask.maxUsd > lim.usdPerDay) return { why: `今天${what}花费已到 $${spent.toFixed(2)}（上限 $${lim.usdPerDay}），再起一个按 $${ask.maxUsd} 算会超`, until: "tomorrow", limit: "usd" };
