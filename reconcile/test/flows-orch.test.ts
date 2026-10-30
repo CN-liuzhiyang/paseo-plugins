@@ -473,7 +473,7 @@ test("a stop is carried on from the page: the run left its word in its files, th
     assert.match(first.resume?.print ?? "", /^[0-9a-f]{16}$/, "the fingerprint of the flow and input it would start");
     assert.deepEqual([first.outcome, first.resume], ["stopped", { flow: "demo-resume", from: "第一段做完了：从第二段接着", spends: "nothing", print: first.resume?.print }]);
     const shown = w.engine.graph("gcp-demo:1")!.runs.find((r) => r.runId === r0)!;
-    assert.deepEqual([shown.actions, shown.resume], [["resume", "retry", "mine", "fold"], { from: "第一段做完了：从第二段接着", spends: "nothing" }]);
+    assert.deepEqual([shown.actions, shown.resume], [["resume", "retry", "mine", "fold"], { line: "第一段做完了：从第二段接着", spends: "nothing" }]);
     const r = w.engine.resumeFlow(r0, "owner");
     assert.equal(r.ok, true, r.detail);
     await tick();

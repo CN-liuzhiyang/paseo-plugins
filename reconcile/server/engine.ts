@@ -1006,7 +1006,7 @@ export function createEngine(deps: EngineDeps) {
       ...(rec.resume && read ? { ran: read.flow } : {}),
       // The run that was started is not the point the button promised (it was changed in between, and the runtime did not stop it): said on the page, by what the run itself recorded.
       ...(rec.resume?.print && read?.resumePrint && read.resumePrint !== rec.resume.print ? { resumeDiffers: true } : {}),
-      resume: point ? { from: point.line, spends: point.spends } : null,
+      resume: point ? { line: point.line, spends: point.spends } : null,
       carriedOn: rec.resume ? { by: rec.resume.by, line: rec.resume.line, spends: rec.resume.spends } : null,
       ...(latest && rounds.length > 1 ? { ledger: { rounds: rounds.length, costUsd: rounds.reduce((sum, r) => sum + (r.ended?.costUsd ?? 0), 0) } } : {}),
     };

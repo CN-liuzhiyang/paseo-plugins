@@ -279,8 +279,8 @@ run: [{ flow: "triage", key: "first", input: { /* 纯 JSON，≤ 16 KB */ }, lab
 （`done` 但 `value` 是 `null`，只有 `summary`）；读到的是冻结的副本。
 `resumedFrom`、`ran`、`resumable` 说「接着跑」的事（见下）：`resumedFrom` 是这一轮接着的那个运行的 runId（不是接着跑的是 `null`）；
 `ran` 是这一轮实际跑的流程名（请求的流程，或者上一轮的续跑声明点名的流程；还没有运行时是 `null`）——接着跑的一轮读到的 `value` 是 `ran` 那个流程的形状，
-不一定是请求的流程的；`resumable` 是 `{ from, spends }`：最新一轮没有结果、又说过能从哪里接着跑，而且人还没收起它、规则也不自己重试它时才有，否则是 `null`
-（`from` 是流程自己写的那句话，`spends` 是 `"nothing"`（不调模型）或 `"maybe"`（可能调））。规则可以用它写「处理好以后，在事项页点「接着跑」」。
+不一定是请求的流程的；`resumable` 是 `{ line, spends }`：最新一轮没有结果、又说过能从哪里接着跑，而且人还没收起它、规则也不自己重试它时才有，否则是 `null`
+（`line` 是流程自己写的那句话，和 `FlowRec.resume.line` 一样；`spends` 是 `"nothing"`（不调模型）或 `"maybe"`（可能调））。规则可以用它写「处理好以后，在事项页点「接着跑」」。
 
 **一个 `stopped` 是「好了」还是「没跑完」**：流程用 `$.stop` 主动停下，规则读到的一直是 `state: "stopped"` 加上它的 `value`，这一点不变。
 控制器对**人**说话（消息、页面）时只认 `value.why` 这一个字段：`value.why` 是**非空的一句话**，这个运行就是「没跑完」——消息写

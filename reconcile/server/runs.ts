@@ -363,7 +363,7 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     retry: null,
     resumeOf: run.resumeOf,
     resumePrint: run.resumePrint,
-    resume: offer ? { from: offer.from, spends: offer.spends } : null,
+    resume: offer ? { line: offer.from, spends: offer.spends } : null,
   };
 }
 

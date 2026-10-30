@@ -417,8 +417,8 @@ export interface FlowResult {
   resumedFrom: string | null;
   /** The flow that ran: the request's own, or the one a resume point named; null when no run exists. */
   ran: string | null;
-  /** A run that did not come to a result and said how it could be carried on: where from (its own words) and whether a model may be called; null otherwise, and once a later round exists. */
-  resumable: { from: string; spends: "nothing" | "maybe" } | null;
+  /** A run that did not come to a result and said how it could be carried on: `line` is where from, in the flow's own words (as on `FlowRec.resume`), and `spends` whether a model may be called; null otherwise, and once a later round exists. */
+  resumable: { line: string; spends: "nothing" | "maybe" } | null;
 }
 
 /** The most of a run's result the controller keeps and hands to a rule. */

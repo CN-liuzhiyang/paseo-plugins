@@ -27,7 +27,7 @@ const stopped = (resume: Offer | null = OFFER, why = "校验没过：缺一个�
 /** The rule of flows-kit, reading out of each run what it is told of carrying on. */
 const READS = RULE.replace(
   'return n + ":" + k + "=" + (r ? r.state + (r.value ? JSON.stringify(r.value) : "") : "-");',
-  'return n + ":" + k + "=" + (r ? r.state + (r.value ? JSON.stringify(r.value) : "") + (r.resumable ? "|can:" + r.resumable.from + "/" + r.resumable.spends : "") + (r.resumedFrom ? "|from:" + r.resumedFrom : "") + "|ran:" + r.ran : "-");',
+  'return n + ":" + k + "=" + (r ? r.state + (r.value ? JSON.stringify(r.value) : "") + (r.resumable ? "|can:" + r.resumable.line + "/" + r.resumable.spends : "") + (r.resumedFrom ? "|from:" + r.resumedFrom : "") + "|ran:" + r.ran : "-");',
 );
 assert.notEqual(READS, RULE, "the rule was changed");
 const SELF = RULE.replace('triage: { flow: "triage-flow", timeout: "30m", maxUsd: 1, notify: true }', 'triage: { flow: "triage-flow", timeout: "30m", maxUsd: 1, notify: true, selfRetry: true }');
@@ -64,9 +64,9 @@ test("the reader takes how a run said it could be carried on, and which run it c
     f.run("resumed-bad", [{ ...start(ago(30 * MIN), AFFAIR("tracker:9")), resumeOf: "a/b" }]);
     f.run("plain", [start(ago(30 * MIN), AFFAIR("tracker:10"))]);
     const of = (n: number) => f.reader.forCase(`tracker:${n}`)[0]!;
-    assert.deepEqual(of(1).resume, { from: "最后的一句", spends: "nothing" });
+    assert.deepEqual(of(1).resume, { line: "最后的一句", spends: "nothing" });
     assert.equal(of(2).resume, null);
-    assert.deepEqual(of(3).resume, { from: "第二句", spends: "maybe" });
+    assert.deepEqual(of(3).resume, { line: "第二句", spends: "maybe" });
     assert.equal(of(4).resume, null);
     for (const n of [5, 6, 7]) assert.equal(of(n).resume, null, `tracker:${n}`);
     assert.equal(of(8).resumeOf, "ended");
@@ -114,7 +114,7 @@ test("a stopped run that said how it could be carried on is offered 接着跑 fi
     await advance(w, 10);
     const offered = view(w, 1, a);
     assert.deepEqual(offered.actions, ["resume", "retry", "mine", "fold"]);
-    assert.deepEqual(offered.resume, { from: OFFER.from, spends: "nothing" });
+    assert.deepEqual(offered.resume, { line: OFFER.from, spends: "nothing" });
     assert.equal(retryLabel(offered), "从头重跑（会再花钱，上次花了 $0.40）");
     assert.match(troubleLine(offered), /没查成：校验没过：缺一个必填字段。处理好原因以后点「接着跑」/);
     assert.equal(resumeNote(offered), "第一步已完成：从第二步接着，不重做第一步 · 不调模型");
@@ -126,8 +126,8 @@ test("a stopped run that said how it could be carried on is offered 接着跑 fi
     assert.equal(retryLabel(plain), "重新跑一次（会再花钱，上次花了 $0.40）");
     assert.match(troubleLine(plain), /不会自动重来。$/);
     // and a flow that may call a model says so
-    assert.equal(resumeNote({ resume: { from: "第二步失败时要查原因。", spends: "maybe" }, costUsd: 1.5 }), "第二步失败时要查原因 · 可能会调模型（上一轮花了 $1.50）");
-    assert.equal(resumeNote({ resume: { from: "第二步失败时要查原因", spends: "maybe" }, costUsd: 0 }), "第二步失败时要查原因 · 可能会调模型");
+    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因。", spends: "maybe" }, costUsd: 1.5 }), "第二步失败时要查原因 · 可能会调模型（上一轮花了 $1.50）");
+    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因", spends: "maybe" }, costUsd: 0 }), "第二步失败时要查原因 · 可能会调模型");
     assert.equal(resumeNote({ resume: null, costUsd: 0 }), "");
   }));
 
@@ -291,7 +291,7 @@ test("a carrying on that never ran (the runtime refused it, nothing spent) is ca
       assert.equal(flowsOf(w)[r1]!.ended!.outcome, "refused");
       const shown = view(w, 1, r1);
       assert.deepEqual(shown.actions, ["resume", "retry", "mine", "fold"], "the same two ways, for a round that did not run");
-      assert.deepEqual(shown.resume, { from: OFFER.from, spends: "nothing" });
+      assert.deepEqual(shown.resume, { line: OFFER.from, spends: "nothing" });
       const again = w.engine.resumeFlow(r1, "owner");
       assert.equal(again.ok, true, again.detail);
       assert.deepEqual(flowsOf(w)[r2]!.resume, { from: r0, flow: "triage-resume", line: OFFER.from, spends: "nothing", by: "owner" }, "it carries on the run that stopped, not the round that never ran");
@@ -513,13 +513,13 @@ test("a carrying on that never ran is carried on again with the word as it stand
       await advance(w, 10);
       // the round that never ran is offered again, and the rule reads what the page shows
       const shown = view(w, 1, r1);
-      assert.deepEqual(shown.resume, { from: OFFER.from, spends: "nothing" });
+      assert.deepEqual(shown.resume, { line: OFFER.from, spends: "nothing" });
       assert.deepEqual(w.engine.flowResult("gcp-demo:1", "triage", "k1")!.resumable, shown.resume, "the rule and the page agree");
       assert.match(headline(w, 1)!, /triage:k1=refused\|can:/);
       // the run it was to carry on says something else now (it went on after it was read as lost): the page shows that, and the next try is for that
       w.flows.probes.set(r0, stopped({ ...first0, from: "改过了：从第三步接着", print: "2222222222222222" }));
       await advance(w, 10);
-      assert.deepEqual(view(w, 1, r1).resume, { from: "改过了：从第三步接着", spends: "nothing" });
+      assert.deepEqual(view(w, 1, r1).resume, { line: "改过了：从第三步接着", spends: "nothing" });
       assert.equal(w.engine.resumeFlow(r1, "owner").ok, true);
       assert.deepEqual([flowsOf(w)[r2]!.resume!.line, flowsOf(w)[r2]!.resume!.print, flowsOf(w)[r2]!.resume!.from], ["改过了：从第三步接着", "2222222222222222", r0]);
       await advance(w, 10);
@@ -528,7 +528,7 @@ test("a carrying on that never ran is carried on again with the word as it stand
       w.flows.probes.set(r2, probeOf({ state: "refused", refused: "gone" }));
       w.flows.probes.delete(r0);
       await advance(w, 10);
-      assert.deepEqual(view(w, 1, r2).resume, { from: "改过了：从第三步接着", spends: "nothing" });
+      assert.deepEqual(view(w, 1, r2).resume, { line: "改过了：从第三步接着", spends: "nothing" });
     },
     { rule: READS, policy: POLICY({}) },
   ));
@@ -701,7 +701,7 @@ test("what a rule is told of a run: where it carried on from, the flow that ran,
   const ended = (over: Partial<FlowEnd> = {}) => END({ resume: OFFER, ...over });
   assert.deepEqual(
     (({ resumedFrom, ran, resumable }) => ({ resumedFrom, ran, resumable }))(resultOf(rec({ ended: ended() }), null)),
-    { resumedFrom: null, ran: "triage-flow", resumable: { from: OFFER.from, spends: "nothing" } },
+    { resumedFrom: null, ran: "triage-flow", resumable: { line: OFFER.from, spends: "nothing" } },
   );
   assert.deepEqual(
     (({ resumedFrom, ran, resumable }) => ({ resumedFrom, ran, resumable }))(resultOf(rec({ round: 1, resume: { from: "r0", flow: "triage-resume", line: "x", spends: "nothing", by: "owner" }, ended: ended({ resume: undefined, outcome: "done", value: { a: 1 }, why: null }) }), null)),

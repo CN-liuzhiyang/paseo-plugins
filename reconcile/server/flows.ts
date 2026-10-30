@@ -265,7 +265,7 @@ export function resultOf(rec: FlowRec, live: Live | null, read: { fresh?: Resume
     ran: read.ran ?? rec.resume?.flow ?? rec.flow,
     // A run that stopped short and said how it could be carried on (or a carrying on that never ran, which is carried on again with the same word),
     // that nobody set aside and the rule does not take care of itself.
-    resumable: ended && noResult(ended) && !rec.dismissed && !rec.selfRetry ? ((point) => (point ? { from: point.line, spends: point.spends } : null))(carryOnOf(rec, read.fresh)) : null,
+    resumable: ended && noResult(ended) && !rec.dismissed && !rec.selfRetry ? ((point) => (point ? { line: point.line, spends: point.spends } : null))(carryOnOf(rec, read.fresh)) : null,
   };
 }
 

@@ -294,7 +294,7 @@ export interface RunView {
    * For a run of its own, set only when it is the newest round of its request, came to no result, and a person may carry it on (the
    * "接着跑" button is drawn from this and `actions`).
    */
-  resume?: { from: string; spends: "nothing" | "maybe" } | null;
+  resume?: { line: string; spends: "nothing" | "maybe" } | null;
   /** For a round of its own that carries on an earlier run: who asked ("cli": started with `orch.mjs resume` and taken into the record), and the line it carried on from. */
   carriedOn?: { by: string; line: string; spends: "nothing" | "maybe" } | null;
   /** For the newest round of a request that has had more than one: how many rounds, and what they cost together (the ones that have ended). */
@@ -547,7 +547,7 @@ export const resumeNote = (run: Pick<RunView, "resume" | "costUsd">): string => 
   const offer = run.resume;
   if (!offer) return "";
   const model = offer.spends === "nothing" ? "不调模型" : `可能会调模型${run.costUsd > 0 ? `（上一轮花了 $${run.costUsd.toFixed(2)}）` : ""}`;
-  return `${offer.from.replace(/[。.]+$/u, "")} · ${model}`;
+  return `${offer.line.replace(/[。.]+$/u, "")} · ${model}`;
 };
 
 /** The sum of a request's rounds, for the line over its way out: "已经跑了 3 次，一共花了 $1.14". */
