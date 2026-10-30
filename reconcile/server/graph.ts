@@ -460,6 +460,7 @@ export function createGraph(deps: GraphDeps) {
       if (r.dismissed || r.own === false) continue;
       if (r.inputDrifted) marks.push({ kind: "flow", line: `${named(r)}${r.round ? `（第 ${r.round + 1} 轮）` : ""}起的时候给的输入，和判断方法现在给的不一样；不会为这个重跑`, since: null, until: null });
       if (r.unwanted) marks.push({ kind: "flow", line: `${named(r)}还在跑，但判断方法已经不要它了；不会去停它，结果出来照样记`, since: null, until: null });
+      if (r.resumeDiffers) marks.push({ kind: "flow", line: `${named(r)}（第 ${(r.round ?? 0) + 1} 次）接着跑起来的流程和输入，和按钮上写的不一样${r.ran ? `（实际跑的是「${r.ran}」）` : ""}；以实际跑的为准，结果照样记`, since: null, until: null });
     }
     if (hold) marks.push({ kind: "held", line: `${personName(hold.by)} ${clockText(hold.at)} 说「${clip(hold.said, 60)}」${hold.until ? ` · ${hold.until} 前不问` : ""} · 说一句就撤`, since: hold.at, until: hold.until });
     const wrong = f.said.find((s) => s.kind === "wrong");

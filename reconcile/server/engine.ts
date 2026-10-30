@@ -3,7 +3,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
 import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
-import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
+import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type ResumeOffer, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
 import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, passesOf, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
 import type { CommandRequest } from "./sources/command";
@@ -17,7 +17,7 @@ import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outp
 import type { CaptureInput } from "./capsule";
 import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, confirmWords, personsOwn, commandStep, type AskedAt, type AnswerRequest, type ConfirmRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
-import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, noResult, ranNothing, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
+import { actFor, affairOf, carryOnOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, noResult, ranNothing, resultOf, runIdOf, unfinishedWhy, type CarryOn, type Launcher, type Live } from "./flows";
 import type { AgentArchiver } from "./archive";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
@@ -673,7 +673,10 @@ export function createEngine(deps: EngineDeps) {
       return held ? deferredResult(held.why, held.limit) : null;
     }
     const rec = state.flows?.[latest.runId];
-    return rec ? resultOf(rec, liveOf.get(rec.runId) ?? null) : null;
+    if (!rec) return null;
+    // What really ran, where the run's own start can be read: a rule is told that, not what the round was made to run.
+    const ran = rec.resume ? deps.flows?.probe?.(rec.runId, null, logDirOf(rec))?.view?.flow : undefined;
+    return resultOf(rec, liveOf.get(rec.runId) ?? null, { fresh: freshOffer(rec), ...(ran ? { ran } : {}) });
   }
 
   type RunAsk = NonNullable<RuleOutput["run"]>[number];
@@ -830,7 +833,7 @@ export function createEngine(deps: EngineDeps) {
         // A round that carries on an earlier run is given no input: the runtime reads it, with the flow, from what that run left.
         if (!rec.resume) writeAtomic(inputFile, JSON.stringify(rec.input));
         writeAtomic(affairFile, JSON.stringify(affairOf({ caseId: rec.caseId, stage: rec.stage, label: rec.affairLabel }, state.items[rec.caseId]?.url ?? null, HOME_SCREEN)));
-        ({ pid } = await flows.launcher.start({ runId, flow: rec.resume?.flow ?? rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`), logDir, ...(rec.resume ? { resumeOf: rec.resume.from } : {}) }));
+        ({ pid } = await flows.launcher.start({ runId, flow: rec.resume?.flow ?? rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`), logDir, ...(rec.resume ? { resumeOf: rec.resume.from, ...(rec.resume.print ? { expect: rec.resume.print } : {}) } : {}) }));
       } catch (error) {
         const message = (error as Error).message.slice(0, 300);
         deps.log(`flow ${runId}: could not start it: ${message}`);
@@ -909,14 +912,14 @@ export function createEngine(deps: EngineDeps) {
   };
 
   /**
-   * How a run in trouble can be carried on, by the controller's own record: what it said when it stopped (`ended.resume`), or, for a round that was
-   * itself to carry one on and never got to run (refused, not started, nothing spent), what it was to carry on -- the same word again. `from` is the run to carry on.
+   * The word of the run a carrying on that never ran was to carry on, as the runtime's files say it now (null: nothing can be read). The runtime reads the
+   * point afresh whenever it carries a run on, and a refusal may be because the point changed since the button was drawn: so the carrying on is
+   * offered again with the word as it stands, and the page shows that, not the old one.
    */
-  const carryOnPoint = (rec: FlowRec): { from: string; flow: string; line: string; spends: "nothing" | "maybe" } | null => {
-    if (!rec.ended) return null;
-    if (rec.ended.resume) return { from: rec.runId, flow: rec.ended.resume.flow, line: rec.ended.resume.from, spends: rec.ended.resume.spends };
-    return rec.resume && ranNothing(rec) ? { from: rec.resume.from, flow: rec.resume.flow, line: rec.resume.line, spends: rec.resume.spends } : null;
-  };
+  const freshOffer = (rec: FlowRec): ResumeOffer | null => (rec.resume && ranNothing(rec) ? (deps.flows?.probe?.(rec.resume.from, null, logDirOf(rec))?.resume ?? null) : null);
+
+  /** How a run in trouble can be carried on (flows.ts `carryOnOf`), with the word of the run it was to carry on read afresh where that applies. */
+  const carryOnPoint = (rec: FlowRec): CarryOn | null => carryOnOf(rec, freshOffer(rec));
 
   /** The rounds of a request, oldest first. */
   const roundsOf = (rec: FlowRec): FlowRec[] => recs().filter((r) => r.caseId === rec.caseId && r.name === rec.name && r.flow === rec.flow && r.key === rec.key).sort((a, b) => a.round - b.round);
@@ -1000,6 +1003,9 @@ export function createEngine(deps: EngineDeps) {
       // A round that carries on is named for the request's flow, not the one it ran (the page names the request; the run's own page says what it ran).
       ...(rec.resume ? { flow: rec.flow } : {}),
       resumeOf: rec.resume?.from ?? null,
+      ...(rec.resume && read ? { ran: read.flow } : {}),
+      // The run that was started is not the point the button promised (it was changed in between, and the runtime did not stop it): said on the page, by what the run itself recorded.
+      ...(rec.resume?.print && read?.resumePrint && read.resumePrint !== rec.resume.print ? { resumeDiffers: true } : {}),
       resume: point ? { from: point.line, spends: point.spends } : null,
       carriedOn: rec.resume ? { by: rec.resume.by, line: rec.resume.line, spends: rec.resume.spends } : null,
       ...(latest && rounds.length > 1 ? { ledger: { rounds: rounds.length, costUsd: rounds.reduce((sum, r) => sum + (r.ended?.costUsd ?? 0), 0) } } : {}),
@@ -1097,7 +1103,7 @@ export function createEngine(deps: EngineDeps) {
       round: rec.round + 1,
       intentAt: nowIso(nowMs),
       logDir,
-      resume: { from: point.from, flow: point.flow, line: point.line, spends: point.spends, by },
+      resume: { from: point.from, flow: point.flow, line: point.line, spends: point.spends, ...(point.print ? { print: point.print } : {}), by },
     };
     delete next.spawnedAt;
     delete next.pid;

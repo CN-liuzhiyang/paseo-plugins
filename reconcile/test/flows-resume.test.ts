@@ -5,7 +5,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { ledgerText, resumeNote, retryLabel, troubleLine, type RunView } from "../shared/graph";
 import type { FlowEnd, FlowRec } from "../shared/model";
-import { createLauncher, endedMessage, resultOf, type LaunchSpec } from "../server/flows";
+import { createLauncher, endedMessage, inputHashOf, resultOf, type LaunchSpec } from "../server/flows";
 import { offerOf, probeFromRunnerOutput } from "../server/runs";
 import { probeOf } from "./helpers";
 import { set } from "./item-flow";
@@ -17,10 +17,11 @@ import { AFFAIR, ago, fixture, MIN, runView, start } from "./run-files";
 // rule and the message at the end are told. As flows-trouble.test.ts: a launcher that records and a probe the test sets; nothing is
 // started (the real runtime is in flows-orch.test.ts).
 
-const OFFER = { flow: "triage-resume", from: "第一步已完成：从第二步接着，不重做第一步", spends: "nothing" as const };
+type Offer = { flow: string; from: string; spends: "nothing" | "maybe"; print?: string };
+const OFFER: Offer = { flow: "triage-resume", from: "第一步已完成：从第二步接着，不重做第一步", spends: "nothing" };
 
 /** A run that stopped on purpose and said in its value that it did not get done what it was for, and how it could be carried on. */
-const stopped = (resume: typeof OFFER | null = OFFER, why = "校验没过：缺一个必填字段", costUsd = 0.4) =>
+const stopped = (resume: Offer | null = OFFER, why = "校验没过：缺一个必填字段", costUsd = 0.4) =>
   probeOf({ state: "ended", costUsd, resume, end: { at: 0, outcome: "stopped", summary: null, stop: why, error: null, value: { why }, valueDropped: false, totalUsd: null } });
 
 /** The rule of flows-kit, reading out of each run what it is told of carrying on. */
@@ -58,8 +59,8 @@ test("the reader takes how a run said it could be carried on, and which run it c
     f.run("bad-flow", [start(ago(30 * MIN), AFFAIR("tracker:5")), { kind: "resume", ts: ago(20 * MIN), ...point, flow: "../elsewhere" }]);
     f.run("bad-spends", [start(ago(30 * MIN), AFFAIR("tracker:6")), { kind: "resume", ts: ago(20 * MIN), ...point, spends: "sometimes" }]);
     f.run("no-line", [start(ago(30 * MIN), AFFAIR("tracker:7")), { kind: "resume", ts: ago(20 * MIN), ...point, from: "  " }]);
-    // which run it carries on
-    f.run("resumed", [{ ...start(ago(30 * MIN), AFFAIR("tracker:8")), resumeOf: "ended" }]);
+    // which run it carries on, and from which point it was started
+    f.run("resumed", [{ ...start(ago(30 * MIN), AFFAIR("tracker:8")), resumeOf: "ended", resumePrint: "92645a244d9b3d69" }]);
     f.run("resumed-bad", [{ ...start(ago(30 * MIN), AFFAIR("tracker:9")), resumeOf: "a/b" }]);
     f.run("plain", [start(ago(30 * MIN), AFFAIR("tracker:10"))]);
     const of = (n: number) => f.reader.forCase(`tracker:${n}`)[0]!;
@@ -69,14 +70,21 @@ test("the reader takes how a run said it could be carried on, and which run it c
     assert.equal(of(4).resume, null);
     for (const n of [5, 6, 7]) assert.equal(of(n).resume, null, `tracker:${n}`);
     assert.equal(of(8).resumeOf, "ended");
+    assert.equal(of(8).resumePrint, "92645a244d9b3d69");
+    assert.equal(of(10).resumePrint, null);
     assert.equal(of(9).resumeOf, null, "an id that does not read as one is not one");
     assert.equal(of(10).resumeOf, null);
     // the controller reads a run by its id, too
-    assert.deepEqual(f.reader.probe("ended", null).resume, { flow: "triage-resume", from: "最后的一句", spends: "nothing" });
-    assert.deepEqual(f.reader.probe("cut-off", null).resume, { flow: "triage-resume", from: "第二句", spends: "maybe" });
+    const print = inputHashOf({ flow: "triage-resume", input: { dir: "d1" } });
+    assert.deepEqual(f.reader.probe("ended", null).resume, { flow: "triage-resume", from: "最后的一句", spends: "nothing", print });
+    assert.deepEqual(f.reader.probe("cut-off", null).resume, { flow: "triage-resume", from: "第二句", spends: "maybe", print });
     assert.equal(f.reader.probe("taken-back", null).resume, null);
     assert.equal(f.reader.probe("not-there", null).resume ?? null, null);
     assert.equal(offerOf({ flow: "a", from: "x", spends: "nothing", input: { secret: 1 } })!.flow, "a");
+    // the fingerprint is the runtime's `pointPrint` (flow and input, whatever order the keys are in): this vector is the one in orchestration's resume test
+    assert.equal(offerOf({ flow: "rs-part-two", from: "x", spends: "nothing", input: { b: 1, a: [1, { d: 2, c: 3 }], s: "中文" } })!.print, "92645a244d9b3d69");
+    assert.equal(offerOf({ input: { s: "中文", a: [1, { c: 3, d: 2 }], b: 1 }, flow: "rs-part-two", from: "another line", spends: "maybe" })!.print, "92645a244d9b3d69");
+    assert.equal(offerOf({ flow: "a", from: "x", spends: "nothing" })!.print, undefined, "no input to fingerprint: no fingerprint");
     assert.equal(offerOf("nope"), null);
   } finally {
     f.close();
@@ -86,7 +94,8 @@ test("the reader takes how a run said it could be carried on, and which run it c
 test("the result a run printed carries how it could be carried on too: a run that ended before the controller read its files is not read as one with nothing to say", () => {
   const printed = (over: Record<string, unknown>) => JSON.stringify({ ok: false, outcome: "stopped", value: { why: "停了" }, summary: null, runId: "r", stop: { reason: "停" }, cost: null, ...over }, null, 2);
   const stoppedShort = probeFromRunnerOutput(printed({ resume: { flow: "triage-resume", input: { a: 1 }, from: "从核对接着", spends: "nothing" } }), 1)!;
-  assert.deepEqual([stoppedShort.resume, stoppedShort.end!.resume], [{ flow: "triage-resume", from: "从核对接着", spends: "nothing" }, { flow: "triage-resume", from: "从核对接着", spends: "nothing" }]);
+  const offer = { flow: "triage-resume", from: "从核对接着", spends: "nothing", print: inputHashOf({ flow: "triage-resume", input: { a: 1 } }) };
+  assert.deepEqual([stoppedShort.resume, stoppedShort.end!.resume], [offer, offer]);
   assert.equal(probeFromRunnerOutput(printed({ resume: null }), 1)!.resume, null);
   assert.equal(probeFromRunnerOutput(printed({}), 1)!.resume, null, "a runtime that did not say");
   assert.equal(probeFromRunnerOutput(printed({ resume: { flow: "../x", from: "y", spends: "nothing" } }), 1)!.resume, null);
@@ -117,8 +126,9 @@ test("a stopped run that said how it could be carried on is offered 接着跑 fi
     assert.equal(retryLabel(plain), "重新跑一次（会再花钱，上次花了 $0.40）");
     assert.match(troubleLine(plain), /不会自动重来。$/);
     // and a flow that may call a model says so
-    assert.equal(resumeNote({ resume: { from: "第二步失败时要查原因。", spends: "maybe" }, retry: { round: 2, estimateUsd: 1.5 } }), "第二步失败时要查原因 · 可能会调模型（上一轮花了 $1.50）");
-    assert.equal(resumeNote({ resume: null, retry: null }), "");
+    assert.equal(resumeNote({ resume: { from: "第二步失败时要查原因。", spends: "maybe" }, costUsd: 1.5 }), "第二步失败时要查原因 · 可能会调模型（上一轮花了 $1.50）");
+    assert.equal(resumeNote({ resume: { from: "第二步失败时要查原因", spends: "maybe" }, costUsd: 0 }), "第二步失败时要查原因 · 可能会调模型");
+    assert.equal(resumeNote({ resume: null, costUsd: 0 }), "");
   }));
 
 test("no button where it would be wrong: a run still going, one that came out whole, a run set aside, an earlier round, a stage the item has left, a flow the rule retries itself", async () => {
@@ -480,6 +490,121 @@ test("a button and a run by hand that raced for the same stop: the round that wa
       assert.equal(w.flows.launcher.started.length, 2, "the round that was refused was started, the run by hand was not");
       assert.match(headline(w, 1)!, /triage:k1=starting\|from:/);
       assert.equal(view(w, 1, r1).actions?.length ?? 0, 0, "the refused round is history now");
+    },
+    { rule: READS, policy: POLICY({}), runs: () => views },
+  );
+});
+
+// ---- the page, the button and the rule say the same -------------------------------------------------------
+
+test("a carrying on that never ran is carried on again with the word as it stands now, and the rule is told the same as the page", () =>
+  withFlows(
+    async (w) => {
+      const [r0, r1, r2] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1), idFor(1, "k1", "triage", 2)];
+      asks(w, 1, [req("k1")], { Watch: "triage:k1" });
+      await first(w);
+      const first0 = { ...OFFER, print: "1111111111111111" };
+      w.flows.probes.set(r0, stopped(first0));
+      await advance(w, 10);
+      assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+      await advance(w, 10);
+      assert.equal(w.flows.launcher.started[1]!.expect, "1111111111111111", "what the person was shown goes to the runtime");
+      w.flows.probes.set(r1, probeOf({ state: "refused", refused: "the resume point of run x is not the one that was shown" }));
+      await advance(w, 10);
+      // the round that never ran is offered again, and the rule reads what the page shows
+      const shown = view(w, 1, r1);
+      assert.deepEqual(shown.resume, { from: OFFER.from, spends: "nothing" });
+      assert.deepEqual(w.engine.flowResult("gcp-demo:1", "triage", "k1")!.resumable, shown.resume, "the rule and the page agree");
+      assert.match(headline(w, 1)!, /triage:k1=refused\|can:/);
+      // the run it was to carry on says something else now (it went on after it was read as lost): the page shows that, and the next try is for that
+      w.flows.probes.set(r0, stopped({ ...first0, from: "改过了：从第三步接着", print: "2222222222222222" }));
+      await advance(w, 10);
+      assert.deepEqual(view(w, 1, r1).resume, { from: "改过了：从第三步接着", spends: "nothing" });
+      assert.equal(w.engine.resumeFlow(r1, "owner").ok, true);
+      assert.deepEqual([flowsOf(w)[r2]!.resume!.line, flowsOf(w)[r2]!.resume!.print, flowsOf(w)[r2]!.resume!.from], ["改过了：从第三步接着", "2222222222222222", r0]);
+      await advance(w, 10);
+      assert.equal(w.flows.launcher.started[2]!.expect, "2222222222222222");
+      // and a point that cannot be read any more leaves the word the round was made with
+      w.flows.probes.set(r2, probeOf({ state: "refused", refused: "gone" }));
+      w.flows.probes.delete(r0);
+      await advance(w, 10);
+      assert.deepEqual(view(w, 1, r2).resume, { from: "改过了：从第三步接着", spends: "nothing" });
+    },
+    { rule: READS, policy: POLICY({}) },
+  ));
+
+test("the buttons' words do not take one round's cost for another's: starting over says what it cost to start over, and the carrying on says what the round it carries on cost", async () => {
+  await withFlows(
+    async (w) => {
+      const [r0, r1] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1)];
+      asks(w, 1, [req("k1")]);
+      await first(w);
+      w.flows.probes.set(r0, stopped(OFFER, "第一次停了", 1.14));
+      await advance(w, 10);
+      assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+      // the process cannot be started three times: the carrying on never ran, and spent nothing
+      w.flows.failStarts.count = 3;
+      await advance(w, 20);
+      assert.equal(flowsOf(w)[r1]!.ended!.outcome, "not-started");
+      const never = view(w, 1, r1);
+      assert.equal(never.situation, "notstarted");
+      assert.equal(retryLabel(never), "从头重跑（会再花钱，上次花了 $1.14）", "what starting over costs is known, whatever the carrying on that never started spent");
+    },
+    { policy: POLICY({}) },
+  );
+  await withFlows(
+    async (w) => {
+      const [r0, r1] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1)];
+      asks(w, 1, [req("k1")]);
+      await first(w);
+      const maybe = { ...OFFER, spends: "maybe" as const };
+      w.flows.probes.set(r0, stopped(maybe, "第一次停了", 1.14));
+      await advance(w, 10);
+      assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+      await advance(w, 10);
+      w.flows.probes.set(r1, stopped(maybe, "又停了", 0.1));
+      await advance(w, 10);
+      const second = view(w, 1, r1);
+      assert.match(resumeNote(second), /可能会调模型（上一轮花了 \$0\.10）$/, "the round it carries on is the one that just stopped");
+      assert.match(retryLabel(second), /上次花了 \$1\.14/, "starting over is what the request cost when it last ran from the start");
+    },
+    { policy: POLICY({}) },
+  );
+});
+
+// ---- what ran is what was shown ---------------------------------------------------------------------------
+
+test("a round that carries on is told as what really ran: the rule reads the flow of the run's own start, and a run that was not started from the point the button showed is said so", async () => {
+  let views: RunView[] = [];
+  await withFlows(
+    async (w) => {
+      const [r0, r1] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1)];
+      asks(w, 1, [req("k1")], { Watch: "triage:k1" });
+      await first(w);
+      const shown = { ...OFFER, print: "1111111111111111" };
+      w.flows.probes.set(r0, stopped(shown));
+      await advance(w, 10);
+      assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+      await advance(w, 10);
+      assert.match(headline(w, 1)!, /\|ran:triage-resume$/, "until it is read, the flow it was made to run");
+      // it ran another flow than the one shown, from another point (the file was changed after the page drew the button, and the runtime did not stop it)
+      const actual = runView("done", { runId: r1, stage: "review", flow: "triage-resume-b", resumeOf: r0, resumePrint: "9999999999999999" });
+      views = [actual];
+      w.flows.probes.set(r1, probeOf({ state: "ended", view: actual, costUsd: 0, end: { at: 0, outcome: "done", summary: null, stop: null, error: null, value: { actual: "b" }, valueDropped: false, totalUsd: 0 } }));
+      await advance(w, 10);
+      const result = w.engine.flowResult("gcp-demo:1", "triage", "k1")!;
+      assert.deepEqual([result.ran, result.resumedFrom, result.value], ["triage-resume-b", r0, { actual: "b" }]);
+      assert.match(headline(w, 1)!, /\|ran:triage-resume-b$/);
+      const page = view(w, 1, r1);
+      assert.deepEqual([page.ran, page.resumeDiffers, page.flow], ["triage-resume-b", true, "triage-flow"]);
+      const marks = w.engine.graph("gcp-demo:1")!.marks.filter((m) => m.kind === "flow");
+      assert.equal(marks.length, 1);
+      assert.match(marks[0]!.line, /接着跑起来的流程和输入，和按钮上写的不一样（实际跑的是「triage-resume-b」）；以实际跑的为准，结果照样记/);
+      // one that was started from the point that was shown is not told off
+      views = [{ ...actual, flow: "triage-resume", resumePrint: "1111111111111111" }];
+      await advance(w, 10);
+      assert.equal(view(w, 1, r1).resumeDiffers, undefined);
+      assert.equal(w.engine.graph("gcp-demo:1")!.marks.filter((m) => m.kind === "flow").length, 0);
     },
     { rule: READS, policy: POLICY({}), runs: () => views },
   );

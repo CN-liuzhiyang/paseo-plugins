@@ -299,6 +299,11 @@ export interface ResumeOffer {
   flow: string;
   from: string;
   spends: "nothing" | "maybe";
+  /**
+   * The fingerprint of the flow and input the point would start (flows.ts `inputHashOf({ flow, input })`, the same as the runtime's `pointPrint`): the
+   * button passes it to `orch.mjs resume --expect`, so that what a person was shown is what is started. Absent: not known (a record from before it was kept).
+   */
+  print?: string;
 }
 
 /** How a run ended, as the controller recorded it when it read or decided that. */
@@ -332,6 +337,8 @@ export interface FlowResume {
   /** What the earlier run said about where it carries on from, cleaned. */
   line: string;
   spends: "nothing" | "maybe";
+  /** The fingerprint of the point it was asked to start from (`ResumeOffer.print`); absent for a run started by hand, which the controller did not ask for. */
+  print?: string;
   /** A person's id for the page's button, "cli" for a run that was started from the command line and taken into the record. */
   by: string;
 }

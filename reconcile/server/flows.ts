@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { LauncherConfig, Policy } from "./config";
-import type { FlowEnd, FlowRec, FlowResult, FlowState } from "../shared/model";
+import type { FlowEnd, FlowRec, FlowResult, FlowState, ResumeOffer } from "../shared/model";
 import type { RunProbe } from "./runs";
 import { localParts } from "./time";
 import { cleanText, hasUnsafe } from "./untrusted";
@@ -211,14 +211,42 @@ const DRAWN: Record<string, string> = { "[": "［", "]": "］", "<": "＜", ">":
  */
 const plainForMessage = (text: string): string => text.replace(/[\[\]<>`@*_~|#]/g, (c) => DRAWN[c]!);
 
+/** How a run in trouble can be carried on, as the page shows it and the button does it. */
+export interface CarryOn {
+  /** The run to carry on. */
+  from: string;
+  flow: string;
+  /** What the flow said about where it carries on from. */
+  line: string;
+  spends: "nothing" | "maybe";
+  print?: string;
+}
+
+/**
+ * How a run that did not come to a result can be carried on, by the controller's own record: what it said when it stopped (`ended.resume`), or, for a
+ * round that was itself to carry one on and never got to run (refused, not started, nothing spent), what it was to carry on -- the word of that
+ * run as it stands now (`fresh`, read by the caller), else the one the round was made with. Null for anything else. The page, the button and
+ * the rule's `resumable` all come from here, so that they say the same.
+ */
+export function carryOnOf(rec: Pick<FlowRec, "runId" | "ended" | "resume">, fresh?: ResumeOffer | null): CarryOn | null {
+  if (!rec.ended) return null;
+  const offer = (o: ResumeOffer, from: string): CarryOn => ({ from, flow: o.flow, line: o.from, spends: o.spends, ...(o.print ? { print: o.print } : {}) });
+  if (rec.ended.resume) return offer(rec.ended.resume, rec.runId);
+  if (rec.resume && ranNothing(rec)) return offer(fresh ?? { flow: rec.resume.flow, from: rec.resume.line, spends: rec.resume.spends, ...(rec.resume.print ? { print: rec.resume.print } : {}) }, rec.resume.from);
+  return null;
+}
+
 /** A run that came to no result, so that a person may ask for it again (and none that did). */
 const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
 /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
 export const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
-/** What a rule is told of a run. */
-export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
+/**
+ * What a rule is told of a run. `fresh`: the word of the run a refused carrying on was to carry on, as it stands now (see `carryOnOf`);
+ * `ran`: the flow the runtime says ran, where it could be read (the run's own start), else the one the round was made to run.
+ */
+export function resultOf(rec: FlowRec, live: Live | null, read: { fresh?: ResumeOffer | null; ran?: string | null } = {}): FlowResult {
   const ended = rec.ended;
   // What the runtime's files say it is wins over the record of the start (which a failed write may have left out).
   const state: FlowState = rec.dismissed ? "dismissed" : ended ? ended.outcome : (live ?? (rec.spawnedAt ? "starting" : "queued"));
@@ -234,9 +262,10 @@ export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
     why: ended?.why ?? null,
     endedOutcome: rec.dismissed ? (ended?.outcome ?? null) : null,
     resumedFrom: rec.resume?.from ?? null,
-    ran: rec.resume?.flow ?? rec.flow,
-    // A run that stopped short and said how it could be carried on, that nobody set aside and the rule does not take care of itself.
-    resumable: ended?.resume && noResult(ended) && !rec.dismissed && !rec.selfRetry ? { from: ended.resume.from, spends: ended.resume.spends } : null,
+    ran: read.ran ?? rec.resume?.flow ?? rec.flow,
+    // A run that stopped short and said how it could be carried on (or a carrying on that never ran, which is carried on again with the same word),
+    // that nobody set aside and the rule does not take care of itself.
+    resumable: ended && noResult(ended) && !rec.dismissed && !rec.selfRetry ? ((point) => (point ? { from: point.line, spends: point.spends } : null))(carryOnOf(rec, read.fresh)) : null,
   };
 }
 
@@ -331,6 +360,8 @@ export interface LaunchSpec {
    * that run left in its resume point, which the runtime reads (`flow` and `inputFile` are then not used, and not written).
    */
   resumeOf?: string | null;
+  /** With `resumeOf`: the fingerprint of the point the person was shown (`--expect`): the runtime starts nothing if the point it reads now has another. */
+  expect?: string | null;
 }
 
 export interface Launcher {
@@ -349,7 +380,7 @@ export function createLauncher(config: LauncherConfig): Launcher {
       const [file, ...prefix] = config.command;
       const timeout = spec.timeout ? ["--timeout", spec.timeout] : [];
       const args = spec.resumeOf
-        ? [...prefix, "resume", spec.resumeOf, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, ...timeout]
+        ? [...prefix, "resume", spec.resumeOf, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, ...timeout, ...(spec.expect ? ["--expect", spec.expect] : [])]
         : [...prefix, "run", spec.flow, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, "--input", `@${spec.inputFile}`, ...timeout];
       return new Promise((resolve, reject) => {
         let out: number;

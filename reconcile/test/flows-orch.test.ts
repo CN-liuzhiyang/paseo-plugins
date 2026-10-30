@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { HOME_SCREEN, RUN_SCREEN } from "../shared/graph";
 import { createLauncher, runIdOf } from "../server/flows";
-import { createOutReader, createRunReaders } from "../server/runs";
+import { createOutReader, createRunReaders, type RunProbe } from "../server/runs";
 import { makeWorld, TEST_POLICY, TZ, type World } from "./helpers";
 import { set } from "./item-flow";
 
@@ -108,7 +108,7 @@ interface Rig {
   logDir: string;
   runsDir: string;
   /** What the engine is given to start flows with: the test may change its `logDir`, as a plugin that comes back to another config has. */
-  flowsDeps: { logDir: string | null; dir: string };
+  flowsDeps: { logDir: string | null; dir: string; probe: (runId: string, spawnedAtMs: number | null, dir: string | null) => RunProbe };
   /** How many processes the launcher was asked to start. */
   starts: number[];
   /** Moves the engine's clock (and the reader's) on without waiting. */
@@ -470,7 +470,8 @@ test("a stop is carried on from the page: the run left its word in its files, th
     await tick();
     await until(() => !!flowsOf(w)[r0]!.ended);
     const first = flowsOf(w)[r0]!.ended!;
-    assert.deepEqual([first.outcome, first.resume], ["stopped", { flow: "demo-resume", from: "第一段做完了：从第二段接着", spends: "nothing" }]);
+    assert.match(first.resume?.print ?? "", /^[0-9a-f]{16}$/, "the fingerprint of the flow and input it would start");
+    assert.deepEqual([first.outcome, first.resume], ["stopped", { flow: "demo-resume", from: "第一段做完了：从第二段接着", spends: "nothing", print: first.resume?.print }]);
     const shown = w.engine.graph("gcp-demo:1")!.runs.find((r) => r.runId === r0)!;
     assert.deepEqual([shown.actions, shown.resume], [["resume", "retry", "mine", "fold"], { from: "第一段做完了：从第二段接着", spends: "nothing" }]);
     const r = w.engine.resumeFlow(r0, "owner");
@@ -482,8 +483,12 @@ test("a stop is carried on from the page: the run left its word in its files, th
     assert.match(headline(w, 1), /^r twoparts:k1=done\{"word":"w","stage":"finish"\} \/ got w in finish$/);
     // what the runtime wrote: the second run says which it carries on, was given what the first declared, and is the same item's
     const [first0, second] = [eventsOf(runsDir, r0), eventsOf(runsDir, r1)];
-    const [start0, start1] = [first0.find((e) => e.kind === "run.start"), second.find((e) => e.kind === "run.start")] as Array<{ resumeOf: string | null; input: unknown; affair: { link: { params: Record<string, string> }; key: string } }>;
+    const [start0, start1] = [first0.find((e) => e.kind === "run.start"), second.find((e) => e.kind === "run.start")] as Array<{ resumeOf: string | null; resumePrint: string | null; input: unknown; affair: { link: { params: Record<string, string> }; key: string } }>;
     assert.equal(start0.resumeOf, null);
+    assert.equal(start0.resumePrint, null);
+    // the fingerprint the controller computed from the run's file is the one the runtime computed from the same file: the same algorithm in two places
+    assert.equal(start1.resumePrint, flowsOf(w)[r1]!.resume!.print);
+    assert.equal(start1.resumePrint, flowsOf(w)[r0]!.ended!.resume!.print);
     assert.deepEqual([start1.resumeOf, start1.input, start1.affair.link.params, start1.affair.key], [r0, { word: "w", stage: "finish" }, start0.affair.link.params, start0.affair.key]);
     assert.equal(readFileSync(path.join(runsDir, `${r0}.resumed`), "utf8"), r1, "the stop is taken once, by this run");
     // and a second run by hand for the same stop is refused, spending nothing and writing no events
@@ -514,4 +519,39 @@ test("a stop is carried on by hand with `orch.mjs resume`: the run lands in the 
     // the button's round for the same stop would have been refused by the runtime: nothing of it is there to take
     assert.equal(w.engine.resumeFlow(r0, "owner").ok, false);
     assert.equal(readdirSync(runsDir).filter((f) => f.endsWith(".jsonl")).length, 2);
+  }));
+
+test("what the page showed is what is started: a point that was changed after the button was drawn is refused by the runtime, spending nothing, and the next try is for the point as it stands", () =>
+  withRig(async ({ w, logDir, runsDir, flowsDeps, tick, until }) => {
+    const [r0, r1, r2] = [0, 1, 2].map((n) => ids(1, "twoparts", "k1", "demo-resume", n));
+    ask(w, 1, [twoParts()], "twoparts:k1");
+    await tick();
+    await until(() => !!flowsOf(w)[r0]!.ended);
+    const shown = flowsOf(w)[r0]!.ended!.resume!;
+    // after the page has the word, the file of the stopped run is changed: the same flow, another input
+    const file = path.join(runsDir, `${r0}.jsonl`);
+    const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as { kind: string; resume?: { input: { word: string } } });
+    lines.find((e) => e.kind === "run.end")!.resume!.input.word = "changed";
+    writeFileSync(file, lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    // (a plugin that was reloaded since reads the file afresh; this one has read the run's end and does not read it again)
+    const readers = createRunReaders({ tz: TZ, now: () => Date.now(), affair: HOME_SCREEN, view: RUN_SCREEN }, logDir);
+    flowsDeps.probe = (runId: string, spawnedAtMs: number | null, dir: string | null) => readers.forDir(dir ?? logDir).probe(runId, spawnedAtMs);
+    const first = w.engine.resumeFlow(r0, "owner");
+    assert.equal(first.ok, true, first.detail);
+    await tick();
+    await until(() => !!flowsOf(w)[r1]!.ended);
+    assert.equal(flowsOf(w)[r1]!.ended!.outcome, "refused");
+    assert.match(flowsOf(w)[r1]!.ended!.why ?? "", /is not the one that was shown/);
+    assert.equal(existsSync(path.join(runsDir, `${r1}.jsonl`)), false, "no run began");
+    assert.equal(existsSync(path.join(runsDir, `${r0}.resumed`)), false, "and the stop was not taken");
+    // the page now shows the point as it stands, and the next try starts that
+    const now = w.engine.graph("gcp-demo:1")!.runs.find((r) => r.runId === r1)!;
+    assert.deepEqual(now.actions?.slice(0, 2), ["resume", "retry"]);
+    const again = w.engine.resumeFlow(r1, "owner");
+    assert.equal(again.ok, true, again.detail);
+    assert.notEqual(flowsOf(w)[r2]!.resume!.print, shown.print);
+    await tick();
+    await until(() => !!flowsOf(w)[r2]!.ended);
+    assert.deepEqual([flowsOf(w)[r2]!.ended!.outcome, flowsOf(w)[r2]!.ended!.value], ["done", { word: "changed", stage: "finish" }]);
+    assert.equal(eventsOf(runsDir, r2).find((e) => e.kind === "run.start")!.resumePrint, flowsOf(w)[r2]!.resume!.print);
   }));

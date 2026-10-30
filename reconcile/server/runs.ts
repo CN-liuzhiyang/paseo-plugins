@@ -4,6 +4,7 @@ import path from "node:path";
 import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
 import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
 import { FLOW_VALUE_BYTES, type ResumeOffer } from "../shared/model";
+import { inputHashOf } from "./flows";
 import { iso } from "./time";
 import { agentIdOf, cleanText, hasUnsafe } from "./untrusted";
 
@@ -108,6 +109,8 @@ interface RunRec {
   holder: { pid?: unknown; hostname?: unknown };
   /** The run this one carries on (run.start's `resumeOf`), when it does and the id reads as one. */
   resumeOf: string | null;
+  /** The fingerprint of the point it was started from (run.start's `resumePrint`), for a run that carries on another. */
+  resumePrint: string | null;
   /** The last word of the flow on how it could be carried on (its `resume` events): null when it has said nothing, or took it back. The run.end's own is `end.resume`. */
   resume: ResumeOffer | null;
   phaseState: Map<string, "run" | "ok" | "bad">;
@@ -150,7 +153,8 @@ export function offerOf(value: unknown): ResumeOffer | null {
   const from = cleanText(point.from, 120);
   if (!flow || flow.length > 80 || !/^[a-z0-9][a-z0-9-]*$/.test(flow) || !from) return null;
   if (point.spends !== "nothing" && point.spends !== "maybe") return null;
-  return { flow, from, spends: point.spends };
+  // What the point would start, for whoever shows it to a person and asks the runtime to start that and nothing else (the runtime's `pointPrint`).
+  return { flow, from, spends: point.spends, ...(obj(point.input) ? { print: inputHashOf({ flow, input: point.input }) } : {}) };
 }
 
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
@@ -358,6 +362,7 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     link: { plugin: deps.view.plugin, screen: deps.view.screen, params: { run: run.runId } },
     retry: null,
     resumeOf: run.resumeOf,
+    resumePrint: run.resumePrint,
     resume: offer ? { from: offer.from, spends: offer.spends } : null,
   };
 }
@@ -462,6 +467,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
       caseId: owner.caseId,
       holder: { pid: e.pid, hostname: e.hostname },
       resumeOf: typeof e.resumeOf === "string" && RUN_ID_SHAPE.test(e.resumeOf) ? e.resumeOf : null,
+      resumePrint: typeof e.resumePrint === "string" && /^[0-9a-f]{16}$/.test(e.resumePrint) ? e.resumePrint : null,
       resume: null,
       phaseState: new Map(),
       calls: new Map(),

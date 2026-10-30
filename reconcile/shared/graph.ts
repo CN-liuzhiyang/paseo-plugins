@@ -280,6 +280,15 @@ export interface RunView {
   title?: string;
   /** The run this one carries on (run.start's `resumeOf`); null for one that does not. */
   resumeOf?: string | null;
+  /** The fingerprint of the point the run was started from (run.start's `resumePrint`), for a run that carries on another. */
+  resumePrint?: string | null;
+  /**
+   * For a round of its own that carries on an earlier run: the flow that really ran, where the run's own start could be read. The page names the request
+   * (`flow`); this is for when the two differ.
+   */
+  ran?: string;
+  /** The run that was started is not the one the button promised: another flow, or another input, than the point it was asked to start from (see `resumePrint`). */
+  resumeDiffers?: boolean;
   /**
    * How the run said it could be carried on, at the moment it stopped: where from, in the flow's own words, and whether a model may be called.
    * For a run of its own, set only when it is the newest round of its request, came to no result, and a person may carry it on (the
@@ -526,16 +535,18 @@ export const troubleLine = (run: Pick<RunView, "flow" | "situation" | "why" | "a
  */
 export const retryLabel = (run: Pick<RunView, "situation" | "retry" | "actions">): string => {
   const name = run.actions?.includes("resume") ? "从头重跑" : "重新跑一次";
-  return run.situation === "notstarted" || (run.situation === "unchecked" && !run.retry?.estimateUsd)
+  // A cost that is known wins over how the last round came out: a carrying on that never started spent nothing, but running from the start still costs what it did.
+  const known = run.retry?.estimateUsd ?? 0;
+  return known === 0 && (run.situation === "notstarted" || run.situation === "unchecked")
     ? `${name}（上次没花钱）`
-    : `${name}（会再花钱${run.retry?.estimateUsd ? `，上次花了 $${run.retry.estimateUsd.toFixed(2)}` : ""}）`;
+    : `${name}（会再花钱${known > 0 ? `，上次花了 $${known.toFixed(2)}` : ""}）`;
 };
 
-/** What stands beside the "接着跑" button: where it carries on from (the flow's own words) and whether it calls a model. */
-export const resumeNote = (run: Pick<RunView, "resume" | "retry">): string => {
+/** What stands beside the "接着跑" button: where it carries on from (the flow's own words) and whether it calls a model, with what the round it carries on cost. */
+export const resumeNote = (run: Pick<RunView, "resume" | "costUsd">): string => {
   const offer = run.resume;
   if (!offer) return "";
-  const model = offer.spends === "nothing" ? "不调模型" : `可能会调模型${run.retry?.estimateUsd ? `（上一轮花了 $${run.retry.estimateUsd.toFixed(2)}）` : ""}`;
+  const model = offer.spends === "nothing" ? "不调模型" : `可能会调模型${run.costUsd > 0 ? `（上一轮花了 $${run.costUsd.toFixed(2)}）` : ""}`;
   return `${offer.from.replace(/[。.]+$/u, "")} · ${model}`;
 };
 
