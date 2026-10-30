@@ -34,6 +34,11 @@ export interface ListedRow {
   /** As the source lists it; compared with the last full read. */
   updatedOn: string;
   changed: boolean;
+  /**
+   * Never listed by this source before, though it has been polled before: the row is new to us. False for every row of a source's
+   * first listing (all of it is new then, and says nothing of what happened lately), and for any row the source has listed once.
+   */
+  fresh?: boolean;
   /** The configured list columns, by the field name a full read gives them. */
   columns: Record<string, string>;
 }

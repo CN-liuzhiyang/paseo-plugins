@@ -640,6 +640,16 @@ test("which listed rows are worth a full read", () =>
     assert.equal(row("gcp-demo:1", { columns: { Release: "2026-10-30" } }), "full");
     // Unknown and dated near today: read it.
     assert.equal(row("gcp-demo:9", { columns: { Release: "2026-10-25" } }), "full");
+    // Never listed before and touched lately: nothing is known of it, so it is read once, whoever touched it and whatever its date.
+    assert.equal(row("gcp-demo:8", { fresh: true }), "full");
+    assert.equal(row("gcp-demo:8", { fresh: true, columns: { Release: "待定" } }), "full");
+    // Not that when it was not touched lately, when it is not fresh (a first listing is not), or when it is a container.
+    assert.equal(row("gcp-demo:8", { fresh: true, updatedOn: "2026-09-01 09:00" }), "skip");
+    assert.equal(row("gcp-demo:8", { fresh: false }), "people");
+    assert.equal(row("gcp-demo:8"), "people");
+    assert.equal(row("gcp-demo:8", { fresh: true, title: "【总单】示例" }), "skip");
+    // One already read is no newer for a flag: the old rules decide.
+    assert.equal(row("gcp-demo:1", { fresh: true }), "people");
     // An umbrella issue: neither a near date nor a recent touch is worth a read.
     assert.equal(row("gcp-demo:7", { title: "【总单】示例", columns: { Release: "2026-10-25" } }), "skip");
     assert.equal(row("gcp-demo:7", { title: "【总单】示例" }), "skip");

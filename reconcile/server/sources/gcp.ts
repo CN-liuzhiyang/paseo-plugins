@@ -267,10 +267,12 @@ export function createGcpSource(
       const rowUpdated = new Map(rows.map((r) => [r.id, r.updated_on ?? ""]));
       for (const row of rows) {
         const changed = cursor.seen[String(row.id)] !== row.updated_on;
+        // The first listing is all new and says nothing of what happened lately: only a row that appears later is fresh.
+        const fresh = cursor.since !== null && !(String(row.id) in cursor.seen);
         const columns: Record<string, string> = {};
         for (const [column, field] of Object.entries(config.columns)) columns[field] = fieldText(row[column]);
         const decision = input.decide
-          ? input.decide({ key: `${config.id}:${row.id}`, title: fieldText(row.subject), status: fieldText(row.status), updatedOn: row.updated_on ?? "", changed, columns })
+          ? input.decide({ key: `${config.id}:${row.id}`, title: fieldText(row.subject), status: fieldText(row.status), updatedOn: row.updated_on ?? "", changed, fresh, columns })
           : changed
             ? "full"
             : "skip";

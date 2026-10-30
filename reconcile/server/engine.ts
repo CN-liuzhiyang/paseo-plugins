@@ -1088,7 +1088,7 @@ export function createEngine(deps: EngineDeps) {
     return heatOf(item, { nowMs, tz, policy: config.policy.hot, open: openCase(item.key), watched: configWatched(item.key), quiet: quietTitle(item.title), flagChangedAt: changedAt, woken: woken ? { at: woken.at, reason: woken.value } : null, flowing: hasOpenFlow(item.key, nowMs), standing: item.source === DESK_SOURCE && !deskOver(item.key, nowMs) });
   }
 
-  /** Per listed row: a full read for what is hot or about to be, a look at its history for what someone may have touched. */
+  /** Per listed row: a full read for what is hot, about to be or new, a look at its history for what someone may have touched. */
   function decide(row: ListedRow, nowMs: number, vocabulary: Vocabulary): "full" | "people" | "skip" {
     const item = state.items[row.key];
     const quiet = quietTitle(row.title || item?.title || "");
@@ -1105,7 +1105,11 @@ export function createEngine(deps: EngineDeps) {
     // Who touched a container or a standing item does not matter: no history read for it.
     if (!row.changed || quiet) return "skip";
     const at = listedAt(row.updatedOn, tz);
-    return at !== null && nowMs - at <= config.policy.hot.recentDays * DAY ? "people" : "skip";
+    const recent = at !== null && nowMs - at <= config.policy.hot.recentDays * DAY;
+    // Not seen before at all, and changed lately: nothing is known of it, so its history (only a person's touch counts there) is
+    // no way to tell whether it matters -- an item made through an API has none. Read it once; after that it is a known item.
+    if (!item && row.fresh && recent) return "full";
+    return recent ? "people" : "skip";
   }
 
   // ---- what people say in conversations ----------------------------------------------------

@@ -211,3 +211,37 @@ test("per row: skip, look at the history, or read in full with commits and histo
   assert.deepEqual(svnRead, ["R-5", "R-5"]);
   assert.deepEqual(Object.keys((poll.cursor as { seen: object }).seen).sort(), ["1", "2", "3"]);
 });
+
+test("a row is fresh when a poll lists it for the first time after the source's first listing, and not before", async () => {
+  const rows = [
+    { id: 1, updated_on: "2026-10-20 10:00", status: "关闭" },
+    { id: 2, updated_on: "2026-10-21 09:00", status: "新建" },
+  ];
+  const exec: Exec = async (_command, args) => {
+    const body = JSON.parse(args[args.indexOf("--body") + 1]!);
+    if (body.params.toolName === "list_issues") return { code: 0, stdout: envelope({ res_code: 1, data: { list: rows } }), stderr: "", ms: 1, timedOut: false };
+    return { code: 0, stdout: envelope(base(body.params.arguments.id)), stderr: "", ms: 1, timedOut: false };
+  };
+  const source = createGcpSource({ ...config, watch: [], columns: {} }, { exec, localDate: () => "2026-10-21", addDays });
+  const input = { watch: [], now: "2026-10-21T17:00:00+08:00", nowMs: Date.parse("2026-10-21T17:00:00+08:00"), callsLeft: 60 };
+  const fresh = new Map<string, boolean | undefined>();
+  const decide = (row: { key: string; fresh?: boolean }) => (fresh.set(row.key, row.fresh), "skip" as const);
+
+  // The first listing: everything is new, so nothing is called fresh.
+  const first = await source.poll({ ...input, cursor: null, decide });
+  assert.deepEqual([...fresh], [["gcp-demo:1", false], ["gcp-demo:2", false]]);
+
+  // The next: a row listed before is not fresh, however it changed; one that was not there is.
+  fresh.clear();
+  rows.push({ id: 3, updated_on: "2026-10-21 10:00", status: "新建" });
+  rows[0]!.updated_on = "2026-10-21 11:00";
+  await source.poll({ ...input, cursor: first.cursor, decide });
+  assert.deepEqual([...fresh], [["gcp-demo:1", false], ["gcp-demo:2", false], ["gcp-demo:3", true]]);
+
+  // Having been skipped is having been seen: it is not fresh a third time.
+  fresh.clear();
+  const third = await source.poll({ ...input, cursor: first.cursor, decide });
+  fresh.clear();
+  await source.poll({ ...input, cursor: third.cursor, decide });
+  assert.deepEqual([...fresh].map(([, f]) => f), [false, false, false]);
+});
