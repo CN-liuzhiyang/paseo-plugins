@@ -14,7 +14,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { affairProblems } from "./affair.mjs";
-import { pointProblems } from "./resume-point.mjs";
+import { PRINT_SHAPE, pointProblems } from "./resume-point.mjs";
 
 export const EVENTS_VERSION = 1;
 
@@ -223,6 +223,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           added(event, "affair", affair.length === 0, `affair is not null or { label, url?, link? }: ${affair.join("; ")}`);
         }
         added(event, "resumeOf", isNullableString(event.resumeOf), "resumeOf is not string | null");
+        added(event, "resumePrint", event.resumePrint === null || (typeof event.resumePrint === "string" && PRINT_SHAPE.test(event.resumePrint) && event.resumeOf !== null), "resumePrint is not null, or the fingerprint of the point a run that carries on another started from");
         break;
       }
       case "phase.start":

@@ -4,14 +4,16 @@
 //                                        [--host ssh://user@box --cwd /path/on/box]
 //                                        [--run-id <id>] [--affair <json | @file>]
 //   node runtime/orch.mjs resume <runId> [--run-id <id>] [--affair <json | @file>] [--timeout 2h]
-//                                        [--host ssh://user@box --cwd /path/on/box]
+//                                        [--host ssh://user@box --cwd /path/on/box] [--expect <print>]
 //   node runtime/orch.mjs check <flow.mjs | name>
 //   node runtime/orch.mjs list
 //
 // `resume` carries on a run that stopped, failed, timed out or was cut off, from the resume point its flow declared
 // (`$.resumeWith`, CONVENTIONS.md "接着跑"): it starts the flow that point names, with its input, as a new run whose
 // run.start says `resumeOf: <runId>`. The affair, the directory and the host are the earlier run's unless given again.
-// One stop is carried on once (resume.mjs). It prints what `run` prints and exits the same way.
+// One stop is carried on once (resume.mjs). `--expect <print>` is for a caller that showed a person the point (its flow and input are the
+// ones `resume-point.mjs` `pointPrint` fingerprints): if the point the run left says another now, nothing is started. It prints what `run`
+// prints and exits the same way.
 //
 // `list` prints the flows that exist -- the shipped ones and those in `flowsDirs` -- as JSON: name,
 // description, phases, inputs, where the file is, and why a file that is not a usable flow is not
@@ -48,13 +50,14 @@ import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
 import { resolveFlowFile, resolveTarget } from "./resolve.mjs";
 import { listFlows } from "./catalog.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
-import { claimResumption, readResumePoint } from "./resume.mjs";
+import { claimResumption, readResumePoint, ResumeRefused } from "./resume.mjs";
+import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
 
 const USAGE = [
   "Usage:",
   "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
   "                                              [--run-id <id>] [--affair <json | @file>]",
-  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>]",
+  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>] [--expect <print>]",
   "  node runtime/orch.mjs check <flow.mjs | name>",
   "  node runtime/orch.mjs list",
 ].join("\n");
@@ -204,7 +207,7 @@ async function run(name, argv) {
  * What follows `resume <runId>`: the flags of a run that do not belong to a flow's input. Exported for the tests; throws UsageError.
  */
 export async function parseResumeArgs(argv) {
-  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" } };
+  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, expect: { type: "string" } };
   // As for a run: a value-taking flag takes the next argument whatever it starts with.
   const joined = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -221,11 +224,15 @@ export async function parseResumeArgs(argv) {
     parsed = parseArgs({ args: joined, options: all, allowPositionals: false, strict: true });
   } catch (error) {
     throw new UsageError(`${error.message}
-The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd`);
+The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd, --expect`);
   }
   const given = {};
   if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
   if (parsed.values.affair !== undefined) given.affair = await readJson("affair", parsed.values.affair);
+  if (parsed.values.expect !== undefined) {
+    if (!PRINT_SHAPE.test(parsed.values.expect)) throw new UsageError("--expect is the 16 hex digits of the fingerprint of the point a caller showed (pointPrint)");
+    given.expect = parsed.values.expect;
+  }
   return { timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
 }
 
@@ -243,10 +250,18 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
   const requested = peekRunId(argv);
   const taken = takeRunId({ runId: requested, logDir });
   try {
-    const { timeout, host, cwd, runId, affair } = await parseResumeArgs(argv);
+    const { timeout, host, cwd, runId, affair, expect } = await parseResumeArgs(argv);
     if (runId !== undefined && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
     const { start, point } = readResumePoint({ dir: logDir, runId: previous });
     const target = resolveFlowFile(point.flow);
+    // What a person was shown is what is started: the run's file is read again here, and a point that says another flow or another input now
+    // (it was changed since, or the run went on after it was read as lost) is not carried on from. Nothing is taken or spent.
+    const print = pointPrint(point);
+    if (expect !== undefined && expect !== print) {
+      throw new ResumeRefused(
+        `the resume point of run ${previous} is not the one that was shown: it now names flow "${point.flow}" (${JSON.stringify(point.from)}) with a flow or input other than the one expected. Look at the run again before carrying it on`,
+      );
+    }
     claimResumption({ dir: logDir, runId: previous, by: taken.runId });
     // From here the id is named in a .resumed file, so somebody does look it up -- the next caller, to see whether this start came to
     // nothing and the stop is free again. A generated id's claim is normally taken away when the run is refused; this one keeps its reason.
@@ -260,6 +275,7 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
       timeout,
       logDir,
       resumeOf: previous,
+      resumePrint: print,
       taken,
       affair: affair !== undefined ? affair : earlier.affair,
       ...((cwd ?? earlier.cwd) ? { cwd: cwd ?? earlier.cwd } : {}),

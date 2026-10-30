@@ -131,7 +131,9 @@ await $.resumeWith(null);                       // 收回：这次停下以后�
 是**一次新的运行**，`run.start.resumeOf` 是上一段的 runId；上一段的 `affair`、`cwd`、`host` 沿用（所以人闸卡片和 agent 还在事项的同一个 workspace 里）。
 **一次停下只能被接一次**：靠独占地建 `<logDir>/runs/<runId>.resumed`，按钮和命令行同时来、双击、两个进程，只有一个成，其余被拒、一分钟不花。
 **上一段还活着时拒**：没有 `run.end` 的，必须占位过期并且同一台机器上它的 pid 已经不在才接；两个进程同时动一个工作目录，比多花一次钱糟。
-超时之后留下的孤儿子进程运行时管不到，流程自己兜（比如"机器被别的构建占着就等"）。细节和读者怎么做：[EVENTS.md](EVENTS.md)「接着跑」。
+超时之后留下的孤儿子进程运行时管不到，流程自己兜（比如"机器被别的构建占着就等"）。
+**调用方把续跑点给人看过的，用 `--expect <指纹>` 交回来**（指纹 = 流程名和输入的 `pointPrint`）：运行时开跑前再读一次，点变了就拒，免得给人看的是 A、起来的是 B。
+细节和读者怎么做：[EVENTS.md](EVENTS.md)「接着跑」。
 
 `flows/resume-smoke.mjs` 是不花钱的演示（两段，各一张人闸卡）：`orch run resume-smoke --stage start …` 停下，`orch resume <runId>` 接着，再接一次被拒。
 

@@ -20,7 +20,8 @@ import { flow } from "../runtime/flow.mjs";
 import { checkEvents, eventsFile, readEvents } from "../runtime/events.mjs";
 import { claimFile, runIdProblem } from "../runtime/claim.mjs";
 import { claimResumption, readResumePoint, resumedFile, ResumeRefused } from "../runtime/resume.mjs";
-import { pointProblems } from "../runtime/resume-point.mjs";
+import { readRunState } from "../runtime/state.mjs";
+import { pointPrint, pointProblems } from "../runtime/resume-point.mjs";
 import { parseResumeArgs, resumeRun } from "../runtime/orch.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
@@ -349,6 +350,67 @@ test("claimResumption: a holder that never came to exist frees the stop once eno
   // Nor is one that names something that is not a run id.
   writeFileSync(resumedFile(dir, "w"), "../../etc/passwd");
   assert.throws(() => claimResumption({ dir, runId: "w", by: "b" }), /cannot be read yet/);
+});
+
+test("claimResumption: a holder whose claim went stale before run.start frees the stop when its process is certainly gone, not when it may only have been asleep", async () => {
+  const stale = (dir, holder, pid) => {
+    const claim = claimFile(dir, holder);
+    writeFileSync(claim, JSON.stringify({ pid, hostname: os.hostname(), startedAt: new Date(Date.now() - 300_000).toISOString() }));
+    const old = new Date(Date.now() - 300_000);
+    utimesSync(claim, old, old);
+  };
+  // The process that took the stop is gone, and wrote no run.start: nothing was spent and nothing will be, so the stop is taken again.
+  const taken = async (name, holder) => {
+    const dir = await tmp(name);
+    mkdirSync(path.join(dir, "runs"), { recursive: true });
+    writeFileSync(resumedFile(dir, "source"), holder);
+    return dir;
+  };
+  const gone = await taken("slot-gone", "killed-start");
+  stale(gone, "killed-start", 2147483647);
+  assert.equal(readRunState({ dir: gone, runId: "killed-start" }).state, "dead-before-start");
+  assert.equal(claimResumption({ dir: gone, runId: "source", by: "replacement" }).attempt, 2);
+  assert.equal(readFileSync(resumedFile(gone, "source", 2), "utf8"), "replacement");
+  // Its process still exists (pids are reused, and the machine may have been asleep): the stop stays taken.
+  const alive = await taken("slot-alive", "asleep-start");
+  stale(alive, "asleep-start", process.pid);
+  assert.equal(readRunState({ dir: alive, runId: "asleep-start" }).state, "stalled-before-start");
+  assert.throws(() => claimResumption({ dir: alive, runId: "source", by: "replacement" }), /already carried on, as run asleep-start: it reads as stalled-before-start/);
+  assert.equal(existsSync(resumedFile(alive, "source", 2)), false);
+  // It began: whatever came of it, it is the carrying on.
+  const began = await taken("slot-began", "began");
+  stale(began, "began", 2147483647);
+  writeFileSync(eventsFile(began, "began"), `${JSON.stringify({ v: 1, seq: 0, ts: new Date().toISOString(), runId: "began", kind: "run.start" })}\n`);
+  assert.throws(() => claimResumption({ dir: began, runId: "source", by: "replacement" }), /already carried on, as run began: it reads as lost/);
+});
+
+test("resume --expect: what a person was shown is what is carried on; a point that says another flow or input now is refused before anything is taken", async () => {
+  // The fingerprint is of the flow and the input, whatever order the keys were written in; reconcile computes the same (its flows-resume test has this vector).
+  assert.equal(pointPrint({ flow: "rs-part-two", input: { b: 1, a: [1, { d: 2, c: 3 }], s: "中文" }, from: "x", spends: "nothing" }), "92645a244d9b3d69");
+  assert.equal(pointPrint({ input: { s: "中文", a: [1, { c: 3, d: 2 }], b: 1 }, flow: "rs-part-two", from: "another line", spends: "maybe" }), "92645a244d9b3d69");
+  await assert.rejects(parseResumeArgs(["--expect", "not-a-print"]), /--expect is the 16 hex digits/);
+  const dir = await tmp("expect");
+  const work = await tmp("work");
+  await stoppedRun(dir, "first", work);
+  const before = filesIn(dir);
+  const changed = await resume(dir, "first", ["--run-id", "asker", "--expect", pointPrint(TWO(path.join(work, "elsewhere")))]).then(() => assert.fail("a point other than the shown one ran"), (error) => error);
+  assert.ok(changed instanceof ResumeRefused, String(changed));
+  assert.match(changed.message, /is not the one that was shown/);
+  assert.equal(existsSync(resumedFile(dir, "first")), false, "the stop was not taken");
+  assert.equal(existsSync(eventsFile(dir, "asker")), false, "no run began");
+  assert.match(JSON.parse(await readFile(claimFile(dir, "asker"), "utf8")).refused, /is not the one that was shown/);
+  assert.deepEqual(filesIn(dir), [...before, "asker.claim"].sort());
+  // The one that was shown runs, and the run says which point it was started from.
+  const shown = await resume(dir, "first", ["--expect", pointPrint(TWO(work))]);
+  assert.equal(shown.outcome, "done");
+  const start = eventsOf(shown)[0];
+  assert.equal(start.resumePrint, pointPrint(TWO(work)));
+  // Without --expect it is recorded too; a run that does not carry on another has none.
+  const second = await tmp("expect-none");
+  await stoppedRun(second, "first", work);
+  assert.equal(eventsOf(await resume(second, "first"))[0].resumePrint, pointPrint(TWO(work)));
+  const plain = await go(flowFile("rs-part-two"), { logDir: await tmp("plain"), input: { dir: work } });
+  assert.equal(eventsOf(plain)[0].resumePrint, null);
 });
 
 test("resume: of any number of processes asking at once, one carries the stop on and the others pay nothing", async () => {

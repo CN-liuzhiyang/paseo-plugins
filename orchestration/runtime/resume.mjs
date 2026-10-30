@@ -9,9 +9,9 @@
 // processes because a person and a button clicked together: of any number of them asking to carry on run X, the one that
 // creates `<logDir>/runs/<X>.resumed` first (an exclusive create, which the file system makes atomic, as
 // claim.mjs does for a run id) is the one that does; the others are refused and spend nothing. The file says which
-// run took it over. If that run was refused before it began, or nothing ever came of its start, the stop is free again
-// and is taken under `<X>.resumed.2`, `.3`, ...; a run that began, whatever it came to, is the carrying on: if it stopped
-// in its turn, it is that run that is carried on next.
+// run took it over. If that run was refused before it began, or nothing ever came of its start, or its process was
+// certainly gone before it wrote run.start, the stop is free again and is taken under `<X>.resumed.2`, `.3`, ...; a run
+// that began, whatever it came to, is the carrying on: if it stopped in its turn, it is that run that is carried on next.
 //
 // Nothing here starts a run or deletes anything.
 
@@ -154,8 +154,10 @@ export function claimResumption({ dir, runId, by, now }) {
         );
       }
       const state = readRunState({ dir, runId: holder.id, spawnedAt: holder.madeMs, ...(now ? { now } : {}) });
-      // Its start came to nothing: refused before run.start, or no claim and no events well after the process was started.
-      if (state.state === "refused" || (state.state === "absent" && state.safeToRestart)) continue;
+      // Its start came to nothing: refused before run.start, or no claim and no events well after the process was started, or a claim that went
+      // stale before run.start whose process is proved gone (nothing was spent, and nothing will write run.start now). A holder whose process still
+      // exists, or is on another machine, is not free: it may only have been asleep.
+      if (state.state === "refused" || (state.state === "absent" && state.safeToRestart) || (state.state === "dead-before-start" && state.processAlive === false)) continue;
       const how =
         state.state === "ended"
           ? `it ended as ${state.outcome}; if it stopped, carry on that run (${holder.id}) instead`

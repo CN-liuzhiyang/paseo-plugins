@@ -9,6 +9,7 @@
 //     from: "编译已过：从核对接着，不重编",               // one line for a person, at most FROM_LIMIT characters
 //     spends: "nothing" }                                     // "nothing": no model is called; "maybe": one may be
 
+import { createHash } from "node:crypto";
 import { textProblem } from "./affair.mjs";
 import { isFlowName } from "./resolve.mjs";
 
@@ -50,3 +51,26 @@ export function pointProblems(point) {
 
 /** The point as it is recorded: the four keys, in this order, nothing else. */
 export const pointOf = (point) => ({ flow: point.flow, input: point.input, from: point.from, spends: point.spends });
+
+/** Keys in the order of their names, at every depth: the same value however it was written. (The same as reconcile's `canonical`; EVENTS.md says what it is.) */
+function canonical(value) {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * The fingerprint of what a resume point would start: the flow it names and its input (not the line for the person, which starts nothing). The first
+ * 16 hex digits of the SHA-256 of `canonical({ flow, input })`. A caller that showed a person a point passes it to `orch.mjs resume --expect`, which refuses
+ * to start when the point it reads now has another one (the file was changed since), and every run that was started from a point records it as
+ * `run.start.resumePrint`.
+ */
+export const pointPrint = (point) => createHash("sha256").update(canonical({ flow: point.flow, input: point.input })).digest("hex").slice(0, 16);
+
+/** What `--expect` and `run.start.resumePrint` look like. */
+export const PRINT_SHAPE = /^[0-9a-f]{16}$/;

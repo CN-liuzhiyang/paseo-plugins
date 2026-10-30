@@ -27,7 +27,7 @@ import { affairProblems } from "./affair.mjs";
 import { affairKey, ensureWorkspace, normalizeDir, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { checkResumePoint } from "./resume.mjs";
-import { pointOf, pointProblems } from "./resume-point.mjs";
+import { pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, INPUT_REDACTED } from "./gate.mjs";
 import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
@@ -195,7 +195,7 @@ function checkKeys(where, object, allowed) {
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
- *           agentProbeDelays?: number[], runId?: string, affair?: object | null, resumeOf?: string | null,
+ *           agentProbeDelays?: number[], runId?: string, affair?: object | null, resumeOf?: string | null, resumePrint?: string | null,
  *           workspaceLock?: { waitMs?: number, staleMs?: number, pollMs?: number },
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
@@ -204,7 +204,7 @@ function checkKeys(where, object, allowed) {
  *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "taken", "workspaceLock"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "resumePrint", "taken", "workspaceLock"]);
 
   // --- The id, before anything slow ---------------------------------------
   // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
@@ -268,6 +268,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     const problem = runIdProblem(resumeOf);
     if (problem) throw new RunRefused(`resumeOf: ${problem}`);
   }
+  const resumePrint = options.resumePrint ?? null;
+  if (resumePrint !== null && !(resumeOf !== null && PRINT_SHAPE.test(resumePrint))) throw new RunRefused("resumePrint is a fingerprint of the point a run that carries on another started from");
   let loaded;
   try {
     loaded = await loadFlow(target);
@@ -936,7 +938,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const startedAt = Date.now();
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf });
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint });
 
   let outcome;
   let value = null;

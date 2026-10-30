@@ -1233,7 +1233,7 @@ test("a run on another host needs a directory there, and cannot gate yet", async
 
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
-    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null },
+    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null, resumePrint: null },
     { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [], resume: null },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);

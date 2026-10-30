@@ -140,14 +140,17 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
 在 [CONVENTIONS.md](CONVENTIONS.md)「接着跑」，事件在 [EVENTS.md](EVENTS.md)。
 
 ```bash
-node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>]
+node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>]
 ```
 
 - 起的是声明里的流程和输入，是一次**新的运行**，`run.start.resumeOf` 是上一段的 runId。上一段的事项（`affair`）、
   目录（`cwd`）、主机（`host`）原样沿用，所以它的 agent 和人闸卡片还在同一个 workspace 里；要换就再给 `--affair` / `--cwd` / `--host`。
 - **一次停下只能被接一次。** 做法和运行 id 的占位一样：先独占地建 `<logDir>/runs/<上一段 runId>.resumed`，内容是新的 runId；
-  按钮和命令行同时来、双击、两个进程，只有一个建得成，其余被拒（退出码 2），一分钟都不花。占着的那个起不来（被拒，或
-  起进程之后一直没有占位）才允许别人重新占，用 `.resumed.2`、`.resumed.3`。接着跑的那一段如果又停了，接的是**它**，不是最初那一段。
+  按钮和命令行同时来、双击、两个进程，只有一个建得成，其余被拒（退出码 2），一分钟都不花。占着的那个起不来（被拒，起进程之后
+  一直没有占位，或者占位的 claim 在 `run.start` 之前就过期而且它的 pid 确知已不在）才允许别人重新占，用 `.resumed.2`、`.resumed.3`。
+  接着跑的那一段如果又停了，接的是**它**，不是最初那一段。
+- **给人看过的就是要跑的**：调用方给人看过一个续跑点（流程名 + 输入），可以把它的指纹（`resume-point.mjs` 的 `pointPrint`）用 `--expect` 交给运行时；
+  运行时现在读到的点指纹不同（文件被改了，或者那个运行后来又往下走了），就拒绝，什么都不占、不花。起来的运行都在 `run.start.resumePrint` 里记着它是从哪个点起的。
 - **没有 `run.end` 的运行**（进程被杀、机器重启）只有在确知进程已经没了时才接：占位过期**并且**同一台机器上 pid 不在。
   占位只是过期（机器睡着了、进程被挂起）、或者在别的机器上，一律拒绝：两个进程同时动一个工作目录，比多花一次钱糟。
 - 清日志时 `.resumed` 和 `.claim`、`.jsonl` 一样要成对处理：删掉它就等于把"这次停下已经被接过"忘了。

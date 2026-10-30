@@ -116,6 +116,7 @@
 | `hostname` | string | 跑这次运行的机器，Node 的 `os.hostname()` |
 | `affair` | `{ label, url?, link?, key? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
 | `resumeOf` | string \| null | 这次运行接着的是哪一次运行（`orch.mjs resume <runId>`，选项 `resumeOf`），那一次的 runId；不是接着跑的为 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `resumePrint` | string \| null | 接着跑的运行是从哪个续跑点起的：那个点的**流程名和输入**的指纹（SHA-256 的前 16 位十六进制，对 `{ flow, input }` 的规范 JSON——每一层的键按名字排序——取；`resume-point.mjs` 的 `pointPrint`）。不是接着跑的为 null。读者拿它和自己给人看过的点的指纹比，就知道起来的是不是给人看的那个。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
 `affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
 
@@ -376,17 +377,23 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 1. 先独占地（`wx`）建 `<上一段 runId>.resumed`，内容是新的 runId。一个建不成就被拒，什么都没花；
 2. 文件已经在：读它里面的 runId，看那个运行——占位里有 `refused`（起来之前就被拒了），或者没有占位也没有事件、而且文件已经建了 60 秒以上
-   （`state.mjs` 的 `absent` 且 `safeToRestart`），这次停下算"没被接成"，换 `.resumed.2`、`.resumed.3` 再占；别的状态（在跑、结束了、失联……）都算被接了，拒；
+   （`state.mjs` 的 `absent` 且 `safeToRestart`），或者占位在 `run.start` 之前就过期了而且同一台机器上它的 pid 确知已不在（`dead-before-start` 且
+   `processAlive === false`：什么都没花，也不会再有人写 `run.start`），这次停下算"没被接成"，换 `.resumed.2`、`.resumed.3` 再占；
+   别的状态（在跑、结束了、失联、pid 还在的 `stalled-before-start`……）都算被接了，拒；
 3. **没有 `run.end` 的运行只在确知它死了时才接**：`readRunState` 说 `lost` 且 `processAlive === false`（同一台机器上占位里的 pid 已不存在）。
    占位只是过期的、pid 还在的、在别的机器上的，都不接。
 
 接着跑那一段如果又停了，它有自己的 `run.end.resume`，下一次接的是它，不是最初那一段。`resumeOf` 串起来的是一条链。
 
+**给人看过的点就是起来的点。** 调用方（一个页面）把一个续跑点给人看过之后，运行时读到的可能已经不是它（文件被改了，或者一个被判成 `lost` 的运行后来又往下走、声明变了）。
+`orch.mjs resume <runId> --expect <指纹>` 在占位之前再读一次上一段的点，指纹（`pointPrint`：流程名和输入，不含给人看的那句话）对不上就拒，什么都不占、不花；
+起来的运行在 `run.start.resumePrint` 里记着它从哪个点起，读者事后也能核对。
+
 ## 演进规则
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`resume` 事件、`run.end.resume`、`run.start.resumeOf`（2026-10-31，缺省分别是没有这种事件、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。
