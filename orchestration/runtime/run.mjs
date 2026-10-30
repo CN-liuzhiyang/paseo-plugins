@@ -26,6 +26,8 @@ import { EventLog, eventsFile } from "./events.mjs";
 import { affairProblems } from "./affair.mjs";
 import { affairKey, ensureWorkspace, normalizeDir, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
+import { checkResumePoint } from "./resume.mjs";
+import { pointOf, pointProblems } from "./resume-point.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, INPUT_REDACTED } from "./gate.mjs";
 import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
@@ -187,20 +189,22 @@ function checkKeys(where, object, allowed) {
  * the caller's own id, otherwise a fresh one. An id that is already claimed, or
  * already has events, is refused and nothing is spent. `affair` is what the run
  * is for, recorded as run.start.affair (affair.mjs); the agents and gate cards of
- * the runs for one affair share a Paseo workspace per directory (workspaces.mjs).
+ * the runs for one affair share a Paseo workspace per directory (workspaces.mjs). `resumeOf` is the run this one
+ * carries on (resume.mjs, `orch.mjs resume`), recorded as run.start.resumeOf.
  *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
- *           agentProbeDelays?: number[], runId?: string, affair?: object | null,
+ *           agentProbeDelays?: number[], runId?: string, affair?: object | null, resumeOf?: string | null,
  *           workspaceLock?: { waitMs?: number, staleMs?: number, pollMs?: number },
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
- *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null }>}
+ *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null,
+ *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "taken", "workspaceLock"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "taken", "workspaceLock"]);
 
   // --- The id, before anything slow ---------------------------------------
   // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
@@ -259,6 +263,11 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const affair = options.affair ?? null;
   const badAffair = affairProblems(affair);
   if (badAffair.length > 0) throw new RunRefused("--affair does not fit", badAffair);
+  const resumeOf = options.resumeOf ?? null;
+  if (resumeOf !== null) {
+    const problem = runIdProblem(resumeOf);
+    if (problem) throw new RunRefused(`resumeOf: ${problem}`);
+  }
   let loaded;
   try {
     loaded = await loadFlow(target);
@@ -372,6 +381,11 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // The first $.stop, recorded when it is called rather than when it reaches
   // the runner: a flow that catches it still ends as stopped.
   let stopped = null;
+  // What the flow last said about carrying this run on (`$.resumeWith`): a resume point, or null. Declarations are
+  // looked into one after another in the order they were made (the flow need not await them), and the run does not end
+  // before the last one has been looked into.
+  let resumePoint = null;
+  let resumeChain = Promise.resolve();
 
   // The affair's workspace, per directory, found or made the first time a call
   // needs it (a run that never calls an agent makes none). Resolves to the
@@ -549,6 +563,33 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const role = (name) => {
     const { instructions, ...bound } = bindRole(roster, { role: name });
     return bound;
+  };
+
+  // One `$.resumeWith`, looked at. Never rejects: whatever goes wrong with a declaration is a warning, not a run that fails.
+  const declareResume = async (point) => {
+    try {
+      if (point === null) {
+        resumePoint = null;
+        log.emit("resume", { cleared: true });
+        return;
+      }
+      // The input as the events will hold it: JSON, and with whatever the run keeps secret already taken out.
+      const plain = isPlainObject(point) ? { ...point, input: jsonSafe(point.input) } : point;
+      const problems = pointProblems(plain);
+      if (problems.length === 0 && JSON.stringify(log.scrub(plain)) !== JSON.stringify(plain)) {
+        problems.push("the input holds a value this run keeps secret, which would be written as <已用> and the run could not be started from it; leave such values out of a resume input");
+      }
+      if (problems.length === 0) problems.push(...(await checkResumePoint(plain)));
+      if (problems.length > 0) {
+        log.emit("log", { level: "warn", message: `$.resumeWith: not recorded, ${problems.join("; ")}` });
+        caveat(`resume: a resume point the flow declared was not recorded (${problems.join("; ").slice(0, 300)}), so the run may have none to be carried on from`, null);
+        return;
+      }
+      resumePoint = pointOf(plain);
+      log.emit("resume", resumePoint);
+    } catch (error) {
+      log.emit("log", { level: "warn", message: `$.resumeWith: not recorded, ${describeThrown(error)}` });
+    }
   };
 
   // --- Primitives -------------------------------------------------------
@@ -861,6 +902,21 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       throw signal;
     },
 
+    /**
+     * Say how this run could be carried on if it does not come to an end: another flow, or this one again, with an input
+     * that says where to pick up, a line for the person who will see it, and whether a model may be called (resume.mjs,
+     * CONVENTIONS.md "接着跑"). Called as often as the flow likes, the last one wins, `null` takes it back. It is looked at
+     * when it is made: the flow must be one this machine can find by name and the input must fit it. One that does not fit
+     * is written as a warning and a caveat and is not recorded -- it never fails the run, which may well be a good one --
+     * and the one before it stands. A run that comes to `done` records none: there is nothing left to carry on.
+     */
+    async resumeWith(point) {
+      if (ending) throw new RunEnded();
+      const declared = resumeChain.then(() => declareResume(point));
+      resumeChain = declared;
+      await declared;
+    },
+
     log: Object.freeze({
       info: (...args) => void log.emit("log", { level: "info", message: format(...args) }),
       warn: (...args) => void log.emit("log", { level: "warn", message: format(...args) }),
@@ -880,7 +936,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const startedAt = Date.now();
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair });
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf });
 
   let outcome;
   let value = null;
@@ -931,6 +987,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     clearTimeout(giveUp);
   }
   sweepInputs();
+  // The last word on how the run could be carried on is in before it ends.
+  await resumeChain;
 
   // Calls still in flight (a timeout, or a flow that threw without awaiting
   // everything it started) are closed here, so every call.start has its
@@ -964,7 +1022,14 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // What goes back to the caller as text -- the error, the stop, the summary -- is what the events say.
   error = log.scrub(error);
   stop = log.scrub(stop);
-  log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats] });
+  // A run that came to its end has nothing to carry on. A point that a secret learned after it was declared has reached is not
+  // one a run could start from: left out, and said.
+  let resume = outcome === "done" ? null : resumePoint;
+  if (resume !== null && JSON.stringify(log.scrub(resume)) !== JSON.stringify(resume)) {
+    caveat("resume: the resume point holds a value this run came to keep secret, so it is not recorded and the run cannot be carried on", null);
+    resume = null;
+  }
+  log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats], resume });
   process.removeListener("exit", sweepInputs);
 
   const result = {
@@ -979,6 +1044,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     durationMs,
     error,
     stop,
+    resume,
   };
   // How the terminal scrubs the whole result as the events were (orch.mjs `printable`). Not enumerable: it is
   // a function, and a result that is serialized must not carry it.

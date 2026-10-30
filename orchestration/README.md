@@ -18,10 +18,12 @@ runtime/
   flow.d.mts     写 flow 用的类型
   step.mjs       step 定义、schema 构造器、输入校验
   run.mjs        运行器：$ 原语、事件、成本、caveats、收尾
-  orch.mjs       命令行：run / check
+  orch.mjs       命令行：run / resume / check / list
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
   claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
+  resume.mjs     接着跑：读上一段留下的续跑点、检查它、一次停下只被接一次（`<runId>.resumed` 占位）；`orch.mjs resume` 用它
+  resume-point.mjs  续跑点 `{ flow, input, from, spends }` 的形状和校验（运行器、契约检查、`resume` 共用）
   liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
@@ -35,7 +37,7 @@ runtime/
   roster.mjs     读 roles/，严格解析；角色绑定
   config.mjs     本机配置（~/.paseo-orchestration/config.json）
   smoke.mjs      升级后回归检查（经真实 Paseo）
-flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟，不花钱）
+flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱）
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例
@@ -129,6 +131,27 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
   的日志里也有一份，给 `stdio` 一个文件描述符即可。
 - **退出码。** 0 是 `done` / `stopped`，1 是 `failed` / `timeout`，2 是运行前就被拒（包括 id 被占）。
 - **取消。** 没有。终止运行器进程只是让运行器消失：agent 是 daemon 管的，不是它的子进程，不会被一起停，仍在花钱；运行视图里能看到它们，要在 Paseo 里停。
+
+## 停下以后接着跑
+
+一个流程停下、失败、超时、或者进程被杀（机器重启）之后，要不要、能不能从停的地方接着走，**由流程自己说**：
+它在跑的过程中用 `$.resumeWith({ flow, input, from, spends })` 声明"如果停在这里，接着跑就是用这个输入起那个流程"，
+运行时把最后一次的声明记进 `run.end.resume`（没写出 `run.end` 的，读者取事件里最后一行 `resume`）。规范和字段含义
+在 [CONVENTIONS.md](CONVENTIONS.md)「接着跑」，事件在 [EVENTS.md](EVENTS.md)。
+
+```bash
+node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>]
+```
+
+- 起的是声明里的流程和输入，是一次**新的运行**，`run.start.resumeOf` 是上一段的 runId。上一段的事项（`affair`）、
+  目录（`cwd`）、主机（`host`）原样沿用，所以它的 agent 和人闸卡片还在同一个 workspace 里；要换就再给 `--affair` / `--cwd` / `--host`。
+- **一次停下只能被接一次。** 做法和运行 id 的占位一样：先独占地建 `<logDir>/runs/<上一段 runId>.resumed`，内容是新的 runId；
+  按钮和命令行同时来、双击、两个进程，只有一个建得成，其余被拒（退出码 2），一分钟都不花。占着的那个起不来（被拒，或
+  起进程之后一直没有占位）才允许别人重新占，用 `.resumed.2`、`.resumed.3`。接着跑的那一段如果又停了，接的是**它**，不是最初那一段。
+- **没有 `run.end` 的运行**（进程被杀、机器重启）只有在确知进程已经没了时才接：占位过期**并且**同一台机器上 pid 不在。
+  占位只是过期（机器睡着了、进程被挂起）、或者在别的机器上，一律拒绝：两个进程同时动一个工作目录，比多花一次钱糟。
+- 清日志时 `.resumed` 和 `.claim`、`.jsonl` 一样要成对处理：删掉它就等于把"这次停下已经被接过"忘了。
+- 要试一遍不花钱的：`flows/resume-smoke.mjs`（两段，各一张人闸卡，第一段停下并声明第二段）。
 
 ## 数据不在这里
 

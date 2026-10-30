@@ -50,7 +50,8 @@ function onlyKeys(where, object, allowed, problems) {
   }
 }
 
-function textProblem(where, value, limit) {
+/** What is wrong with a text that will be drawn on a screen (a label, a resume point's `from`), or null. Exported for resume-point.mjs. */
+export function textProblem(where, value, limit) {
   if (typeof value !== "string") return `${where} must be a string`;
   if (value.trim() === "") return `${where} must not be empty`;
   if (length(value) > limit) return `${where} is longer than ${limit} characters`;

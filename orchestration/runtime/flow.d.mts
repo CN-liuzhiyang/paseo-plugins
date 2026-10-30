@@ -160,6 +160,24 @@ export interface RunContext {
   role(name: string): { role: string | null; provider: string; thinking: string | null };
 }
 
+/** A flow's name as `$.resumeWith` takes it: a literal with a slash, a backslash or a dot in it (a path, a file name) does not type-check. */
+export type FlowName<N extends string> = N extends `${string}/${string}` | `${string}\\${string}` | `${string}.${string}` ? never : N;
+
+/**
+ * How a run that does not come to its end could be carried on: the flow to start, its input, a line for the person who will see
+ * it, and whether it may call a model. Every field is required.
+ */
+export interface ResumePoint<N extends string = string> {
+  /** A flow found by name (the shipped flows and `flowsDirs`), never a path. It may be the flow that is running. */
+  flow: FlowName<N>;
+  /** That flow's input, as its `inputs` ask for it. Nothing the run keeps secret: it would be written as "<已用>". */
+  input: object;
+  /** One line, at most 60 characters, for the person: where it picks up, and anything that is done again without asking. */
+  from: string;
+  /** "nothing": no model is called. "maybe": one may be. */
+  spends: "nothing" | "maybe";
+}
+
 export interface Dollar<PhaseId extends string> {
   ask<Out, In>(step: Step<Out, In>, input: In, options?: AskOptions): Promise<Out>;
   do<T>(name: string, fn: () => T | Promise<T>, options?: { title?: string }): Promise<T>;
@@ -167,6 +185,11 @@ export interface Dollar<PhaseId extends string> {
   phase<T>(id: PhaseId, fn: () => T | Promise<T>): Promise<T>;
   all<const T extends readonly Task[]>(tasks: T): Promise<{ -readonly [K in keyof T]: Settled<Result<T[K]>> }>;
   stop(reason: string, value?: unknown): never;
+  /**
+   * Say how this run could be carried on if it stops, fails, times out or is cut off. The last call wins; `null` takes it back. One that
+   * does not fit is a warning and a caveat, not a failed run, and the one before it stands. A run that comes to done records none.
+   */
+  resumeWith<const N extends string>(point: ResumePoint<N> | null): Promise<void>;
   readonly log: {
     info(...args: unknown[]): void;
     warn(...args: unknown[]): void;

@@ -14,6 +14,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { affairProblems } from "./affair.mjs";
+import { pointProblems } from "./resume-point.mjs";
 
 export const EVENTS_VERSION = 1;
 
@@ -221,6 +222,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           const affair = "affair" in event ? affairProblems(event.affair) : [];
           added(event, "affair", affair.length === 0, `affair is not null or { label, url?, link? }: ${affair.join("; ")}`);
         }
+        added(event, "resumeOf", isNullableString(event.resumeOf), "resumeOf is not string | null");
         break;
       }
       case "phase.start":
@@ -347,6 +349,16 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, isString(event.key) && event.key !== "", "key is not a non-empty string");
         need(event, typeof event.created === "boolean", "created is not a boolean");
         break;
+      case "resume": {
+        if (event.cleared === true) {
+          need(event, !("flow" in event) && !("input" in event) && !("from" in event) && !("spends" in event), "a resume event that takes the point back carries no point");
+          break;
+        }
+        const { v, seq, ts, runId: id, kind, ...point } = event;
+        const bad = pointProblems(point);
+        need(event, bad.length === 0, `not { cleared: true } and not a resume point: ${bad.join("; ")}`);
+        break;
+      }
       case "caveat":
         need(event, event.callId === null || calls.has(event.callId), "callId is not null or a started call");
         need(event, isString(event.text), "text is not a string");
@@ -382,6 +394,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           event,
           event.cost === null || (isObject(event.cost) && typeof event.cost.totalUsd === "number" && typeof event.cost.agentCount === "number" && isString(event.cost.partial)),
           "cost is not { totalUsd, agentCount, partial } | null",
+        );
+        added(
+          event,
+          "resume",
+          event.resume === null || (outcome !== "done" && pointProblems(event.resume).length === 0),
+          "resume must be null, or a resume point when the run did not come to done",
         );
         need(event, Array.isArray(event.caveats) && event.caveats.every(isString), "caveats is not string[]");
         need(event, new Set(event.caveats).size === (event.caveats ?? []).length, "caveats has duplicates");

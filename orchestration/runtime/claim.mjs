@@ -29,7 +29,7 @@ import { LIVE_WITHIN_MS } from "./liveness.mjs";
 export const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 export const RUN_ID_LIMIT = 128;
 /** The runner's own files sit next to a run's: an id ending like one would be taken for it. */
-const OWN_SUFFIX = /\.(claim|jsonl)$/i;
+const OWN_SUFFIX = /\.(claim|jsonl|resumed(\.\d+)?)$/i;
 /** Names Windows treats as devices whatever extension follows; a file called CON.claim is not a file. */
 const DEVICE_NAME = /^(con|prn|aux|nul|com[0-9]|lpt[0-9])(\.|$)/i;
 
@@ -47,7 +47,7 @@ export const claimFile = (dir, runId) => path.join(dir, "runs", `${runId}.claim`
 export function runIdProblem(runId) {
   if (typeof runId !== "string" || !RUN_ID.test(runId)) return `a run id must match ${RUN_ID}`;
   if (runId.length > RUN_ID_LIMIT) return `a run id is at most ${RUN_ID_LIMIT} characters`;
-  if (OWN_SUFFIX.test(runId)) return `a run id does not end in .claim or .jsonl, which are the run's own files`;
+  if (OWN_SUFFIX.test(runId)) return `a run id does not end in .claim, .jsonl or .resumed, which are the run's own files`;
   if (DEVICE_NAME.test(runId)) return `"${runId}" is a reserved device name on Windows`;
   return null;
 }

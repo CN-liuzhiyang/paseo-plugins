@@ -3,8 +3,15 @@
 //   node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
 //                                        [--host ssh://user@box --cwd /path/on/box]
 //                                        [--run-id <id>] [--affair <json | @file>]
+//   node runtime/orch.mjs resume <runId> [--run-id <id>] [--affair <json | @file>] [--timeout 2h]
+//                                        [--host ssh://user@box --cwd /path/on/box]
 //   node runtime/orch.mjs check <flow.mjs | name>
 //   node runtime/orch.mjs list
+//
+// `resume` carries on a run that stopped, failed, timed out or was cut off, from the resume point its flow declared
+// (`$.resumeWith`, CONVENTIONS.md "接着跑"): it starts the flow that point names, with its input, as a new run whose
+// run.start says `resumeOf: <runId>`. The affair, the directory and the host are the earlier run's unless given again.
+// One stop is carried on once (resume.mjs). It prints what `run` prints and exits the same way.
 //
 // `list` prints the flows that exist -- the shipped ones and those in `flowsDirs` -- as JSON: name,
 // description, phases, inputs, where the file is, and why a file that is not a usable flow is not
@@ -38,13 +45,16 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadFlow, checkFlow } from "./flow.mjs";
 import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
-import { resolveTarget } from "./resolve.mjs";
+import { resolveFlowFile, resolveTarget } from "./resolve.mjs";
 import { listFlows } from "./catalog.mjs";
+import { logDir as configuredLogDir } from "./config.mjs";
+import { claimResumption, readResumePoint } from "./resume.mjs";
 
 const USAGE = [
   "Usage:",
   "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
   "                                              [--run-id <id>] [--affair <json | @file>]",
+  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>]",
   "  node runtime/orch.mjs check <flow.mjs | name>",
   "  node runtime/orch.mjs list",
 ].join("\n");
@@ -190,6 +200,77 @@ async function run(name, argv) {
   }
 }
 
+/**
+ * What follows `resume <runId>`: the flags of a run that do not belong to a flow's input. Exported for the tests; throws UsageError.
+ */
+export async function parseResumeArgs(argv) {
+  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" } };
+  // As for a run: a value-taking flag takes the next argument whatever it starts with.
+  const joined = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const name = argv[i].startsWith("--") && !argv[i].includes("=") ? argv[i].slice(2) : null;
+    if (name && all[name]?.type === "string" && i + 1 < argv.length) {
+      joined.push(`${argv[i]}=${argv[i + 1]}`);
+      i += 1;
+    } else {
+      joined.push(argv[i]);
+    }
+  }
+  let parsed;
+  try {
+    parsed = parseArgs({ args: joined, options: all, allowPositionals: false, strict: true });
+  } catch (error) {
+    throw new UsageError(`${error.message}
+The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd`);
+  }
+  const given = {};
+  if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
+  if (parsed.values.affair !== undefined) given.affair = await readJson("affair", parsed.values.affair);
+  return { timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
+}
+
+/**
+ * Carry on the run `previous`: read the resume point it left, take this run's id, take the stop (once), and start the flow the
+ * point names. Throws what a refused run throws (RunRefused, or ResumeRefused for a stop that cannot be carried on); a caller-given
+ * id keeps the reason with its claim, as for `run`. `logDir` is the directory `previous` is in; the run is written there too.
+ *
+ * @param {string} previous the run id to carry on
+ * @param {string[]} argv the flags after it
+ * @param {{ logDir?: string, runOptions?: object }} [options] `runOptions` go to runFlow as they are (tests: executor, roster)
+ */
+export async function resumeRun(previous, argv, { logDir = configuredLogDir(), runOptions = {} } = {}) {
+  // The id this run will have is taken first, as `run` does: whatever goes wrong from here is on its claim for a caller that cannot see stderr.
+  const requested = peekRunId(argv);
+  const taken = takeRunId({ runId: requested, logDir });
+  try {
+    const { timeout, host, cwd, runId, affair } = await parseResumeArgs(argv);
+    if (runId !== undefined && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
+    const { start, point } = readResumePoint({ dir: logDir, runId: previous });
+    const target = resolveFlowFile(point.flow);
+    claimResumption({ dir: logDir, runId: previous, by: taken.runId });
+    // From here the id is named in a .resumed file, so somebody does look it up -- the next caller, to see whether this start came to
+    // nothing and the stop is free again. A generated id's claim is normally taken away when the run is refused; this one keeps its reason.
+    taken.callerGiven = true;
+    // The earlier run's affair, directory and host unless the caller says otherwise: the agents and the gate cards of the stop it left
+    // stay where the person looks for them (workspaces.mjs), and a flow that reads $.ctx.cwd finds what it had.
+    const earlier = { affair: start.affair ?? null, cwd: typeof start.cwd === "string" ? start.cwd : null, host: typeof start.host === "string" ? start.host : null };
+    return await runFlow(target, {
+      ...runOptions,
+      input: point.input,
+      timeout,
+      logDir,
+      resumeOf: previous,
+      taken,
+      affair: affair !== undefined ? affair : earlier.affair,
+      ...((cwd ?? earlier.cwd) ? { cwd: cwd ?? earlier.cwd } : {}),
+      ...((host ?? earlier.host) ? { host: host ?? earlier.host } : {}),
+    });
+  } catch (error) {
+    settleRefusal(taken, error);
+    throw error;
+  }
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, target, ...rest] = process.argv.slice(2);
   const print = (value) => console.log(JSON.stringify(printable(value), null, 2));
@@ -204,7 +285,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   }
 
-  if (!["run", "check"].includes(command) || !target) {
+  if (!["run", "check", "resume"].includes(command) || !target) {
     console.error(USAGE);
     process.exit(2);
   }
@@ -216,7 +297,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       print(result);
       process.exit(result.ok ? 0 : 2);
     }
-    const result = await run(target, rest);
+    const result = command === "resume" ? await resumeRun(target, rest) : await run(target, rest);
     print(result);
     // Calls left running past a timeout hold child processes open; the run
     // is over, and its events say so.

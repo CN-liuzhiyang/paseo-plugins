@@ -63,6 +63,20 @@ export default flow({
     await $.gate({ title: "t", content: "c", input: { secret: true } });
     // @ts-expect-error secret is a boolean
     await $.gate({ title: "t", content: "c", input: { label: "x", secret: "yes" } });
+    await $.resumeWith({ flow: "build-resume", input: { dir: "r" }, from: "编译已过：从核对接着", spends: "nothing" });
+    await $.resumeWith(null);
+    // @ts-expect-error spends is required
+    await $.resumeWith({ flow: "build-resume", input: {}, from: "x" });
+    // @ts-expect-error spends is one of two words
+    await $.resumeWith({ flow: "build-resume", input: {}, from: "x", spends: "sometimes" });
+    // @ts-expect-error a flow is named, not found by a path
+    await $.resumeWith({ flow: "flows/build-resume.mjs", input: {}, from: "x", spends: "nothing" });
+    // @ts-expect-error nor by a file name
+    await $.resumeWith({ flow: "build-resume.mjs", input: {}, from: "x", spends: "nothing" });
+    // @ts-expect-error nor by a Windows path
+    await $.resumeWith({ flow: "C:\\flows\\build-resume", input: {}, from: "x", spends: "nothing" });
+    // @ts-expect-error a point is an object or null
+    await $.resumeWith("build-resume");
     return { d, c, ok };
   },
   summarize: (value, { outcome }) => `${outcome}: ${value.d}`,

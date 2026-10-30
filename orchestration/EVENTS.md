@@ -45,6 +45,8 @@
   （`flowsDirs` 没配好、参数写错）：改好以后要换一个 id 才能重来。`runId` 是随机生成的，没人会来查，占位文件
   直接删掉，和以前一样不留任何文件。
 - 它不是事件文件里的一行：`run.start` 必须是第一行，而占位要早于它。
+- 另有一种文件：`<runId>.resumed`（和 `.resumed.2`、`.resumed.3`……），是**别人**要接着这个运行跑的占位，见下面"接着跑"。`runId`
+  不能以 `.claim`、`.jsonl`、`.resumed`（带不带数字）结尾。
 - 读占位文件时解析失败（空文件、半截 JSON），说明它正在被写：**稍等再读**，不是结论。
 - 清理日志的人注意：正常结束的运行也留着 `.claim`。同时删掉某个 `runId` 的 `.claim` 和 `.jsonl`，就等于把
   这个 id 放出来了；要么成对删，要么都不删。
@@ -113,6 +115,7 @@
 | `pid` | number | 跑这次运行的进程 id |
 | `hostname` | string | 跑这次运行的机器，Node 的 `os.hostname()` |
 | `affair` | `{ label, url?, link?, key? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
+| `resumeOf` | string \| null | 这次运行接着的是哪一次运行（`orch.mjs resume <runId>`，选项 `resumeOf`），那一次的 runId；不是接着跑的为 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
 `affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
 
@@ -145,6 +148,23 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 - 每个目录最多一条，在用到它的第一个 `call.start` 之前。没有 `affair`、身份认不出、跨机（`--host`）、或者找/建失败时
   **没有这条**；后三种会有一条 `caveat`（`affair: ...`），调用照老办法起 agent，运行不因此失败。
 - 之前的文件没有这个事件，读者忽略不认识的 `kind`（见"演进规则"）。
+
+### `resume`
+
+flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）：这一刻起，如果这个运行没走到头，从哪里、用什么接着跑。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `flow` | string | 接着跑要起的流程，**流程名**（不是路径：全小写、数字、连字符），运行时按名字在 `flows/` 和 `flowsDirs` 里找 |
+| `input` | object | 那个流程的输入，调用的当下已经按它的 `inputs` 校验过。照样过脱敏：含这次运行当时已知的秘密值的声明不会被记下 |
+| `from` | string | 一句话给人看：从哪里接着、有什么会重做或直接做。最多 60 个字符（码点），不含控制字符和改变文字方向的字符，读者当不可信文本 |
+| `spends` | `"nothing"` \| `"maybe"` | `nothing`：不调模型；`maybe`：可能调 |
+
+或者 `{ cleared: true }`（`$.resumeWith(null)`）：flow 把之前的声明收回了，这个运行没有可接的地方。
+
+- **最后一次为准。** 不合格的声明（流程名是路径或找不到、输入对不上那个流程、`from` 不合规、秘密值）**不写这一行**，写一条
+  `log` warn 和一条 `caveat`（`resume: …`），运行不因此失败，之前的声明照旧。
+- 读者读到的"现在能怎么接"，对**没写出 `run.end`** 的运行（`lost`）就是最后一行 `resume`；对已经结束的就读 `run.end.resume`。
 
 ### `phase.start` / `phase.end`
 
@@ -344,12 +364,29 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `durationMs` | number | |
 | `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 只算最后一轮 `LastUsage`；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
 | `caveats` | string[] | 本次运行所有 caveat 的去重列表 |
+| `resume` | `{ flow, input, from, spends }` \| null | 这个运行没走到头时，flow 最后一次声明的续跑点（同上面 `resume` 事件）；没声明或收回了为 null。**`outcome` 是 `done` 时恒为 null**：完成了的运行没有可接的。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+
+## 接着跑
+
+一个没走到头的运行（`stopped`、`failed`、`timeout`，或没有 `run.end` 的 `lost`）能不能接着跑、怎么接，只看上面的 `run.end.resume`
+（`lost` 的看最后一行 `resume`）。接着跑是**一次新的运行**：另一个 runId，`run.start.resumeOf` 指向它接着的那一次。
+
+读者怎么判断"这次停下已经被接过了"：看 `<runId>.resumed`（再看 `.resumed.2`……）有没有、里面的 runId 是什么、那个运行现在什么状态。
+`orch.mjs resume` 的做法（`runtime/resume.mjs`）：
+
+1. 先独占地（`wx`）建 `<上一段 runId>.resumed`，内容是新的 runId。一个建不成就被拒，什么都没花；
+2. 文件已经在：读它里面的 runId，看那个运行——占位里有 `refused`（起来之前就被拒了），或者没有占位也没有事件、而且文件已经建了 60 秒以上
+   （`state.mjs` 的 `absent` 且 `safeToRestart`），这次停下算"没被接成"，换 `.resumed.2`、`.resumed.3` 再占；别的状态（在跑、结束了、失联……）都算被接了，拒；
+3. **没有 `run.end` 的运行只在确知它死了时才接**：`readRunState` 说 `lost` 且 `processAlive === false`（同一台机器上占位里的 pid 已不存在）。
+   占位只是过期的、pid 还在的、在别的机器上的，都不接。
+
+接着跑那一段如果又停了，它有自己的 `run.end.resume`，下一次接的是它，不是最初那一段。`resumeOf` 串起来的是一条链。
 
 ## 演进规则
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`resume` 事件、`run.end.resume`、`run.start.resumeOf`（2026-10-31，缺省分别是没有这种事件、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。
