@@ -53,6 +53,9 @@ export function runIdOf(instanceId: string, caseId: string, name: string, flow: 
 
 export type FlowLimits = Policy["flows"];
 
+/** A run that ended refused or not started at a known $0: nothing ran. */
+export const ranNothing = (r: Pick<FlowRec, "ended">): boolean => r.ended !== undefined && (r.ended.outcome === "refused" || r.ended.outcome === "not-started") && r.ended.costUsd === 0 && !r.ended.costUnknown;
+
 /** The day of an instant in the instance's zone. */
 const dayOf = (iso: string, tz: string) => localParts(Date.parse(iso), tz).date;
 
@@ -79,7 +82,6 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
   // Named as people name it when the rule gave the flow a title.
   const what = own ? (ask.title ? `「${ask.title}」` : `「${ask.flow}」流程`) : "流程";
   const all = [...recs, ...ahead].filter(scope);
-  const ranNothing = (r: FlowRec) => r.ended !== undefined && (r.ended.outcome === "refused" || r.ended.outcome === "not-started") && r.ended.costUsd === 0 && !r.ended.costUnknown;
   const mine = all.filter((r) => dayOf(r.intentAt, tz) === today && !ranNothing(r));
   if (mine.length >= lim.perDay) return { why: `今天${what}已经起了 ${mine.length} 次（上限 ${lim.perDay}）`, until: "tomorrow", limit: "perDay" };
   const ofCase = mine.filter((r) => r.caseId === ask.caseId).length;
@@ -142,6 +144,8 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
           value: end.value,
           valueDropped: end.valueDropped,
           why,
+          // What it said about being carried on, for a run that did not come out whole (a finished one has none to give, and the runtime writes it as nothing).
+          ...(outcome !== "done" && probe.resume ? { resume: probe.resume } : {}),
         },
       });
     }
@@ -172,7 +176,9 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
       const partial = probe.unread > 0;
       if (!sureAfter(partial ? UNREAD_SUSPECT_MS : SUSPECT_MS)) return { act: { kind: "wait", live: "slow" }, suspect: true };
       const spent = probe.costUsd > 0 ? `；已花 $${probe.costUsd.toFixed(2)}${probe.costKnown ? "" : "（读到的部分）"}` : "";
-      return calm(endOf("lost", `失联：心跳停了，之后再没有动静${partial ? "；它写的事件里有读不全的行，花了多少不知道" : ""}${spent}`, probe.costUsd, probe.costKnown));
+      const lost = endOf("lost", `失联：心跳停了，之后再没有动静${partial ? "；它写的事件里有读不全的行，花了多少不知道" : ""}${spent}`, probe.costUsd, probe.costKnown);
+      // A run that was cut off still wrote its last word on being carried on (its `resume` events): the runtime carries it on only once it is sure the process is gone.
+      return calm(probe.resume && lost.kind === "end" ? { kind: "end", end: { ...lost.end, resume: probe.resume } } : lost);
     }
     case "running":
       return calm({ kind: "wait", live: probe.gate ? "gate" : probe.slow ? "slow" : "running" });
@@ -205,6 +211,12 @@ const DRAWN: Record<string, string> = { "[": "［", "]": "］", "<": "＜", ">":
  */
 const plainForMessage = (text: string): string => text.replace(/[\[\]<>`@*_~|#]/g, (c) => DRAWN[c]!);
 
+/** A run that came to no result, so that a person may ask for it again (and none that did). */
+const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
+
+/** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
+export const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
+
 /** What a rule is told of a run. */
 export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
   const ended = rec.ended;
@@ -221,11 +233,15 @@ export function resultOf(rec: FlowRec, live: Live | null): FlowResult {
     costUsd: ended?.costUsd ?? 0,
     why: ended?.why ?? null,
     endedOutcome: rec.dismissed ? (ended?.outcome ?? null) : null,
+    resumedFrom: rec.resume?.from ?? null,
+    ran: rec.resume?.flow ?? rec.flow,
+    // A run that stopped short and said how it could be carried on, that nobody set aside and the rule does not take care of itself.
+    resumable: ended?.resume && noResult(ended) && !rec.dismissed && !rec.selfRetry ? { from: ended.resume.from, spends: ended.resume.spends } : null,
   };
 }
 
 /** What a rule is told of a request that was held back for now (no run exists). */
-export const deferredResult = (why: string, limit?: FlowResult["limit"]): FlowResult => ({ state: "deferred", runId: null, round: 0, startedAt: null, endedAt: null, value: null, summary: null, costUsd: 0, why, endedOutcome: null, ...(limit ? { limit } : {}) });
+export const deferredResult = (why: string, limit?: FlowResult["limit"]): FlowResult => ({ state: "deferred", runId: null, round: 0, startedAt: null, endedAt: null, value: null, summary: null, costUsd: 0, why, endedOutcome: null, resumedFrom: null, ran: null, resumable: null, ...(limit ? { limit } : {}) });
 
 /** The word for a run that is not over and the controller reads as in trouble ("fail" is the runtime's, not this). */
 export const WAITING_ON_YOU: ReadonlySet<FlowResult["state"]> = new Set(["failed", "timeout", "lost", "not-started", "refused"]);
@@ -251,16 +267,19 @@ export function plainWhy(end: Pick<FlowEnd, "outcome" | "why">): string {
 }
 
 /** The one message for a run that ended: the rule's label, and the flow's own summary or why it did not come to a result. */
-export function endedMessage(rec: Pick<FlowRec, "label" | "caseId">, end: FlowEnd): { title: string; text: string; status: "succeeded" | "failed" } {
+export function endedMessage(rec: Pick<FlowRec, "label" | "caseId" | "selfRetry">, end: FlowEnd): { title: string; text: string; status: "succeeded" | "failed" } {
   const number = `#${rec.caseId.slice(rec.caseId.lastIndexOf(":") + 1)}`;
   const unfinished = unfinishedWhy(end);
+  // One sentence of way out, for a run that did not finish and said how it could be carried on (not for one the rule takes care of itself:
+  // that one has no button). The words are the flow's own; the message only points at the button.
+  const carryOn = end.resume && !rec.selfRetry && noResult(end) ? `处理好以后在事项页点「接着跑」（${plainForMessage((cleanText(end.resume.from, 80) ?? end.resume.from).replace(/[。.]+$/u, ""))}）。` : "";
   // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done".
-  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainForMessage(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。详情在「事项追踪」里。`, status: "failed" };
+  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainForMessage(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。${carryOn}详情在「事项追踪」里。`, status: "failed" };
   if (end.outcome === "done" || end.outcome === "stopped") {
     return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${plainForMessage(end.summary ?? (end.outcome === "done" ? "完成了" : "中止了"))}。详情在「事项追踪」里。`, status: "succeeded" };
   }
   const why = end.why ? cleanText(end.why, 120) : null;
-  return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainWhy(end)}${why ? `（${plainForMessage(why)}）` : ""}，要自己看。`, status: "failed" };
+  return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainWhy(end)}${why ? `（${plainForMessage(why)}）` : ""}，要自己看。${carryOn}`, status: "failed" };
 }
 
 // ---- the affair a run is for -------------------------------------------------------------------------
@@ -307,6 +326,11 @@ export interface LaunchSpec {
   outFile: string;
   /** The runtime's log directory the process is told to use (ORCH_LOG_DIR), the one the run is read back from; null or absent: whatever it resolves itself. */
   logDir?: string | null;
+  /**
+   * Set when the run carries on an earlier one: the process is `orch.mjs resume <resumeOf> --run-id …`, and the flow and its input are the ones
+   * that run left in its resume point, which the runtime reads (`flow` and `inputFile` are then not used, and not written).
+   */
+  resumeOf?: string | null;
 }
 
 export interface Launcher {
@@ -315,14 +339,18 @@ export interface Launcher {
 }
 
 /**
- * The real one: `<command> run <flow> --run-id … --affair @… --input @… [--timeout …]`, no shell, no window, its own
+ * The real one: `<command> run <flow> --run-id … --affair @… --input @… [--timeout …]` (or, for a run that carries on another,
+ * `<command> resume <earlier run> --run-id … --affair @… [--timeout …]`), no shell, no window, its own
  * process (not the plugin's child to wait for, nor killed with it: a plugin reload leaves the run going).
  */
 export function createLauncher(config: LauncherConfig): Launcher {
   return {
     start(spec) {
       const [file, ...prefix] = config.command;
-      const args = [...prefix, "run", spec.flow, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, "--input", `@${spec.inputFile}`, ...(spec.timeout ? ["--timeout", spec.timeout] : [])];
+      const timeout = spec.timeout ? ["--timeout", spec.timeout] : [];
+      const args = spec.resumeOf
+        ? [...prefix, "resume", spec.resumeOf, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, ...timeout]
+        : [...prefix, "run", spec.flow, "--run-id", spec.runId, "--affair", `@${spec.affairFile}`, "--input", `@${spec.inputFile}`, ...timeout];
       return new Promise((resolve, reject) => {
         let out: number;
         try {

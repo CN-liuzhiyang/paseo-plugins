@@ -268,8 +268,8 @@ export interface RunView {
   maybeAsleep?: boolean;
   /** Why a run that did not come to a result did not, in a sentence. */
   why?: string | null;
-  /** What a person may do with it on the page now (the server decides): run it again, take it over, or fold it away. */
-  actions?: Array<"retry" | "mine" | "fold">;
+  /** What a person may do with it on the page now (the server decides): carry on, run it again from the start, take it over, or fold it away. */
+  actions?: Array<"resume" | "retry" | "mine" | "fold">;
   /** The rule now gives another input for this run than the one it was run with (it is not run again for that). */
   inputDrifted?: boolean;
   /** A run still going that the rule's latest judgment no longer asks for (it is not stopped for that). */
@@ -278,6 +278,18 @@ export interface RunView {
   selfRetry?: boolean;
   /** What people call the flow (rules.ts `title`); absent: its name. */
   title?: string;
+  /** The run this one carries on (run.start's `resumeOf`); null for one that does not. */
+  resumeOf?: string | null;
+  /**
+   * How the run said it could be carried on, at the moment it stopped: where from, in the flow's own words, and whether a model may be called.
+   * For a run of its own, set only when it is the newest round of its request, came to no result, and a person may carry it on (the
+   * "接着跑" button is drawn from this and `actions`).
+   */
+  resume?: { from: string; spends: "nothing" | "maybe" } | null;
+  /** For a round of its own that carries on an earlier run: who asked ("cli": started with `orch.mjs resume` and taken into the record), and the line it carried on from. */
+  carriedOn?: { by: string; line: string; spends: "nothing" | "maybe" } | null;
+  /** For the newest round of a request that has had more than one: how many rounds, and what they cost together (the ones that have ended). */
+  ledger?: { rounds: number; costUsd: number };
 }
 
 export interface Fact {
@@ -503,16 +515,32 @@ export const troubleWord = (situation: RunView["situation"]): string =>
   situation === "notstarted" ? "没起来" : situation === "unchecked" ? "没查成" : situation === "lost" ? "断了" : situation === "slow" ? "可能卡住了" : "失败了";
 
 /** The line over the way out of a run in trouble: which run, what became of it and why in the flow's own words (no double stop). */
-export const troubleLine = (run: Pick<RunView, "flow" | "situation" | "why">): string => {
+export const troubleLine = (run: Pick<RunView, "flow" | "situation" | "why" | "actions">): string => {
   const why = run.why?.replace(/[。.]+$/u, "");
-  return `流程「${run.flow}」${troubleWord(run.situation)}${why ? `：${why}` : ""}。不会自动重来。`;
+  return `流程「${run.flow}」${troubleWord(run.situation)}${why ? `：${why}` : ""}。${run.actions?.includes("resume") ? "处理好原因以后点「接着跑」，不会自己重来。" : "不会自动重来。"}`;
 };
 
-/** What the button that runs it again says: whether it will cost, and what the last round cost. */
-export const retryLabel = (run: Pick<RunView, "situation" | "retry">): string =>
-  run.situation === "notstarted" || (run.situation === "unchecked" && !run.retry?.estimateUsd)
-    ? "重新跑一次（上次没花钱）"
-    : `重新跑一次（会再花钱${run.retry?.estimateUsd ? `，上次花了 $${run.retry.estimateUsd.toFixed(2)}` : ""}）`;
+/**
+ * What the button that runs it again says: whether it will cost, and what the last round cost. Next to "接着跑" it is called "从头重跑"
+ * (carrying on and starting over are two buttons, and the names say which is which); on its own it is "重新跑一次".
+ */
+export const retryLabel = (run: Pick<RunView, "situation" | "retry" | "actions">): string => {
+  const name = run.actions?.includes("resume") ? "从头重跑" : "重新跑一次";
+  return run.situation === "notstarted" || (run.situation === "unchecked" && !run.retry?.estimateUsd)
+    ? `${name}（上次没花钱）`
+    : `${name}（会再花钱${run.retry?.estimateUsd ? `，上次花了 $${run.retry.estimateUsd.toFixed(2)}` : ""}）`;
+};
+
+/** What stands beside the "接着跑" button: where it carries on from (the flow's own words) and whether it calls a model. */
+export const resumeNote = (run: Pick<RunView, "resume" | "retry">): string => {
+  const offer = run.resume;
+  if (!offer) return "";
+  const model = offer.spends === "nothing" ? "不调模型" : `可能会调模型${run.retry?.estimateUsd ? `（上一轮花了 $${run.retry.estimateUsd.toFixed(2)}）` : ""}`;
+  return `${offer.from.replace(/[。.]+$/u, "")} · ${model}`;
+};
+
+/** The sum of a request's rounds, for the line over its way out: "已经跑了 3 次，一共花了 $1.14". */
+export const ledgerText = (ledger: RunView["ledger"]): string => (ledger && ledger.rounds > 1 ? `这件事已经跑了 ${ledger.rounds} 次，一共花了 $${ledger.costUsd.toFixed(2)}。` : "");
 
 // One pass, so that what an escape protects is read as the character it stands for and not as a mark: `\#` is a
 // "#", and the "#" it makes is not the start of a heading. An escape is a backslash before ASCII punctuation (the

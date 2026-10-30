@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { clockText, durationText, retryLabel, SITUATION, troubleLine, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
+import { clockText, durationText, ledgerText, resumeNote, retryLabel, SITUATION, troubleLine, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
 import { answerRpc, flowRpc, graphRpc } from "../shared/rpc";
 import { BallChip, StageChart, StageRail } from "./chart";
 import { go, jumpOf } from "./jump";
@@ -135,14 +135,18 @@ function Facts({ view }: { view: GraphView }) {
 
 // ---- a run in trouble: the way out ------------------------------------------------------------
 
-/** What a person may do with a flow that failed, broke or never started: run it again, take it over, or fold it away. */
+/**
+ * What a person may do with a flow that failed, broke or never started. When the flow said where it could carry on from, the first thing is a
+ * button for that ("接着跑", with the flow's own words beside it); next to it, running it again is called "从头重跑", so that the two names
+ * say which carries on and which starts over. Then: take it over ("我自己来"), or fold it away.
+ */
 function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolean; text: string }): void }) {
   const ui = useUi();
   const flow = useRpc(flowRpc);
   const [busy, setBusy] = useState(false);
   const runs = view.runs.filter((r) => (r.actions?.length ?? 0) > 0);
   if (runs.length === 0) return null;
-  const press = async (runId: string, action: "retry" | "mine" | "fold") => {
+  const press = async (runId: string, action: "resume" | "retry" | "mine" | "fold") => {
     setBusy(true);
     try {
       const reply = await flow({ runId, action });
@@ -159,7 +163,16 @@ function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolea
         <View key={r.runId} style={{ borderRadius: 10, borderWidth: 1, borderColor: ui.tone("warning"), backgroundColor: ui.theme.colors.surface1, padding: 10, gap: 6 }}>
           <Text style={ui.styles.small} selectable>
             {troubleLine(r)}
+            {ledgerText(r.ledger) ? ` ${ledgerText(r.ledger)}` : ""}
           </Text>
+          {r.actions!.includes("resume") ? (
+            <View style={[ui.styles.row, { gap: 10, flexWrap: "wrap", alignItems: "center" }]}>
+              <Button icon="Play" primary label="接着跑" disabled={busy} onPress={() => void press(r.runId, "resume")} />
+              <Text style={[ui.styles.small, { flexShrink: 1 }]} selectable>
+                {resumeNote(r)}
+              </Text>
+            </View>
+          ) : null}
           <View style={[ui.styles.row, { gap: 8, flexWrap: "wrap" }]}>
             {r.actions!.includes("retry") ? (
               <Button

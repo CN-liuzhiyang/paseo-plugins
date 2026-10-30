@@ -6,7 +6,7 @@
 //
 //   { flow: "build-resume",                                   // a flow's name, never a path
 //     input: { dir: "batch-1" },                   // what that flow's `inputs` ask for
-//     from: "编译已过：从提交前的核对接着，不重编",               // one line for a person, at most FROM_LIMIT characters
+//     from: "编译已过：从核对接着，不重编",               // one line for a person, at most FROM_LIMIT characters
 //     spends: "nothing" }                                     // "nothing": no model is called; "maybe": one may be
 
 import { textProblem } from "./affair.mjs";

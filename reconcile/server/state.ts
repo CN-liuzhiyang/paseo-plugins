@@ -47,6 +47,11 @@ export type EventBody =
   | { type: "flow.dismissed"; runId: string; how: "mine" | "fold"; by: string }
   /** A person asked for a run again: the next round of the key, whose intent follows in the same batch. For the record. */
   | { type: "flow.retry"; caseId: string; name: string; key: string; round: number; runId: string; by: string; estimateUsd: number }
+  /**
+   * A round that carries on the run `from` instead of starting the request's flow again, whose intent follows in the same batch: asked for by a
+   * person (`by` their id), or a run someone started with `orch.mjs resume` that the controller took into the record (`by: "cli"`). `flow` is the flow that runs. For the record.
+   */
+  | { type: "flow.resume"; caseId: string; name: string; key: string; round: number; runId: string; from: string; flow: string; by: string }
   | { type: "started"; instanceId: string; mode: "live" | "dry-run"; pid: number; home: string };
 
 export interface RulesDiff {
@@ -242,6 +247,7 @@ export function apply(state: State, event: JournalEvent): void {
       return;
     }
     case "flow.retry":
+    case "flow.resume":
       return;
     case "eval.candidate":
       state.evals += 1;

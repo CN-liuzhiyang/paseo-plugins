@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -54,12 +55,37 @@ export default flow({
 });
 `;
 
+/**
+ * A flow in two parts that spends nothing: the first says how it could be carried on (the same flow, its second part) and stops, saying in
+ * its value that it did not get done what it was for; the second returns what it is given.
+ */
+const TWO_PARTS = `import { flow, text, choice } from ${JSON.stringify(FLOW_MJS)};
+export default flow({
+  name: "demo-resume",
+  description: "spends nothing: the first part stops and says how it could be carried on, the second part returns",
+  phases: [{ id: "work", title: "work" }],
+  inputs: { word: text("word"), stage: choice(["start", "finish"], "which part") },
+  grants: [],
+  summarize: (value) => "got " + value.word + " in " + value.stage,
+  async run({ word, stage }, $) {
+    return await $.phase("work", async () => {
+      if (stage === "start") {
+        await $.resumeWith({ flow: "demo-resume", input: { word, stage: "finish" }, from: "第一段做完了：从第二段接着", spends: "nothing" });
+        return $.stop("第一段停在这里", { why: "第一段停在这里，接着跑第二段", word, stage });
+      }
+      return { word, stage };
+    });
+  },
+});
+`;
+
 /** A rule that asks for runs as its item's `Runs` field says, and shows what it reads of them. */
 const RULE = `export const flows = {
   demo: { flow: "demo-triage", timeout: "1m", maxUsd: 0.1 },
   noisy: { flow: "demo-noisy", timeout: "1m", maxUsd: 0.1 },
   hurried: { flow: "demo-triage", timeout: "1s", maxUsd: 0.1 },
   missing: { flow: "no-such-flow", maxUsd: 0.1 },
+  twoparts: { flow: "demo-resume", timeout: "1m", maxUsd: 0.1 },
 };
 export default {
   name: "orchrule", description: "x", applies: { source: "gcp-demo" }, params: {},
@@ -103,6 +129,7 @@ async function withRig(body: (rig: Rig) => Promise<void>, options: { envDir?: st
   mkdirSync(logDir);
   writeFileSync(path.join(flowsDir, "demo-triage.mjs"), DEMO);
   writeFileSync(path.join(flowsDir, "demo-noisy.mjs"), NOISY);
+  writeFileSync(path.join(flowsDir, "demo-resume.mjs"), TWO_PARTS);
   const configFile = path.join(base, "orch-config.json");
   writeFileSync(configFile, JSON.stringify({ flowsDirs: [flowsDir] }));
   const env = { ...process.env, ORCH_CONFIG: configFile, ORCH_LOG_DIR: logDir };
@@ -429,4 +456,62 @@ test("N7C-03: a flow that wrote more than the window to stdout before its result
     assert.equal(starts.length, 1, "the result is at the end of the file, and it is the end that is read: not a second run, and a second payment");
     assert.deepEqual([rec.ended?.outcome, rec.ended?.summary, rec.ended?.value, rec.ended?.valueDropped], ["done", "noisy done", { found: 3 }, false]);
     assert.deepEqual(Object.keys(flowsOf(w)), [id]);
+  }));
+
+// ---- a run that stopped short, carried on ---------------------------------------------------------------------
+
+const twoParts = (key = "k1") => ({ flow: "twoparts", key, input: { word: "w", stage: "start" }, label: "两段" });
+const orchResume = (logDir: string, runId: string, ...flags: string[]) => spawnSync(process.execPath, [ORCH, "resume", runId, ...flags], { encoding: "utf8", env: { ...process.env, ORCH_LOG_DIR: logDir } });
+
+test("a stop is carried on from the page: the run left its word in its files, the button's round is started with `orch.mjs resume`, in the item's own workspace, and its result comes back to the rule", () =>
+  withRig(async ({ w, logDir, runsDir, tick, until }) => {
+    const [r0, r1] = [ids(1, "twoparts", "k1", "demo-resume"), ids(1, "twoparts", "k1", "demo-resume", 1)];
+    ask(w, 1, [twoParts()], "twoparts:k1");
+    await tick();
+    await until(() => !!flowsOf(w)[r0]!.ended);
+    const first = flowsOf(w)[r0]!.ended!;
+    assert.deepEqual([first.outcome, first.resume], ["stopped", { flow: "demo-resume", from: "第一段做完了：从第二段接着", spends: "nothing" }]);
+    const shown = w.engine.graph("gcp-demo:1")!.runs.find((r) => r.runId === r0)!;
+    assert.deepEqual([shown.actions, shown.resume], [["resume", "retry", "mine", "fold"], { from: "第一段做完了：从第二段接着", spends: "nothing" }]);
+    const r = w.engine.resumeFlow(r0, "owner");
+    assert.equal(r.ok, true, r.detail);
+    await tick();
+    await until(() => !!flowsOf(w)[r1]!.ended);
+    assert.deepEqual([flowsOf(w)[r1]!.ended!.outcome, flowsOf(w)[r1]!.ended!.value], ["done", { word: "w", stage: "finish" }]);
+    await tick();
+    assert.match(headline(w, 1), /^r twoparts:k1=done\{"word":"w","stage":"finish"\} \/ got w in finish$/);
+    // what the runtime wrote: the second run says which it carries on, was given what the first declared, and is the same item's
+    const [first0, second] = [eventsOf(runsDir, r0), eventsOf(runsDir, r1)];
+    const [start0, start1] = [first0.find((e) => e.kind === "run.start"), second.find((e) => e.kind === "run.start")] as Array<{ resumeOf: string | null; input: unknown; affair: { link: { params: Record<string, string> }; key: string } }>;
+    assert.equal(start0.resumeOf, null);
+    assert.deepEqual([start1.resumeOf, start1.input, start1.affair.link.params, start1.affair.key], [r0, { word: "w", stage: "finish" }, start0.affair.link.params, start0.affair.key]);
+    assert.equal(readFileSync(path.join(runsDir, `${r0}.resumed`), "utf8"), r1, "the stop is taken once, by this run");
+    // and a second run by hand for the same stop is refused, spending nothing and writing no events
+    const again = orchResume(logDir, r0, "--run-id", "by-hand-late");
+    assert.equal(again.status, 2, again.stdout + again.stderr);
+    assert.match(again.stderr, /already carried on, as run /);
+    assert.equal(existsSync(path.join(runsDir, "by-hand-late.jsonl")), false);
+    assert.equal(w.engine.resumeFlow(r0, "owner").ok, false);
+  }));
+
+test("a stop is carried on by hand with `orch.mjs resume`: the run lands in the item's workspace, the controller takes it in as the next round, and follows it to its result", () =>
+  withRig(async ({ w, logDir, runsDir, tick, until }) => {
+    const r0 = ids(1, "twoparts", "k1", "demo-resume");
+    ask(w, 1, [twoParts()], "twoparts:k1");
+    await tick();
+    await until(() => !!flowsOf(w)[r0]!.ended);
+    const done = orchResume(logDir, r0, "--run-id", "by-hand-1");
+    assert.equal(done.status, 0, done.stdout + done.stderr);
+    await until(() => !!flowsOf(w)["by-hand-1"]);
+    const rec = flowsOf(w)["by-hand-1"]!;
+    assert.deepEqual([rec.round, rec.name, rec.flow, rec.key, rec.resume?.by, rec.resume?.from, rec.resume?.flow], [1, "twoparts", "demo-resume", "k1", "cli", r0, "demo-resume"]);
+    await until(() => !!rec.ended || !!flowsOf(w)["by-hand-1"]!.ended);
+    await tick();
+    assert.equal(flowsOf(w)["by-hand-1"]!.ended!.outcome, "done");
+    assert.match(headline(w, 1), /^r twoparts:k1=done\{"word":"w","stage":"finish"\}/);
+    assert.equal(w.engine.graph("gcp-demo:1")!.runs.filter((r) => (r.actions?.length ?? 0) > 0).length, 0, "nothing is left to do for the item");
+    assert.equal(w.journal().filter((e) => e.type === "flow.resume" && e.by === "cli").length, 1);
+    // the button's round for the same stop would have been refused by the runtime: nothing of it is there to take
+    assert.equal(w.engine.resumeFlow(r0, "owner").ok, false);
+    assert.equal(readdirSync(runsDir).filter((f) => f.endsWith(".jsonl")).length, 2);
   }));

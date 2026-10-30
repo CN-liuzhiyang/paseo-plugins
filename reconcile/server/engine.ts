@@ -17,7 +17,7 @@ import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outp
 import type { CaptureInput } from "./capsule";
 import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, confirmWords, personsOwn, commandStep, type AskedAt, type AnswerRequest, type ConfirmRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
-import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
+import { actFor, affairOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, noResult, ranNothing, resultOf, runIdOf, unfinishedWhy, type Launcher, type Live } from "./flows";
 import type { AgentArchiver } from "./archive";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
@@ -655,10 +655,6 @@ export function createEngine(deps: EngineDeps) {
   /** A run of the item is going, or ended and no judgment has had its result yet: either way the item is judged, however cold it would be. */
   const hasOpenFlow = (caseId: string, nowMs: number) => recs().some((r) => r.caseId === caseId && (!r.ended || (!endRead.has(r.runId) && nowMs - Date.parse(r.ended.at) < 3 * DAY)));
   const adminId = () => Object.values(config.persons).find((p) => p.admin)?.id ?? null;
-  /** A run that came to no result, so that a person may ask for it again (and none that did). */
-  const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
-  /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (flows.ts unfinishedWhy). */
-  const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
   /** The flow a rule's name for one stands for now (rules.ts `flows`); null for a name the item's rule does not declare. */
   const declaredFlow = (caseId: string, name: string): string | null => {
@@ -696,7 +692,8 @@ export function createEngine(deps: EngineDeps) {
     if (had) {
       const rec = state.flows?.[had.runId];
       if (rec) {
-        if (rec.inputHash === hash) drifted.delete(rec.runId);
+        // A round that carries on an earlier run is given its input by that run's files, not by the rule: the rule's input is not what it was made with.
+        if (rec.resume || rec.inputHash === hash) drifted.delete(rec.runId);
         else drifted.add(rec.runId);
       }
       return;
@@ -819,7 +816,7 @@ export function createEngine(deps: EngineDeps) {
     for (const runId of flowsProgress(nowMs)) {
       if (stopped) return;
       const rec = state.flows?.[runId];
-      if (!rec || rec.ended || !rec.input) continue;
+      if (!rec || rec.ended || (!rec.input && !rec.resume)) continue;
       const logDir = logDirOf(rec);
       if (logDir === null) {
         lastProblems.push(`流程「${rec.label}」不知道日志目录在哪，没有起`);
@@ -830,9 +827,10 @@ export function createEngine(deps: EngineDeps) {
         mkdirSync(dir, { recursive: true });
         const inputFile = path.join(dir, `${runId}.input.json`);
         const affairFile = path.join(dir, `${runId}.affair.json`);
-        writeAtomic(inputFile, JSON.stringify(rec.input));
+        // A round that carries on an earlier run is given no input: the runtime reads it, with the flow, from what that run left.
+        if (!rec.resume) writeAtomic(inputFile, JSON.stringify(rec.input));
         writeAtomic(affairFile, JSON.stringify(affairOf({ caseId: rec.caseId, stage: rec.stage, label: rec.affairLabel }, state.items[rec.caseId]?.url ?? null, HOME_SCREEN)));
-        ({ pid } = await flows.launcher.start({ runId, flow: rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`), logDir }));
+        ({ pid } = await flows.launcher.start({ runId, flow: rec.resume?.flow ?? rec.flow, timeout: rec.timeout, inputFile, affairFile, outFile: path.join(dir, `${runId}.out`), logDir, ...(rec.resume ? { resumeOf: rec.resume.from } : {}) }));
       } catch (error) {
         const message = (error as Error).message.slice(0, 300);
         deps.log(`flow ${runId}: could not start it: ${message}`);
@@ -910,6 +908,19 @@ export function createEngine(deps: EngineDeps) {
     return !!asked && !rec.ended && !asked.some((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key);
   };
 
+  /**
+   * How a run in trouble can be carried on, by the controller's own record: what it said when it stopped (`ended.resume`), or, for a round that was
+   * itself to carry one on and never got to run (refused, not started, nothing spent), what it was to carry on -- the same word again. `from` is the run to carry on.
+   */
+  const carryOnPoint = (rec: FlowRec): { from: string; flow: string; line: string; spends: "nothing" | "maybe" } | null => {
+    if (!rec.ended) return null;
+    if (rec.ended.resume) return { from: rec.runId, flow: rec.ended.resume.flow, line: rec.ended.resume.from, spends: rec.ended.resume.spends };
+    return rec.resume && ranNothing(rec) ? { from: rec.resume.from, flow: rec.resume.flow, line: rec.resume.line, spends: rec.resume.spends } : null;
+  };
+
+  /** The rounds of a request, oldest first. */
+  const roundsOf = (rec: FlowRec): FlowRec[] => recs().filter((r) => r.caseId === rec.caseId && r.name === rec.name && r.flow === rec.flow && r.key === rec.key).sort((a, b) => a.round - b.round);
+
   /** A run's page view: the reader's when it has read the run, else made from what the controller knows; with its place in the controller's own record. */
   function viewOfRec(rec: FlowRec, read: RunView | undefined, currentStage: string | undefined): RunView {
     const live = liveOf.get(rec.runId) ?? null;
@@ -940,7 +951,12 @@ export function createEngine(deps: EngineDeps) {
     const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
     const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
     // Only for the newest round of its request: an earlier one is history (the request is the person's to set aside, not each round of it).
-    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(outcome !== null ? (["retry"] as const) : []), "mine", "fold"] : [];
+    const point = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? carryOnPoint(rec) : null;
+    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(point ? (["resume"] as const) : []), ...(outcome !== null ? (["retry"] as const) : []), "mine", "fold"] : [];
+    const rounds = latest ? roundsOf(rec) : [];
+    // "From the start" costs what the request cost when it last ran from the start, not what a carrying on cost.
+    const fromStart = [...rounds].reverse().find((r) => !r.resume && r.ended);
+    const estimateOf = (r: FlowRec | undefined) => (r?.ended && r.ended.costUsd > 0 ? r.ended.costUsd : null);
     const base: RunView = read ?? {
       runId: rec.runId,
       stage: rec.stage,
@@ -977,10 +993,16 @@ export function createEngine(deps: EngineDeps) {
       ...(suspects.has(rec.runId) && situation !== "done" ? { maybeAsleep: true } : {}),
       ...(drifted.has(rec.runId) ? { inputDrifted: true } : {}),
       ...(unwanted(rec) ? { unwanted: true } : {}),
-      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry ? { round: rec.round + 1, estimateUsd: rec.ended!.costUsd > 0 ? rec.ended!.costUsd : null } : null,
+      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry ? { round: rec.round + 1, estimateUsd: rec.resume ? estimateOf(fromStart) : estimateOf(rec) } : null,
       ...(rec.selfRetry ? { selfRetry: true } : {}),
       ...(rec.title ? { title: rec.title } : {}),
       actions: actions,
+      // A round that carries on is named for the request's flow, not the one it ran (the page names the request; the run's own page says what it ran).
+      ...(rec.resume ? { flow: rec.flow } : {}),
+      resumeOf: rec.resume?.from ?? null,
+      resume: point ? { from: point.line, spends: point.spends } : null,
+      carriedOn: rec.resume ? { by: rec.resume.by, line: rec.resume.line, spends: rec.resume.spends } : null,
+      ...(latest && rounds.length > 1 ? { ledger: { rounds: rounds.length, costUsd: rounds.reduce((sum, r) => sum + (r.ended?.costUsd ?? 0), 0) } } : {}),
     };
   }
 
@@ -1032,6 +1054,8 @@ export function createEngine(deps: EngineDeps) {
     delete next.spawnError;
     delete next.ended;
     delete next.dismissed;
+    // From the start, whatever the last round was: the request's own flow with the input of now.
+    delete next.resume;
     // A new round is made under the directory of now: its id is new, and nothing of it is anywhere yet.
     delete next.logDir;
     if (deps.flows.logDir) next.logDir = deps.flows.logDir;
@@ -1041,7 +1065,100 @@ export function createEngine(deps: EngineDeps) {
       { type: "flow.retry", caseId: rec.caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, by, estimateUsd: estimate },
       { type: "flow.intent", rec: next },
     ]);
-    return { ok: true, detail: `记下了，这就重新跑一次（第 ${next.round + 1} 轮）；上一轮花了 $${rec.ended.costUsd.toFixed(2)}` };
+    return { ok: true, detail: `记下了，这就${carryOnPoint(rec) ? "从头重跑" : "重新跑一次"}（第 ${next.round + 1} 轮）；上一轮花了 $${rec.ended.costUsd.toFixed(2)}` };
+  }
+
+  /**
+   * A person carries on a run that stopped short: the next round of its request, run by `orch.mjs resume <the stopped run>` with the flow and
+   * the input that run left in its resume point (the runtime reads them; the controller never holds the input). Everything that holds the retry
+   * holds this -- the newest round of its key, no result yet, not the rule's own to retry, the day's limits counted as for a person's retry --
+   * and the rule has to still mean the same flow by that name, and the run has to have said how it could be carried on.
+   */
+  function resumeFlow(runId: string, by: string): { ok: boolean; detail: string } {
+    const nowMs = deps.now();
+    const rec = state.flows?.[runId];
+    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
+    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
+    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用接着跑" : "这个运行还没结束" };
+    if (rec.selfRetry) return { ok: false, detail: "这个流程没成的时候，判断方法会自己再起一次，不用手动接着跑" };
+    if (rec.dismissed) return { ok: false, detail: "这个运行已经被收起（或者说了「我自己来」），不再接着跑" };
+    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
+    if (declaredFlow(rec.caseId, rec.name) !== rec.flow) return { ok: false, detail: "判断方法现在不起这个流程了，没法接着它跑" };
+    const point = carryOnPoint(rec);
+    if (!point) return { ok: false, detail: "这个运行没说过能从哪里接着跑" };
+    // The earlier run is looked for where it was started, and the new one is made there too.
+    const logDir = logDirOf(rec);
+    if (logDir === null) return { ok: false, detail: "不知道上一轮的运行日志在哪个目录，没法接着它跑" };
+    const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}), byPerson: true }, nowMs, tz);
+    if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
+    const next: FlowRec = {
+      ...rec,
+      runId: runIdOf(deps.instanceId, rec.caseId, rec.name, rec.flow, rec.key, rec.round + 1),
+      round: rec.round + 1,
+      intentAt: nowIso(nowMs),
+      logDir,
+      resume: { from: point.from, flow: point.flow, line: point.line, spends: point.spends, by },
+    };
+    delete next.spawnedAt;
+    delete next.pid;
+    delete next.spawnTries;
+    delete next.spawnError;
+    delete next.ended;
+    delete next.dismissed;
+    if (state.flows?.[next.runId]) return { ok: false, detail: "这一轮已经记过了" };
+    append([
+      { type: "flow.resume", caseId: rec.caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, from: point.from, flow: point.flow, by },
+      { type: "flow.intent", rec: next },
+    ]);
+    return { ok: true, detail: `记下了，这就接着跑（第 ${next.round + 1} 次）：${point.line.replace(/[。.]+$/u, "")}` };
+  }
+
+  /**
+   * A run someone started with `orch.mjs resume` for a run of this controller's own is taken into the record as the next round of that run's
+   * request (by "cli"), so that the page, the rule, the day's count and the message at its end follow it as they follow a round a button started.
+   * Narrow on purpose (what the runtime's files say is not trusted: anyone who can write them can name any run): only a run that names, as the
+   * one it carries on, the newest round of a request -- one that has ended without a result, or one that was itself to carry on a run and never
+   * ran (refused, nothing spent), where the run it names is the one that round was to carry on -- and that is for the same item. Any other is only listed.
+   */
+  function adoptResumes(): void {
+    if (deps.mode !== "live" || !deps.runs || !deps.flows?.logDir) return;
+    const events: EventBody[] = [];
+    const byCase = new Map<string, FlowRec[]>();
+    for (const latest of Object.values(state.flowKeys ?? {})) {
+      const rec = state.flows?.[latest.runId];
+      if (rec?.ended && !rec.selfRetry && logDirOf(rec) === deps.flows.logDir && (noResult(rec.ended) || (rec.resume && ranNothing(rec)))) byCase.set(rec.caseId, [...(byCase.get(rec.caseId) ?? []), rec]);
+    }
+    for (const [caseId, candidates] of byCase) {
+      const views = deps.runs(caseId).filter((v) => v.resumeOf && !state.flows?.[v.runId]).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+      for (const rec of candidates) {
+        // The run it must carry on: the round itself, or the run a refused carrying on was to carry on.
+        const target = rec.resume && ranNothing(rec) ? rec.resume.from : rec.runId;
+        const view = views.find((v) => v.resumeOf === target);
+        if (!view) continue;
+        const point = carryOnPoint(rec);
+        const line = point && point.from === target ? point : null;
+        const next: FlowRec = {
+          ...rec,
+          runId: view.runId,
+          round: rec.round + 1,
+          intentAt: view.startedAt,
+          logDir: deps.flows.logDir,
+          resume: { from: target, flow: view.flow, line: line?.line ?? "从命令行接着跑的", spends: line?.spends ?? "maybe", by: "cli" },
+        };
+        delete next.spawnedAt;
+        delete next.pid;
+        delete next.spawnTries;
+        delete next.spawnError;
+        delete next.ended;
+        delete next.dismissed;
+        events.push(
+          { type: "flow.resume", caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, from: target, flow: view.flow, by: "cli" },
+          { type: "flow.intent", rec: next },
+          { type: "flow.spawned", runId: next.runId, pid: null },
+        );
+      }
+    }
+    if (events.length > 0) append(events);
   }
 
   // ---- hot and cold -----------------------------------------------------------------------
@@ -3312,6 +3429,7 @@ export function createEngine(deps: EngineDeps) {
           if (!stopped) await pollSources(nowMs);
           // Runs are read before judging, so that one that ended is in this round's judgment; the ones to start are started after it.
           if (!stopped) flowsProgress(nowMs);
+          if (!stopped) adoptResumes();
           if (!stopped) await judgeAll(nowMs, plan);
           if (!stopped) await flowsLaunch(nowMs, plan);
           if (!stopped) await tellFlows(nowMs, plan);
@@ -3510,6 +3628,8 @@ export function createEngine(deps: EngineDeps) {
     dismissFlow,
     /** A person asks for a run again, by the id of the one that did not come out. */
     retryFlow,
+    /** A person carries on a run that stopped short, by its id: the next round, run with what that run left (`orch.mjs resume`). */
+    resumeFlow,
     /** The runs the controller started, as it keeps them (for tests and the status). */
     flowRecs: (): FlowRec[] => structuredClone(recs()),
     /** What a rule is told of a run it asked for (for tests). */

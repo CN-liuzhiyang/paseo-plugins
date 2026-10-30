@@ -340,7 +340,7 @@ export default function contribute(server: PluginServerContext, io: Io = { exec,
 
   server.handle(flowRpc, async ({ runId, action }) => {
     if (!engine) return { ok: false, detail: problem.detail || "控制器现在没在运行" };
-    const result = action === "retry" ? engine.retryFlow(runId, "page") : engine.dismissFlow(runId, action, "page");
+    const result = action === "retry" ? engine.retryFlow(runId, "page") : action === "resume" ? engine.resumeFlow(runId, "page") : engine.dismissFlow(runId, action, "page");
     // The run starts, or the page changes, in a reconcile of its own: not waited for here.
     if (result.ok && !engine.busy()) void engine.tick().catch((error: unknown) => log(`reconcile after a flow action failed: ${(error as Error).message}`));
     return result;

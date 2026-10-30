@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
 import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
-import { FLOW_VALUE_BYTES } from "../shared/model";
+import { FLOW_VALUE_BYTES, type ResumeOffer } from "../shared/model";
 import { iso } from "./time";
 import { agentIdOf, cleanText, hasUnsafe } from "./untrusted";
 
@@ -106,6 +106,10 @@ interface RunRec {
   caseId: string;
   /** Who ran it, as run.start says: asked about when the run has no claim. */
   holder: { pid?: unknown; hostname?: unknown };
+  /** The run this one carries on (run.start's `resumeOf`), when it does and the id reads as one. */
+  resumeOf: string | null;
+  /** The last word of the flow on how it could be carried on (its `resume` events): null when it has said nothing, or took it back. The run.end's own is `end.resume`. */
+  resume: ResumeOffer | null;
   phaseState: Map<string, "run" | "ok" | "bad">;
   calls: Map<string, CallRec>;
   lastAt: number;
@@ -114,7 +118,7 @@ interface RunRec {
   /** Calls that began after as many were kept as are (MAX_CALLS): their cost is missing from the sum. */
   skipped: number;
   /** `totalUsd` is the run.end's own sum of what the run cost (cost.totalUsd), null when the line did not give one or was not read. */
-  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null } | null;
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null; resume?: ResumeOffer | null } | null;
 }
 
 /** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
@@ -130,6 +134,24 @@ const errorOf = (v: unknown): RunError | null => {
   const e = obj(v);
   return e ? { name: cleanText(e.name, 60) ?? "Error", message: cleanText(e.message, 300) ?? "", headline: cleanText(str(e.message)?.split("\n")[0], 120) ?? "" } : null;
 };
+
+/** A run id as the runtime makes them (orchestration/runtime/claim.mjs): what `resumeOf` has to look like to be taken for one. */
+const RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+/**
+ * How a flow said it could be carried on, from a `resume` event or a run.end's `resume`: the flow it names, one line for a person, and whether
+ * a model may be called. Its input is not read (it is the runtime's to read when it carries on). Null for anything that does not fit the shape
+ * the runtime writes (EVENTS.md): a file can be edited, and a button is drawn from this.
+ */
+export function offerOf(value: unknown): ResumeOffer | null {
+  const point = obj(value);
+  if (!point) return null;
+  const flow = str(point.flow);
+  const from = cleanText(point.from, 120);
+  if (!flow || flow.length > 80 || !/^[a-z0-9][a-z0-9-]*$/.test(flow) || !from) return null;
+  if (point.spends !== "nothing" && point.spends !== "maybe") return null;
+  return { flow, from, spends: point.spends };
+}
 
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
 export function caseOfStart(start: Record<string, unknown>, affair: RunsDeps["affair"]): { caseId: string; stage: string | null } | null {
@@ -216,13 +238,17 @@ function fold(run: RunRec, e: Record<string, unknown>) {
       };
       return;
     }
+    case "resume":
+      // The last one counts; one that is taken back (or does not read) leaves nothing to carry on from.
+      run.resume = e.cleared === true ? null : offerOf(e);
+      return;
     case "run.end": {
       const stop = obj(e.stop);
       // What the flow returned is kept up to a bound (a rule is handed it); past that only that it was too large.
       const value = e.value === undefined ? null : e.value;
       const kept = valueWithin(value);
       const total = obj(e.cost)?.totalUsd;
-      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null };
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null, resume: offerOf(e.resume) };
     }
   }
 }
@@ -307,6 +333,8 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     .map((c) => c.title.slice(0, 80));
 
   const end = run.end;
+  // How it said it could be carried on: the run.end's word when it has ended, else the last it said while it ran (a run that was cut off).
+  const offer = end ? end.resume : run.resume;
   const outcome = end ? (end.summary ?? (end.outcome === "done" ? "完成了" : end.outcome === "stopped" ? (end.stop ? `中止了：${end.stop}` : "中止了") : end.outcome === "timeout" ? "超过了总时限" : (error?.plain ?? "失败了"))) : null;
 
   return {
@@ -329,6 +357,8 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     agentId: ended ? null : ((gate ?? [...open].reverse().find((c) => c.agentId))?.agentId ?? null),
     link: { plugin: deps.view.plugin, screen: deps.view.screen, params: { run: run.runId } },
     retry: null,
+    resumeOf: run.resumeOf,
+    resume: offer ? { from: offer.from, spends: offer.spends } : null,
   };
 }
 
@@ -369,6 +399,8 @@ export interface RunProbe {
   gate: boolean;
   /** Long quiet for a run that is alive. */
   slow: boolean;
+  /** How the run said it could be carried on: the run.end's word when it has ended, else the last `resume` event (a run that was cut off). Null: it did not, or it took it back. */
+  resume?: ResumeOffer | null;
 }
 
 export interface RunReader {
@@ -429,6 +461,8 @@ export function createRunReader(deps: RunsDeps): RunReader {
       stage: owner.stage,
       caseId: owner.caseId,
       holder: { pid: e.pid, hostname: e.hostname },
+      resumeOf: typeof e.resumeOf === "string" && RUN_ID_SHAPE.test(e.resumeOf) ? e.resumeOf : null,
+      resume: null,
       phaseState: new Map(),
       calls: new Map(),
       lastAt: Number.isFinite(startedAt) ? startedAt : deps.now(),
@@ -453,7 +487,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
     }
     const at = Date.parse(m[1]!);
     run.lastAt = Math.max(run.lastAt, Number.isFinite(at) ? at : 0);
-    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null };
+    run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: m[2]!, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null, resume: null };
   }
 
   function readNew(file: string, rec: FileRec) {
@@ -599,6 +633,7 @@ export function createRunReader(deps: RunsDeps): RunReader {
         reachable,
         gate: view?.gate != null,
         slow: view?.situation === "slow",
+        resume: run ? (run.end ? run.end.resume : run.resume) : null,
       };
     },
     archives(runId) {
@@ -643,7 +678,7 @@ function readersOf(base: Omit<RunsDeps, "runsDir">): (logDir: string) => RunRead
 }
 
 /** A run that cannot be looked for because no directory is known to look in: nothing is seen, and nothing may be concluded from that. */
-const NOWHERE: RunProbe = { state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: false, gate: false, slow: false };
+const NOWHERE: RunProbe = { state: "absent", safeToRestart: false, refused: null, view: null, end: null, costUsd: 0, costKnown: true, unread: 0, reachable: false, gate: false, slow: false, resume: null };
 
 // ---- what the runner printed --------------------------------------------------------------------
 
@@ -676,7 +711,7 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
   if (outcome !== "done" && outcome !== "stopped" && outcome !== "failed" && outcome !== "timeout") return null;
   const at = Number.isFinite(mtimeMs) ? mtimeMs : 0;
   // Unreadable (cut short, or a later attempt's words after it): that it ended, and how, is all there is; what it cost is not known.
-  let end: NonNullable<RunProbe["end"]> = { at, outcome, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null };
+  let end: NonNullable<RunProbe["end"]> = { at, outcome, summary: null, stop: null, error: null, value: null, valueDropped: true, totalUsd: null, resume: null };
   let costUsd = 0;
   let costKnown = false;
   if (result) {
@@ -684,12 +719,12 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
     const cost = obj(result.cost);
     const total = cost?.totalUsd;
     const usd = typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null;
-    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd };
+    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd, resume: offerOf(result.resume) };
     // No `cost` at all is a run in which no agent was asked anything: nothing was spent.
     costUsd = usd ?? 0;
     costKnown = usd !== null || cost === null;
   }
-  return { state: "ended", safeToRestart: false, refused: null, view: null, end, costUsd, costKnown, unread: 0, reachable: true, gate: false, slow: false };
+  return { state: "ended", safeToRestart: false, refused: null, view: null, end, costUsd, costKnown, unread: 0, reachable: true, gate: false, slow: false, resume: end.resume ?? null };
 }
 
 /**

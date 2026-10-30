@@ -109,7 +109,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 await $.resumeWith({
   flow: "build-resume",                         // 流程名（运行时按名字找），不收路径
   input: { dir: "batch-1" },         // 照那个流程的 inputs 校验；运行目录只给目录名，不给绝对路径
-  from: "编译已过：从提交前的核对接着，不重编",    // 一句话给人看，最多 60 个字符
+  from: "编译已过：从核对接着，不重编",    // 一句话给人看，最多 60 个字符
   spends: "nothing",                            // "nothing" 不调模型；"maybe" 可能调
 });
 await $.resumeWith(null);                       // 收回：这次停下以后不能接着跑

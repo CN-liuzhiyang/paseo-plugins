@@ -508,7 +508,7 @@ export function createGraph(deps: GraphDeps) {
       case "unchecked":
         kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : situation === "unchecked" ? "没查成 · 看一眼" : "可能卡住了 · 看一眼";
         line = lastRun ? `「${lastRun.title ?? lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : situation === "unchecked" ? `没查成：${lastRun.why ?? "没说原因"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
-        sub = lastRun ? (situation === "notstarted" || situation === "unchecked" ? `${situation === "unchecked" && lastRun.costUsd > 0 ? `已花 $${lastRun.costUsd.toFixed(2)}。` : "没花钱。"}${lastRun.retry ? "可以再跑一次，或者你自己来。" : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
+        sub = lastRun ? (situation === "notstarted" || situation === "unchecked" ? `${situation === "unchecked" && lastRun.costUsd > 0 ? `已花 $${lastRun.costUsd.toFixed(2)}。` : "没花钱。"}${lastRun.retry ? (lastRun.actions?.includes("resume") ? "可以接着跑、从头重跑，或者你自己来。" : "可以再跑一次，或者你自己来。") : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
         break;
       case "stuck":
         kicker = "卡住了 · 看一眼";
@@ -577,7 +577,12 @@ export function createGraph(deps: GraphDeps) {
     };
     // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
     const flowLines = f.runs.flatMap((r) => [
-      { ms: Date.parse(r.startedAt), line: `起了${named(r)}`, detail: r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : (null as string | null) },
+      {
+        ms: Date.parse(r.startedAt),
+        // A round that carries an earlier run on says so, and from where in the flow's own words; one started from the command line says it was taken in.
+        line: r.carriedOn ? `接着跑了${named(r)}${r.round ? `（第 ${r.round + 1} 次）` : ""}` : `起了${named(r)}`,
+        detail: [r.carriedOn ? clip(`${r.carriedOn.line.replace(/[。.]+$/u, "")}${r.carriedOn.by === "cli" ? "（从命令行接着跑的，已记进来）" : ""}`, 160) : "", r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : ""].filter(Boolean).join("；") || (null as string | null),
+      },
       ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `${named(r)}${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: [r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r)].filter(Boolean).join(" ") || null }] : []),
     ]);
     const history: HistoryLine[] = [

@@ -291,6 +291,16 @@ export type EvalKind = "woke-noop" | "nag-ignored" | "commitment-expired" | "rul
 /** How a run came out: the runtime's own four, and the three the controller reaches when the runtime cannot say. */
 export type FlowOutcome = "done" | "stopped" | "failed" | "timeout" | "lost" | "not-started" | "refused";
 
+/**
+ * How a run that did not finish said it could be carried on (the runtime's resume point, EVENTS.md "接着跑", without its input: that stays in
+ * the run's own files, and `orch.mjs resume` reads it there): the flow that would carry on, one line for a person on where from, and whether a model may be called.
+ */
+export interface ResumeOffer {
+  flow: string;
+  from: string;
+  spends: "nothing" | "maybe";
+}
+
 /** How a run ended, as the controller recorded it when it read or decided that. */
 export interface FlowEnd {
   at: string;
@@ -309,6 +319,21 @@ export interface FlowEnd {
   valueDropped: boolean;
   /** Why, in words, when the run did not come to a result. */
   why: string | null;
+  /** How the run said it could be carried on, if it did (the last word of the flow at the moment it stopped); absent: it did not, or it came to a result. */
+  resume?: ResumeOffer;
+}
+
+/** A round that carries on an earlier one (instead of running the request again from the start). */
+export interface FlowResume {
+  /** The run it carries on: the one before it in the request, or for a run someone else started with `orch.mjs resume`, the one it names. */
+  from: string;
+  /** The flow it runs: the one the earlier run named in its resume point; the request's own `flow` stays the request's. */
+  flow: string;
+  /** What the earlier run said about where it carries on from, cleaned. */
+  line: string;
+  spends: "nothing" | "maybe";
+  /** A person's id for the page's button, "cli" for a run that was started from the command line and taken into the record. */
+  by: string;
 }
 
 /** One run of a flow the controller meant to start for an item: the intent, written before the process was. */
@@ -336,7 +361,10 @@ export interface FlowRec {
   selfRetry?: boolean;
   /** What people call the flow on the page (rules.ts `title`); absent: its name. */
   title?: string;
-  /** What the flow is given; dropped once the run is done or stopped (a run that failed is run again with it). */
+  /**
+   * What the request's flow is given; dropped once the run is done or stopped (a run that failed is run again with it). A round that carries on
+   * an earlier one (`resume`) keeps the request's input too: the flow it runs reads its own from the earlier run's files, and "from the start" needs this.
+   */
   input: Record<string, unknown> | null;
   inputHash: string;
   /** The fingerprint of the rules that asked for it. */
@@ -354,6 +382,8 @@ export interface FlowRec {
   spawnError?: string;
   ended?: FlowEnd;
   dismissed?: { how: "mine" | "fold"; by: string; at: string };
+  /** Set for a round that carries on an earlier run (`orch.mjs resume`) instead of starting the request's flow from its input. */
+  resume?: FlowResume;
 }
 
 /** What a rule reads of a run (ctx.run). */
@@ -376,6 +406,12 @@ export interface FlowResult {
   limit?: "perDay" | "perCase" | "usd" | "concurrent";
   /** For a run a person set aside ("dismissed"): how it ended, or null when it has not. */
   endedOutcome: FlowOutcome | null;
+  /** The run this one carries on, when it does (a person pressed "接着跑", or it was started with `orch.mjs resume`); null for a run from the start. */
+  resumedFrom: string | null;
+  /** The flow that ran: the request's own, or the one a resume point named; null when no run exists. */
+  ran: string | null;
+  /** A run that did not come to a result and said how it could be carried on: where from (its own words) and whether a model may be called; null otherwise, and once a later round exists. */
+  resumable: { from: string; spends: "nothing" | "maybe" } | null;
 }
 
 /** The most of a run's result the controller keeps and hands to a rule. */
