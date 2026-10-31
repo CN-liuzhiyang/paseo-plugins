@@ -21,14 +21,26 @@ export const COMMAND_LINE_BUDGET = 32_000;
 const DEFAULT_INSTALL_DIR = path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Paseo");
 
 export class PaseoCliError extends Error {
-  constructor(message, { argv, exitCode, stdout, stderr }) {
+  /** `code` and `details` are the CLI's own { error: { code, details } }, when it said why in JSON. */
+  constructor(message, { argv, exitCode, stdout, stderr, code = null, details = null }) {
     super(message);
     this.name = "PaseoCliError";
     this.argv = argv;
     this.exitCode = exitCode;
     this.stdout = stdout;
     this.stderr = stderr;
+    this.code = code;
+    this.details = details;
   }
+}
+
+/**
+ * The option an older CLI does not know, from the "error: unknown option '--x'" its argument parser prints before it does
+ * anything (so nothing was started or spent). Null for any other failure.
+ */
+export function unknownOption(error) {
+  if (error?.name !== "PaseoCliError" || typeof error.exitCode !== "number" || error.exitCode === 0) return null;
+  return /^error: unknown option '(--[\w-]+)'/m.exec(`${error.stderr ?? ""}\n${error.stdout ?? ""}`)?.[1] ?? null;
 }
 
 function resolveLaunch(installDir) {
@@ -161,17 +173,22 @@ const ERROR_HINTS = {
     "array through runtime/paseo-cli.mjs rather than through cmd.exe or PowerShell.",
 };
 
-function describeFailure(argv, exitCode, stdout, stderr) {
-  const raw = stderr.trim() || stdout.trim();
+// { error: { code, message, details } } as the CLI prints it, behind any line it said first (the workspace it used).
+function errorBody(raw) {
+  const at = raw.search(/^\{/m);
+  if (at < 0) return null;
   try {
-    const parsed = JSON.parse(raw);
-    const code = parsed?.error?.code;
-    if (code) {
-      const hint = ERROR_HINTS[code];
-      return `paseo ${argv[0]} failed: ${code} -- ${parsed.error.message}${hint ? `\n\n${hint}` : ""}`;
-    }
+    const error = JSON.parse(raw.slice(at))?.error;
+    return typeof error?.code === "string" ? error : null;
   } catch {
-    // Not JSON; fall through to the raw text.
+    return null;
+  }
+}
+
+function describeFailure(argv, exitCode, raw, error) {
+  if (error) {
+    const hint = ERROR_HINTS[error.code];
+    return `paseo ${argv[0]} failed: ${error.code} -- ${error.message}${hint ? `\n\n${hint}` : ""}`;
   }
   return `paseo ${argv[0]} exited ${exitCode}: ${raw}`;
 }
@@ -181,11 +198,15 @@ export async function runPaseoJson(args, options = {}) {
   const { stdout, stderr, exitCode } = await runPaseo(argv, options);
 
   if (exitCode !== 0) {
-    throw new PaseoCliError(describeFailure(argv, exitCode, stdout, stderr), {
+    const raw = stderr.trim() || stdout.trim();
+    const body = errorBody(raw);
+    throw new PaseoCliError(describeFailure(argv, exitCode, raw, body), {
       argv,
       exitCode,
       stdout,
       stderr,
+      code: body?.code ?? null,
+      details: body?.details ?? null,
     });
   }
 

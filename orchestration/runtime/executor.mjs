@@ -6,7 +6,9 @@
 // run a whole flow without spending anything, and so moving execution into
 // the daemon one day replaces this file and nothing else.
 //
-//   ask(request)          run an agent to completion; resolves to its structured output
+//   ask(request)          run an agent to completion; resolves to its structured output. With `maxRetries: 0` a reply that
+//                         does not fit rejects (PaseoCliError, code OUTPUT_SCHEMA_FAILED, details.lastResponse) instead of being asked for again
+//   send({ agentId, prompt, schema, timeout, file })   another turn for that agent, same shape of result and failure; absent on an executor that cannot
 //   spawn(request)        start an agent without waiting; resolves to { agentId }
 //   findAgent(labels)     id of the agent carrying every one of these labels, or null
 //   inspect(agentId)      { status, usage: { usd, inputTokens, outputTokens } | null }
@@ -23,6 +25,8 @@
 // is to be started in that workspace. A workspace's agents all work in the
 // workspace's own directory: `paseo run --workspace` ignores --cwd.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { runPaseo, runPaseoJson } from "./paseo-cli.mjs";
 import { cutTitle } from "./workspaces.mjs";
 
@@ -58,11 +62,32 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
   return {
     // `--output-schema` makes stdout the agent's structured output, with no
     // agent id in it; the runner finds the agent again by its labels.
+    // `maxRetries` 0: the CLI hands back a reply that does not fit instead of asking again itself, and the runner
+    // sends back only what is wrong (answer.mjs). Left out, the CLI retries as it always did.
     ask: (request) =>
       runJson(
-        ["run", ...agentArgs(request), ...where(request.cwd), "--wait-timeout", request.timeout, "--output-schema", JSON.stringify(request.schema), request.prompt],
+        [
+          "run",
+          ...agentArgs(request),
+          ...where(request.cwd),
+          "--wait-timeout",
+          request.timeout,
+          "--output-schema",
+          JSON.stringify(request.schema),
+          ...(request.maxRetries === undefined ? [] : ["--max-retries", String(request.maxRetries)]),
+          request.prompt,
+        ],
         opts(request.cwd),
       ),
+
+    // Another turn for an agent that already answered, with its own schema. The prompt goes in a file because `send`
+    // can read one, and an argument is capped (paseo-cli.mjs). The file is read by the CLI process, which is on this
+    // machine whichever host the agent is on.
+    send: async ({ agentId, prompt, schema, timeout, file }) => {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, prompt, "utf8");
+      return runJson(["send", agentId, "--prompt-file", file, "--output-schema", JSON.stringify(schema), "--max-retries", "0", "--wait-timeout", timeout], opts());
+    },
 
     // Paseo rejects --output-schema with --background, so only unstructured
     // agents (the gate's carrier) are spawned.
