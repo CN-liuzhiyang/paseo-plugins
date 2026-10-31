@@ -43,8 +43,8 @@ export const runCardSchema = z.object({
       carrierAgentId: z.string().nullable(),
     })
     .nullable(),
-  /** For a lost run: whether its process is known to be gone. */
-  lost: z.object({ pid: z.number().nullable(), procGone: z.boolean() }).nullable(),
+  /** For a lost run: whether its process is known to be gone, and whether agents it started were still open. */
+  lost: z.object({ pid: z.number().nullable(), procGone: z.boolean(), agents: z.boolean().optional() }).nullable(),
   /** The node the run view selects first when opened from the card. */
   focus: z.string(),
   /** Started with --host: its agents live on another daemon. */
@@ -121,7 +121,7 @@ export function cardOf(
           carrierAgentId: gateCall.agentId,
         }
       : null,
-    lost: status === "lost" ? { pid: proc?.pid ?? null, procGone: processGone(proc) } : null,
+    lost: status === "lost" ? { pid: proc?.pid ?? null, procGone: processGone(proc), agents: openCalls(run).some((call) => call.agentId) } : null,
     focus: top.select,
     remote: start.host != null,
     evaluatedAt: new Date(now).toISOString(),

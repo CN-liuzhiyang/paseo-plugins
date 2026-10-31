@@ -37,6 +37,14 @@ export const runSummary = z.object({
   host: z.string().nullable(),
   /** run.start.affair's label: what the run is for, as its caller said. The detail view has the rest. */
   affairLabel: z.string().nullable(),
+  /** Where the affair's own page is, when it names one inside Paseo; the outside address stays in the file. */
+  affairLink: z.object({ plugin: z.string(), screen: z.string(), params: z.record(z.string(), z.string()) }).nullable(),
+  /** The Paseo workspaces the runtime put the run's agents and gate cards in (the `workspace` events). */
+  workspaceIds: z.array(z.string()),
+  /** The run this one carries on, when it was started with `orch.mjs resume`. */
+  resumeOf: z.string().nullable(),
+  /** The one-line card, worked out the same way as the one in the conversation; the flow bar draws its rows from it. */
+  card: runCardSchema.nullable(),
   /** For a run without run.end: what it is doing, or was doing when it went quiet. */
   activity: z.string().nullable(),
   stop: z.object({ reason: z.string(), phase: z.string().nullable(), phaseTitle: z.string().nullable() }).nullable(),

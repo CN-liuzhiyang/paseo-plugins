@@ -2,6 +2,7 @@ import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { RpcOutput } from "@getpaseo/plugin";
 import type { listRunsRpc, readRunRpc, RunSummary } from "../shared/rpc";
+import { cardOf } from "../shared/card";
 import { activity } from "../shared/format";
 import { hero, inputLabel, phaseStrip } from "../shared/graph";
 import {
@@ -96,6 +97,10 @@ export function summarize(
     caller: run.start?.caller ?? null,
     host: run.start?.host ?? null,
     affairLabel: run.start?.affair?.label ?? null,
+    affairLink: run.start?.affair?.link ?? null,
+    workspaceIds: run.workspaces.map((workspace) => workspace.workspaceId),
+    resumeOf: run.start?.resumeOf ?? null,
+    card: cardOf(runId, run, status, now, { proc }),
     activity: activity(run, status, now, { proc, staleMs }),
     stop: end?.stop ? { ...end.stop, phaseTitle: phaseTitle(run, end.stop.phase) } : null,
     error: end?.error ?? null,
@@ -123,6 +128,10 @@ function unreadable(runId: string, size: number, problem: string): RunSummary {
     caller: null,
     host: null,
     affairLabel: null,
+    affairLink: null,
+    workspaceIds: [],
+    resumeOf: null,
+    card: null,
     activity: null,
     stop: null,
     error: null,
