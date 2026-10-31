@@ -78,7 +78,7 @@ test("card: lost with the process gone says so", () => {
   const status = runStatus(run, lastTs(events) + 1_000, BASE, proc);
   assert.equal(status, "lost");
   const card = cardOf("r6", run, status, lastTs(events) + 1_000, { proc })!;
-  assert.deepEqual(card.lost, { pid: 4242, procGone: true });
+  assert.deepEqual(card.lost, { pid: 4242, procGone: true, agents: true }, "a call with an agent was still open");
   assert.equal(card.tone, "warning");
 });
 

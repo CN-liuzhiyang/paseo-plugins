@@ -57,6 +57,14 @@ export interface RunStart {
   hostname: string | null;
   /** What the run is for, as its caller said (shared/affair.ts); absent in files written before it was added. */
   affair: Affair | null;
+  /** The run this one carries on (`orch.mjs resume`); null for a run that started on its own. */
+  resumeOf: string | null;
+}
+
+/** A Paseo workspace the runtime put this run's agents and gate cards in (the `workspace` event). */
+export interface RunWorkspace {
+  workspaceId: string;
+  cwd: string | null;
 }
 
 export interface RunEnd {
@@ -186,6 +194,8 @@ export interface RunState {
   calls: Map<string, CallState>;
   caveats: Caveat[];
   logs: LogEntry[];
+  /** Workspaces the run works in, one per directory, in the order they were named. */
+  workspaces: RunWorkspace[];
   end: RunEnd | null;
   /** Lines that broke the contract. Shown to the reader, never fatal. */
   problems: string[];
@@ -211,6 +221,7 @@ export function createRun(): RunState {
     calls: new Map(),
     caveats: [],
     logs: [],
+    workspaces: [],
     end: null,
     problems: [],
     unknownKinds: {},
@@ -357,6 +368,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         pid: num(raw.pid),
         hostname: str(raw.hostname),
         affair: affairOf(raw.affair),
+        resumeOf: str(raw.resumeOf),
       };
       run.startedAt = ts;
       // Declared phases come first, in declared order, even the ones never entered.
@@ -525,6 +537,15 @@ export function applyEvent(run: RunState, raw: unknown): void {
         level: level === "warn" || level === "error" ? level : "info",
         message: str(raw.message) ?? "",
       });
+      return;
+    }
+    case "workspace": {
+      const workspaceId = str(raw.workspaceId);
+      if (workspaceId === null) {
+        problem(run, `第 ${seq ?? "?"} 条 workspace 没有 workspaceId`);
+        return;
+      }
+      if (!run.workspaces.some((known) => known.workspaceId === workspaceId)) run.workspaces.push({ workspaceId, cwd: str(raw.cwd) });
       return;
     }
     case "run.end": {

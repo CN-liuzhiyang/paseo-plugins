@@ -35,6 +35,10 @@ export function createFocusStore() {
       focus.set(workspaceId, { runId, select, nonce: current?.runId === runId ? current.nonce : 0 });
       notify();
     },
+    /** Nothing shown for this workspace any more. */
+    clear(workspaceId: string) {
+      if (focus.delete(workspaceId)) notify();
+    },
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       return () => {

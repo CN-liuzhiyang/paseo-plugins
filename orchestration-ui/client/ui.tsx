@@ -249,12 +249,15 @@ export function Button({
   onPress,
   primary = false,
   wide = false,
+  small = false,
 }: {
   icon?: string;
   label: string;
   onPress(): void;
   primary?: boolean;
   wide?: boolean;
+  /** For a row in a narrow place: less padding, smaller type. */
+  small?: boolean;
 }) {
   const ui = useUi();
   const c = ui.theme.colors;
@@ -269,8 +272,8 @@ export function Button({
         alignItems: "center",
         justifyContent: "center",
         gap: 6,
-        paddingHorizontal: 14,
-        paddingVertical: 8,
+        paddingHorizontal: small ? 9 : 14,
+        paddingVertical: small ? 4 : 8,
         borderRadius: 8,
         borderWidth: 1,
         borderColor: primary ? c.foreground : c.border,
@@ -279,8 +282,8 @@ export function Button({
         opacity: pressed ? 0.75 : 1,
       })}
     >
-      {icon ? <Icon name={icon} size={14} color={fg} /> : null}
-      <Text style={{ color: fg, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+      {icon ? <Icon name={icon} size={small ? 12 : 14} color={fg} /> : null}
+      <Text style={{ color: fg, fontSize: small ? 12 : 13, fontWeight: "600" }}>{label}</Text>
     </Pressable>
   );
 }

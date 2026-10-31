@@ -27,6 +27,17 @@ export function formatDuration(value: number | null): string {
   return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
 }
 
+/** The coarse span a one-line status uses: "42 秒", "12 分", "3 小时 5 分", "2 天". */
+export function formatBrief(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return "—";
+  const minutes = Math.floor(value / 60_000);
+  if (minutes < 1) return `${Math.floor(value / 1_000)} 秒`;
+  if (minutes < 60) return `${minutes} 分`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours} 小时 ${minutes % 60} 分` : `${hours} 小时`;
+  return `${Math.floor(hours / 24)} 天`;
+}
+
 /** The same, tight enough for a node: "42秒", "3分12秒", "1时05分". */
 export function formatShort(value: number | null): string {
   if (value === null || !Number.isFinite(value) || value < 0) return "—";

@@ -1,13 +1,13 @@
-import { useAgent, type PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
+import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import type { RunSummary } from "../shared/rpc";
-import { useRunList } from "./data";
 import { defaultRun, type FocusStore } from "./focus";
 import { RUN_LOOK } from "./looks";
 import { RunDetail } from "./run-detail";
 import { Banner, Button, UiProvider, useUi } from "./ui";
+import { useWorkspaceRuns } from "./workspace-runs";
 
 // The workspace's 流程 tab. A run started by an agent puts that agent and every agent it asks
 // into the same workspace, so the run sits here as a tab beside them: to an agent and back is one
@@ -15,13 +15,6 @@ import { Banner, Button, UiProvider, useUi } from "./ui";
 // the same view as the sidebar screen.
 
 const MAX_CHIPS = 8;
-
-/** Reports whether one caller lives in this workspace; renders nothing. */
-function Member({ caller, workspaceId, report }: { caller: string; workspaceId: string; report(caller: string, inside: boolean): void }) {
-  const where = useAgent(caller, (agent) => agent.workspaceId);
-  useEffect(() => report(caller, where === workspaceId), [caller, where, workspaceId, report]);
-  return null;
-}
 
 function Chip({ run, active, onPress }: { run: RunSummary; active: boolean; onPress(): void }) {
   const ui = useUi();
@@ -56,25 +49,15 @@ function Chip({ run, active, onPress }: { run: RunSummary; active: boolean; onPr
 
 function Panel({ workspaceId, focus, openAll }: { workspaceId: string; focus: FocusStore; openAll(): void }) {
   const ui = useUi();
-  const { data, error } = useRunList();
   const current = useSyncExternalStore(
     focus.subscribe,
     () => focus.get(workspaceId),
     () => focus.get(workspaceId),
   );
-  const [members, setMembers] = useState<ReadonlySet<string>>(new Set());
-  const report = useCallback((caller: string, inside: boolean) => {
-    setMembers((before) => {
-      if (before.has(caller) === inside) return before;
-      const next = new Set(before);
-      if (inside) next.add(caller);
-      else next.delete(caller);
-      return next;
-    });
-  }, []);
-  const runs = data?.runs ?? [];
-  const callers = [...new Set(runs.flatMap((run) => (run.caller ? [run.caller] : [])))];
-  const mine = runs.filter((run) => (run.caller && members.has(run.caller)) || run.runId === current?.runId);
+  // A run opened from outside stays listed even when the workspace cannot be shown to own it.
+  const opened = current?.runId;
+  const keep = useCallback((run: RunSummary) => run.runId === opened, [opened]);
+  const { data, error, mine, probes } = useWorkspaceRuns(workspaceId, keep);
   const shown = current?.runId ?? defaultRun(mine)?.runId ?? null;
   const onPick = useCallback(
     (key: string) => {
@@ -83,7 +66,6 @@ function Panel({ workspaceId, focus, openAll }: { workspaceId: string; focus: Fo
     [focus, workspaceId, shown],
   );
 
-  const probes = callers.map((caller) => <Member key={caller} caller={caller} workspaceId={workspaceId} report={report} />);
   if (shown === null) {
     return (
       <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>

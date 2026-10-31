@@ -38,3 +38,17 @@ test("default run: needs you, then running, then newest", () => {
   assert.equal(defaultRun([run("a", "done"), run("b", "failed")])?.runId, "a");
   assert.equal(defaultRun([]), null);
 });
+
+test("focus: clearing a workspace tells its listeners once and leaves the others alone", () => {
+  const focus = createFocusStore();
+  focus.open("w1", "run-a", null);
+  focus.open("w2", "run-b", null);
+  let changes = 0;
+  focus.subscribe(() => (changes += 1));
+  focus.clear("w1");
+  assert.equal(focus.get("w1"), null);
+  assert.equal(focus.get("w2")?.runId, "run-b");
+  assert.equal(changes, 1);
+  focus.clear("w1");
+  assert.equal(changes, 1, "nothing was open, nothing to tell");
+});
