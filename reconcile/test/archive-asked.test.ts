@@ -6,7 +6,7 @@ import { writeFileSync } from "node:fs";
 import path from "node:path";
 import { createRunsWiring } from "../server/runs";
 import { advance, asks, finished, first, flowsOf, headline, idFor, look, req, running, withFlows } from "./flows-kit";
-import { ago, AFFAIR, callEnd, callStart, fixture, MIN, start } from "./run-files";
+import { ago, AFFAIR, callEnd, callStart, fixture, MIN, only, start } from "./run-files";
 
 // The agents of the calls that asked to be archived once they had handed in (`$.ask(..., { archive: "after" })`), which the runtime's CLI cannot
 // archive when the call ran in a background workspace (the affair's): the plugin that started the run archives them. Three parts: how the run's
@@ -122,6 +122,154 @@ test("the plugin's wiring reads them from the log directory a run was started un
     assert.deepEqual(nowhere.archives("r1", null), [], "no log directory is known: nothing is read");
   } finally {
     f.close();
+  }
+});
+
+// ---- `$.again`: one agent, several calls ---------------------------------------------------------------------------------
+
+// A call that goes on with an agent (`$.again`, call.start's `continues`) is a call of its own, with its own id, for an agent that carries the
+// label of the call that made it (`orch-call`). What is left to archive is told per agent, by the last call it served, under the id the label has.
+const again = (ts: string, callId: string, of: string, extra: Record<string, unknown> = {}) => callStart(ts, callId, "ask", { continues: { runId: "r1", callId: of }, ...extra });
+const agentOfCall = (ts: string, callId: string, agentId = "agent-1") => ({ kind: "call.agent", ts, callId, agentId });
+
+test("a call that goes on with an agent is told under the call that made it: that is the id the agent's label has", () =>
+  withRun(
+    lines(
+      callStart(ago(30 * MIN), "c1", "ask", {}),
+      callEnd(ago(29 * MIN), "c1", true, { agentId: "agent-1" }),
+      again(ago(28 * MIN), "c2", "c1", ASKED),
+      agentOfCall(ago(28 * MIN), "c2"),
+      callEnd(ago(27 * MIN), "c2", true, { agentId: "agent-1" }),
+    ),
+    (archives) => assert.deepEqual(archives, [{ callId: "c1", agentId: "agent-1" }]),
+  ));
+
+test("and a call that goes on from one that went on is told under the first of them", () =>
+  withRun(
+    lines(
+      callStart(ago(30 * MIN), "c1", "ask", {}),
+      callEnd(ago(29 * MIN), "c1", true, { agentId: "agent-1" }),
+      again(ago(28 * MIN), "c2", "c1"),
+      callEnd(ago(27 * MIN), "c2", true, { agentId: "agent-1" }),
+      again(ago(26 * MIN), "c3", "c2", ASKED),
+      agentOfCall(ago(26 * MIN), "c3"),
+      callEnd(ago(25 * MIN), "c3", true, { agentId: "agent-1" }),
+    ),
+    (archives) => assert.deepEqual(archives, [{ callId: "c1", agentId: "agent-1" }]),
+  ));
+
+test("an agent that two calls asked to have archived is told once", () =>
+  withRun(
+    lines(
+      callStart(ago(30 * MIN), "c1", "ask", ASKED),
+      callEnd(ago(29 * MIN), "c1", true, { agentId: "agent-1" }),
+      again(ago(28 * MIN), "c2", "c1", ASKED),
+      callEnd(ago(27 * MIN), "c2", true, { agentId: "agent-1" }),
+      callStart(ago(26 * MIN), "c3", "ask", ASKED),
+      callEnd(ago(25 * MIN), "c3", true, { agentId: "agent-3" }),
+    ),
+    (archives) => assert.deepEqual(archives, [{ callId: "c1", agentId: "agent-1" }, { callId: "c3", agentId: "agent-3" }]),
+  ));
+
+test("the last call an agent served says what is left: an archive that failed for the first and went through for the second is not tried again", () =>
+  withRun(
+    lines(
+      callStart(ago(30 * MIN), "c1", "ask", ASKED),
+      callEnd(ago(29 * MIN), "c1", true, { agentId: "agent-1" }),
+      archiveEvent(ago(28 * MIN), "c1", false),
+      again(ago(27 * MIN), "c2", "c1", ASKED),
+      callEnd(ago(26 * MIN), "c2", true, { agentId: "agent-1" }),
+      archiveEvent(ago(25 * MIN), "c2", true),
+    ),
+    (archives) => assert.deepEqual(archives, []),
+  ));
+
+test("not every call that asked and was not archived is told, only the last of its agent: the earlier ask is not an ask to archive an agent that went on", () =>
+  withRun(
+    lines(
+      // asked, not archived, then gone on with by a call that did not ask: the agent is meant to stay
+      callStart(ago(40 * MIN), "c1", "ask", ASKED),
+      callEnd(ago(39 * MIN), "c1", true, { agentId: "agent-1" }),
+      again(ago(38 * MIN), "c2", "c1"),
+      callEnd(ago(37 * MIN), "c2", true, { agentId: "agent-1" }),
+      // asked, archived, then gone on with by a call that asked again and was not archived: it is left
+      callStart(ago(36 * MIN), "c3", "ask", ASKED),
+      callEnd(ago(35 * MIN), "c3", true, { agentId: "agent-3" }),
+      archiveEvent(ago(34 * MIN), "c3", true, "agent-3"),
+      again(ago(33 * MIN), "c4", "c3", ASKED),
+      callEnd(ago(32 * MIN), "c4", true, { agentId: "agent-3" }),
+      // asked, and gone on with by a call that failed: its agent is kept to be looked into
+      callStart(ago(31 * MIN), "c5", "ask", ASKED),
+      callEnd(ago(30 * MIN), "c5", true, { agentId: "agent-5" }),
+      again(ago(29 * MIN), "c6", "c5", ASKED),
+      callEnd(ago(28 * MIN), "c6", false, { agentId: "agent-5", error: { name: "CheckFailed", message: "x" } }),
+    ),
+    (archives) => assert.deepEqual(archives, [{ callId: "c3", agentId: "agent-3" }]),
+  ));
+
+test("a link to a call that is not of this run, or that does not read, is not followed; one to a call past those kept still names it", () =>
+  withRun(
+    lines(
+      callStart(ago(30 * MIN), "c1", "ask", {}),
+      callEnd(ago(29 * MIN), "c1", true, { agentId: "agent-1" }),
+      callStart(ago(28 * MIN), "c2", "ask", { ...ASKED, continues: { runId: "another-run", callId: "c1" } }),
+      callEnd(ago(27 * MIN), "c2", true, { agentId: "agent-2" }),
+      callStart(ago(26 * MIN), "c3", "ask", { ...ASKED, continues: "c1" }),
+      callEnd(ago(25 * MIN), "c3", true, { agentId: "agent-3" }),
+      callStart(ago(24 * MIN), "c4", "ask", { ...ASKED, continues: { runId: "r1", callId: "c4" } }),
+      callEnd(ago(23 * MIN), "c4", true, { agentId: "agent-4" }),
+      callStart(ago(22 * MIN), "c5", "ask", { ...ASKED, continues: { runId: "r1", callId: "gone" } }),
+      callEnd(ago(21 * MIN), "c5", true, { agentId: "agent-5" }),
+    ),
+    (archives) =>
+      assert.deepEqual(archives, [
+        { callId: "c2", agentId: "agent-2" },
+        { callId: "c3", agentId: "agent-3" },
+        { callId: "c4", agentId: "agent-4" },
+        { callId: "gone", agentId: "agent-5" },
+      ]),
+  ));
+
+test("a call that goes on does not change how the run is told: its page has the same calls, cost and agent as for a run without them", () => {
+  const f = fixture();
+  try {
+    f.run(
+      "r1",
+      [
+        start(ago(40 * MIN), AFFAIR("tracker:1")),
+        callStart(ago(5 * MIN), "c1", "ask", ASKED),
+        callEnd(ago(4 * MIN), "c1", true, { agentId: "agent-1" }),
+        again(ago(3 * MIN), "c2", "c1", ASKED),
+        agentOfCall(ago(3 * MIN), "c2"),
+      ],
+      { claimAgeMs: 10_000 },
+    );
+    const view = only(f);
+    assert.equal(view.situation, "doing");
+    assert.equal(view.costUsd, 0.25, "what the first call cost; the second has not ended");
+    assert.equal(view.agentId, "agent-1", "the agent that is working now is the one the second call is with");
+    assert.deepEqual(f.reader.archives("r1"), [], "and while it works nothing of it is left to archive");
+  } finally {
+    f.close();
+  }
+  const g = fixture();
+  try {
+    g.run(
+      "r1",
+      [
+        start(ago(40 * MIN), AFFAIR("tracker:1")),
+        callStart(ago(5 * MIN), "c1", "ask", ASKED),
+        callEnd(ago(4 * MIN), "c1", true, { agentId: "agent-1" }),
+        again(ago(3 * MIN), "c2", "c1", ASKED),
+        agentOfCall(ago(3 * MIN), "c2"),
+        callEnd(ago(2 * MIN), "c2", true, { agentId: "agent-1", cost: { usd: 0.1, inputTokens: 1, outputTokens: 1 } }),
+      ],
+      { claimAgeMs: 10_000 },
+    );
+    assert.equal(only(g).costUsd, 0.35, "each call's cost is its own: the second is a round of its own");
+    assert.deepEqual(g.reader.archives("r1"), [{ callId: "c1", agentId: "agent-1" }]);
+  } finally {
+    g.close();
   }
 });
 

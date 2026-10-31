@@ -95,6 +95,8 @@ interface CallRec {
   /** The flow asked for the agent to be archived once it had handed in (call.start's `archive: "after"`), and whether a `call.archive` says it was done. */
   archive: boolean;
   archived: boolean;
+  /** The call of this run whose agent this one carries on (`$.again`: call.start's `continues`): the same agent, the conversation going on. Null for a call that made its agent. */
+  continues: string | null;
   end: { at: number; ok: boolean; error: RunError | null; usd: number; outcome: string | null } | null;
 }
 
@@ -138,6 +140,22 @@ const errorOf = (v: unknown): RunError | null => {
   return e ? { name: cleanText(e.name, 60) ?? "Error", message: cleanText(e.message, 300) ?? "", headline: cleanText(str(e.message)?.split("\n")[0], 120) ?? "" } : null;
 };
 
+/**
+ * The call that made the agent a call talked to, by following `continues` back: the agent carries that call's id in its `orch-call` label,
+ * which is what whoever archives it checks. A call that continues one past the number kept is still named by that one's id.
+ */
+function creatorOf(run: RunRec, call: CallRec): string {
+  const seen = new Set<string>([call.id]);
+  let at = call;
+  while (at.continues !== null && !seen.has(at.continues)) {
+    const next = run.calls.get(at.continues);
+    if (!next) return at.continues;
+    seen.add(next.id);
+    at = next;
+  }
+  return at.id;
+}
+
 /** A run id as the runtime makes them (orchestration/runtime/claim.mjs): what `resumeOf` has to look like to be taken for one. */
 const RUN_ID_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -155,6 +173,16 @@ export function offerOf(value: unknown): ResumeOffer | null {
   if (point.spends !== "nothing" && point.spends !== "maybe") return null;
   // What the point would start, for whoever shows it to a person and asks the runtime to start that and nothing else (the runtime's `pointPrint`).
   return { flow, from, spends: point.spends, ...(obj(point.input) ? { print: inputHashOf({ flow, input: point.input }) } : {}) };
+}
+
+/**
+ * The call a `$.again` carries on, from call.start's `continues` ({ runId, callId }): its id when it is a call of this run (the runtime only
+ * writes those; a link out of the run is not followed, since the agent's labels name the run that made it). Null for anything else.
+ */
+function continuesOf(value: unknown, runId: string): string | null {
+  const link = obj(value);
+  const callId = str(link?.callId);
+  return link && link.runId === runId && callId && callId.length <= 128 ? callId : null;
 }
 
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
@@ -211,6 +239,7 @@ function fold(run: RunRec, e: Record<string, unknown>) {
         agentId: null,
         archive: type === "ask" && e.archive === "after",
         archived: false,
+        continues: type === "ask" ? continuesOf(e.continues, run.runId) : null,
         end: null,
       });
       return;
@@ -416,6 +445,9 @@ export interface RunReader {
    * `call.archive` says it was done (EVENTS.md): what the runtime could not archive itself, left to whoever started the run. Empty for a run
    * that is not read (not this plugin's, or not there). Which agent it is, is the file's word, and a file is not trusted: the caller checks the
    * agent before it touches it.
+   *
+   * One entry for an agent, however many calls it served (`$.again` goes on with the same one): the last of them decides, and the call id is
+   * that of the call that made the agent, since that is what the agent's `orch-call` label has.
    */
   archives(runId: string): Array<{ callId: string; agentId: string }>;
   /**
@@ -646,7 +678,11 @@ export function createRunReader(deps: RunsDeps): RunReader {
       scan();
       const run = files.get(`${runId}.jsonl`)?.run;
       if (!run) return [];
-      return [...run.calls.values()].flatMap((c) => (c.archive && !c.archived && c.end?.ok === true && c.agentId ? [{ callId: c.id, agentId: c.agentId }] : []));
+      // An agent can serve several calls (`$.again` goes on with the same one), and what is to be done with it is the last call's word: a
+      // later call that did not ask for it to be archived, failed, or has it archived already leaves nothing to do, whatever an earlier one said.
+      const last = new Map<string, CallRec>();
+      for (const c of run.calls.values()) if (c.agentId) last.set(c.agentId, c);
+      return [...last].flatMap(([agentId, c]) => (c.archive && !c.archived && c.end?.ok === true ? [{ callId: creatorOf(run, c), agentId }] : []));
     },
     forCase(caseId) {
       scan();
