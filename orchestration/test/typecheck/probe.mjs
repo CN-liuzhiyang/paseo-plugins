@@ -48,6 +48,17 @@ export default flow({
     await $.ask(analyze, { question }, { check: () => [{ where: "/a", say: "x" }] });
     // @ts-expect-error fixes is a number
     await $.ask(analyze, { question }, { fixes: "2" });
+    const next = await $.again(answer, "name the file");
+    /** @type {"low" | "medium" | "high"} */
+    const again = next.confidence;
+    await $.again(answer, analyze, { question }, { check: null, archive: null, fresh: false });
+    await $.again(answer, "redo", { fresh: true, role: "worker", check: (a) => (a.items.length > 0 ? [] : "no items") });
+    // @ts-expect-error the question is a string
+    await $.again(answer, 42);
+    // @ts-expect-error a misspelled field of the answer is caught in the check
+    await $.again(answer, "redo", { check: (a) => a.diagnosys });
+    // @ts-expect-error fresh is true or false
+    await $.again(answer, "redo", { fresh: "yes" });
     // @ts-expect-error phase id not declared
     await $.phase("debate", async () => null);
     // @ts-expect-error inputs are the declared ones

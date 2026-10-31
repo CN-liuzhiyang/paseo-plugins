@@ -111,6 +111,23 @@ export interface AskOptions<Out = unknown> {
   mode?: never;
 }
 
+/** What `$.again` takes beyond the question. Naming who asks (role, provider, thinking, cwd) only makes sense for a new agent. */
+export interface AgainOptions<Out = unknown> {
+  /** A new agent instead of the one that answered: given the previous version in a file, and free to be another role. */
+  fresh?: boolean;
+  role?: string;
+  provider?: string;
+  thinking?: string;
+  cwd?: string;
+  title?: string;
+  timeout?: Duration;
+  /** Default: the previous call's. `null` turns it off, a function replaces it. */
+  check?: ((answer: Out, info: { round: number }) => Problems | Promise<Problems>) | null;
+  fixes?: number;
+  /** Default: the previous call's. `null` turns it off. */
+  archive?: "after" | null;
+}
+
 export interface GateEvidence {
   /** One line naming what this is, e.g. "要实现的修复 r7237410". */
   label: string;
@@ -212,6 +229,13 @@ export interface ResumePoint<N extends string = string> {
 
 export interface Dollar<PhaseId extends string> {
   ask<Out, In>(step: Step<Out, In>, input: In, options?: AskOptions<Out>): Promise<Out>;
+  /**
+   * Say something more to the agent that gave `prev` (the object `$.ask` or `$.again` returned, as it is) and get the whole
+   * answer again: the same agent, with its conversation, even if it was archived since. If it is gone, a new one is asked and
+   * given the previous version. `$.again(prev, step, input)` asks another step of the same agent.
+   */
+  again<Out>(prev: Out, text: string, options?: AgainOptions<Out>): Promise<Out>;
+  again<Out, In>(prev: unknown, step: Step<Out, In>, input: In, options?: AgainOptions<Out>): Promise<Out>;
   do<T>(name: string, fn: () => T | Promise<T>, options?: { title?: string }): Promise<T>;
   gate(request: GateRequest): Promise<GateDecision>;
   phase<T>(id: PhaseId, fn: () => T | Promise<T>): Promise<T>;

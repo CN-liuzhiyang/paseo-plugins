@@ -14,7 +14,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { format } from "node:util";
@@ -704,6 +704,185 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     }
   };
 
+  // What each answer an ask handed back was, by the object itself: `$.again` finds the agent and the call it came from
+  // through the very object the flow got, so a copy or a part of it (a trimmed plan) is not one it knows.
+  const answers = new WeakMap();
+  const ref = (rec) => (rec ? { runId, callId: rec.callId } : null);
+
+  // The previous version in a file, for the agent that is to improve on it: one that was asked in a session the daemon
+  // has since reloaded, or a new one, still has it. Written once, the first time it is asked for.
+  const versionFile = (rec) => {
+    if (!rec.file) {
+      rec.file = path.join(runDir, "answers", `${rec.callId}.json`);
+      mkdirSync(path.dirname(rec.file), { recursive: true });
+      writeFileSync(rec.file, log.scrub(rec.text), "utf8");
+    }
+    return rec.file;
+  };
+
+  // Whether the agent behind an answer can be asked again, and if not why not: a CLI that cannot send a question with a schema, an
+  // agent that was never found or is gone. (One that is archived is asked all the same: sending to it wakes it, and it is archived again.)
+  const cannotContinue = async (rec) => {
+    if (oldCli) return "cannot be sent a question with a schema by this Paseo CLI";
+    if (typeof executor.send !== "function") return "cannot be sent to by this executor";
+    if (!rec.agentId) return "was never found";
+    try {
+      await executor.inspect(rec.agentId);
+    } catch (error) {
+      if (error?.code === "AGENT_NOT_FOUND") return "is gone";
+      throw error;
+    }
+    return null;
+  };
+
+  // One agent call: `$.ask`, and `$.again`, which says whose agent it asks again (`continues`) or whose answer a new
+  // agent improves on (`revises`).
+  const askCall = async (step, stepInput, callOptions, again = null) => {
+    if (!isStep(step)) throw new TypeError("$.ask needs a step from define()");
+    if (Object.hasOwn(callOptions ?? {}, "mode")) {
+      throw new TypeError(`$.ask: mode is gone. The step declares effects ("${step.effects}"), and runtime/fences.mjs picks the mode`);
+    }
+    checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive", "check", "fixes"]);
+    if (callOptions.archive !== undefined && callOptions.archive !== "after") {
+      throw new TypeError(`$.ask(${step.name}): archive can only be "after" (archive the agent once the call has handed in its answer), not ${JSON.stringify(callOptions.archive)}`);
+    }
+    const { check, fixes = DEFAULT_FIXES } = callOptions;
+    if (check !== undefined && typeof check !== "function") throw new TypeError(`$.ask(${step.name}): check must be a function (answer, { round }) returning the problems found, as [{ at, say }]`);
+    if (!Number.isInteger(fixes) || fixes < 0 || fixes > MAX_FIXES) throw new TypeError(`$.ask(${step.name}): fixes is how many times the answer may be sent back to be corrected, 0 to ${MAX_FIXES} (default ${DEFAULT_FIXES})`);
+    const bound = bindRole(roster, callOptions);
+    const fence = fenceFor(bound.provider, step.effects);
+    const continues = again?.continues ?? null;
+    if (continues && fence.mode !== continues.fenceMode) {
+      throw new TypeError(
+        `$.again(${step.name}): the step's effects ("${step.effects}") need mode ${fence.mode}, and the agent was started with ${continues.fenceMode}; ` +
+          "a running agent keeps its fence, so ask this step with $.ask",
+      );
+    }
+    const prompt = promptOf(bound, step, stepInput, again);
+    const timeout = callOptions.timeout ?? step.timeout ?? DEFAULT_CALL_TIMEOUT;
+    parseDuration(timeout);
+    // The call's own title, then the step's, then its name: one value for
+    // the events and for the agent on Paseo.
+    const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
+    const callCwd = callOptions.cwd ?? cwd;
+    // Before the call exists: a wait for another run's workspace is not part of this call's time.
+    // Without an affair nothing is awaited here, so such a run goes through exactly the steps it always did.
+    // (An agent asked again is where it was.)
+    const used = affair && !continues ? workspaceFor(callCwd) : null;
+    const workspace = used ? await used : null;
+
+    const record = startCall();
+    log.emit("call.start", {
+      callId: record.callId,
+      type: "ask",
+      name: step.name,
+      title,
+      headline: step.headline,
+      phase: currentPhase(),
+      role: bound.role,
+      provider: bound.provider,
+      thinking: bound.thinking,
+      effects: step.effects,
+      fence,
+      prompt,
+      schema: step.schema,
+      schemaFingerprint: step.fingerprint,
+      timeout,
+      archive: callOptions.archive ?? null,
+      continues: ref(continues),
+      revises: ref(again?.revises ?? null),
+    });
+    if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
+    // An agent asked again is known from the start; a new one is looked for by its labels while the call runs.
+    if (continues) announceAgent(record, continues.agentId);
+    else probeAgent(record);
+
+    const askRequest = {
+      provider: bound.provider,
+      thinking: bound.thinking,
+      mode: fence.mode,
+      title,
+      labels: { ...record.labels, "orch-step": step.name },
+      prompt,
+      schema: step.schema,
+      timeout,
+      cwd: callCwd,
+    };
+    // `retries` 0 hands a reply that does not fit back to the runner instead of the CLI asking again; an older CLI
+    // that does not know the option is asked the old way, once and for the rest of the run.
+    const first = continues
+      ? async () => {
+          try {
+            return await executor.send({ agentId: continues.agentId, prompt, schema: step.schema, timeout, file: path.join(runDir, "prompts", `${record.callId}.r1.txt`) });
+          } catch (error) {
+            if (["--output-schema", "--max-retries"].includes(unknownOption(error))) {
+              oldCli = true;
+              caveat("again: this Paseo CLI's `send` does not take --output-schema, so an agent cannot be asked again; ask with `fresh: true`", record.callId);
+            }
+            throw error;
+          }
+        }
+      : (retries) =>
+          startIn(callCwd, used, workspace, async (inWorkspace) => {
+            try {
+              return await executor.ask({ ...askRequest, workspace: inWorkspace, maxRetries: retries });
+            } catch (error) {
+              if (retries === undefined || unknownOption(error) !== "--max-retries") throw error;
+              oldCli = true;
+              caveat(
+                "answer: this Paseo CLI does not take --max-retries, so it retries a reply that does not fit by itself, and what is wrong with an answer cannot be sent back to its agent (a check that fails ends the call)",
+                record.callId,
+              );
+              return executor.ask({ ...askRequest, workspace: inWorkspace });
+            }
+          });
+
+    const state = { rounds: 1, cost: null, agentId: continues?.agentId ?? null, value: null };
+    record.state = state;
+    let failure = null;
+    try {
+      await converse(record, state, { step, check, fixes, timeout, phase: currentPhase(), first });
+    } catch (error) {
+      failure = error;
+    }
+    endCall(record, { ok: !failure, output: safe(state.value), error: failure, agentId: state.agentId, cost: state.cost, rounds: state.rounds });
+    if (failure) throw failure;
+    if (isPlainObject(state.value)) {
+      const { role, provider, thinking, cwd: at } = callOptions;
+      answers.set(state.value, {
+        callId: record.callId,
+        step,
+        stepInput,
+        agentId: state.agentId,
+        who: { role, provider, thinking },
+        cwd: at,
+        fenceMode: fence.mode,
+        check,
+        fixes: callOptions.fixes,
+        archive: callOptions.archive,
+        text: JSON.stringify(state.value, null, 2),
+        file: null,
+      });
+    }
+    // Only a call that came out well, and only when the flow asked for it: a call that failed keeps its agent to be looked into.
+    if (callOptions.archive === "after") await archiveAfter(record, state.agentId);
+    return state.value;
+  };
+
+  // The prompt as sent. A new agent gets the role's instructions and the step's prompt; one asked again has had them.
+  // `again.text` is what the flow said about the previous version, which is in a file for whoever reads it.
+  const promptOf = (bound, step, stepInput, again) => {
+    if (again?.continues) {
+      return again.text === undefined ? step.for(stepInput) : `${again.text}\n\nYour previous version is saved in ${again.file}. Reply with the complete revised answer.`;
+    }
+    const body = step.for(stepInput);
+    if (again?.text !== undefined) {
+      return composePrompt(bound, `${body}\n\n${again.text}\n\nA previous version of this answer, written by another agent, is saved in ${again.file}. Reply with the complete revised answer.`);
+    }
+    if (again?.handover) return composePrompt(bound, `${body}\n\nThe answer the previous agent gave to ${again.revises.step.name} is saved in ${again.file}.`);
+    return composePrompt(bound, body);
+  };
+
   // --- Primitives -------------------------------------------------------
   const $ = Object.freeze({
     /**
@@ -711,95 +890,52 @@ async function runClaimed(target, options, { runId, dir, claim }) {
      * Everything that can be wrong without an agent -- the step, the role,
      * the prompt's input, the fence -- throws before the call starts.
      */
-    async ask(step, stepInput, callOptions = {}) {
-      if (!isStep(step)) throw new TypeError("$.ask needs a step from define()");
-      if (Object.hasOwn(callOptions ?? {}, "mode")) {
-        throw new TypeError(`$.ask: mode is gone. The step declares effects ("${step.effects}"), and runtime/fences.mjs picks the mode`);
-      }
-      checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive", "check", "fixes"]);
-      if (callOptions.archive !== undefined && callOptions.archive !== "after") {
-        throw new TypeError(`$.ask(${step.name}): archive can only be "after" (archive the agent once the call has handed in its answer), not ${JSON.stringify(callOptions.archive)}`);
-      }
-      const { check, fixes = DEFAULT_FIXES } = callOptions;
-      if (check !== undefined && typeof check !== "function") throw new TypeError(`$.ask(${step.name}): check must be a function (answer, { round }) returning the problems found, as [{ at, say }]`);
-      if (!Number.isInteger(fixes) || fixes < 0 || fixes > MAX_FIXES) throw new TypeError(`$.ask(${step.name}): fixes is how many times the answer may be sent back to be corrected, 0 to ${MAX_FIXES} (default ${DEFAULT_FIXES})`);
-      const bound = bindRole(roster, callOptions);
-      const fence = fenceFor(bound.provider, step.effects);
-      const prompt = composePrompt(bound, step.for(stepInput));
-      const timeout = callOptions.timeout ?? step.timeout ?? DEFAULT_CALL_TIMEOUT;
-      parseDuration(timeout);
-      // The call's own title, then the step's, then its name: one value for
-      // the events and for the agent on Paseo.
-      const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
-      const callCwd = callOptions.cwd ?? cwd;
-      // Before the call exists: a wait for another run's workspace is not part of this call's time.
-      // Without an affair nothing is awaited here, so such a run goes through exactly the steps it always did.
-      const used = affair ? workspaceFor(callCwd) : null;
-      const workspace = used ? await used : null;
+    ask: (step, stepInput, callOptions = {}) => askCall(step, stepInput, callOptions),
 
-      const record = startCall();
-      log.emit("call.start", {
-        callId: record.callId,
-        type: "ask",
-        name: step.name,
-        title,
-        headline: step.headline,
-        phase: currentPhase(),
-        role: bound.role,
-        provider: bound.provider,
-        thinking: bound.thinking,
-        effects: step.effects,
-        fence,
-        prompt,
-        schema: step.schema,
-        schemaFingerprint: step.fingerprint,
-        timeout,
-        archive: callOptions.archive ?? null,
-      });
-      if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
-      probeAgent(record);
+    /**
+     * Say something more to the agent that gave `prev` (what `$.ask` or `$.again` returned, as it is), and get the whole answer
+     * again: `$.again(prev, "the reviewer said ...")`. The agent is the same one, with its conversation, even if it was archived
+     * since; if it is gone, a new one is asked and given the previous version. `$.again(prev, otherStep, input)` asks another step of
+     * the same agent. `{ fresh: true }` asks a new agent instead (from the previous version in a file), which can be another role.
+     */
+    async again(prev, ...args) {
+      const rec = answers.get(prev);
+      if (!rec) throw new TypeError("$.again: pass the object $.ask or $.again returned, as it is -- not a copy of it or a part of it");
+      const stepForm = isStep(args[0]);
+      const [step, stepInput, text, options = {}] = stepForm ? [args[0], args[1], undefined, args[2]] : [rec.step, rec.stepInput, args[0], args[1]];
+      if (!stepForm && (typeof text !== "string" || text.trim() === "")) throw new TypeError("$.again(prev, text): text is what to say to the agent; to ask another step, $.again(prev, step, input)");
+      checkKeys("$.again", options ?? {}, ["fresh", "check", "fixes", "title", "timeout", "archive", "role", "provider", "thinking", "cwd"]);
+      const { fresh = false } = options ?? {};
+      if (typeof fresh !== "boolean") throw new TypeError("$.again: fresh is true or false");
+      const who = ["role", "provider", "thinking"].filter((k) => options[k] !== undefined);
+      if (!fresh && (who.length > 0 || options.cwd !== undefined)) throw new TypeError(`$.again: ${[...who, ...(options.cwd === undefined ? [] : ["cwd"])].join(", ")} can only be given with fresh: true -- the agent asked again is where it was, as it was started`);
+      if (fresh && stepForm) throw new TypeError("$.again: fresh with another step is a $.ask");
+      if (options.archive !== undefined && options.archive !== null && options.archive !== "after") throw new TypeError('$.again: archive is "after" or null');
 
-      const askRequest = {
-        provider: bound.provider,
-        thinking: bound.thinking,
-        mode: fence.mode,
-        title,
-        labels: { ...record.labels, "orch-step": step.name },
-        prompt,
-        schema: step.schema,
-        timeout,
-        cwd: callCwd,
+      // What this call runs as: the previous call's, as given, unless a new agent is asked and the flow names another.
+      const callOptions = {
+        ...(who.length > 0 ? Object.fromEntries(who.map((k) => [k, options[k]])) : Object.fromEntries(Object.entries(rec.who).filter(([, v]) => v !== undefined))),
+        ...((options.cwd ?? rec.cwd) === undefined ? {} : { cwd: options.cwd ?? rec.cwd }),
+        ...(options.title === undefined ? {} : { title: options.title }),
+        ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
       };
-      // `retries` 0 hands a reply that does not fit back to the runner instead of the CLI asking again; an older CLI
-      // that does not know the option is asked the old way, once and for the rest of the run.
-      const first = (retries) =>
-        startIn(callCwd, used, workspace, async (inWorkspace) => {
-          try {
-            return await executor.ask({ ...askRequest, workspace: inWorkspace, maxRetries: retries });
-          } catch (error) {
-            if (retries === undefined || unknownOption(error) !== "--max-retries") throw error;
-            oldCli = true;
-            caveat(
-              "answer: this Paseo CLI does not take --max-retries, so it retries a reply that does not fit by itself, and what is wrong with an answer cannot be sent back to its agent (a check that fails ends the call)",
-              record.callId,
-            );
-            return executor.ask({ ...askRequest, workspace: inWorkspace });
-          }
-        });
+      const check = options.check === undefined ? (stepForm ? undefined : rec.check) : (options.check ?? undefined);
+      if (check !== undefined) callOptions.check = check;
+      const fixes = options.fixes ?? (stepForm ? undefined : rec.fixes);
+      if (fixes !== undefined) callOptions.fixes = fixes;
+      const archive = options.archive === undefined ? rec.archive : (options.archive ?? undefined);
+      if (archive !== undefined) callOptions.archive = archive;
 
-      const state = { rounds: 1, cost: null, agentId: null, value: null };
-      record.state = state;
-      let failure = null;
-      try {
-        await converse(record, state, { step, check, fixes, timeout, phase: currentPhase(), first });
-      } catch (error) {
-        failure = error;
+      let why = null;
+      if (!fresh) {
+        why = await cannotContinue(rec);
+        if (why) caveat(`again: the agent of ${rec.callId} ${why}, so a new agent is asked and given the previous version`, null);
       }
-      endCall(record, { ok: !failure, output: safe(state.value), error: failure, agentId: state.agentId, cost: state.cost, rounds: state.rounds });
-      if (failure) throw failure;
-      // Only a call that came out well, and only when the flow asked for it: a call that failed keeps its agent to be looked into.
-      if (callOptions.archive === "after") await archiveAfter(record, state.agentId);
-      return state.value;
+      if (fresh || why) {
+        const again = { continues: null, revises: rec, file: versionFile(rec), ...(stepForm ? { handover: true } : { text }) };
+        return askCall(step, stepInput, callOptions, again);
+      }
+      return askCall(step, stepInput, callOptions, { continues: rec, revises: null, ...(stepForm ? {} : { text, file: versionFile(rec) }) });
     },
 
     /** The flow's own deterministic action: read, run a CLI, write. Returns fn's value. */

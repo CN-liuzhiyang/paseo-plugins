@@ -187,6 +187,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const agents = new Map(); // callId -> agentId from call.agent
   const endedOk = new Set(); // calls whose call.end said ok
   const archived = new Set(); // calls that have a call.archive
+  const agentOf = new Map(); // callId -> the agent it ended with
   const fixRound = new Map(); // callId -> round of its latest call.fix
   const fixedRound = new Map(); // callId -> round of its latest call.fixed
   const caveatTexts = new Set();
@@ -274,6 +275,13 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
             "headline is not null or a field of schema",
           );
           added(event, "archive", event.archive === null || event.archive === "after", 'archive is not null | "after"');
+          for (const key of ["continues", "revises"]) {
+            const ref = event[key];
+            added(event, key, ref === null || (isObject(ref) && isString(ref.runId) && isString(ref.callId)), `${key} is not null | { runId, callId }`);
+            // Within this run the call it names must have started before this one.
+            if (isObject(ref) && ref.runId === runId) need(event, calls.has(ref.callId), `${key} names ${ref.callId}, which has not started`);
+          }
+          need(event, !(event.continues && event.revises), "a call that continues an agent does not also revise an answer: a new agent revises, the same one continues");
         }
         if (event.type === "gate") {
           for (const key of ["brief", "content", "sha256", "timeout"]) need(event, isString(event[key]), `${key} is not a string`);
@@ -315,6 +323,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         if (start.type === "do") need(event, event.agentId === null, "a do call has no agent");
         if (agents.has(event.callId) && event.agentId !== null) {
           need(event, event.agentId === agents.get(event.callId), "agentId differs from the call's call.agent");
+        }
+        if (event.agentId) agentOf.set(event.callId, event.agentId);
+        {
+          // A call that asked an agent again ends with that agent.
+          const asked = start.continues?.runId === runId ? agentOf.get(start.continues.callId) : undefined;
+          if (asked && event.agentId) need(event, event.agentId === asked, `agentId differs from ${start.continues.callId}'s, which this call continues`);
         }
         if (start.type === "ask") {
           added(event, "rounds", Number.isInteger(event.rounds) && event.rounds >= Math.max(1, fixedRound.get(event.callId) ?? 0), "rounds is not an integer of at least 1, and at least the last round that call.fixed answered");

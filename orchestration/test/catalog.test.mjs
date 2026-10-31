@@ -95,6 +95,6 @@ test("catalog: `orch.mjs list` prints it as JSON, and takes no argument", async 
   writeFileSync(config, JSON.stringify({ flowsDirs: [dir] }));
   const { stdout } = await exec(process.execPath, [orch, "list"], { env: { ...process.env, ORCH_CONFIG: config } });
   const names = JSON.parse(stdout).flows.map((f) => f.name);
-  assert.deepEqual(names, ["advisor", "answer-smoke", "committee", "gate-smoke", "item-glance", "resume-smoke", "triage"]);
+  assert.deepEqual(names, ["advisor", "again-smoke", "answer-smoke", "committee", "gate-smoke", "item-glance", "resume-smoke", "triage"]);
   await assert.rejects(exec(process.execPath, [orch, "list", "extra"], { env: { ...process.env, ORCH_CONFIG: config } }), (error) => error.code === 2);
 });

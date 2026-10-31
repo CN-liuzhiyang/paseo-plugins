@@ -208,6 +208,8 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `timeout` | string | |
 | `archive` | `"after"` \| null | 调用点的 `$.ask(step, input, { archive })`：flow 要求这次调用交卷以后归档它的 agent。没要求为 null。后加的字段（2026-10-29），旧文件没有，读者按 null 处理 |
 | `headline` | string \| null | step 的 `define({ headline })`：`schema.properties` 里的一个键，说明回答里哪个字段可以当这次调用的一句话（界面在节点上显示 `call.end.output[headline]`）。step 没声明时为 null。运行时写的每条 `ask` 都有这个字段；之前写的文件没有，读者按 null 处理 |
+| `continues` | `{ runId, callId }` \| null | `$.again` 接着问的是哪次调用的 agent：同一个 agent，对话接着往下。现在总是本次运行里的调用（`runId` 是本次的）。这时 `call.agent` 在 `call.start` 之后立刻发，`call.end.agentId` 与那次调用的相同。普通 `$.ask` 为 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `revises` | `{ runId, callId }` \| null | `$.again` 起的是**新** agent（flow 要求 `fresh: true`，或原来的 agent 已经不在、CLI 太旧而退回）：它改的是哪次调用的答案，上一版放在 `<runDir>/answers/<callId>.json`，提示词里说了。和 `continues` 不会同时有。后加的字段（2026-10-31），缺省 null |
 
 `type: "gate"` 另有：
 
@@ -245,7 +247,8 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 只有 `ask` 和 `gate` 会有；`do` 没有。
 - 每个调用**最多一条**，而且一定在该调用的 `call.end` 之前；调用结束后不再为它发。
-- `gate` 在载体 agent 起来之后立刻发。`ask` 的 agent id 不会随 `run --output-schema` 返回，运行时在后台按
+- **一个 agent 可以对应多个调用**：`$.again` 接着问的调用带着同一个 agent（`call.start.continues` 指向前一次）。按 `agentId` 归并调用的读者要处理这一点；一个调用对应一个 agent 仍然成立。
+- `gate` 在载体 agent 起来之后立刻发。`$.again` 接着问的 `ask` 在 `call.start` 之后立刻发（agent 是已知的，中间至多隔几条 `caveat`）。别的 `ask` 的 agent id 不会随 `run --output-schema` 返回，运行时在后台按
   标签找：调用开始后约 3 秒找第一次，找不到就隔一段再试，总共最多 5 次（约 78 秒内）。所以短调用、
   或者一直没找到的调用，**可能没有** `call.agent`——那时以 `call.end.agentId` 为准。
 - 两条都有时，`call.end.agentId` 与 `call.agent.agentId` 相同。
@@ -343,7 +346,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 每个 `call.fix` 之后最多一条 `call.fixed`；发送失败（agent 不在了、超时）时没有，错误在 `call.end` 里，那一轮的钱照样记进 `call.end.cost`。
 - 都在该调用的 `call.end` 之前；运行已经定了结局之后不再发（调用已经被补了 `RunEnded`）。
-- 一个 `ask` 调用里这几条和 `call.agent` 对应的是**同一个 agent**：打回不起新 agent。
+- 一个 `ask` 调用里这几条和 `call.agent` 对应的是**同一个 agent**：打回不起新 agent。`$.again` 接着问的调用，打回也在那个 agent 里。
 - 运行时没法打回的情况（Paseo CLI 太旧，没有 `send --output-schema` / `--max-retries`，或找不到这次调用的 agent）不写这两个事件，写一条 caveat：该 CLI 自己重试不合 schema 的回答，`check` 指出的问题发不回去，调用以 `CheckFailed` 结束。
 
 ### `call.archive`
@@ -419,7 +422,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

@@ -37,7 +37,7 @@ runtime/
   roster.mjs     读 roles/，严格解析；角色绑定
   config.mjs     本机配置（~/.paseo-orchestration/config.json）
   smoke.mjs      升级后回归检查（经真实 Paseo）
-flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱；answer-smoke 是打回冒烟，几分钱）
+flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱；answer-smoke 是打回冒烟、again-smoke 是接着问冒烟，都是几分钱）
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例

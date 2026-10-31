@@ -79,6 +79,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 | 原语 | 做什么 | 事件 |
 |---|---|---|
 | `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive?, check?, fixes? })` | 一次 agent 调用，返回 schema 形状的、核对过的结果。**不接受 `mode`**（见 R8）。回答到手后先按 schema 查（多出来的字段直接删，不算错），再跑 `check`；有问题就在**同一个 agent** 里只把出问题的几处发回去改，见下「核对和针对性打回」；没有路可以发回去时（CLI 太旧、执行层不会 `send`）schema 不合还是抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败，每次试都写一条 `call.archive` 事件（成没成、CLI 的代码）。事项 workspace 里的 agent（后台的）CLI 归档不了，交给起这次运行的插件归档（reconcile 读 `call.archive` 做）。缺省不归档：事后还有人要接着翻、接着聊的会话，由 flow 自己决定 | `call.start`（带 `archive`）/`call.agent`/`call.fix`/`call.fixed`/`call.end`（带 `rounds`）/`call.archive`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
+| `$.again(prev, text, { fresh?, check?, fixes?, archive?, title?, timeout?, role?, provider?, thinking?, cwd? })`、`$.again(prev, step, input, …)` | 接着问 `prev`（`$.ask` / `$.again` 返回的那个对象，原样传）的那个 agent，返回新的整份答案。`role` / `provider` / `thinking` / `cwd` 只在 `fresh: true` 时能给。见下「接着问：`$.again`」 | `call.start`（带 `continues` 或 `revises`）/`call.agent`（接着问的一开始就发）/…/`call.end`，`type: "ask"` |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath?, input? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。`input: { label, secret?, pattern?, hint? }`：批准的同时带一个值（验证码），见下「批准并附一个值」。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
@@ -127,6 +128,29 @@ const patch = await $.ask(patchStep, input, {
 - 事件里每轮有 `call.fix`（发出去之前）和 `call.fixed`，`call.end.rounds` 是作答的轮数，`call.end.cost` 是各轮之和（EVENTS.md）。
 - 要 fork CLI 的 `send --output-schema --max-retries`。Paseo CLI 太旧时（第一次见到 `unknown option '--max-retries'`）整次运行退回老办法：
   CLI 自己重试，打回发不出去，`check` 不过就是 `CheckFailed`（`rounds` 为 1），记一条 caveat，不让运行失败。
+
+### 接着问：`$.again`
+
+人没批、评审有意见，要原来写的那个 agent 接着改，而不是起一个新的、丢掉它的思路：
+
+```js
+let plan = await $.ask(planStep, input, { role: "worker", check: planProblems });
+for (let v = 2; ; v += 1) {
+  const g = await $.gate(planGate(plan, v - 1));
+  if (g.approved) break;
+  if (v > MAX_REVISIONS || !g.reason) $.stop(`方案第 ${v - 1} 版没批`, { plan });
+  plan = await $.again(plan, `审批人没批这一版，原话：\n> ${g.reason}\n按意见改，交回完整的新方案。`);
+}
+```
+
+- `prev` 必须是 `$.ask` / `$.again` 返回的**那个对象**：运行时靠对象本身认出它是哪个 agent、哪次调用答的。拷贝（`structuredClone`）、取出的一部分、别的运行返回的都不认，直接抛错（`TypeError`，说"原样传进来"）。
+- **接着同一个 agent 问**：发出去的是 `text`、一句"你上一版存在 `<文件>`"（`<runDir>/answers/<callId>.json`）和"交回完整的新答案"；schema 还是那个 step 的整份。文件是 Paseo 重载过会话、上下文丢了时留的后路，几乎不花钱。agent 被归档过也照样接着问（发消息会唤回它）；这次调用带着 `archive: "after"` 时再归档一次。
+- `check`、`fixes`、`archive` 沿用前一次调用的（`archive: null`、`check: null` 关掉，`check: fn` 换掉）。接着问的第一轮也是一次作答，不合 schema 或 `check` 不过照常在同一个 agent 里打回，所以 `$.again` 的结果和 `$.ask` 一样是核过的整份。
+- `$.again(prev, step, input)`：同一个 agent 换一个 step 问（方案批了，接着让它写补丁）。发的是那个 step 自己的提示词（不重复角色指令，agent 早已收到），答案是那个 step 的 schema；`check` 不沿用（它是前一个 step 的答案的核对）。step 的 `effects` 要的模式必须和这个 agent 起来时的一样（栅栏换不了），不一样就抛错，用 `$.ask` 起新的。
+- `{ fresh: true }`：起一个**新** agent，可以另外指定 `role` / `provider` / `thinking` / `cwd`（不给就沿用前一次的）。提示词 = 原来的提示词 + 你的话 + "上一版（另一个 agent 写的）在 `<文件>`"，调用的 `revises` 指向被改的那次。什么时候换人由流程定（"这一处已经被打回两次"）；缺省接着原 agent。`fresh` 不和换 step 合用。
+- 原来的 agent 已经不在了（`inspect` 报 `AGENT_NOT_FOUND`）、Paseo CLI 太旧（`send` 不认 `--output-schema`）、执行层不会 `send`：运行时自动按 `fresh` 起新的，记一条 `caveat`，不让运行失败。换 step 问时，新 agent 会被告知前一个 agent 的答案在哪个文件。别的失败（连不上 daemon）是这次调用自己的失败，**不会**悄悄起新 agent 花钱。
+- 一个 agent 现在可以对应多个调用：`call.end.cost` 记各自那几轮，`run.end.cost.agentCount` 数的是 agent。读事件的人按 `call.start.continues` 把它们串起来（EVENTS.md）。
+- 现成的最小例子：`flows/again-smoke.mjs`（一个 fast 角色，几分钱，不过人闸）。
 
 ### 接着跑：`$.resumeWith` 和 `orch.mjs resume`
 
