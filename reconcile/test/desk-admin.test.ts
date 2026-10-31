@@ -73,7 +73,7 @@ test("taking back in the admin's chat needs no card only just after it was told,
     assert.equal(w.receipt(late)!.text, "先不生效：「撤掉 D1「年度体检」（10-13 周二 10:00 交代的，撤掉就不再盯它）」已改成确认卡，等 测试用户 在卡上确认。");
     // and a yes on it ends the matter, as said
     await w.engine.tick();
-    w.answer({ "确认 D1": "照办" });
+    w.answer({ D1: "要" });
     await w.engine.tick();
     assert.equal(item(w, 1)!.closed, true);
   }));

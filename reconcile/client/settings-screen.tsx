@@ -1,6 +1,7 @@
-import { useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
+import { useRpc, useSettings, type PluginSurfaceProps } from "@getpaseo/plugin/client";
 import { SettingsAction, SettingsCard, SettingsInput, SettingsRow, SettingsSection, SettingsSwitch } from "@getpaseo/plugin/client/ui";
 import { useState } from "react";
+import { testCardRpc } from "../shared/rpc";
 import { settingsDefinition, type Settings } from "../shared/settings";
 
 // Saving restarts the controller on the daemon side (index.server.ts watches the settings).
@@ -22,6 +23,8 @@ const TEXT_FIELDS: Array<{ key: "instanceId" | "home" | "configDir" | "dataDir";
 export function ReconcileSettings(_props: PluginSurfaceProps) {
   const settings = useSettings(settingsDefinition);
   const [draft, setDraft] = useState<Draft>({});
+  const testCard = useRpc(testCardRpc);
+  const [test, setTest] = useState<{ busy: boolean; text: string | null }>({ busy: false, text: null });
 
   if (settings.status === "loading") {
     return (
@@ -59,6 +62,14 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
   };
   const dirty = JSON.stringify(next) !== JSON.stringify(values);
 
+  const sendTest = () => {
+    setTest({ busy: true, text: null });
+    testCard({}).then(
+      (reply) => setTest({ busy: false, text: reply.detail || (reply.ok ? "发了" : "没发出去") }),
+      (error: unknown) => setTest({ busy: false, text: String(error) }),
+    );
+  };
+
   return (
     <>
       <SettingsSection title="发卡">
@@ -77,6 +88,15 @@ export function ReconcileSettings(_props: PluginSurfaceProps) {
             disabled={settings.saving}
             onValueChange={(on) => void settings.save({ ...values, questionCard: on }, revision)}
           />
+        </SettingsCard>
+      </SettingsSection>
+      <SettingsSection title="说明">
+        <SettingsCard>
+          <SettingsRow label="「看一眼」只读" hint="它读来源和你交代的事，不会替你联系任何人，也不会改任何东西。" />
+          <SettingsRow label="怎么答推送" hint="引用那条推送，回一个数字，或者直接写一句。推送最后一行「（问题 D1-1）」是它的编号；一次答一个问题，写上编号，比如「D1-1 选 1」。" />
+          <SettingsRow label="没有显示的事项" hint="没有要问的、最近没人动、日期不在近期、关联的开关也没变的事项是冷的：不判断、不显示；其中任何一样变了会自动回来。" />
+          <SettingsRow label="不想被问" hint="在对话里说一声，比如「这个先别问到周一」「洗牙那个不盯了」；说一句「刚才那条不要了」可以撤回。" />
+          <SettingsAction label={test.text ?? "起一张测试卡，看通知和推送通不通"} actionLabel={test.busy ? "正在排…" : "发测试卡"} disabled={test.busy} onPress={sendTest} />
         </SettingsCard>
       </SettingsSection>
       <SettingsSection title="设置">

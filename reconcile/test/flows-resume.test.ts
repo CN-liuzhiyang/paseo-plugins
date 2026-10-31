@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { ledgerText, resumeNote, retryLabel, troubleLine, type RunView } from "../shared/graph";
+import { ledgerText, resumeNote, retryCost, troubleLine, type RunView } from "../shared/graph";
 import type { FlowEnd, FlowRec } from "../shared/model";
 import { createLauncher, endedMessage, inputHashOf, resultOf, type LaunchSpec } from "../server/flows";
 import { offerOf, probeFromRunnerOutput } from "../server/runs";
@@ -115,19 +115,20 @@ test("a stopped run that said how it could be carried on is offered 接着跑 fi
     const offered = view(w, 1, a);
     assert.deepEqual(offered.actions, ["resume", "retry", "mine", "fold"]);
     assert.deepEqual(offered.resume, { line: OFFER.from, spends: "nothing" });
-    assert.equal(retryLabel(offered), "从头重跑（会再花钱，上次花了 $0.40）");
-    assert.match(troubleLine(offered), /没查成：校验没过：缺一个必填字段。处理好原因以后点「接着跑」/);
+    assert.equal(retryCost(offered), "从头重跑：会再花钱，上次 $0.40");
+    assert.match(troubleLine(offered), /^triage-flow停了：校验没过：缺一个必填字段$/, "what became of it and why; the button and its promise are not in the line");
     assert.equal(resumeNote(offered), "第一步已完成：从第二步接着，不重做第一步 · 不调模型");
-    assert.match(w.engine.graph("gcp-demo:1")!.hero.sub, /可以接着跑、从头重跑，或者你自己来。不会自动重来。/);
+    assert.match(w.engine.graph("gcp-demo:1")!.hero.kicker, /接着跑/, "the top bar says which button is the one to press");
     // one that said nothing is offered what it always was
     const plain = view(w, 2, b);
     assert.deepEqual(plain.actions, ["retry", "mine", "fold"]);
     assert.equal(plain.resume, null);
-    assert.equal(retryLabel(plain), "重新跑一次（会再花钱，上次花了 $0.40）");
-    assert.match(troubleLine(plain), /不会自动重来。$/);
+    assert.equal(retryCost(plain), "从头重跑：会再花钱，上次 $0.40");
+    assert.match(w.engine.graph("gcp-demo:2")!.hero.kicker, /从头重跑/, "with nothing to carry on, starting over is the way");
     // and a flow that may call a model says so
-    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因。", spends: "maybe" }, costUsd: 1.5 }), "第二步失败时要查原因 · 可能会调模型（上一轮花了 $1.50）");
-    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因", spends: "maybe" }, costUsd: 0 }), "第二步失败时要查原因 · 可能会调模型");
+    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因。", spends: "maybe" }, costUsd: 1.5 }), "第二步失败时要查原因 · 可能调模型（上一轮 $1.50）");
+    assert.equal(resumeNote({ resume: { line: "第二步失败时要查原因", spends: "maybe" }, costUsd: 0 }), "第二步失败时要查原因 · 可能调模型");
+    assert.ok([...resumeNote({ resume: { line: "x".repeat(80), spends: "nothing" }, costUsd: 0 })].length < 40, "a long line is cut beside the button");
     assert.equal(resumeNote({ resume: null, costUsd: 0 }), "");
   }));
 
@@ -147,7 +148,8 @@ test("no button where it would be wrong: a run still going, one that came out wh
     // set aside by the person ("我自己来"): not carried on
     assert.equal(w.engine.dismissFlow(ids[3]!, "mine", "owner").ok, true);
     assert.deepEqual(view(w, 4, ids[3]!).actions, []);
-    assert.match(w.engine.resumeFlow(ids[3]!, "owner").detail, /已经被收起/);
+    assert.equal(w.engine.resumeFlow(ids[3]!, "owner").ok, false, "a run a person set aside is not carried on");
+    assert.match(w.engine.resumeFlow(ids[3]!, "owner").detail, /收起/);
     // an earlier round is history: the button is for the newest round of its request
     assert.equal(w.engine.resumeFlow(ids[4]!, "owner").ok, true);
     await advance(w, 10);
@@ -168,7 +170,7 @@ test("no button where it would be wrong: a run still going, one that came out wh
       w.flows.probes.set(id, stopped());
       await advance(w, 10);
       assert.deepEqual(view(w, 1, id).actions, [], "the rule takes the failure of this flow itself");
-      assert.match(w.engine.resumeFlow(id, "owner").detail, /判断方法会自己再起一次/);
+      assert.match(w.engine.resumeFlow(id, "owner").detail, /自己重试/);
     },
     { rule: SELF },
   );
@@ -186,7 +188,7 @@ test("carrying on is a person's: the next round of the request under a new id, w
       await advance(w, 10);
       assert.equal(headline(w, 1), `r triage:k1=stopped{"why":"校验没过：缺一个必填字段"}|can:${OFFER.from}/nothing|ran:triage-flow`, "the rule is told it can be carried on, and by what");
       const r = w.engine.resumeFlow(r0, "owner");
-      assert.deepEqual([r.ok, r.detail], [true, `记下了，这就接着跑（第 2 次）：${OFFER.from}`]);
+      assert.deepEqual([r.ok, r.detail], [true, "接着跑了"], "one thing was done: said in a word");
       const events = w.journal().filter((e) => e.type === "flow.resume" || (e.type === "flow.intent" && (e.rec as { round: number }).round === 1));
       assert.deepEqual(events.map((e) => e.type), ["flow.resume", "flow.intent"], "the person's act and the intent, in one write");
       assert.deepEqual([events[0]!.runId, events[0]!.round, events[0]!.from, events[0]!.flow, events[0]!.by, events[0]!.caseId, events[0]!.name, events[0]!.key], [r1, 1, r0, "triage-resume", "owner", "gcp-demo:1", "triage", "k1"]);
@@ -237,7 +239,8 @@ test("carrying on is held to the day's limits as a person's retry is: the item's
       await advance(w, 10);
       const r = w.engine.resumeFlow(idFor(1, "k1"), "owner");
       assert.equal(r.ok, false);
-      assert.match(r.detail, /今天流程已经起了 2 次（上限 2），明天再点/);
+      assert.match(r.detail, /今天.*明天再点/, "what stops it and when it can be pressed again");
+      assert.ok([...r.detail].length <= 24, r.detail);
       assert.equal(kinds(w).filter((k) => k === "flow.resume").length, 0);
     },
     { policy: POLICY({ perDay: 2 }) },
@@ -254,15 +257,17 @@ test("carrying on is refused, writing nothing, where it makes no sense: no such 
     w.flows.probes.set(ids[2]!, stopped(null));
     w.flows.probes.set(ids[3]!, stopped());
     await advance(w, 10);
-    assert.match(w.engine.resumeFlow("rc-test-nope", "owner").detail, /不是这个控制器起的/);
-    assert.match(w.engine.resumeFlow(ids[0]!, "owner").detail, /还没结束/);
-    assert.match(w.engine.resumeFlow(ids[1]!, "owner").detail, /已经有结果了/);
-    assert.match(w.engine.resumeFlow(ids[2]!, "owner").detail, /没说过能从哪里接着跑/);
+    for (const [id, why] of [["rc-test-nope", /没有这个运行/], [ids[0]!, /还没停/], [ids[1]!, /已经有结果了/], [ids[2]!, /没说过能从哪接着跑/]] as const) {
+      const refused = w.engine.resumeFlow(id, "owner");
+      assert.equal(refused.ok, false, id);
+      assert.match(refused.detail, why);
+      assert.ok([...refused.detail].length <= 20, `a refusal is a few words: ${refused.detail}`);
+    }
     assert.equal(kinds(w).filter((k) => k === "flow.resume").length, 0);
     // the rule means another flow by the name now: that is another request, and this one is not carried on
     writeFileSync(path.join(w.configDir, "rules", "flow.mjs"), RULE.replace('flow: "triage-flow"', 'flow: "replacement-flow"'));
     await look(w, 60);
-    assert.match(w.engine.resumeFlow(ids[3]!, "owner").detail, /判断方法现在不起这个流程了/);
+    assert.match(w.engine.resumeFlow(ids[3]!, "owner").detail, /不起这个流程了/);
     assert.equal(kinds(w).filter((k) => k === "flow.resume").length, 0);
   });
   await withFlows(async (w) => {
@@ -272,7 +277,7 @@ test("carrying on is refused, writing nothing, where it makes no sense: no such 
     w.flows.probes.set(id, stopped());
     await advance(w, 10);
     await w.restart("dry-run");
-    assert.match(w.engine.resumeFlow(id, "owner").detail, /现在只演练/);
+    assert.match(w.engine.resumeFlow(id, "owner").detail, /演练中/);
   });
 });
 
@@ -330,11 +335,11 @@ test("running a round that carried on again is from the start: the request's own
       await advance(w, 10);
       const second = view(w, 1, r1);
       assert.deepEqual(second.actions, ["resume", "retry", "mine", "fold"]);
-      assert.equal(retryLabel(second), "从头重跑（会再花钱，上次花了 $0.40）", "what starting over costs is what the request cost when it last ran from the start");
+      assert.equal(retryCost(second), "从头重跑：会再花钱，上次 $0.40", "what starting over costs is what the request cost when it last ran from the start");
       asks(w, 1, [req("k1", { n: 2 })]);
       await advance(w, 10);
       const r = w.engine.retryFlow(r1, "owner");
-      assert.deepEqual([r.ok, r.detail], [true, "记下了，这就从头重跑（第 3 轮）；上一轮花了 $0.10"]);
+      assert.deepEqual([r.ok, r.detail], [true, "从头重跑了（上一轮 $0.10）"]);
       assert.equal(flowsOf(w)[r2]!.resume, undefined);
       await advance(w, 10);
       const spec = w.flows.launcher.started[2]!;
@@ -548,7 +553,7 @@ test("the buttons' words do not take one round's cost for another's: starting ov
       assert.equal(flowsOf(w)[r1]!.ended!.outcome, "not-started");
       const never = view(w, 1, r1);
       assert.equal(never.situation, "notstarted");
-      assert.equal(retryLabel(never), "从头重跑（会再花钱，上次花了 $1.14）", "what starting over costs is known, whatever the carrying on that never started spent");
+      assert.equal(retryCost(never), "从头重跑：会再花钱，上次 $1.14", "what starting over costs is known, whatever the carrying on that never started spent");
     },
     { policy: POLICY({}) },
   );
@@ -565,8 +570,8 @@ test("the buttons' words do not take one round's cost for another's: starting ov
       w.flows.probes.set(r1, stopped(maybe, "又停了", 0.1));
       await advance(w, 10);
       const second = view(w, 1, r1);
-      assert.match(resumeNote(second), /可能会调模型（上一轮花了 \$0\.10）$/, "the round it carries on is the one that just stopped");
-      assert.match(retryLabel(second), /上次花了 \$1\.14/, "starting over is what the request cost when it last ran from the start");
+      assert.match(resumeNote(second), /可能调模型（上一轮 \$0\.10）$/, "the round it carries on is the one that just stopped");
+      assert.match(retryCost(second), /上次 \$1\.14/, "starting over is what the request cost when it last ran from the start");
     },
     { policy: POLICY({}) },
   );
@@ -616,15 +621,22 @@ const END = (over: Partial<FlowEnd> = {}): FlowEnd => ({ at: "2026-10-13T10:00:0
 
 test("the message for a run that did not finish points at the button, in the flow's own words, once, and only where there is a button", async () => {
   const rec = { label: "初查", caseId: "gcp-demo:1" };
-  assert.equal(endedMessage(rec, END()).text, "#1 初查没跑完：校验没过：缺一个必填字段。详情在「事项追踪」里。");
-  assert.equal(endedMessage(rec, END({ resume: OFFER })).text, "#1 初查没跑完：校验没过：缺一个必填字段。处理好以后在事项页点「接着跑」（第一步已完成：从第二步接着，不重做第一步）。详情在「事项追踪」里。");
-  assert.equal(endedMessage(rec, END({ outcome: "failed", value: null, why: "出错了", resume: OFFER })).text, "#1 初查没跑完：流程失败了（出错了），要自己看。处理好以后在事项页点「接着跑」（第一步已完成：从第二步接着，不重做第一步）。");
+  const said = (text: string) => assert.equal(text.match(/#1/g)!.length, 1, `the number once: ${text}`);
+  assert.equal(endedMessage(rec, END()).text, "#1 初查停了：校验没过：缺一个必填字段。");
+  const carry = endedMessage(rec, END({ resume: OFFER })).text;
+  assert.match(carry, /^#1 初查停了：校验没过：缺一个必填字段。处理好后在事项页点「接着跑」。$/, "the button is pointed at once, without repeating what the page says beside it");
+  assert.doesNotMatch(carry, /第一步已完成/, "the flow's line for the button is on the page, not in the push");
+  said(carry);
+  const failed = endedMessage(rec, END({ outcome: "failed", value: null, why: "出错了", resume: OFFER }));
+  assert.equal(failed.status, "failed");
+  assert.match(failed.text, /^#1 初查出错了：.*处理好后在事项页点「接着跑」。$/);
+  said(failed.text);
   // the rule takes its own failure: no button, so none is spoken of
   assert.doesNotMatch(endedMessage({ ...rec, selfRetry: true }, END({ resume: OFFER })).text, /接着跑/);
   // a run that came out whole has nothing to carry on
   assert.doesNotMatch(endedMessage(rec, END({ value: { found: 1 }, summary: "找到 1 处", resume: OFFER })).text, /接着跑/);
   // what the flow wrote is not drawn as anything
-  assert.match(endedMessage(rec, END({ resume: { ...OFFER, from: "看[这里](http://x) *不重编*" } })).text, /（看［这里］\(http:\/\/x\) ＊不重编＊）/);
+  assert.match(endedMessage(rec, END({ value: { why: "看[这里](http://x) *不重编*" }, why: "x" })).text, /看［这里］\(http:\/\/x\) ＊不重编＊/);
 });
 
 test("the person who is told when a run ends hears about the button in the message", () =>
@@ -635,7 +647,7 @@ test("the person who is told when a run ends hears about the button in the messa
       w.flows.probes.set(idFor(1, "k1"), stopped());
       await advance(w, 10);
       assert.equal(w.deliveries.length, 1);
-      assert.match(w.deliveries[0]!.text, /处理好以后在事项页点「接着跑」（第一步已完成：从第二步接着，不重做第一步）。详情在「事项追踪」里。$/);
+      assert.match(w.deliveries[0]!.text, /处理好后在事项页点「接着跑」。$/);
     },
     { persons: OWNER(), policy: POLICY({}) },
   ));
@@ -657,11 +669,13 @@ test("the page says what the rounds of a request were: carried on or from the st
       await advance(w, 10);
       const latest = view(w, 1, r1);
       assert.deepEqual(latest.ledger, { rounds: 2, costUsd: 0.5 });
-      assert.equal(ledgerText(latest.ledger), "这件事已经跑了 2 次，一共花了 $0.50。");
+      assert.equal(ledgerText(latest.ledger), "跑了 2 次，一共 $0.50");
       assert.equal(ledgerText(undefined), "");
       assert.equal(view(w, 1, r0).ledger, undefined, "the sum is the newest round's to show");
       const lines = w.engine.graph("gcp-demo:1")!.history.filter((h) => h.kind === "run").map((h) => h.line);
-      assert.deepEqual(lines, ["起了流程「triage-flow」", "流程「triage-flow」没查成", "接着跑了流程「triage-flow」（第 2 次）", "流程「triage-flow」没查成"]);
+      assert.equal(lines.length, 2, `a run is one line, said when it ended: ${JSON.stringify(lines)}`);
+      assert.match(lines[0]!, /^triage-flow停了：/);
+      assert.match(lines[1]!, /^接着跑：triage-flow停了：/, "the round that carried on says so");
     },
     { policy: POLICY({}) },
   ));

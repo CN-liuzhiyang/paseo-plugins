@@ -1,28 +1,13 @@
+import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { durationText, GROUP_LABEL, SITUATION, type Group, type ListRow, type StripCell } from "../shared/graph";
-import { BallChip } from "./chart";
+import { GROUP_LABEL, SITUATION, type Group, type ListRow, type StripCell } from "../shared/graph";
+import { arrange, statusLine } from "./list-model";
 import { Badge, tint, useUi } from "./ui";
 
 // The list: items in groups by who has to act -- you, someone else, the system, you yourself
-// developing -- not by health. Each row says in a line what the item is doing, shows how far it
-// is along its route as a strip (one cell a stage, a narrow one for a detour), and who holds the
-// ball, for how long, and what comes next. A row opens the item's page.
-
-// "你 · 回答：…" -> "回答：…": the chip already says whose ball it is.
-const whatOf = (label: string) => (label.includes(" · ") ? label.slice(label.indexOf(" · ") + 3) : "");
-
-export const GROUP_ORDER: Group[] = ["me", "errors", "them", "system", "mine", "done"];
-
-/**
- * How long, in words. A clock that starts when tracking began is "at least": it says so, and an item that was already over
- * when tracking began does not get a length made up for it.
- */
-export function waitText(row: ListRow): string {
-  if (row.group === "mine") return ""; // your own work is not something to nag about: no clock on it
-  const w = row.waiting;
-  if (w.ended) return w.ms !== null ? `${w.atLeast ? "至少用了" : "用了"} ${durationText(w.ms)}` : w.atLeast ? "追踪前就结束了" : "";
-  return w.ms !== null ? `${w.atLeast ? "至少已等" : "已等"} ${durationText(w.ms)}` : "";
-}
+// developing -- not by health. A row is two lines: the item, and where it is, whose ball it is and
+// for how long; on a wide screen a strip shows how far it is along its route (one cell a stage, a
+// narrow one for a detour). A row opens the item's page.
 
 function Strip({ row }: { row: ListRow }) {
   const ui = useUi();
@@ -35,20 +20,14 @@ function Strip({ row }: { row: ListRow }) {
     if (row.side && row.side.after === i) cells.push({ key: "side", node: "side" });
   });
   return (
-    <View style={{ gap: 3 }}>
-      <View style={{ flexDirection: "row", gap: 3, alignItems: "center", width: "100%" }}>
-        {cells.map((x) =>
-          x.node === "side" ? (
-            <View key={x.key} style={{ width: 9, height: 5, borderRadius: 2, backgroundColor: ui.tone("warning") }} />
-          ) : (
-            <View key={x.key} style={{ flex: 1, height: 5, borderRadius: 2, backgroundColor: color(x.cell!) }} />
-          ),
-        )}
-      </View>
-      <Text style={ui.styles.small} numberOfLines={1}>
-        {row.stageLabel}
-        {row.side ? `（走过岔路：${row.side.label}）` : ""}
-      </Text>
+    <View style={{ flexDirection: "row", gap: 3, alignItems: "center", width: "100%" }}>
+      {cells.map((x) =>
+        x.node === "side" ? (
+          <View key={x.key} style={{ width: 9, height: 5, borderRadius: 2, backgroundColor: ui.tone("warning") }} />
+        ) : (
+          <View key={x.key} style={{ flex: 1, height: 5, borderRadius: 2, backgroundColor: color(x.cell!) }} />
+        ),
+      )}
     </View>
   );
 }
@@ -59,19 +38,18 @@ function RowView({ row, onOpen }: { row: ListRow; onOpen(caseId: string): void }
   const s = SITUATION[row.situation];
   const color = ui.tone(s.tone);
   const finished = row.group === "done";
-  const wait = waitText(row);
   const icon = (
     <View style={{ width: 30, height: 30, borderRadius: 15, backgroundColor: color, alignItems: "center", justifyContent: "center" }}>
       <Text style={{ color: c.surface0, fontWeight: "800", fontSize: 13 }}>{s.icon}</Text>
     </View>
   );
-  const title = (
-    <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
+  const text = (
+    <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
       <Text style={[ui.styles.strong, { fontSize: 14 }]} numberOfLines={ui.compact ? 2 : 1}>
         {row.number} {row.title}
       </Text>
-      <Text style={ui.styles.small} numberOfLines={2}>
-        {row.headline}
+      <Text style={ui.styles.small} numberOfLines={1}>
+        {statusLine(row)}
       </Text>
       {row.notice ? (
         <Text style={[ui.styles.small, { color: ui.tone("warning") }]} numberOfLines={2}>
@@ -85,48 +63,15 @@ function RowView({ row, onOpen }: { row: ListRow; onOpen(caseId: string): void }
       ) : null}
     </View>
   );
-  if (ui.compact) {
-    return (
-      <Pressable accessibilityRole="button" accessibilityLabel={`${row.number} ${row.title}`} onPress={() => onOpen(row.caseId)} style={{ flexDirection: "row", gap: 10, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: c.border }}>
-        {icon}
-        <View style={{ flex: 1, gap: 4 }}>
-          {title}
-          <Strip row={row} />
-          <View style={{ flexDirection: "row", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-            {finished ? null : <BallChip actor={row.who.actor} />}
-            <Text style={ui.styles.small} numberOfLines={1}>
-              {[finished ? "" : whatOf(row.who.label), wait].filter(Boolean).join(" · ")}
-            </Text>
-          </View>
-        </View>
-      </Pressable>
-    );
-  }
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={`${row.number} ${row.title}`} onPress={() => onOpen(row.caseId)} style={{ flexDirection: "row", alignItems: "center", gap: 14, paddingVertical: 10, paddingHorizontal: 14, borderBottomWidth: 1, borderBottomColor: c.border }}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`${row.number} ${row.title}`} onPress={() => onOpen(row.caseId)} style={{ flexDirection: "row", alignItems: "center", gap: ui.compact ? 10 : 14, paddingVertical: 10, paddingHorizontal: ui.compact ? 0 : 14, borderBottomWidth: 1, borderBottomColor: c.border }}>
       {icon}
-      <View style={{ flex: 1, minWidth: 0 }}>{title}</View>
-      <View style={{ width: 190 }}>
-        <Strip row={row} />
-      </View>
-      <View style={{ width: 200, gap: 2 }}>
-        {finished ? null : (
-          <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
-            <BallChip actor={row.who.actor} />
-            <Text style={[ui.styles.small, { flexShrink: 1, color: c.foreground }]} numberOfLines={1}>
-              {whatOf(row.who.label)}
-            </Text>
-          </View>
-        )}
-        {wait ? <Text style={ui.styles.small}>{wait}</Text> : null}
-      </View>
-      <View style={{ width: 170, gap: 1 }}>
-        {row.next.map((n) => (
-          <Text key={n} style={ui.styles.small} numberOfLines={1}>
-            {n}
-          </Text>
-        ))}
-      </View>
+      {text}
+      {ui.compact || finished ? null : (
+        <View style={{ width: 190 }}>
+          <Strip row={row} />
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -134,32 +79,27 @@ function RowView({ row, onOpen }: { row: ListRow; onOpen(caseId: string): void }
 export function GroupedList({ rows, onOpen, extra }: { rows: ListRow[]; onOpen(caseId: string): void; extra?: Partial<Record<Group, React.ReactNode>> }) {
   const ui = useUi();
   const c = ui.theme.colors;
+  const [older, setOlder] = useState(false);
   return (
     <View style={{ borderRadius: 12, borderWidth: 1, borderColor: c.border, backgroundColor: c.surface1, overflow: "hidden" }}>
-      {GROUP_ORDER.map((g) => {
-        const here = rows.filter((r) => r.group === g);
-        if (here.length === 0 && g !== "me" && !extra?.[g]) return null;
-        const label = GROUP_LABEL[g];
-        return (
-          <View key={g}>
-            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "baseline", gap: 10, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: c.surface2, borderBottomWidth: 1, borderBottomColor: c.border }}>
-              <Text style={[ui.styles.strong, { fontSize: 14 }]}>
-                {label.name}（{here.length}）
-              </Text>
-              <Text style={ui.styles.small}>{label.sub}</Text>
-            </View>
-            {extra?.[g]}
-            {here.length === 0 && g === "me" && !extra?.[g] ? (
-              <View style={{ padding: 14 }}>
-                <Text style={ui.styles.muted}>现在没有要你做的。</Text>
-              </View>
-            ) : null}
-            {here.map((row) => (
-              <RowView key={row.caseId} row={row} onOpen={onOpen} />
-            ))}
+      {arrange(rows, older, extra ?? {}).map(({ group: g, total, shown, hidden }) => (
+        <View key={g}>
+          <View style={{ flexDirection: "row", alignItems: "baseline", paddingHorizontal: 14, paddingVertical: 8, backgroundColor: c.surface2, borderBottomWidth: 1, borderBottomColor: c.border }}>
+            <Text style={[ui.styles.strong, { fontSize: 14 }]}>
+              {GROUP_LABEL[g].name}（{total}）
+            </Text>
           </View>
-        );
-      })}
+          {extra?.[g]}
+          {shown.map((row) => (
+            <RowView key={row.caseId} row={row} onOpen={onOpen} />
+          ))}
+          {hidden > 0 ? (
+            <Pressable accessibilityRole="button" accessibilityLabel={`更早的 ${hidden} 个`} onPress={() => setOlder(true)} style={{ paddingHorizontal: 14, paddingVertical: 10 }}>
+              <Text style={ui.styles.muted}>更早的 {hidden} 个 ▸</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ))}
     </View>
   );
 }

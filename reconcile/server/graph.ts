@@ -2,12 +2,14 @@ import { DESK_SOURCE, type Annotation, type Assessment, type Commitment, type It
 import {
   clockText,
   clockWeekText,
+  cutText,
   durationText,
   normalizeStages,
   plainMd,
   routeOf,
   stripOf,
   SITUATION,
+  troubleLine,
   type AskView,
   type Ball,
   type Deviation,
@@ -54,7 +56,7 @@ export interface GraphDeps {
   isConfirm(c: Commitment): boolean;
 }
 
-const FALLBACK_DROPPED: StageMeta = { id: "dropped", label: "不再追踪", named: true, next: [], side: false, when: null, end: true, endKind: "dropped", done: null };
+const FALLBACK_DROPPED: StageMeta = { id: "dropped", label: "不盯了", named: true, next: [], side: false, when: null, end: true, endKind: "dropped", done: null };
 
 export function createGraph(deps: GraphDeps) {
   const { store, config } = deps;
@@ -71,6 +73,8 @@ export function createGraph(deps: GraphDeps) {
   const stamp = (ms: number) => iso(ms, tz);
   const numberOf = (caseId: string) => (isDeskKey(caseId) ? deskNo(caseId) : `#${caseId.slice(caseId.lastIndexOf(":") + 1)}`);
   const shortTitle = (title: string) => title.replace(/^(【[^】]*】\s*)+/, "").trim() || title;
+  /** The source's own label in front of a title ("【示例】"): not shown on the page, kept for the evidence. */
+  const tagOf = (title: string): string | null => /^(【[^】]*】\s*)+/.exec(title)?.[0].trim() || null;
   /** A run as people read it: the title its rule gave the flow, else the flow's name. */
   const named = (r: Pick<RunView, "title" | "flow">) => (r.title ? `「${r.title}」` : `流程「${r.flow}」`);
   const isOpen = (c: Commitment | undefined): c is Commitment => !!c && (c.status === "scheduled" || c.status === "waiting");
@@ -466,108 +470,79 @@ export function createGraph(deps: GraphDeps) {
     const wrong = f.said.find((s) => s.kind === "wrong");
     if (wrong) marks.push({ kind: "wrong", line: `${personName(wrong.by)} ${clockText(wrong.at)} 说这个判断错了：「${clip(wrong.said, 60)}」`, since: wrong.at, until: null });
 
-    // ---- the top bar and the four cells
-    const stepOf = (v: Visit | undefined) => (v && route.includes(v.stage) ? route.indexOf(v.stage) + 1 : null);
-    const stepNo = stepOf(last);
+    // ---- the top bar: whether it wants you, what is going on, and who has the ball
     const whoText = actor === "me" ? "你" : actor === "system" ? "系统" : actor === "them" ? "别人" : "没有";
     const sinceMs = waitingSince ? nowMs - Date.parse(waitingSince) : null;
     const took = tookOf(real, drop && !stageMeta.end ? drop.at : null);
-    const answerable = asks.length > 0;
     const lastRun = f.deciding.find((r) => r.situation === situation);
+    const hm = (t: string | null) => (t ? clockText(t) : "");
+    // A time of today is only the clock; another day has its date.
+    const when = (t: string) => (t.slice(0, 10) === stamp(nowMs).slice(0, 10) ? t.slice(11, 16) : clockText(t));
+    const joined = (...parts: Array<string | false | null | undefined>) => parts.filter(Boolean).join(" · ");
+    const waited = sinceMs !== null ? `${held.atLeast ? "至少已等" : "已等"} ${durationText(sinceMs)}` : "";
 
     let kicker: string;
     let line: string;
     let sub: string;
-    const hm = (t: string | null) => (t ? clockText(t) : "");
-    const hmw = (t: string | null) => (t ? clockWeekText(t) : "");
     switch (situation) {
       case "me":
-        kicker = ask ? `在等你回答 · 第 ${ask.round} 次问` : "在等你批准";
+        // A move of the person's that is neither a question nor an approval is what the rule says it is.
+        kicker = ask ? "要你：答一个问题" : lastRun?.gate ? "要你：批准" : `要你：${cutText(a?.next.what, 16) || "看一眼"}`;
         line = ask?.question ?? lastRun?.gate?.summary ?? a?.headline ?? "";
-        sub = ask ? `${hmw(ask.askedAt)} 问的。${ask.nextAskAt ? `不答的话${ask.nextAskWhat === "nag" ? `${hmw(ask.nextAskAt)} 再问` : `${hmw(ask.nextAskAt)} 以后不再问`}，最多 ${ask.maxRounds} 次。` : ""}${personNotifies(ask) ?? ""}` : "批准在审批卡上点；这里不替你批。";
+        sub = joined("你", waited, ask?.nextAskAt && `${when(ask.nextAskAt)} ${ask.nextAskWhat === "nag" ? "再问" : "以后不再问"}`);
         break;
       case "them":
-        kicker = `在等别人${a?.next.what ? ` · ${a.next.what}` : ""}`;
+        kicker = "不用你管";
         line = a?.headline ?? "";
-        sub = sinceMs !== null ? `${held.atLeast ? "至少已等" : "已等"} ${durationText(sinceMs)}${held.rulesAt ? `（${sinceText(held, "别人")}）` : held.atLeast ? "（开始追踪时就在等了，之前多久不知道）" : ""}。` : "";
+        sub = joined("别人", waited);
         break;
       case "system":
-        kicker = "系统在查 · 不用你做什么";
+        kicker = "不用你管";
         line = a?.headline ?? "还没有判断";
-        sub = [poll?.nextAt ? `${poll.what}，下次 ${hm(poll.nextAt)}。` : "", nextAsk?.at ? `${hm(nextAsk.at)} 还没有变化就问你。` : ""].join("");
+        sub = joined("系统", waited, poll?.nextAt && `下次看 ${when(poll.nextAt)}`, nextAsk?.at && `${when(nextAsk.at)} 没变化就问你`);
         break;
       case "doing":
-        kicker = "系统在做 · 不用你做什么";
+        kicker = "不用你管";
         // A flow the rule gave a title to is told as its rule tells it ("正在看第一眼"): the flow's own name and steps are not what people read.
-        line = lastRun ? (lastRun.title ? (a?.headline ?? `${named(lastRun)}在跑`) : `流程「${lastRun.flow}」在跑${lastRun.step ? `：${lastRun.step.title}（第 ${lastRun.step.index} 步${lastRun.step.total ? `，共 ${lastRun.step.total} 步` : ""}）` : ""}`) : (a?.headline ?? "");
-        sub = lastRun ? `已跑 ${durationText(nowMs - Date.parse(lastRun.startedAt))}，花了 $${lastRun.costUsd.toFixed(2)}${lastRun.title ? "" : "（只算已经结束的调用）"}。` : "";
+        line = lastRun ? (lastRun.title ? (a?.headline ?? `${named(lastRun)}在跑`) : `「${lastRun.flow}」在跑${lastRun.step ? `：${lastRun.step.title}（${lastRun.step.index}${lastRun.step.total ? `/${lastRun.step.total}` : ""}）` : ""}`) : (a?.headline ?? "");
+        sub = lastRun ? joined("系统", `已跑 ${durationText(nowMs - Date.parse(lastRun.startedAt))}`, `$${lastRun.costUsd.toFixed(2)}`) : "";
         break;
       case "fail":
       case "lost":
       case "slow":
       case "notstarted":
       case "unchecked":
-        kicker = situation === "fail" ? "流程失败了 · 看一眼" : situation === "lost" ? "流程断了 · 看一眼" : situation === "notstarted" ? "流程没起来 · 看一眼" : situation === "unchecked" ? "没查成 · 看一眼" : "可能卡住了 · 看一眼";
-        line = lastRun ? `「${lastRun.title ?? lastRun.flow}」${lastRun.step ? `在第 ${lastRun.step.index} 步「${lastRun.step.title}」` : ""}${situation === "fail" ? `失败了：${lastRun.error?.plain ?? lastRun.why ?? "出错了"}` : lastRun.maybeAsleep ? "没有动静了，可能是电脑睡了一会儿，等下一次检查再看" : situation === "lost" ? "断了：之后再没有动静" : situation === "notstarted" ? `没起来：${lastRun.why ?? "运行时没有出现"}` : situation === "unchecked" ? `没查成：${lastRun.why ?? "没说原因"}` : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没有动静`}` : "";
-        sub = lastRun ? (situation === "notstarted" || situation === "unchecked" ? `${situation === "unchecked" && lastRun.costUsd > 0 ? `已花 $${lastRun.costUsd.toFixed(2)}。` : "没花钱。"}${lastRun.retry ? (lastRun.actions?.includes("resume") ? "可以接着跑、从头重跑，或者你自己来。" : "可以再跑一次，或者你自己来。") : ""}不会自动重来。` : `已花 $${lastRun.costUsd.toFixed(2)}。${lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}。` : "对外的动作在人闸之后，没有改任何东西。"}不会自动重来。`) : "";
+        kicker = lastRun?.actions?.includes("resume") ? "要你：处理好后点「接着跑」" : lastRun?.actions?.includes("retry") ? "要你：从头重跑，或你自己来" : "要你：看一眼";
+        line = lastRun ? (situation === "slow" ? `${named(lastRun)}${lastRun.maybeAsleep ? "没动静了，可能是电脑睡了一会儿" : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没动静`}` : troubleLine(lastRun)) : "";
+        // What may already have been changed outside is the one thing worth saying up here; the cost and the rest are behind "原因全文".
+        sub = lastRun && lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}` : "";
         break;
       case "stuck":
-        kicker = "卡住了 · 看一眼";
+        kicker = "要你：看一眼";
         line = a?.headline ?? "";
         sub = "";
         break;
       case "error":
-        kicker = "检查出错 · 不是事项本身的问题";
-        line = `判断这个事项的时候出错了${chain?.last ? `，下面显示的是 ${hm(chain.last.at)} 的判断` : ""}`;
-        sub = clip(a?.error ?? "", 200);
+        kicker = "检查出错了";
+        line = `判断这个事项的时候出错了${chain?.last ? `，下面是 ${hm(chain.last.at)} 的判断` : ""}`;
+        sub = clip(a?.error ?? "", 120);
         break;
       case "mine":
-        kicker = "你在做 · 不催你";
+        kicker = "你在做";
         line = a?.headline ?? "";
-        sub = "做完之后系统自动接着跟。";
+        sub = "做完系统自动接着跟";
         break;
       case "dropped":
-        kicker = drop ? `不再追踪 · ${personName(drop.by)} ${hm(drop.at)} 说的` : "不再追踪";
-        line = a?.headline ?? "";
-        sub = drop ? `说一句「${numberOf(caseId)} 接着跟」就恢复；图保留。` : "";
+        kicker = "不盯了";
+        // The words that ended it, not the judgment's own line (which says who and when again).
+        line = drop ? `「${clip(drop.said, 60)}」` : (a?.headline ?? "");
+        sub = drop ? joined(`${personName(drop.by)} ${hm(drop.at)} 说的`, "说「接着跟」可恢复") : "";
         break;
       default:
-        kicker = took.ms !== null ? `结束了 · ${took.atLeast ? "至少用了" : "共"} ${durationText(took.ms)}` : took.atLeast ? "结束了 · 开始追踪时就已经结束了" : "结束了";
+        kicker = "结束了";
         line = a?.headline ?? "";
-        sub = "";
+        sub = took.ms !== null ? `${took.atLeast ? "至少用了" : "用了"} ${durationText(took.ms)}` : took.atLeast ? "追踪前就结束了" : "";
     }
-
-    const stageSub = !a ? "还没有判断" : stageMeta.side ? `岔路：${stageMeta.when ?? ""}` : stepNo ? `第 ${stepNo} 步，共 ${route.length} 步${last && last.skipped.length > 0 ? `（跳过了${last.skipped.map((s) => metaOf(metas, s.stage).label).join("、")}）` : ""}` : "";
-    const facts = [
-      { label: "走到哪", value: stageMeta.label || "—", sub: stageSub, hot: false },
-      { label: "在等谁", value: finished ? "没有" : whoText, sub: finished ? "" : what, hot: false },
-      {
-        label: finished ? "用了多久" : "等了多久",
-        value: finished
-          ? took.ms !== null
-            ? `${took.atLeast ? "至少 " : ""}${durationText(took.ms)}`
-            : took.atLeast
-              ? "追踪前就结束了"
-              : "—"
-          : sinceMs !== null
-            ? `${held.atLeast ? "至少 " : ""}${durationText(sinceMs)}`
-            : "—",
-        sub: finished
-          ? real[0]?.from && took.atLeast
-            ? `从 ${clockText(real[0].from)} 开始追踪起`
-            : real[0]?.from && last?.from
-              ? `${clockText(real[0].from)} → ${clockText(last.from)}`
-              : ""
-          : sinceText(held, whoText),
-        hot: false,
-      },
-      {
-        label: "要你做吗",
-        value: answerable || situation === "me" ? "要" : situation === "stuck" || situation === "slow" || situation === "fail" || situation === "lost" || situation === "notstarted" || situation === "unchecked" ? "看一眼" : "不用",
-        sub: answerable ? "在下面选一个答案" : situation === "me" ? "批准只在审批卡上点" : situation === "stuck" ? "是顺延了还是漏了" : nextAsk?.at ? `${clockText(nextAsk.at)} 还没有变化才问你` : "",
-        hot: answerable || situation === "me" || situation === "stuck" || situation === "fail" || situation === "lost" || situation === "notstarted",
-      },
-    ];
 
     // A look of a matter a person told ends with the time it chose for the next one, in the line of its end. (A flow that has a title for
     // people does not say here how it failed in the runtime's own words: the run's page has them.)
@@ -576,18 +551,24 @@ export function createGraph(deps: GraphDeps) {
       const next = n ? nextLookOf(state.notes[caseId]?.["desk.log"]?.value, n) : null;
       return next ? `→ 下次看 ${clockWeekText(next)}` : "";
     };
-    // Some entries carry the instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
-    const flowLines = f.runs.flatMap((r) => [
-      {
-        ms: Date.parse(r.startedAt),
-        // A round that carries an earlier run on says so, and from where in the flow's own words; one started from the command line says it was taken in.
-        line: r.carriedOn ? `接着跑了${named(r)}${r.round ? `（第 ${r.round + 1} 次）` : ""}` : `起了${named(r)}`,
-        detail: [r.carriedOn ? clip(`${r.carriedOn.line.replace(/[。.]+$/u, "")}${r.carriedOn.by === "cli" ? "（从命令行接着跑的，已记进来）" : ""}`, 160) : "", r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : ""].filter(Boolean).join("；") || (null as string | null),
-      },
-      ...(r.endedAt ? [{ ms: Date.parse(r.endedAt), line: `${named(r)}${r.situation === "fail" ? "失败了" : r.situation === "lost" ? "断了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" ? "没查成" : r.outcome === "stopped" ? "被停了" : "结束了"}`, detail: [r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r)].filter(Boolean).join(" ") || null }] : []),
-    ]);
+    // A run is one line: when it started while it goes, when it ended once it has (with how long and what it cost). Some entries carry the
+    // instant the journal wrote them (UTC), some the one a judgment names (local): ordered as instants, shown in the instance's zone.
+    // A run a person set aside (took over, folded away) did not come to a result either: its line says so, not "好了".
+    const endWord = (r: RunView) => (r.situation === "fail" || r.situation === "lost" ? "出错了" : r.situation === "notstarted" ? "没起来" : r.situation === "unchecked" || (r.dismissed && r.why) ? "停了" : r.outcome === "stopped" ? "被停了" : "好了");
+    const flowLines = f.runs.map((r) => {
+      const unread = r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : "";
+      const from = r.carriedOn ? clip(`${r.carriedOn.line.replace(/[。.]+$/u, "")}${r.carriedOn.by === "cli" ? "（从命令行接着跑的，已记进来）" : ""}`, 160) : "";
+      if (!r.endedAt) return { ms: Date.parse(r.startedAt), line: r.carriedOn ? `接着跑了${named(r)}${r.round ? `（第 ${r.round + 1} 次）` : ""}` : `起了${named(r)}`, detail: [from, unread].filter(Boolean).join("；") || (null as string | null) };
+      const spent = [durationText(Date.parse(r.endedAt) - Date.parse(r.startedAt)), r.costUsd > 0 ? `$${r.costUsd.toFixed(2)}` : ""].filter(Boolean).join("，");
+      const why = r.situation === "done" && !r.dismissed ? "" : (r.shortWhy ?? "");
+      return {
+        ms: Date.parse(r.endedAt),
+        line: `${r.carriedOn ? "接着跑：" : ""}${r.title ?? r.flow}${endWord(r)}${why ? `：${why}` : ""}（${spent}）`,
+        detail: [from, r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r), unread].filter(Boolean).join(" ") || null,
+      };
+    });
     const history: HistoryLine[] = [
-      ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null } })),
+      ...(chain?.entries ?? []).map((e) => ({ ms: Date.parse(e.at), order: e.seq, line: { kind: e.kind, line: e.text(fmt), detail: e.detail ? clip(e.detail, 160) : null, ...(e.inner ? { inner: true } : {}) } })),
       ...flowLines.map((l, i) => ({ ms: l.ms, order: Number.MAX_SAFE_INTEGER - 1000 + i, line: { kind: "run" as const, line: l.line, detail: l.detail } })),
     ]
       .sort((x, y) => x.ms - y.ms || x.order - y.order)
@@ -604,7 +585,8 @@ export function createGraph(deps: GraphDeps) {
     return {
       case: caseId,
       number: numberOf(caseId),
-      title: item.title,
+      title: shortTitle(item.title),
+      tag: tagOf(item.title),
       url: item.url,
       now: stamp(nowMs),
       mode: deps.mode,
@@ -612,7 +594,6 @@ export function createGraph(deps: GraphDeps) {
       situation,
       marks,
       hero: { kicker, line, sub },
-      facts,
       graph: { stages: metas, normal: route },
       visits: walk.visits,
       deviations: walk.deviations,
@@ -636,7 +617,7 @@ export function createGraph(deps: GraphDeps) {
         .sort((x, y) => y.at.localeCompare(x.at))
         .map((s) => ({ id: s.id, kind: s.kind, label: KIND_LABEL[s.kind], said: clip(s.said, 200), by: personName(s.by), at: s.at, until: s.until, how: s.how, inForce: f.said.some((x) => x.id === s.id), revokedAt: s.revoked?.at ?? null })),
       history,
-      evidence: { facts: factRows, sources: sourceRows, stages: stageRows, rule: a ? { name: a.rule, fingerprint: a.rulesFingerprint } : null, handoffsRead: false },
+      evidence: { waitFrom: finished ? "" : sinceText(held, whoText), facts: factRows, sources: sourceRows, stages: stageRows, rule: a ? { name: a.rule, fingerprint: a.rulesFingerprint } : null, handoffsRead: false },
     };
   }
 

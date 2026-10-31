@@ -33,7 +33,7 @@ test("drop, hold and wrong said with --said - in the admin's own chat take effec
       const id = say(w, { cmd: "say", item: "D1", said: "-", ...extra });
       await w.engine.tick();
       assert.equal(w.receipt(id)!.outcome, "applied", `${text}: ${w.receipt(id)!.text}`);
-      assert.match(w.receipt(id)!.text, /要撤销/);
+      assert.match(w.receipt(id)!.text, /撤销：reconcile-say undo --id a_[0-9a-f]{12}/, "the way back is kept for the agent");
       const a = Object.values(w.store.state.annotations).find((x) => x.said === text)!;
       assert.equal(a.how, "own-words");
     }
@@ -82,14 +82,14 @@ test("what is asked names the matter: in the conversation and on the card", () =
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "asked");
     const question = w.store.state.requests[id]!.question!;
-    assert.match(question, /^要我不再追踪「年检取模」（D1）吗？/);
+    assert.match(question, /^要我不盯「年检取模」（D1）吗？/);
     assert.match(w.receipt(id)!.text, /他回了同意以后（比如「要」「对」），在前台跑：reconcile-say confirm --id/);
   }, true));
 
 test("the card names the matter too", () =>
   withAdmin(async (w) => {
     await carded(w);
-    assert.match(cards(w)[0]!.ask.question, /^要不再追踪「年检取模」（D1）吗/);
+    assert.match(cards(w)[0]!.ask.question, /^要不盯「年检取模」（D1）吗/);
   }));
 
 test("the yes given in the conversation is recorded as given there; the yes on a card as given on the card", () =>

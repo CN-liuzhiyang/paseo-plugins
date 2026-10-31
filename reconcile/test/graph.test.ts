@@ -392,6 +392,6 @@ test("a journal that cannot be listed leaves the page as it was and is read agai
 
 test("a stage the rule gave no name is never shown by its id: a step number, a detour number, or what kind of end", () => {
   const m = normalizeStages(["a", { id: "b", label: "有名字" }, { id: "x", side: true }, { id: "y", side: true, label: "打回" }, { id: "z", side: true }, "c", { id: "fin", end: true }, { id: "off", end: true, endKind: "dropped" }, { id: "odd", end: true, endKind: "other" }, "dropped"]);
-  assert.deepEqual(m.map((s) => s.label), ["第 1 步", "有名字", "岔路 1", "打回", "岔路 2", "第 3 步", "结束", "不再追踪", "另一种结束", "不再追踪"]);
+  assert.deepEqual(m.map((s) => s.label), ["第 1 步", "有名字", "岔路 1", "打回", "岔路 2", "第 3 步", "结束", "不盯了", "另一种结束", "不盯了"]);
   assert.ok(m.every((s) => s.named === (s.id === "b" || s.id === "y")));
 });

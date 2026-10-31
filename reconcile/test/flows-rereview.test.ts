@@ -179,7 +179,7 @@ test("N7B-06: a run that came to no result is still told on Monday morning when 
       assert.equal(w.deliveries.length, 0, "20:30 is after the quiet hours began");
       w.clock.now = at("2026-10-19 09:35");
       await first(w);
-      assert.deepEqual(w.deliveries.map((d) => d.title).sort(), ["初查没跑完", "初查没跑完"], "61 hours later, the two that need the person");
+      assert.deepEqual(w.deliveries.map((d) => d.title).sort(), ["初查停了", "初查出错了"].sort(), "61 hours later, the two that need the person");
       assert.equal(w.store.state.ledger[`flow-notify:${ids[2]}:chat:u1`]!.status, "suppressed", "good news that old is news no more");
       // one that ended on Friday evening and is read on Thursday: six days
       w.flows.probes.set(ids[3]!, finished(null, { outcome: "failed", error: { name: "X", message: "m", headline: "m", plain: "x", raw: "x" } as never, at: at(FRIDAY_NIGHT) }, 0.1));
@@ -211,7 +211,7 @@ test("N7B-07: in a message what would make a link, a tag or code is not sent as 
       await advance(w, 10);
       const sent = w.deliveries.find((d) => d.text.startsWith("#1"))!;
       assert.equal(/[\[\]<>`*]/.test(sent.text), false, sent.text);
-      assert.equal(sent.text, "#1 初查没跑完：［点这里修复］(https://evil.example/x) ＜b＞x＜/b＞ ｀code｀ ＊＊bold＊＊。详情在「事项追踪」里。");
+      assert.match(sent.text, /^#1 初查停了：［点这里修复］\(https:\/\/evil\.example\/x\) ＜b＞x＜\/b/, "the sentence still reads, in the cut it is told in");
       assert.equal(w.engine.graph("gcp-demo:1")!.runs[0]!.why, raw, "the page is not Markdown");
       const marks = w.deliveries.find((d) => d.text.startsWith("#2"))!;
       assert.equal(marks.title, "初查好了", "marks only: finished, not 'did not get done: 。'");
@@ -222,7 +222,7 @@ test("N7B-07: in a message what would make a link, a tag or code is not sent as 
 
 test("N7B-07: the message of a plain sentence is as it was", () => {
   const told = endedMessage({ label: "初查", caseId: "gcp-demo:7" }, { at: "2026-10-13T02:00:00.000Z", costUsd: 0, valueDropped: false, why: "x", outcome: "stopped", summary: null, value: { why: `${WHY}。` } });
-  assert.equal(told.text, `#7 初查没跑完：${WHY}。详情在「事项追踪」里。`);
+  assert.equal(told.text, `#7 初查停了：${WHY}。`);
 });
 
 // ---- N7B-09: no log directory known ----------------------------------------------------------------------------------

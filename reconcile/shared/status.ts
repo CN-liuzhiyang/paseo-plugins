@@ -54,7 +54,7 @@ export interface StatusSaid {
   caseId: string;
   title: string;
   kind: Annotation["kind"];
-  /** How the kind reads: 不再追踪, 先别问, 判断错了, 交代, 补一句. */
+  /** How the kind reads: 不盯了, 先别问, 判断错了, 交代, 补一句. */
   label: string;
   said: string;
   by: string;

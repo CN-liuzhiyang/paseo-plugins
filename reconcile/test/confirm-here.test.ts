@@ -50,7 +50,7 @@ test("their yes after the question was asked word for word tells the matter, as 
     const { id, question } = await asked(w);
     const done = await reply(w, id, "要", `好的。${question}`);
     assert.equal(done.outcome, "applied", done.text);
-    assert.match(done.text, /记下了/);
+    assert.match(done.text, /^盯着了：/);
     assert.equal(item(w, 1)?.title, "年度体检");
   }));
 
@@ -203,11 +203,11 @@ test("in the admin's own chat words the agent copied, that cannot be checked aga
       const receipt = w.receipt(id)!;
       assert.equal(receipt.outcome, "asked", receipt.text);
       const question = w.store.state.requests[id]!.question!;
-      assert.match(question, /不再追踪「年度体检」（D1）/);
+      assert.match(question, /不盯「年度体检」（D1）/);
       assert.notEqual(assessed(w, 1)?.stage, "dropped");
       const done = await reply(w, id, "要的", question, MINE);
       assert.equal(done.outcome, "applied", done.text);
-      assert.match(done.text, /不再追踪/);
+      assert.match(done.text, /不盯了/);
     },
     { persons: mine() },
   ));
@@ -239,7 +239,7 @@ test("the matter ended another way in the minutes after it was asked to end: the
       assert.equal(w.receipt(direct)!.outcome, "applied", w.receipt(direct)!.text);
       const done = await reply(w, id, "要", question, MINE);
       assert.equal(done.outcome, "rejected", done.text);
-      assert.match(done.text, /已经不再追踪/);
+      assert.match(done.text, /已经不盯了/);
     },
     { persons: mine() },
   ));

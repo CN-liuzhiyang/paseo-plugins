@@ -3,17 +3,16 @@ import { useRpc } from "@getpaseo/plugin/client";
 import { TextInput } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { clockText, durationText, ledgerText, resumeNote, retryLabel, SITUATION, troubleLine, type AskView, type GraphView, type RunView, type Visit } from "../shared/graph";
+import { clockText, cutText, durationText, ledgerText, resumeNote, retryCost, RETRY_LABEL, SITUATION, troubleLine, type AskView, type GraphView, type HistoryLine, type RunView, type Visit } from "../shared/graph";
 import { answerRpc, flowRpc, graphRpc } from "../shared/rpc";
-import { BallChip, StageChart, StageRail } from "./chart";
+import { BallChip, ChartLegend, StageChart, StageRail, StageStrip } from "./chart";
 import { go, jumpOf } from "./jump";
-import { Banner, Button, Fold, openExternal, OpenAgent, ScreenLink, tint, useUi } from "./ui";
+import { Banner, Button, Fold, openExternal, OpenAgent, ScreenLink, TextLink, tint, useUi } from "./ui";
 
-// The page of one item: the bar that says what it is doing (and whose ball), four cells, the
-// question if there is one (answered here, the same answer as on its card), then the chart and,
-// beside it, what comes next, what it is tied to and what you said about it. Clicking a stage
-// opens that stage's details in place of the side. The thing to approve is not here: that is only
-// on the approval card, which the bar opens.
+// The page of one item. The bar says whether it wants you, what is going on, and who has the ball; when a flow stopped, the way out
+// (carry on, start over, take it over) is in the bar. A question waiting is answered right under it (the same answer as on its
+// card). Then the route in one line and, in tabs, what happened, the chart of stages and the evidence. What it is tied to and what
+// you said about it stand beside, only when there is something. The thing to approve is on the approval card, which the bar opens.
 
 const POLL_MS = 5_000;
 type GraphReply = RpcOutput<typeof graphRpc>;
@@ -43,7 +42,7 @@ function useGraph(caseId: string): { view: GraphView | null; error: string | nul
   return { ...state, refresh: () => setNonce((n) => n + 1) };
 }
 
-// ---- the top bar and the four cells -----------------------------------------------------------
+// ---- the top bar ------------------------------------------------------------------------------
 
 function Glyph({ situation, size = 36 }: { situation: GraphView["situation"]; size?: number }) {
   const ui = useUi();
@@ -55,22 +54,17 @@ function Glyph({ situation, size = 36 }: { situation: GraphView["situation"]; si
   );
 }
 
-function Hero({ view }: { view: GraphView }) {
+type Done = (note: { ok: boolean; text: string }) => void;
+
+/** The runs a person may do something about, the newest first: the first is the bar's, the others stand under it. */
+const inTrouble = (view: GraphView): RunView[] => view.runs.filter((r) => (r.actions?.length ?? 0) > 0);
+
+function Hero({ view, onDone }: { view: GraphView; onDone: Done }) {
   const ui = useUi();
   const s = SITUATION[view.situation];
   const color = ui.tone(s.tone);
   const gate = view.runs.find((r) => r.gate);
-  const run = view.runs.find((r) => r.situation !== "done" && r.situation !== "refused") ?? view.runs[0];
-  const ask = view.current.ask;
-  const actions = (
-    <View style={[ui.styles.row, { gap: 8 }]}>
-      {gate?.gate?.agentId ? <OpenAgent agentId={gate.gate.agentId} label="去批准" primary /> : null}
-      {ask?.cardAgentId ? <OpenAgent agentId={ask.cardAgentId} label="在问题卡里答" /> : null}
-      {run?.situation === "slow" && run.agentId ? <OpenAgent agentId={run.agentId} label="打开那个 agent" primary /> : null}
-      {run ? <ScreenLink plugin={run.link.plugin} screen={run.link.screen} params={run.link.params} label="看这次流程" /> : null}
-      {view.url ? <Button icon="ExternalLink" label="打开单子" onPress={() => openExternal(view.url!)} /> : null}
-    </View>
-  );
+  const trouble = inTrouble(view)[0];
   return (
     <View style={{ borderRadius: 12, borderWidth: 1, borderColor: tint(color, 0.45), backgroundColor: tint(color, 0.1), padding: ui.compact ? 12 : 16, gap: 10 }}>
       <View style={{ flexDirection: "row", gap: 12, alignItems: "flex-start" }}>
@@ -99,36 +93,8 @@ function Hero({ view }: { view: GraphView }) {
           </View>
         );
       })}
-      {actions}
-    </View>
-  );
-}
-
-function Facts({ view }: { view: GraphView }) {
-  const ui = useUi();
-  return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-      {view.facts.map((f) => (
-        <View
-          key={f.label}
-          style={{
-            flexGrow: 1,
-            flexBasis: ui.compact ? "46%" : "22%",
-            minWidth: ui.compact ? 130 : 170,
-            borderRadius: 10,
-            borderWidth: f.hot ? 1.5 : 1,
-            borderColor: f.hot ? ui.tone("warning") : ui.theme.colors.border,
-            backgroundColor: f.hot ? tint(ui.tone("warning"), 0.08) : ui.theme.colors.surface1,
-            paddingHorizontal: 12,
-            paddingVertical: 9,
-            gap: 1,
-          }}
-        >
-          <Text style={[ui.styles.small, { fontWeight: "600" }]}>{f.label}</Text>
-          <Text style={{ color: ui.theme.colors.foreground, fontSize: 16, fontWeight: "700" }}>{f.value}</Text>
-          <Text style={ui.styles.small}>{f.sub || " "}</Text>
-        </View>
-      ))}
+      {gate?.gate?.agentId ? <OpenAgent agentId={gate.gate.agentId} label="去批准" primary /> : null}
+      {trouble ? <Ways run={trouble} onDone={onDone} /> : null}
     </View>
   );
 }
@@ -136,20 +102,20 @@ function Facts({ view }: { view: GraphView }) {
 // ---- a run in trouble: the way out ------------------------------------------------------------
 
 /**
- * What a person may do with a flow that failed, broke or never started. When the flow said where it could carry on from, the first thing is a
- * button for that ("接着跑", with the flow's own words beside it); next to it, running it again is called "从头重跑", so that the two names
- * say which carries on and which starts over. Then: take it over ("我自己来"), or fold it away.
+ * What a person may do with a flow that stopped, failed or broke: one main button ("接着跑" when the flow said where it could carry on from,
+ * else "从头重跑"), and, as words beside it, the others: start over, take it over ("我自己来"), fold it away, and the whole of the reason.
  */
-function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolean; text: string }): void }) {
+function Ways({ run, onDone, withLine = false }: { run: RunView; onDone: Done; withLine?: boolean }) {
   const ui = useUi();
   const flow = useRpc(flowRpc);
   const [busy, setBusy] = useState(false);
-  const runs = view.runs.filter((r) => (r.actions?.length ?? 0) > 0);
-  if (runs.length === 0) return null;
-  const press = async (runId: string, action: "resume" | "retry" | "mine" | "fold") => {
+  const [open, setOpen] = useState(false);
+  const actions = run.actions ?? [];
+  if (actions.length === 0) return null;
+  const press = async (action: "resume" | "retry" | "mine" | "fold") => {
     setBusy(true);
     try {
-      const reply = await flow({ runId, action });
+      const reply = await flow({ runId: run.runId, action });
       onDone({ ok: reply.ok, text: reply.detail });
     } catch (error) {
       onDone({ ok: false, text: String(error) });
@@ -157,36 +123,40 @@ function FlowWays({ view, onDone }: { view: GraphView; onDone(note: { ok: boolea
       setBusy(false);
     }
   };
+  const resume = actions.includes("resume");
+  const retry = actions.includes("retry");
+  const whole = [run.why ? cutText(run.why, 600) : "", ledgerText(run.ledger), retry ? retryCost(run) : "", run.costUsd > 0 ? `已花 $${run.costUsd.toFixed(2)}` : ""].filter(Boolean);
   return (
     <View style={{ gap: 8 }}>
-      {runs.map((r) => (
-        <View key={r.runId} style={{ borderRadius: 10, borderWidth: 1, borderColor: ui.tone("warning"), backgroundColor: ui.theme.colors.surface1, padding: 10, gap: 6 }}>
-          <Text style={ui.styles.small} selectable>
-            {troubleLine(r)}
-            {ledgerText(r.ledger) ? ` ${ledgerText(r.ledger)}` : ""}
+      {withLine ? (
+        <Text style={ui.styles.strong} selectable>
+          {troubleLine(run)}
+        </Text>
+      ) : null}
+      <View style={[ui.styles.row, { gap: 10, alignItems: "center" }]}>
+        {resume ? <Button icon="Play" primary label="接着跑" disabled={busy} onPress={() => void press("resume")} /> : retry ? <Button icon="RotateCw" primary label={RETRY_LABEL} disabled={busy} onPress={() => void press("retry")} /> : null}
+        {!resume && !retry && run.situation === "slow" && run.agentId ? <OpenAgent agentId={run.agentId} label="打开那个 agent" primary /> : null}
+        {resume ? (
+          <Text style={[ui.styles.small, { flexShrink: 1 }]} selectable>
+            {resumeNote(run)}
           </Text>
-          {r.actions!.includes("resume") ? (
-            <View style={[ui.styles.row, { gap: 10, flexWrap: "wrap", alignItems: "center" }]}>
-              <Button icon="Play" primary label="接着跑" disabled={busy} onPress={() => void press(r.runId, "resume")} />
-              <Text style={[ui.styles.small, { flexShrink: 1 }]} selectable>
-                {resumeNote(r)}
-              </Text>
-            </View>
-          ) : null}
-          <View style={[ui.styles.row, { gap: 8, flexWrap: "wrap" }]}>
-            {r.actions!.includes("retry") ? (
-              <Button
-                icon="RotateCw"
-                label={retryLabel(r)}
-                disabled={busy}
-                onPress={() => void press(r.runId, "retry")}
-              />
-            ) : null}
-            <Button icon="User" label="我自己来" disabled={busy} onPress={() => void press(r.runId, "mine")} />
-            <Button icon="EyeOff" label="收起" disabled={busy} onPress={() => void press(r.runId, "fold")} />
-          </View>
+        ) : null}
+      </View>
+      <View style={[ui.styles.row, { gap: 14 }]}>
+        {resume && retry ? <TextLink label={RETRY_LABEL} disabled={busy} onPress={() => void press("retry")} /> : null}
+        <TextLink label="我自己来" disabled={busy} onPress={() => void press("mine")} />
+        <TextLink label="收起" disabled={busy} onPress={() => void press("fold")} />
+        {whole.length > 0 ? <TextLink label={`原因全文 ${open ? "▾" : "▸"}`} onPress={() => setOpen((value) => !value)} /> : null}
+      </View>
+      {open ? (
+        <View style={{ gap: 2 }}>
+          {whole.map((line) => (
+            <Text key={line} style={ui.styles.small} selectable>
+              {line}
+            </Text>
+          ))}
         </View>
-      ))}
+      ) : null}
     </View>
   );
 }
@@ -220,8 +190,7 @@ export function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boo
   return (
     <View style={{ borderRadius: 12, borderWidth: 1, borderColor: color, backgroundColor: c.surface1, overflow: "hidden" }}>
       <View style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 6, paddingHorizontal: 12, paddingVertical: 7, backgroundColor: tint(color, 0.12) }}>
-        <Text style={{ color, fontSize: 12, fontWeight: "700" }}>{ask.confirm ? "要你确认某句话是不是你说的" : "问你"} · 第 {ask.round} 次</Text>
-        <Text style={ui.styles.small}>回答会记进日志；问题卡上答也一样，先到的算</Text>
+        <Text style={{ color, fontSize: 12, fontWeight: "700" }}>问你{ask.round > 1 ? ` · 第 ${ask.round} 次` : ""}</Text>
       </View>
       <View style={{ padding: 12, gap: 8 }}>
         <Text style={[ui.styles.strong, { fontSize: 15 }]} selectable>
@@ -263,15 +232,12 @@ export function AskPanel({ ask, onDone }: { ask: AskView; onDone(note: { ok: boo
           ) : null}
           <Button icon="Check" primary label={busy ? "正在记…" : chosenLabel ? `提交：${chosenLabel}` : "提交"} disabled={busy} onPress={submit} />
         </View>
-        <Text style={ui.styles.small}>
-          不想现在答：收起不算回答{ask.nextAskAt ? `，${clockText(ask.nextAskAt)} ${ask.nextAskWhat === "nag" ? "再问" : "以后不再问"}` : ""}。想先别问：在对话里说"先别问 到周五"。
-        </Text>
       </View>
     </View>
   );
 }
 
-// ---- the side: what comes next, what it is tied to, what you said ------------------------------------
+// ---- the side: what it is tied to, what you said ----------------------------------------------------
 
 const KIND_LABEL: Record<string, string> = { parent: "父单", child: "子单", requires: "前置", provides: "提供给", "same-key": "同开关" };
 
@@ -280,65 +246,48 @@ function SideHeading({ children }: { children: string }) {
   return <Text style={[ui.styles.small, { fontWeight: "700", marginTop: 4 }]}>{children}</Text>;
 }
 
+/** Whether there is anything for the side to say. */
+const hasSide = (view: GraphView): boolean => view.links.length > 0 || view.said.length > 0;
+
 function Side({ view, openCase }: { view: GraphView; openCase(caseId: string): void }) {
   const ui = useUi();
   const c = ui.theme.colors;
   return (
     <View style={{ gap: 8 }}>
-      <SideHeading>接下来会做什么</SideHeading>
-      {view.schedule.length === 0 ? (
-        <Text style={ui.styles.small}>没有排着的。</Text>
-      ) : (
-        view.schedule.map((s, i) => (
-          <View key={i} style={{ flexDirection: "row", gap: 10 }}>
-            <Text style={[ui.styles.small, { width: 84, fontFamily: ui.styles.mono.fontFamily }]}>{s.at ? clockText(s.at) : "现在"}</Text>
-            <Text style={[ui.styles.text, { flex: 1, fontSize: 13 }]}>{s.line}</Text>
-          </View>
-        ))
-      )}
-      <SideHeading>关联的事项</SideHeading>
-      {view.links.length === 0 ? (
-        <Text style={ui.styles.small}>没有。</Text>
-      ) : (
-        view.links.map((l) => (
-          <View key={`${l.kind}${l.number}`} style={{ gap: 1 }}>
-            <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <View style={{ paddingHorizontal: 6, borderRadius: 4, backgroundColor: c.surface2 }}>
-                <Text style={ui.styles.small}>{KIND_LABEL[l.kind] ?? l.kind}</Text>
-              </View>
-              {l.caseId ? (
-                <Pressable accessibilityRole="link" accessibilityLabel={`打开 ${l.number}`} onPress={() => openCase(l.caseId!)}>
-                  <Text style={{ color: c.accent, fontSize: 13, fontWeight: "600" }}>{l.number} ↗</Text>
-                </Pressable>
-              ) : (
-                <Text style={ui.styles.strong}>{l.number}</Text>
-              )}
-              {l.state ? <Text style={ui.styles.small}>{SITUATION[l.state.situation].name} · {l.state.stageLabel}</Text> : <Text style={ui.styles.small}>不在追踪</Text>}
+      {view.links.length > 0 ? <SideHeading>关联的事项</SideHeading> : null}
+      {view.links.map((l) => (
+        <View key={`${l.kind}${l.number}`} style={{ gap: 1 }}>
+          <View style={{ flexDirection: "row", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <View style={{ paddingHorizontal: 6, borderRadius: 4, backgroundColor: c.surface2 }}>
+              <Text style={ui.styles.small}>{KIND_LABEL[l.kind] ?? l.kind}</Text>
             </View>
-            {l.label ? <Text style={ui.styles.small}>{l.label}</Text> : null}
-            {l.state ? <Text style={ui.styles.small} numberOfLines={2}>{l.state.line}</Text> : null}
+            {l.caseId ? (
+              <Pressable accessibilityRole="link" accessibilityLabel={`打开 ${l.number}`} onPress={() => openCase(l.caseId!)}>
+                <Text style={{ color: c.accent, fontSize: 13, fontWeight: "600" }}>{l.number} ↗</Text>
+              </Pressable>
+            ) : (
+              <Text style={ui.styles.strong}>{l.number}</Text>
+            )}
+            {l.state ? <Text style={ui.styles.small}>{SITUATION[l.state.situation].name} · {l.state.stageLabel}</Text> : <Text style={ui.styles.small}>不在追踪</Text>}
           </View>
-        ))
-      )}
-      <SideHeading>你在对话里说过的</SideHeading>
-      {view.said.length === 0 ? (
-        <Text style={ui.styles.small}>没有。在任何新开的对话里说「{view.number} 不用跟了」「先别问到周五」，这里就会出现原话。</Text>
-      ) : (
-        view.said.map((s) => (
-          <View key={s.id} style={{ borderLeftWidth: 3, borderLeftColor: s.inForce ? ui.tone("accent") : c.border, paddingLeft: 8, gap: 1 }}>
-            <Text style={[s.inForce ? ui.styles.text : ui.styles.muted, { fontSize: 13 }]} selectable>
-              「{s.said}」
-            </Text>
-            <Text style={ui.styles.small}>
-              {s.by} {clockText(s.at)} 说 · {s.label}
-              {s.until ? ` 到 ${s.until}` : ""}
-              {s.how === "confirmed" ? " · 在卡片上确认的" : s.how === "confirmed-here" ? " · 在对话里确认的" : ""}
-              {s.inForce ? " · 说一句就撤" : s.revokedAt ? ` · ${clockText(s.revokedAt)} 撤了` : " · 过期了"}
-            </Text>
-          </View>
-        ))
-      )}
-      <Text style={ui.styles.small}>点图上任何一段，看那一段的细节。</Text>
+          {l.label ? <Text style={ui.styles.small}>{l.label}</Text> : null}
+          {l.state ? <Text style={ui.styles.small} numberOfLines={2}>{l.state.line}</Text> : null}
+        </View>
+      ))}
+      {view.said.length > 0 ? <SideHeading>你在对话里说过的</SideHeading> : null}
+      {view.said.map((s) => (
+        <View key={s.id} style={{ borderLeftWidth: 3, borderLeftColor: s.inForce ? ui.tone("accent") : c.border, paddingLeft: 8, gap: 1 }}>
+          <Text style={[s.inForce ? ui.styles.text : ui.styles.muted, { fontSize: 13 }]} selectable>
+            「{s.said}」
+          </Text>
+          <Text style={ui.styles.small}>
+            {s.by} {clockText(s.at)} 说 · {s.label}
+            {s.until ? ` 到 ${s.until}` : ""}
+            {s.how === "confirmed" ? " · 在卡片上确认的" : s.how === "confirmed-here" ? " · 在对话里确认的" : ""}
+            {s.inForce ? " · 说一句就撤" : s.revokedAt ? ` · ${clockText(s.revokedAt)} 撤了` : " · 过期了"}
+          </Text>
+        </View>
+      ))}
     </View>
   );
 }
@@ -402,7 +351,6 @@ function StageDetail({ view, selected, onClose }: { view: GraphView; selected: s
               <Text style={ui.styles.small}>{durationText(Math.max(0, (b.to ? Date.parse(b.to) : nowMs) - Date.parse(b.from)))}</Text>
             </View>
           ))}
-          <Text style={ui.styles.small}>谁（策划、QA）在什么时候接了手，这里还读不到，所以没有画。</Text>
           <Text style={[ui.styles.small, { fontWeight: "700" }]}>{v.cur || !v.lastHeadline ? "到下一步的标志" : "走的时候的样子"}</Text>
           <Text style={ui.styles.muted} selectable>
             {v.cur || !v.lastHeadline ? (meta?.done ?? "—") : v.lastHeadline}
@@ -433,29 +381,48 @@ function History({ view }: { view: GraphView }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const color: Record<string, string> = { stage: c.accent, ask: ui.tone("warning"), answer: ui.tone("warning"), said: ui.tone("accent"), rules: c.foregroundMuted, error: ui.tone("danger"), run: c.accent, note: c.foregroundMuted };
-  if (view.history.length === 0) return <Text style={ui.styles.muted}>日志里还没有这个事项的经过。</Text>;
+  const lines = view.history.filter((h) => !h.inner);
+  if (lines.length === 0) return <Text style={ui.styles.muted}>日志里还没有这个事项的经过。</Text>;
   return (
     <View style={{ gap: 0 }}>
-      {view.history.map((h, i) => (
-        <View key={i} style={{ flexDirection: "row", gap: 10, paddingBottom: 8 }}>
-          <View style={{ alignItems: "center", width: 12, paddingTop: 5 }}>
-            <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: color[h.kind] ?? c.border }} />
-            {i === view.history.length - 1 ? null : <View style={{ flex: 1, width: 1, backgroundColor: c.border, marginTop: 3 }} />}
-          </View>
-          <View style={{ flex: 1, gap: 1 }}>
-            <Text style={[ui.styles.small, { fontFamily: ui.styles.mono.fontFamily }]}>{clockText(h.at)}</Text>
-            <Text style={[ui.styles.text, { fontSize: 13 }]} selectable>
-              {h.line}
-            </Text>
-            {h.detail ? (
-              <Text style={ui.styles.small} selectable>
-                {h.detail}
-              </Text>
-            ) : null}
-          </View>
-        </View>
+      {lines.map((h, i) => (
+        <HistoryRow key={i} h={h} dot={color[h.kind] ?? c.border} last={i === lines.length - 1} />
       ))}
-      <Text style={ui.styles.small}>按时间从早到晚。圆点：蓝 = 走到新的一步，黄 = 问你、你答，紫蓝 = 你说过的话，灰 = 判断方法更新。「判断方法更新后改判」不算业务上的一步，不画在图上。</Text>
+    </View>
+  );
+}
+
+/** One line of what happened; what stands behind it (the reason, the whole of a look's finding) opens on a press. */
+function HistoryRow({ h, dot, last }: { h: HistoryLine; dot: string; last: boolean }) {
+  const ui = useUi();
+  const [open, setOpen] = useState(false);
+  const body = (
+    <View style={{ flex: 1, gap: 1 }}>
+      <Text style={[ui.styles.small, { fontFamily: ui.styles.mono.fontFamily }]}>{clockText(h.at)}</Text>
+      <Text style={[ui.styles.text, { fontSize: 13 }]} selectable={!h.detail}>
+        {h.line}
+        {h.detail ? <Text style={ui.styles.small}>{open ? "  ▾" : "  ▸"}</Text> : null}
+      </Text>
+      {open && h.detail ? (
+        <Text style={ui.styles.small} selectable>
+          {h.detail}
+        </Text>
+      ) : null}
+    </View>
+  );
+  return (
+    <View style={{ flexDirection: "row", gap: 10, paddingBottom: 8 }}>
+      <View style={{ alignItems: "center", width: 12, paddingTop: 5 }}>
+        <View style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: dot }} />
+        {last ? null : <View style={{ flex: 1, width: 1, backgroundColor: ui.theme.colors.border, marginTop: 3 }} />}
+      </View>
+      {h.detail ? (
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityLabel={open ? "收起详情" : "看详情"} onPress={() => setOpen((value) => !value)} style={{ flex: 1 }}>
+          {body}
+        </Pressable>
+      ) : (
+        body
+      )}
     </View>
   );
 }
@@ -476,8 +443,11 @@ function Evidence({ view }: { view: GraphView }) {
       ) : null}
     </View>
   );
+  const inner = view.history.filter((h) => h.inner);
   return (
     <View style={{ gap: 8 }}>
+      {view.tag ? <Text style={ui.styles.small}>来源标签：{view.tag}</Text> : null}
+      {view.evidence.waitFrom ? <Text style={ui.styles.small}>已等多久怎么算的：{view.evidence.waitFrom}</Text> : null}
       <View>
         {view.evidence.facts.length === 0 ? <Text style={ui.styles.muted}>没有记下的事实。</Text> : view.evidence.facts.map((f) => row(f.field, f.value, f.evidence ? `${f.evidence}（${clockText(f.at)}）` : clockText(f.at)))}
       </View>
@@ -488,11 +458,27 @@ function Evidence({ view }: { view: GraphView }) {
             <Text style={{ fontFamily: ui.styles.mono.fontFamily }}> {s.id}</Text>
             {view.evidence.stages.find((x) => x.id === s.id)?.named === false ? "（规则里没有给名字）" : ""}
             {s.side ? `（岔路：${s.when ?? ""}）` : ""}
-            {s.end ? `（终点${s.endKind === "dropped" ? "：不再追踪" : s.endKind === "other" ? "：不跟了" : ""}）` : ""}
+            {s.end ? `（终点${s.endKind === "dropped" ? "：不盯了" : s.endKind === "other" ? "：不跟了" : ""}）` : ""}
             {s.done ? `：${s.done}` : ""}
           </Text>
         ))}
       </Fold>
+      <Fold label={`接下来会做什么（${view.schedule.length}）`}>
+        {view.schedule.map((x, i) => (
+          <Text key={i} style={ui.styles.small} selectable>
+            {x.at ? clockText(x.at) : "现在"}　{x.line}
+          </Text>
+        ))}
+      </Fold>
+      {inner.length > 0 ? (
+        <Fold label={`系统自己的记录（${inner.length}）`}>
+          {inner.map((h, i) => (
+            <Text key={i} style={ui.styles.small} selectable>
+              {clockText(h.at)}　{h.line}
+            </Text>
+          ))}
+        </Fold>
+      ) : null}
       <Fold label="各来源上次读到">
         {view.evidence.sources.map((s) => (
           <Text key={s.id} style={ui.styles.small}>
@@ -511,18 +497,21 @@ function Evidence({ view }: { view: GraphView }) {
 
 // ---- the page -------------------------------------------------------------------------------
 
+type Tab = "history" | "graph" | "evidence";
+
 export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: string; onBack(): void; openCase(caseId: string): void; onChanged(): void }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const { view, error, gone, refresh } = useGraph(caseId);
-  const [tab, setTab] = useState<"graph" | "history" | "evidence">("graph");
+  // What happened comes first: the question people ask of a page like this is "what has been going on".
+  const [tab, setTab] = useState<Tab>("history");
   const [selected, setSelected] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string; title?: string } | null>(null);
   const askAt = useRef(0);
   useEffect(() => {
     setSelected(null);
     setNote(null);
-    setTab("graph");
+    setTab("history");
   }, [caseId]);
 
   const openRun = useCallback(
@@ -538,11 +527,13 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
     [ui.navigation, ui.hostId, ui.routes],
   );
 
-  const wide = !ui.compact;
+  // What is said up here is only what is not so by itself: that the data is old, and that nothing is being asked for real.
+  const stale = view?.marks.some((m) => m.kind === "stale") ?? false;
+  const aside = view ? [stale ? `${clockText(view.now)} 读取` : "", view.mode === "dry-run" ? "演练" : ""].filter(Boolean).join(" · ") : "";
   const back = (
     <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
       <Button icon="ArrowLeft" label="事项追踪" onPress={onBack} />
-      <Text style={ui.styles.small}>{view ? `${clockText(view.now)} 读取${view.mode === "dry-run" ? " · 演练" : ""}` : ""}</Text>
+      {aside ? <Text style={[ui.styles.small, stale ? { color: ui.tone("warning") } : null]}>{aside}</Text> : null}
     </View>
   );
   if (!view) {
@@ -555,37 +546,41 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
     );
   }
   const asks = view.current.asks;
-  const side = selected ? <StageDetail view={view} selected={selected} onClose={() => setSelected(null)} /> : <Side view={view} openCase={openCase} />;
+  const done: Done = (n) => {
+    setNote(n);
+    refresh();
+    onChanged();
+  };
+  const trouble = inTrouble(view);
+  const newest = view.runs.find((r) => r.own !== false) ?? view.runs[0];
+  const side = selected ? <StageDetail view={view} selected={selected} onClose={() => setSelected(null)} /> : hasSide(view) ? <Side view={view} openCase={openCase} /> : null;
   const chart = ui.compact ? <StageRail view={view} selected={selected} onSelect={setSelected} openRun={openRun} /> : <StageChart view={view} selected={selected} onSelect={setSelected} openRun={openRun} />;
   const anyBefore = view.visits.some((v) => v.before && !v.superseded);
   const main = (
     <View style={{ gap: ui.compact ? 12 : 14, flex: 1, minWidth: 0 }}>
-      <View style={{ gap: 2 }}>
-        <View style={[ui.styles.row, { gap: 8 }]}>
+      <View style={[ui.styles.row, { gap: 8, justifyContent: "space-between", flexWrap: "nowrap" }]}>
+        <View style={[ui.styles.row, { gap: 8, flexShrink: 1, flexWrap: "nowrap", alignItems: "baseline" }]}>
           <Text style={[ui.styles.title, { fontSize: ui.compact ? 18 : 22 }]}>{view.number}</Text>
           <Text style={[ui.styles.strong, { flexShrink: 1, fontSize: 15 }]} selectable>
             {view.title}
           </Text>
         </View>
+        {view.url ? <TextLink label="单子 ↗" onPress={() => openExternal(view.url!)} /> : null}
       </View>
       {error ? <Banner tone="warning" icon="TriangleAlert" title="刷新失败，下面是上一次读到的" /> : null}
-      <Hero view={view} />
-      <Facts view={view} />
+      <Hero view={view} onDone={done} />
       {note ? (
-        <Banner tone={note.ok ? "success" : "warning"} icon={note.ok ? "Check" : "Info"} title={note.title ?? (note.ok ? "已记下" : "没记下")}>
+        <Banner tone={note.ok ? "success" : "warning"} icon={note.ok ? "Check" : "Info"} title={note.title ?? (note.ok ? "好了" : "没成")}>
           <Text style={ui.styles.text} selectable>
             {note.text}
           </Text>
         </Banner>
       ) : null}
-      <FlowWays
-        view={view}
-        onDone={(n) => {
-          setNote(n);
-          refresh();
-          onChanged();
-        }}
-      />
+      {trouble.slice(1).map((r) => (
+        <View key={r.runId} style={{ borderRadius: 10, borderWidth: 1, borderColor: ui.tone("warning"), backgroundColor: c.surface1, padding: 10 }}>
+          <Ways run={r} withLine onDone={done} />
+        </View>
+      ))}
       {asks.map((a) => (
         <AskPanel
           key={`${a.commitmentId}:${a.round}`}
@@ -598,36 +593,44 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
           }}
         />
       ))}
+      <View style={{ gap: 8 }}>
+        <StageStrip view={view} />
+        {newest ? (
+          <View style={ui.styles.row}>
+            <ScreenLink plugin={newest.link.plugin} screen={newest.link.screen} params={newest.link.params} label="这次流程" />
+          </View>
+        ) : null}
+      </View>
       <View style={{ flexDirection: "row", gap: 4, borderBottomWidth: 1, borderBottomColor: c.border }}>
-        {([["graph", "阶段图"], ["history", "经过"], ["evidence", "证据"]] as const).map(([k, l]) => (
+        {([["history", "经过"], ["graph", "阶段"], ["evidence", "证据"]] as const).map(([k, l]) => (
           <Pressable key={k} accessibilityRole="tab" accessibilityState={{ selected: tab === k }} onPress={() => setTab(k)} style={{ paddingHorizontal: 12, paddingVertical: 8, borderBottomWidth: 2, borderBottomColor: tab === k ? c.foreground : "transparent" }}>
             <Text style={{ color: tab === k ? c.foreground : c.foregroundMuted, fontWeight: tab === k ? "700" : "400", fontSize: 14 }}>{l}</Text>
           </Pressable>
         ))}
       </View>
-      {tab === "graph" ? (
+      {tab === "history" ? (
+        <History view={view} />
+      ) : tab === "graph" ? (
         <View style={{ gap: 8 }}>
           {chart}
-          {anyBefore ? <Text style={ui.styles.small}>灰底虚线框和标「追踪前」「至少」「约」的时间：{view.trackingSince ? clockText(view.trackingSince) : ""} 开始追踪之前的部分，按单子上的日期推的，或者没有记录，不是实测的。</Text> : null}
+          <ChartLegend note={anyBefore ? `虚线灰底框和标「追踪前」「至少」「约」的时间：${view.trackingSince ? clockText(view.trackingSince) : ""} 开始追踪之前的部分，按单子上的日期推的，或者没有记录，不是实测的。` : null} />
           {view.deviations.length > 0 ? (
             <Text style={ui.styles.small}>
               {view.deviations.map((d) => `${view.graph.stages.find((s) => s.id === d.from)?.label ?? d.from} → ${view.graph.stages.find((s) => s.id === d.to)?.label ?? d.to}：${d.kind === "skip" ? "跳过" : d.kind === "back" ? "打回" : "岔路"}${d.why ? `（${d.why}）` : ""}`).join("；")}
             </Text>
           ) : null}
         </View>
-      ) : tab === "history" ? (
-        <History view={view} />
       ) : (
         <Evidence view={view} />
       )}
-      {/* On a phone the side comes under the chart: what a stage says when one is picked, else what comes next. */}
-      {ui.compact ? <View style={{ borderTopWidth: 1, borderTopColor: c.border, paddingTop: 12 }}>{side}</View> : null}
+      {/* On a phone the side comes under the tabs. */}
+      {ui.compact && side ? <View style={{ borderTopWidth: 1, borderTopColor: c.border, paddingTop: 12 }}>{side}</View> : null}
     </View>
   );
   return (
     <View style={{ gap: ui.styles.pad }}>
       {back}
-      {wide ? (
+      {!ui.compact && side ? (
         <View style={{ flexDirection: "row", gap: 18, alignItems: "flex-start" }}>
           {main}
           <View style={{ width: 340, borderLeftWidth: 1, borderLeftColor: c.border, paddingLeft: 16 }}>{side}</View>
@@ -638,4 +641,3 @@ export function ItemPage({ caseId, onBack, openCase, onChanged }: { caseId: stri
     </View>
   );
 }
-

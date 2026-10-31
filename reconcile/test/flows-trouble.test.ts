@@ -151,7 +151,8 @@ test("a run that failed is the item's condition until a person takes it over: it
     assert.equal(v.runs[0]!.situation, "fail");
     assert.deepEqual(v.runs[0]!.actions, ["retry", "mine", "fold"]);
     assert.equal(w.engine.status().cases.find((c) => c.caseId === "gcp-demo:1")!.row!.situation, "fail");
-    assert.match(v.hero.kicker, /流程失败了/);
+    assert.match(v.hero.kicker, /^要你：/, "the first words say it wants something of the person");
+    assert.match(v.hero.line, /出错了/, "and the line what became of the run");
     // a person takes it over: it is theirs now, not the item's
     const r = w.engine.dismissFlow(id, "mine", "owner");
     assert.deepEqual(r.ok, true, r.detail);
@@ -174,11 +175,11 @@ test("only a run in trouble is set aside, and one that is not known is not", () 
     w.flows.probes.set(idFor(1, "k1"), running());
     w.flows.probes.set(idFor(2, "k1"), finished({ ok: 1 }));
     await advance(w, 10);
-    assert.match(w.engine.dismissFlow(idFor(1, "k1"), "mine", "owner").detail, /还在正常地跑/);
-    assert.match(w.engine.dismissFlow(idFor(2, "k1"), "mine", "owner").detail, /正常结束的/);
-    assert.match(w.engine.dismissFlow("rc-test-nope", "mine", "owner").detail, /不是这个控制器起的/);
+    assert.match(w.engine.dismissFlow(idFor(1, "k1"), "mine", "owner").detail, /还在跑/);
+    assert.match(w.engine.dismissFlow(idFor(2, "k1"), "mine", "owner").detail, /正常结束/);
+    assert.match(w.engine.dismissFlow("rc-test-nope", "mine", "owner").detail, /没有这个运行/);
     assert.match(w.engine.retryFlow(idFor(2, "k1"), "owner").detail, /已经有结果了/);
-    assert.match(w.engine.retryFlow(idFor(1, "k1"), "owner").detail, /还没结束/);
+    assert.match(w.engine.retryFlow(idFor(1, "k1"), "owner").detail, /还没停/);
     assert.equal(kinds(w).filter((k) => k === "flow.dismissed" || k === "flow.retry").length, 0);
   }));
 
@@ -196,7 +197,7 @@ test("run it again is a person's: a new round under a new id with the rule's inp
       await advance(w, 25);
       assert.equal(w.flows.launcher.started.length, 1, "the rule alone never runs it again");
       const r = w.engine.retryFlow(r0, "owner");
-      assert.deepEqual([r.ok, r.detail], [true, "记下了，这就重新跑一次（第 2 轮）；上一轮花了 $0.30"]);
+      assert.deepEqual([r.ok, r.detail], [true, "从头重跑了（上一轮 $0.30）"]);
       const events = w.journal().filter((e) => e.type === "flow.retry" || (e.type === "flow.intent" && (e.rec as { round: number }).round === 1));
       assert.deepEqual(events.map((e) => e.type), ["flow.retry", "flow.intent"], "the person's act and the intent, in one write");
       assert.deepEqual([events[0]!.runId, events[0]!.round, events[0]!.by, events[0]!.estimateUsd, events[0]!.caseId, events[0]!.name, events[0]!.key], [r1, 1, "owner", 0.3, "gcp-demo:1", "triage", "k1"]);
@@ -228,7 +229,7 @@ test("run it again is held to the limits like any other start, and is not offere
       await advance(w, 10);
       const r = w.engine.retryFlow(idFor(1, "k1"), "owner");
       assert.equal(r.ok, false);
-      assert.match(r.detail, /今天流程已经起了 2 次（上限 2），明天再点/);
+      assert.match(r.detail, /明天再点/, "what stops it, and when it can be pressed again");
       assert.equal(kinds(w).filter((k) => k === "flow.retry").length, 0);
     },
     { policy: POLICY({ perDay: 2 }) },
@@ -239,7 +240,7 @@ test("run it again is held to the limits like any other start, and is not offere
     w.flows.probes.set(idFor(1, "k1"), failedProbe());
     await advance(w, 10);
     await w.restart("dry-run");
-    assert.match(w.engine.retryFlow(idFor(1, "k1"), "owner").detail, /现在只演练/);
+    assert.match(w.engine.retryFlow(idFor(1, "k1"), "owner").detail, /演练中/);
   });
 });
 
@@ -250,7 +251,7 @@ test("a run that was never started because it could not be is offered the same w
     await advance(w, 15);
     const id = idFor(1, "k1");
     assert.equal(flowsOf(w)[id]!.ended!.outcome, "not-started");
-    assert.match(w.engine.retryFlow(id, "owner").detail, /上一轮花了 \$0\.00/);
+    assert.match(w.engine.retryFlow(id, "owner").detail, /上一轮 \$0\.00/, "and what the round it starts over from cost");
     await advance(w, 5);
     assert.deepEqual(w.flows.launcher.started.map((s) => s.runId), [idFor(1, "k1", "triage", 1)]);
   }));
@@ -313,7 +314,8 @@ test("the page tells a run's whole story: when it began, how it ended, and when 
     const done = w.engine.graph("gcp-demo:1")!;
     assert.equal(done.marks.filter((m) => m.kind === "flow").length, 0, "nothing to say once it is over");
     const lines = done.history.filter((h) => h.kind === "run").map((h) => h.line);
-    assert.deepEqual(lines, ["起了流程「triage-flow」", "流程「triage-flow」结束了"]);
+    assert.equal(lines.length, 1, `a run is one line: ${JSON.stringify(lines)}`);
+    assert.match(lines[0]!, /^triage-flow好了（.+）$/, "what became of it, and how long it took and what it cost");
     assert.equal(done.runs[0]!.outcome, "找到 2 处");
   }));
 

@@ -267,16 +267,13 @@ test("a run's state decides where the item stands on the list and what the page 
     // a finished run is no longer what the item is doing: the item's own judgment says (someone else has the ball)
     assert.deepEqual([1, 2, 3, 4, 5, 6].map(cell), [["doing", "system"], ["fail", "me"], ["lost", "me"], ["slow", "me"], ["me", "me"], ["them", "them"]]);
     const fail = w.engine.graph("gcp-demo:2")!;
-    assert.match(fail.hero.kicker, /流程失败了/);
-    assert.match(fail.hero.line, /agent 的回答不合约定的格式/);
-    assert.match(fail.hero.sub, /拷贝示例文件/, "what it may already have changed is told");
-    assert.match(fail.hero.sub, /不会自动重来/);
+    assert.match(fail.hero.kicker, /^要你：/);
+    assert.match(fail.hero.line, /^示例流程出错了：agent 的回答不合约定的格式/);
+    assert.match(fail.hero.sub, /拷贝示例文件/, "what it may already have changed is told, the one thing up there that is not a word for what became of it");
     assert.equal(fail.runs.length, 1);
     const gate = w.engine.graph("gcp-demo:5")!;
     assert.match(gate.hero.line, /把示例改动放进目录/);
-    assert.match(gate.hero.sub, /审批卡上点/, "approval is not done on this page");
-    assert.deepEqual([gate.facts[3]!.value, gate.facts[3]!.hot], ["要", true], "a run waiting for approval is something for you to do");
-    assert.match(gate.facts[3]!.sub, /审批卡/);
+    assert.equal(gate.hero.kicker, "要你：批准", "a run waiting for approval is something for you to do, said in the first words");
     assert.match(w.engine.graph("gcp-demo:1")!.hero.line, /示例流程/);
   } finally {
     w.close();

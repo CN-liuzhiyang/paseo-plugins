@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { SUSPECT_MS } from "../server/flows";
+import { retryCost } from "../shared/graph";
 import { probeOf, type World } from "./helpers";
 import { set } from "./item-flow";
 import { advance, asks, finished, first, flowsOf, headline, idFor, kinds, look, OWNER, req, running, withFlows } from "./flows-kit";
@@ -145,7 +146,8 @@ test("a run that failed, timed out or was refused is told as not coming to a res
       assert.equal(headline(w, 2), "r triage:k1=timeout");
       assert.equal(headline(w, 3), "r triage:k1=refused");
       assert.match(flowsOf(w)[idFor(1, "k1")]!.ended!.why!, /OutputMismatch：回答不合格式/);
-      assert.match(w.deliveries.map((d) => d.text).join("\n"), /#1 初查没跑完：流程失败了/);
+      assert.match(w.deliveries.map((d) => d.text).join("\n"), /#1 初查出错了：/);
+      assert.ok(w.deliveries.every((d) => /^#\d 初查出错了：/.test(d.text) && (d.text.match(/#/g) ?? []).length === 1), "each says it once, in the one word for a run that went wrong");
       assert.equal(w.deliveries.length, 3, "a message for each");
       assert.ok(w.deliveries.every((d) => d.status === "failed"));
     },
@@ -248,9 +250,10 @@ test("started and nothing ever came of it: started again under the same id when 
     // it comes to the page as one that did not start, for a person to look at
     const v = w.engine.graph("gcp-demo:1")!;
     assert.equal(v.runs[0]!.situation, "notstarted");
-    assert.match(v.hero.kicker, /流程没起来/);
-    assert.match(v.hero.line, /没起来：起了 3 次/);
-    assert.match(v.hero.sub, /没花钱/);
+    assert.match(v.hero.kicker, /^要你：/);
+    assert.match(v.hero.line, /出错了：起了 3 次/, "one word for what became of it, then the reason");
+    assert.equal(v.hero.sub, "", "the cost is where the buttons are, not up here");
+    assert.equal(retryCost(v.runs[0]!), "从头重跑：上次没花钱");
     assert.deepEqual(v.runs[0]!.actions, ["retry", "mine", "fold"]);
   }));
 
