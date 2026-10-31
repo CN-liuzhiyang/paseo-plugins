@@ -479,7 +479,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `id` | 这个位置的名字：`step:<名>`、`ask:<step 名>#<第几次>`、`again:<前一个 id>#<第几次>`、`gate#<第几次>`。在某个 `$.step` 里面的，带上那一步的名字作前缀（`ask:build/analyze#1`、`gate:commit#1`），所以一个被沿用的 `step` 不会把后面的名字挤歪 |
 | `kind` | `step` \| `ask` \| `again` \| `gate` |
 | `state` | `done`；`begun`（`once` 的步骤开始了，还没有结果）；`failed`（`once` 的步骤抛了错）；`settled`（人用 `orch.mjs settle` 或探查说了结果，`by` 是 `cli` 或 `probe`，`done` 说做没做）；`voided`（这个位置要重做，之前的记录作废：`by` 是 `redo`、`again`（`key` 变了或 `still` 说不成立）、`other-prompt`、`reuse`、`check`、`workspace`、`asked-again`；`get` 当没有，后面再写的 `done` 盖过它） |
-| `keyPrint` | 做这件事的依据的指纹：`step` 的 `key`；`ask` 的提示词、schema、provider、thinking、effects；`again` 再加上它接着的那份答案和那个 agent；`gate` 的标题和内容。依据变了，这一条就不算数 |
+| `keyPrint` | 做这件事的依据的指纹：`step` 的 `key`；`ask` 的提示词（角色的指令已在其中）、schema、provider、thinking、effects，和它问的**目录**与**主机**（换了目录，旧答案描述的是另一棵树）；`again` 是它接着的那份答案、那份答案当时的指纹（前一问的提示词变了就不算数）、那个 agent，问的话或步骤，effects，目录和主机，`fresh` 时还有角色**现在解析出来**的 provider、thinking 和指令（不是流程里写的角色名）；`gate` 的标题和内容。依据变了，这一条就不算数 |
 | `value` | 结果（JSON，最多 1 MB；`step` 的值超过或写不成 JSON，这一步失败）。含这次运行的秘密值的，或 `ask` / `again` 的答案过大，不记（这一条干脆没有，接着跑时重做；`once` 的步骤记 `done` 加 `dropped: true`，没有值）。要人填一个值（`input`）的人闸不进日志 |
 | `scope` | 可选。这条记录是在哪几个 `$.step` 里面写下的，由外到内的步骤名（不在任何步骤里的没有这个字段）。`--redo <外层步骤>` 靠它连里面的子步骤和 `ask` 一起作废（里面的记录先于外层步骤写下，光看写入顺序找不到） |
 | `runId`、`callId` | 哪个运行、哪次调用写下的 |

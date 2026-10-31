@@ -919,14 +919,16 @@ async function runClaimed(target, options, taken) {
           "a running agent keeps its fence, so ask this step with $.ask",
       );
     }
+    const callCwd = callOptions.cwd ?? cwd;
     const prompt = promptOf(bound, step, stepInput, again);
-    const print = again ? again.print : fingerprint({ prompt, schema: step.fingerprint, provider: bound.provider, thinking: bound.thinking, effects: step.effects });
+    // What the answer was given for: the prompt (the role's instructions are in it), the schema, who was asked, and where -- a directory or
+    // a host that is not the one it was given in describes other files.
+    const print = again ? again.print : fingerprint({ prompt, schema: step.fingerprint, provider: bound.provider, thinking: bound.thinking, effects: step.effects, cwd: normalizeDir(callCwd), host });
     const timeout = callOptions.timeout ?? step.timeout ?? DEFAULT_CALL_TIMEOUT;
     parseDuration(timeout);
     // The call's own title, then the step's, then its name: one value for
     // the events and for the agent on Paseo.
     const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
-    const callCwd = callOptions.cwd ?? cwd;
     const recorded = again ? (again.reused ?? null) : await recordedAnswer(journalId, print, "ask", step, reuse, check);
     // Before the call exists: a wait for another run's workspace is not part of this call's time.
     // Without an affair nothing is awaited here, so such a run goes through exactly the steps it always did.
@@ -962,6 +964,7 @@ async function runClaimed(target, options, taken) {
       answers.set(value, {
         callId: record.callId,
         journalId,
+        print,
         step,
         stepInput,
         agentId,
@@ -1178,14 +1181,21 @@ async function runClaimed(target, options, taken) {
       // Named before anything is awaited. What this asks is fingerprinted with the answer it follows, and with the agent that gave it, whose
       // conversation it goes on with: if either is not what the journal's was given, the journal's does not answer this.
       const journalId = nextId("again", rec.journalId);
+      // A new agent is asked as what the roles say now (the provider and thinking they resolve to, and the instructions), not as the names the
+      // flow wrote; an agent asked again is the one that was, so who it is answers that.
+      const bound = bindRole(roster, callOptions);
       const print = fingerprint({
         prev: fingerprint(rec.text),
+        prevPrint: rec.print,
         agent: fresh ? null : (rec.agentId ?? null),
         text: stepForm ? null : text,
         step: step.fingerprint,
         input: stepForm ? step.for(stepInput) : null,
+        effects: step.effects,
         fresh,
-        who: fresh ? { role: callOptions.role, provider: callOptions.provider, thinking: callOptions.thinking, cwd: callOptions.cwd } : null,
+        who: fresh ? { provider: bound.provider, thinking: bound.thinking, instructions: fingerprint(bound.instructions) } : null,
+        cwd: normalizeDir(callOptions.cwd ?? cwd),
+        host,
       });
       const reused = await recordedAnswer(journalId, print, "again", step, undefined, check);
       if (reused) {
