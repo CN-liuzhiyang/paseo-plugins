@@ -52,6 +52,12 @@ test("the new events fold into the run and none of them is an unknown kind or a 
   assert.deepEqual([run.end?.stop?.kind, run.end?.stop?.step], ["unknown", "submit"]);
 });
 
+test("a resume declaration is read and left alone, a kind nobody knows is still counted", () => {
+  const extra = [{ v: 1, seq: 28, ts: "2026-10-30T09:01:00.000Z", runId: "x", kind: "resume", flow: "demo-flow", input: {}, from: "x", spends: "nothing" }];
+  assert.deepEqual(foldEvents([...events, ...extra]).unknownKinds, {});
+  assert.deepEqual(foldEvents([...events, { ...extra[0]!, kind: "something-else" }]).unknownKinds, { "something-else": 1 });
+});
+
 test("a file from before these events folds as it did: one round, nothing sent back, nobody told", () => {
   const old = foldEvents(fixture("committee-done.jsonl"));
   assert.deepEqual(old.problems, []);
@@ -126,6 +132,14 @@ test("while an answer is being sent back the card and the bar row say which step
   const row = rowSentence(longName, now);
   assert.ok(sentenceLength(row) <= ROW_SENTENCE_MAX && row.endsWith("）"), row);
   assert.equal(hero(run, status, now).title.includes("2"), true);
+});
+
+test("between a round handed back and the next one sent, the call is open but nothing is being sent back", () => {
+  const run = foldEvents(until((event) => event.kind === "call.fixed" && event.round === 2));
+  assert.equal(run.calls.get("c3")!.end, null);
+  assert.equal(fixingOf(run.calls.get("c3")!), null);
+  const now = Date.parse(run.lastEventAt!) + 1_000;
+  assert.equal(cardOf("fixrun-0002", run, runStatus(run, now, BASE), now)!.fixing, null);
 });
 
 test("once the fixed answer is in, nothing about it is on the card", () => {
