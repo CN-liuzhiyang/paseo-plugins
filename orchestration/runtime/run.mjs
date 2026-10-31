@@ -1796,6 +1796,7 @@ async function runClaimed(target, options, taken) {
       durationMs,
       usd: cost?.totalUsd ?? null,
       resume,
+      working: inflight.size,
       events: log.file,
     },
     dir,

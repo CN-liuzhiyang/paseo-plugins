@@ -25,6 +25,7 @@ runtime/
   resume.mjs     接着跑：读上一段留下的续跑点、检查它、一次停下只被接一次（`<runId>.resumed` 占位）；`orch.mjs resume` 用它
   resume-point.mjs  续跑点 `{ flow, input, from, spends }` 的形状和校验（运行器、契约检查、`resume` 共用）
   wake.mjs       运行结束时告诉该知道的会话（`--notify`、`--detach` 的起运行方、配置里 `stewards` 的负责会话）并记账 `<logDir>/steward/ledger.jsonl`；`orch.mjs wake-lost` 补发进程已死的运行
+  line-lock.mjs  一条"线"同一时刻只有一个运行在写：`<logDir>/lines/<lineage>.lock`，读日志之前取，到它启动的调用都返回了才还；`runFlow` 和 `orch.mjs settle` 都走它
   journal.mjs    一条"线"（一个运行加上接着它跑的那些）做过的事：`$.step` 的值、`$.ask`/`$.again` 的答案、人答过的卡；追加的 `runs/<线>/journal.jsonl`
   liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）

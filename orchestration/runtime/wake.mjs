@@ -107,7 +107,8 @@ export function duration(ms) {
 /**
  * The message, made from what run.start and run.end say and nothing else: a run that is done is one line, any other ends in the
  * way to look at it and to carry it on. `facts`: { flow, outcome, affair (a label or null), durationMs, usd, runId, lineage, events,
- * reason, resume ({ from } or null), manual (a path or null), unseen, ledger (the path) }.
+ * reason, resume ({ from } or null), working (calls that have not returned: the line is held until they do), manual (a path or null),
+ * unseen, ledger (the path) }.
  */
 export function wakeText(facts) {
   const head = [`[流程] ${facts.flow} ${WORDS[facts.outcome] ?? facts.outcome}`];
@@ -123,6 +124,7 @@ export function wakeText(facts) {
     lines.push(`原因：${oneLine(facts.reason)}`);
     lines.push(`运行 ${facts.runId}${facts.lineage && facts.lineage !== facts.runId ? `（接着线 ${facts.lineage}）` : ""} · 事件 ${facts.events}`);
     if (facts.resume) lines.push(`接着跑：node ${ORCH_PATH} resume ${facts.runId}（${oneLine(facts.resume.from, 80)}）`);
+    if (facts.working > 0) lines.push(`还有 ${facts.working} 个调用没回来，这条线还被占着：现在接着跑会被拒，等它们回来再接着跑`);
     if (facts.manual) lines.push(`手册：${facts.manual}`);
   }
   if (facts.unseen > 0) lines.push(`账里自上次以来还有 ${facts.unseen} 次运行（${facts.ledger}）`);
@@ -232,6 +234,7 @@ export async function wakeAtEnd({ run, dir, executor, roster, stewards, timeoutM
         events: run.events,
         reason: run.reason,
         resume: run.resume,
+        working: run.working ?? 0,
         manual: manualFile && existsSync(manualFile) ? manualFile : null,
         unseen: event.unseen,
         ledger: ledgerFile(dir),

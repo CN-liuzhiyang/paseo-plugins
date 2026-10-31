@@ -262,6 +262,9 @@ test("wakeText and duration, on their own", () => {
   assert.equal(lines[2], "运行 r1（接着线 r0） · 事件 E");
   assert.equal(wakeText({ ...facts, outcome: "lost", usd: 0.001, durationMs: null, lineage: "r1", reason: "gone" }).split("\n")[0], "[流程] f 失联了 · <$0.01");
   assert.deepEqual([45_000, 95_000, 3_600_000, 90_000_000, -1, NaN].map(duration), ["45s", "1m35s", "1h", "1d1h", null, null]);
+  // A run that ended with a call still going holds its line: carrying it on now would be refused, and the message says so.
+  assert.equal(wakeText({ ...facts, working: 2 }).split("\n").some((line) => /还有 2 个调用没回来/.test(line)), true);
+  assert.equal(wakeText({ ...facts, working: 0 }).includes("没回来"), false);
 });
 
 test("what a secret was cannot get into the message: the code a person typed is in no word of it", async () => {
