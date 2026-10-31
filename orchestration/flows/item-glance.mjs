@@ -117,6 +117,9 @@ export default flow({
     workdir: text("这次看一眼在哪个目录里起；空字符串就是运行本身的目录"),
   },
   grants: [],
+  // A look comes round on a schedule the caller keeps, and there are many: a steward that is told of each one that came to done would spend a
+  // turn on every one of them. It hears of those that did not (they are in the account all the same).
+  wake: "problems",
 
   async run(input, $) {
     // The model of every look is the role's: a missing role is found before anything is spent.
