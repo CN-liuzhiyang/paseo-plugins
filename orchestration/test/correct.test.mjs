@@ -1,8 +1,9 @@
 // `$.ask` with `check` and `fixes`: an answer that does not pass is sent back to the agent that gave it, with only what is
 // wrong, and merged. The executor is a fake that answers from a script; nothing talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";

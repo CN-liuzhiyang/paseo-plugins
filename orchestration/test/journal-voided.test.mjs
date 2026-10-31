@@ -2,8 +2,9 @@
 // has visited everything), a place whose new result cannot be kept, a value a probe finds, and an answer that no longer passes the check.
 // A fake executor answers. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";

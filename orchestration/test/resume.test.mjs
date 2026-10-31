@@ -2,8 +2,9 @@
 // `orch.mjs resume`, which starts it again once and only once. Nothing here calls a model or talks to Paseo: the flows
 // are scripts that do nothing but declare and stop, and the gates (resume-smoke) are answered by the fake executor.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";

@@ -2,8 +2,9 @@
 // `$.step`, an answer, a card a person answered -- while what cannot be taken back is never done twice on a guess. A fake executor
 // answers; the runs that are cut off are real processes (steps-child.mjs). Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

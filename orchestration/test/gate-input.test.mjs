@@ -2,8 +2,9 @@
 // value, and a secret value is nowhere in what the run writes. Nothing here talks to Paseo; the provider's side
 // of the same gate is in orchestration-gate/server (input.test.ts, contract.test.ts).
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";

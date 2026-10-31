@@ -3,8 +3,9 @@
 // A fake executor stands in for the daemon (its `workspaces` array is the
 // daemon's list), so nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";

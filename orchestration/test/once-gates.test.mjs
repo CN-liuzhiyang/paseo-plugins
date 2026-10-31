@@ -1,8 +1,9 @@
 // A card that asks for a value belongs in the `before` of the once step it authorises, not in the step's function: said when it
 // happens (a caveat) and, where the source shows it, by `orch check` (a warning). Neither fails anything.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";

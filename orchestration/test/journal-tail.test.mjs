@@ -1,8 +1,9 @@
 // A journal whose last write was cut off, and one with a line that cannot be read: what a step that cannot be taken back does about them.
 // The runs that die are real processes (tail-child.mjs). Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

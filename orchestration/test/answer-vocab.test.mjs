@@ -2,8 +2,9 @@
 // (minLength, patternProperties, $ref...) is corrected as a whole and judged by the CLI, and what the CLI refuses is not taken for fixed.
 // A fake executor answers from a script. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { runFlow } from "../runtime/run.mjs";

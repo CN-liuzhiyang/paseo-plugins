@@ -3,8 +3,9 @@
 // before an agent exists, parallel gates, a lock that fails, directory spellings,
 // the title. Same fake daemon as workspaces.test.mjs.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { readdir, readFile, writeFile } from "node:fs/promises";

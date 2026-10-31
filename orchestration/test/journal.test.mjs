@@ -1,7 +1,8 @@
 // The journal of a line of runs: what is read back, which line of an id counts, what `redo` sets aside. No run is made here.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

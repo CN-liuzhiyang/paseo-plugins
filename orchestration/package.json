@@ -12,7 +12,7 @@
     "./flows/*": "./flows/*"
   },
   "scripts": {
-    "test": "node --import ./test/hermetic.mjs --test test/*.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "smoke": "node runtime/smoke.mjs",
     "sync:liveness": "node scripts/sync-liveness.mjs"
   }

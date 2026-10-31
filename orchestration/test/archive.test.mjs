@@ -4,6 +4,7 @@
 //
 //   node --test test/archive.test.mjs        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { runFlow } from "../runtime/run.mjs";

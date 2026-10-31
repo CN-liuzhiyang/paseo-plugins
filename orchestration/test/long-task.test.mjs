@@ -11,8 +11,9 @@
 //   - a gate of eight hours expires as `expired`, with the card closed by the runtime's deny, and one answered at
 //     seven hours is allowed, value and all.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, mock, before } from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";

@@ -2,8 +2,9 @@
 // once, the affair it belongs to, and a flow found by name. Nothing here talks
 // to Paseo and nothing is spent.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

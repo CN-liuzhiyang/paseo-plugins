@@ -2,6 +2,7 @@
 // The table's rows are run through `classify` in state.test.mjs (state.mjs re-exports it) and again, row by row,
 // in each plugin that carries a copy.
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { classify, LIVE_WITHIN_MS, parseDuration, pidFact, STALE_BASE_MS, STALE_GRACE_MS, staleAfterMs } from "../runtime/liveness.mjs";

@@ -1,8 +1,9 @@
 // `$.step` hands back a JSON copy, and `$.again` only knows the object `$.ask` gave: what that means for a flow that uses both. A fake
 // executor answers. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { runFlow } from "../runtime/run.mjs";

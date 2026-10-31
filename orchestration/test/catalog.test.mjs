@@ -1,7 +1,8 @@
 // `orch.mjs list`: the flows that exist, as data. Nothing here talks to Paseo and nothing is spent.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

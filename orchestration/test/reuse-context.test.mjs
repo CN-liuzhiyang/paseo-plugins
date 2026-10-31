@@ -1,8 +1,9 @@
 // An answer is taken from the journal only for what it was given for: the prompt, the schema, who was asked (as the roles resolve now),
 // and where (the directory and the host). A fake executor answers. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { runFlow } from "../runtime/run.mjs";

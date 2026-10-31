@@ -2,8 +2,9 @@
 // the message, the ledger, a delivery that fails or is late, and the runs whose process died. No Paseo is asked: a fake executor takes the
 // messages and the processes that are killed are real.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";

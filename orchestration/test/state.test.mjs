@@ -1,6 +1,7 @@
 // What state a run is in (runtime/state.mjs): the table as data, then the same table read from real
 // files. Nothing here talks to Paseo and nothing is spent.
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";

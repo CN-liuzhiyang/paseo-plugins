@@ -1,8 +1,9 @@
 // The runner end to end on a fake executor: flows run, events come out, and
 // the events conform to EVENTS.md. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";

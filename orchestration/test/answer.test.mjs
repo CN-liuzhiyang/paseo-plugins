@@ -1,7 +1,8 @@
 // The pure half of correcting an answer in place: pointers, reading a reply, finding what is wrong, planning the correction.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CheckFailed, MAX_PLACES, applyFix, extractJson, fixPrompt, normalizeProblems, planFix, pointer, problemsOf, schemaFailure, segmentsOf, stripUndeclared } from "../runtime/answer.mjs";

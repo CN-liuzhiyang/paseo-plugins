@@ -2,8 +2,9 @@
 // lock itself, two runs of one line in one process and in two, a run that ends while a step waits for its `before` or is in the act, and
 // `settle` while the line is held. The processes are real (line-child.mjs). Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";

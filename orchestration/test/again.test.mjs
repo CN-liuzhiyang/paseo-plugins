@@ -1,8 +1,9 @@
 // `$.again`: another question to the agent that answered, or to a new one that starts from the answer. The executor is a fake
 // that answers from a script; nothing talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
