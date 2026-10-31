@@ -33,7 +33,8 @@ import { FROM_LIMIT, pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, contentDigest, INPUT_REDACTED } from "./gate.mjs";
 import { Journal, JournalError, MAX_VALUE_BYTES, fingerprint, known, shortPrint } from "./journal.mjs";
-import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
+import { loadConfig, logDir as configuredLogDir, resolveHost } from "./config.mjs";
+import { AGENT_ID, wakeAtEnd } from "./wake.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
 export const DEFAULT_CALL_TIMEOUT = "30m";
@@ -193,12 +194,16 @@ function checkKeys(where, object, allowed) {
  * carries on (resume.mjs, `orch.mjs resume`), recorded as run.start.resumeOf. `lineage` is the first run of the line of runs
  * this one belongs to (its own id when it is the first): the line shares one journal (journal.mjs), so what a run did is not
  * done again by the runs that carry it on. `redo` names a step of that journal to do again (and what came after it).
+ * `notify` is a session to tell when the run ends (`orch.mjs run --notify`), and `detached` says the run was started in the background
+ * (`--detach`), so that its caller is told: see wake.mjs for who is told otherwise. `stewards` and `wakeTimeoutMs` stand in for the
+ * config's `stewards` and the 30 seconds delivering may take, for a caller that embeds the runner.
  *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
  *           agentProbeDelays?: number[], runId?: string, affair?: object | null, resumeOf?: string | null, resumePrint?: string | null,
- *           lineage?: string, redo?: string | null,
+ *           lineage?: string, redo?: string | null, notify?: string | null, detached?: boolean,
+ *           stewards?: object, wakeTimeoutMs?: number,
  *           workspaceLock?: { waitMs?: number, staleMs?: number, pollMs?: number },
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
@@ -207,7 +212,7 @@ function checkKeys(where, object, allowed) {
  *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "resumePrint", "lineage", "redo", "taken", "workspaceLock"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "resumePrint", "lineage", "redo", "notify", "detached", "stewards", "wakeTimeoutMs", "taken", "workspaceLock"]);
 
   // --- The id, before anything slow ---------------------------------------
   // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
@@ -282,6 +287,12 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   if (redo !== null && (typeof redo !== "string" || redo.trim() === "" || resumeOf === null)) {
     throw new RunRefused("redo names a step of the line of runs this run carries on, so it needs a step name and resumeOf");
   }
+  const notifyAgent = options.notify ?? null;
+  if (notifyAgent !== null && (typeof notifyAgent !== "string" || !AGENT_ID.test(notifyAgent))) {
+    throw new RunRefused("notify is the id of the session to tell when the run ends (letters, digits, . _ : -)");
+  }
+  if (options.detached !== undefined && typeof options.detached !== "boolean") throw new RunRefused("detached is true or false");
+  if (options.wakeTimeoutMs !== undefined && !(Number.isFinite(options.wakeTimeoutMs) && options.wakeTimeoutMs > 0)) throw new RunRefused("wakeTimeoutMs is a positive number of milliseconds");
   // Read once: the journal is what a run of this line did before this one, and nothing else writes it while this one works.
   let journal;
   try {
@@ -368,6 +379,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   }
   const cwd = options.cwd ?? process.cwd();
   const caller = options.caller !== undefined ? options.caller : (process.env.PASEO_AGENT_ID ?? null);
+  // Who asked to be told when this run ends (wake.mjs): named, or the session that started it in the background.
+  const notify = notifyAgent !== null ? { agent: notifyAgent, via: "explicit" } : options.detached === true && caller ? { agent: caller, via: "caller" } : null;
+  if (notify && !AGENT_ID.test(notify.agent)) throw new RunRefused(`the caller ${JSON.stringify(notify.agent)} is not an agent id this runtime can tell when the run ends`);
   const gatePollMs = options.gatePollMs ?? 10_000;
   const agentProbeDelays = options.agentProbeDelays ?? AGENT_PROBE_DELAYS;
 
@@ -1542,7 +1556,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const startedAt = Date.now();
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint, lineage, redo });
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint, lineage, redo, notify });
 
   let outcome;
   let value = null;
@@ -1647,6 +1661,40 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     caveat("resume: the resume point holds a value this run came to keep secret, so it is not recorded and the run cannot be carried on", null);
     resume = null;
   }
+  // Whoever should know is told before run.end, which must be the last line; a message that cannot be delivered is a line here and
+  // nothing more. The daemon asked is this machine's, whichever host the run's own agents are on.
+  let stewards = options.stewards;
+  if (stewards === undefined) {
+    try {
+      stewards = loadConfig().stewards;
+    } catch (configError) {
+      caveat(`wake: the config could not be read, so no steward was looked for (${configError.message})`, null);
+    }
+  }
+  const woken = await wakeAtEnd({
+    run: {
+      flow: f,
+      source,
+      runId,
+      lineage,
+      affair,
+      caller,
+      notify,
+      outcome,
+      reason: outcome === "stopped" ? stop?.reason : outcome === "failed" || outcome === "timeout" ? `${error?.name}: ${error?.message}` : summary,
+      durationMs,
+      usd: cost?.totalUsd ?? null,
+      resume,
+      events: log.file,
+    },
+    dir,
+    executor: options.executor ?? (host ? paseoExecutor({ host: null }) : executor),
+    roster,
+    stewards,
+    timeoutMs: options.wakeTimeoutMs,
+    scrub: (text) => log.scrub(text),
+  });
+  log.emit("wake", woken.event);
   log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats], resume });
   process.removeListener("exit", sweepInputs);
 

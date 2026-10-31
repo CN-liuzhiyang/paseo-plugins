@@ -119,6 +119,7 @@
 | `resumePrint` | string \| null | 接着跑的运行是从哪个续跑点起的：那个点的**流程名和输入**的指纹（SHA-256 的前 16 位十六进制，对 `{ flow, input }` 的规范 JSON——每一层的键按名字排序——取；`resume-point.mjs` 的 `pointPrint`）。不是接着跑的为 null。读者拿它和自己给人看过的点的指纹比，就知道起来的是不是给人看的那个。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 | `lineage` | string | 这次运行属于的那条"线"：一个运行和接着它跑的那些运行共用一份日志（见下面"日志"），线以第一个运行的 runId 为名。不接着谁跑的运行，`lineage` 就是自己的 runId；接着跑的运行取它接着的那一次的 `lineage`。后加的字段（2026-10-31），旧文件没有，读者按 `runId` 处理 |
 | `redo` | string \| null | 接着跑时要求重做的步骤名（`orch.mjs resume --redo <步骤>`）：这一步和它之后能撤回的记录这次都当没有；不是则 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `notify` | `{ agent, via }` \| null | 运行结束时要告诉的会话：`via` 是 `explicit`（`orch.mjs run --notify <agent>`，选项 `notify`）或 `caller`（`--detach` 起的后台运行，告诉起它的那个会话）。都没有为 null——负责的会话（steward）不在这里，它由配置和 flow 名定，结果记在 `wake` 事件里。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
 `affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
 
@@ -400,6 +401,32 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `level` | `"info"` \| `"warn"` \| `"error"` | |
 | `message` | string | |
 
+### `wake`
+
+运行结束时告诉谁、告诉成没成，一次运行最多一行，写在 `run.end` **之前**一刻（后加的事件，2026-10-31）。要告诉的人是这样定的，先到先得：
+`run.start.notify`（`--notify`，或 `--detach` 起它的会话）→ 前台起它的会话（`run.start.caller` 有值，它自己从命令输出里读结果，不告诉）→ 配置 `stewards`
+里这个 flow 的负责会话（flow 名一栏，没有就取 `*`）→ 没人。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `to` | string \| null | 收消息的 agent id；没人要告诉为 null |
+| `via` | `"explicit"` \| `"caller"` \| `"steward"` \| null | 为什么是它；`to` 为 null 时为 null |
+| `ok` | boolean \| null | 有收件人时：消息送到了没有（`send` 命令成了，**不等于它读了**）；没收件人为 null，找负责会话时就出了错为 false |
+| `error` | string \| null | 没送成或找不到时的一行原话（最多 300 字符）；送成了为 null |
+| `why` | string \| null | 没发的原因，给人看的一句话（没配负责会话、flow 说只听出问题的、前台的会话自己读结果、配置的 agent 不在了……）；同一个 label 下有几个会话时也在这里说「取了第一个」 |
+| `started` | boolean | 负责会话是这一下才起的（消息是它的第一条，`ok` 即为 true）；只有 `via` 是 `steward` 时才会是 true |
+| `unseen` | number | 这条消息发出前，账里「自从上一条送到负责会话的以来」的运行数，消息里的「账里自上次以来还有 N 次运行」就是它；没有配负责会话为 0 |
+| `ledger` | boolean | 这次运行已经记进账本 `<logDir>/steward/ledger.jsonl` 了。有负责会话配置（不管有没有人收到）才记 |
+
+- **送不出去只是这一行，不改变结局**，不写 `caveat` 也不让运行失败。每次投递最长等 30 秒，超时算没送成（`error` 里写「no answer in 30s」）。
+- 消息一律是 `paseo send <agent> --prompt-file <文件> --behavior steer --no-wait`：并进对方正在跑的那一轮，不排队等。文件放
+  `<logDir>/steward/wake/<runId>.txt`（消息正文，经过脱敏），读者想看发了什么就看它。
+- **账本 `<logDir>/steward/ledger.jsonl`** 只追加，一行一次运行：`{ v, at, runId, lineage, flow, affair: { key, label } | null, outcome, why, durationMs, usd, to, via, ok, started }`。
+  负责会话隔了一阵被叫醒、或换了一个会话时，靠它知道漏了什么；读者对读不懂的行当没有。
+- **失联的运行**（同一台机器上进程已不在、没写出 `run.end`）自己不会发 `wake`，由 `orch.mjs wake-lost` 找出来补发一次：消息里说「失联了」，账本里记一行（`outcome: "lost"`）；
+  **不往那个运行的事件文件里写**（它已经没有人在写了）。已经有 `wake` 事件或账本里已经有它的运行不会再发；没有定时器，什么时候跑 `wake-lost` 由人或别的程序定。
+- 之前的文件没有这个事件，读者忽略不认识的 `kind`。
+
 ### `run.end`（最后一行）
 
 | 字段 | 类型 | 含义 |
@@ -475,7 +502,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`run.start.lineage`、`run.start.redo`、`call.start.reused`、`call.start.type: "step"` 及它的 `once` / `key`（2026-10-31，缺省分别是取 `runId`、null、null、没有这种调用）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`wake` 事件、`run.start.notify`（2026-10-31，缺省分别是没有这种事件、null）；`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`run.start.lineage`、`run.start.redo`、`call.start.reused`、`call.start.type: "step"` 及它的 `once` / `key`（2026-10-31，缺省分别是取 `runId`、null、null、没有这种调用）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

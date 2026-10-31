@@ -138,4 +138,18 @@ export default flow({
   },
   summarize: (value, { outcome }) => `${outcome}: ${value.d}`,
   resume: "auto",
+  wake: "problems",
+});
+
+flow({
+  name: "quiet",
+  description: "d",
+  phases: [],
+  inputs: {},
+  grants: [],
+  // @ts-expect-error wake is "problems" or left out
+  wake: "always",
+  async run() {
+    return 1;
+  },
 });

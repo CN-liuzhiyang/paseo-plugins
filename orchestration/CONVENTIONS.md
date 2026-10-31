@@ -55,12 +55,14 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 都只是一条 warn 加 `summary: null`，结局不变——所以不必为它写防御代码，但也别在里面做事情，它是同步调用、
 不 await 的。committee 的写法可以照抄：收敛了说第几轮、结论是什么，没收敛说分歧是什么。
 
+另两个可选键（`resume`，见「接着跑」；`wake: "problems"`，见「跑完叫醒」）同样不改变运行本身，只改变别人怎么对待它。
+
 **`inputs` 用 step 的字段构造器写**（`text`/`count`/`flag`/`choice`/`list`/`group`），同样全字段必填、
 不能有别的 JSON Schema 关键字（`default` 之类直接报错）。运行器在**第一笔花费之前**按它校验输入，
 不合就拒绝运行、不产生事件文件。命令行上每个输入是一个 kebab-case 的 flag（`hotfixVersion` →
 `--hotfix-version`），按类型解析：`text`/`choice` 是字符串，`count` 是数字，`flag` 是 `--x` / `--no-x`，
 `list(text())` 重复写 flag；`group` 只能经 `--input <json 或 @文件>` 给。以 `-` 开头的值（写成列表的问题、
-负数）照常能传。`input`、`timeout`、`help`
+负数）照常能传。`input`、`timeout`、`host`、`cwd`、`help`、`runId`、`affair`、`notify`、`detach`
 是运行器自己的 flag，不能当输入名。
 
 没有默认值是刻意的：advisor 的 `role`、committee 的 `assessor` 都要调用方写出来。代价是命令行长一点，
@@ -612,6 +614,57 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 - **跨机时没有父（实测，2026-10-21）。** 带 `--host` 时 CLI 先去目标 daemon 上查 `PASEO_AGENT_ID`，
   查不到就不传调用方（`cli/src/utils/caller-agent.ts`），不报错；远端 agent 在 App 上没有父，每次
   `paseo run` 还会在那边新建一个 workspace。事件里的 `caller` 照旧是本机这个 id。
+
+---
+
+## 跑完叫醒：负责的会话（steward）
+
+一个没人守着的运行（后台起的、定时起的、插件起的）结束了，常常没人知道。运行时在写 `run.end` 之前，把结局告诉**一个**该知道的会话，并记一笔账。
+消息只有一句话或几行：流程、结局、原因、事件文件、接着跑的命令、该流程的手册路径（`<flow>.steward.md`，在 flow 文件旁边有才写）。
+
+**告诉谁**，先到先得（结果记在事件 `wake`，格式见 [EVENTS.md](EVENTS.md)）：
+
+1. `orch.mjs run ... --notify <agent>`：显式指定的会话（`run.start.notify.via = "explicit"`）。
+2. `orch.mjs run ... --detach`：运行转到后台进程里跑，命令立刻返回 `runId`；起它的会话（`PASEO_AGENT_ID`）结束时被告诉（`via = "caller"`）。`resume` 同样支持两个选项。
+3. 前台跑的、有会话在前面等着的运行：不告诉，它自己从命令输出里读结果。
+4. 配置里这个 flow 有负责会话：`~/.paseo-orchestration/config.json` 的 `stewards`（每台机器自己的，公开仓不放任何具体路径或人）：
+
+   ```json
+   "stewards": {
+     "*": { "cwd": "D:\\private\\ops", "guide": ["D:\\private\\ops\\GUIDE.md"] },
+     "build-and-ship": { "agent": "<agent id>" }
+   }
+   ```
+
+   键是 flow 名，`*` 管没点名的。每项**恰好**写一个落脚处：`agent`（一个现成的会话）、`workspace`（Paseo workspace id）、`cwd`（一个目录，它的 workspace 找或建，登记在 `<logDir>/workspaces/`）；
+   可选的 `role`（roster 里的角色，缺省 `steward`：公开仓 `roles/steward.md`）和 `guide`（新起的会话要先读的文件，写进它的第一条消息）。**公开仓只有机制，没有人或路径。**
+5. 都没有：不发，`wake { to: null, why }` 说为什么。
+
+负责会话的找法：配置的 `agent` 还在（没归档）就用它；`agent` 不在了、或配的是 `workspace` / `cwd`，就在那个 workspace 里找标签 `orch-steward=<flow 名>`（`*` 是 `all`）的、没归档的会话；
+找不到就**现起一个**（角色见上），消息连同一段交代身份的开场白是它的第一条（`started: true`），之后的运行找到它、直接发。没配 `stewards`、也没给 `--notify` / `--detach` 的运行，什么都不发、也不记账，事件里只多一行 `wake { to: null }`。
+
+**每条消息都是** `paseo send <agent> --prompt-file <文件> --behavior steer --no-wait`，最长等 30 秒，失败只是事件里一行（`wake.ok = false`、`error`），不改结局。运行时没有重试，也不会去找别的会话顶替。
+`done` 也发一行（跑完的记一笔就行）；flow 想让负责会话只听出问题的，声明 `wake: "problems"`：`done` 就不发（`wake.why` 说明），但账里照记。它只管 steward 这一路，显式的 `--notify` 照发。
+
+**账本** `<logDir>/steward/ledger.jsonl`：有 steward 配置的 flow，每次运行一行（不管有没有人收到）。负责会话隔了很久才被叫醒、或者换了一个会话，消息末尾会多一句
+「账里自上次以来还有 N 次运行（路径）」——N 是上一条**送到了负责会话**的之后记的行数——它去读账补上漏的，不靠消息本身。
+
+**失联的运行**（进程被杀、机器重启，没写出 `run.end`）自己不会说话。`orch.mjs wake-lost [--dry-run]` 找出同一台机器上进程确已不在、没有 `wake`、账里也没有的运行，各补发一次
+（消息里结局是「失联了」；账本记一行）。**运行时里没有定时器**，什么时候跑它由人或别的程序决定（例如开机后跑一次、或每小时跑一次）；`--dry-run` 只列出会发给谁，不发。
+
+### 注意：消息进来时对方在做什么（2026-10-31 实测）
+
+用 Haiku 当探针 steward（`stewards.agent` 指向它），对着真 daemon 试了三种状态下的 `send --behavior steer --no-wait`（CLI 发的消息 daemon 会「排队约两秒再送」）：
+
+- **空闲**：被叫醒（`idle` → `running` → `idle`），按消息办。
+- **正在生成文字**：不会被打断；消息在这一段输出写完之后、同一次活动里处理（探针写 1 到 140 的清单，写完才回到消息）。所以「消息会并进当前这一轮」是对的，但不是「立刻」。
+- **卡在一个权限请求上**（等人批工具调用）：steer 会**把那个请求当作被拒绝**撤掉，然后在同一轮里处理这条消息——也就是消息会替人把一个待批的请求否了。负责会话的权限模式越紧，这种事越可能发生。
+
+由此：
+
+- **运行时起的 steward 用的是 provider 的默认权限模式**（Claude 是 default），它每调一个工具都会向人要权限。运行时不会也不该替它选松的模式（`gate:allow` 不存在，权限请求不替人批）。
+  所以 steward 若要无人值守地工作，要由部署方自己决定：给 `role` 配一个只读能力够用的模式，或自己起好会话再用 `stewards.agent` 指过去；否则它第一次调工具就会等人批，之后的消息又会把那个待批请求撤掉。
+- 消息写得**不依赖回复**：开场白里已经告诉它「消息会并进当前这一轮，不用回复它」。
 
 ---
 

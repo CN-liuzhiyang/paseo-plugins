@@ -2,9 +2,11 @@
 //
 //   node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h]
 //                                        [--host ssh://user@box --cwd /path/on/box]
-//                                        [--run-id <id>] [--affair <json | @file>]
+//                                        [--run-id <id>] [--affair <json | @file>] [--notify <agent>] [--detach]
 //   node runtime/orch.mjs resume <runId> [--run-id <id>] [--affair <json | @file>] [--timeout 2h]
 //                                        [--host ssh://user@box --cwd /path/on/box] [--expect <print>] [--redo <step>]
+//                                        [--notify <agent>] [--detach]
+//   node runtime/orch.mjs wake-lost [--dry-run]
 //   node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done
 //   node runtime/orch.mjs steps <runId>
 //   node runtime/orch.mjs check <flow.mjs | name>
@@ -17,6 +19,11 @@
 // `--redo <step>` does that step, and what came after it that can be taken back, again. `--expect <print>` is for a caller that showed a person the point (its flow and input are the
 // ones `resume-point.mjs` `pointPrint` fingerprints): if the point the run left says another now, nothing is started. It prints what `run`
 // prints and exits the same way.
+//
+// `--notify <agent>` tells that session, when the run ends, how it ended; `--detach` starts the run in the background and returns at once with its
+// id (the events file is where it goes on), and the session that started it -- `$PASEO_AGENT_ID` -- is told when it ends. Without either, a run started by
+// a session is read off the command by that session and tells nobody; one nobody started is told to the steward of config.json, if there is one
+// (wake.mjs). `wake-lost` tells of the runs whose process died without writing run.end, once each.
 //
 // `steps` prints what the journal of a run's line holds, one entry per place in the flow. `settle` says how a step that cannot be taken back
 // (`once`) ended when it began and left no word of how: that it was done (with the value it would have returned) or that it was not. Only
@@ -48,9 +55,11 @@
 // --host` takes); --cwd is then required, a directory on that host. The
 // runner and its events stay on this machine.
 
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadFlow, checkFlow } from "./flow.mjs";
 import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
@@ -62,12 +71,17 @@ import { Journal, JournalError, known } from "./journal.mjs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
 import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
+import { AGENT_ID, wakeLost } from "./wake.mjs";
+import { loadRoster } from "./roster.mjs";
+import { paseoExecutor } from "./executor.mjs";
+import { loadConfig } from "./config.mjs";
 
 const USAGE = [
   "Usage:",
   "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
-  "                                              [--run-id <id>] [--affair <json | @file>]",
-  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>] [--expect <print>] [--redo <step>]",
+  "                                              [--run-id <id>] [--affair <json | @file>] [--notify <agent>] [--detach]",
+  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>] [--expect <print>] [--redo <step>] [--notify <agent>] [--detach]",
+  "  node runtime/orch.mjs wake-lost [--dry-run]",
   "  node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done",
   "  node runtime/orch.mjs steps <runId>",
   "  node runtime/orch.mjs check <flow.mjs | name>",
@@ -112,6 +126,39 @@ function inputOptions(schema) {
   return { options, convert };
 }
 
+// Set by startInBackground in the process it starts, and taken out of the environment so that what this run starts is not taken for one.
+const DETACHED = process.env.ORCH_DETACHED === "1";
+delete process.env.ORCH_DETACHED;
+
+/** What a run is given of the flags about being told when it ends. */
+const wakeOptions = (notify) => ({ ...(notify ? { notify } : {}), ...(DETACHED ? { detached: true } : {}) });
+
+/** `--notify` and `--detach` of a command line; `joined` is its arguments with each flag's value joined to it, so that `--detach` can be taken out. */
+function wakeFlags(values, joined) {
+  const out = {};
+  if (values.notify !== undefined) {
+    if (!AGENT_ID.test(values.notify)) throw new UsageError("--notify is the id of the session to tell when the run ends (letters, digits, . _ : -)");
+    out.notify = values.notify;
+  }
+  if (values.detach === true) {
+    out.detach = true;
+    out.argv = joined.filter((arg) => arg !== "--detach");
+  }
+  return out;
+}
+
+/**
+ * The same command, in a process of its own that outlives this one, with the id the run will have; returns at once. What went wrong before
+ * the run began is with the id's claim, as for any caller that started a run and cannot see its stderr (run.mjs `settleRefusal`).
+ */
+function startInBackground(command, target, argv, runId) {
+  const id = runId ?? randomUUID();
+  const args = [fileURLToPath(import.meta.url), command, target, ...argv, ...(runId === undefined ? ["--run-id", id] : [])];
+  const child = spawn(process.execPath, args, { detached: true, stdio: "ignore", windowsHide: true, env: { ...process.env, ORCH_DETACHED: "1" } });
+  child.unref();
+  return { ok: true, detached: true, runId: id, events: eventsFile(configuredLogDir(), id) };
+}
+
 /** A flag's JSON value, inline or `@file`. */
 async function readJson(flag, raw) {
   const text = raw.startsWith("@") ? await readFile(raw.slice(1), "utf8") : raw;
@@ -136,7 +183,7 @@ async function readInput(raw) {
  */
 export async function parseRunArgs(f, argv) {
   const { options, convert } = inputOptions(f.inputs);
-  const all = { ...options, input: { type: "string" }, timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" } };
+  const all = { ...options, input: { type: "string" }, timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, notify: { type: "string" }, detach: { type: "boolean" } };
   // parseArgs refuses a value that starts with "-" as ambiguous, and a question
   // written as a Markdown list does. A value-taking flag always takes the next
   // argument, so join them before parseArgs sees them.
@@ -163,7 +210,7 @@ export async function parseRunArgs(f, argv) {
   }
   const input = await readInput(parsed.values.input);
   for (const [flag, raw] of Object.entries(parsed.values)) {
-    if (["input", "timeout", "host", "cwd", "run-id", "affair"].includes(flag)) continue;
+    if (["input", "timeout", "host", "cwd", "run-id", "affair", "notify", "detach"].includes(flag)) continue;
     const [name, value] = convert[flag](raw);
     input[name] = value;
   }
@@ -171,6 +218,7 @@ export async function parseRunArgs(f, argv) {
   const given = {};
   if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
   if (parsed.values.affair !== undefined) given.affair = await readJson("affair", parsed.values.affair);
+  Object.assign(given, wakeFlags(parsed.values, joined));
   return { input, timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
 }
 
@@ -197,8 +245,13 @@ async function run(name, argv) {
   try {
     const target = resolveTarget(name);
     const { flow: f } = await loadFlow(target);
-    const { input, timeout, host, cwd, runId, affair } = await parseRunArgs(f, argv);
+    const { input, timeout, host, cwd, runId, affair, notify, detach, argv: bare } = await parseRunArgs(f, argv);
     if (taken && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
+    if (detach) {
+      // Everything that can be refused without spending anything has been: what follows is the same command, in the background, with the id it will have.
+      if (taken) taken.claim.discard();
+      return startInBackground("run", name, bare, runId);
+    }
     // The path, not the loaded value: the runner records it and scans its source.
     return await runFlow(target, {
       input,
@@ -207,6 +260,7 @@ async function run(name, argv) {
       ...(cwd ? { cwd } : {}),
       ...(taken ? { taken } : runId !== undefined ? { runId } : {}),
       ...(affair !== undefined ? { affair } : {}),
+      ...wakeOptions(notify),
     });
   } catch (error) {
     // runFlow settles its own refusals; this is for what failed before it was called (settling twice is harmless: the claim is already stopped).
@@ -219,7 +273,7 @@ async function run(name, argv) {
  * What follows `resume <runId>`: the flags of a run that do not belong to a flow's input. Exported for the tests; throws UsageError.
  */
 export async function parseResumeArgs(argv) {
-  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, expect: { type: "string" }, redo: { type: "string" } };
+  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, expect: { type: "string" }, redo: { type: "string" }, notify: { type: "string" }, detach: { type: "boolean" } };
   // As for a run: a value-taking flag takes the next argument whatever it starts with.
   const joined = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -236,7 +290,7 @@ export async function parseResumeArgs(argv) {
     parsed = parseArgs({ args: joined, options: all, allowPositionals: false, strict: true });
   } catch (error) {
     throw new UsageError(`${error.message}
-The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd, --expect, --redo`);
+The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd, --expect, --redo, --notify, --detach`);
   }
   const given = {};
   if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
@@ -249,6 +303,7 @@ The input is the one the earlier run's flow declared, not a flag: resume takes -
     if (parsed.values.redo.trim() === "") throw new UsageError("--redo is the name of a step of the run's journal (orch.mjs steps <runId> lists them)");
     given.redo = parsed.values.redo;
   }
+  Object.assign(given, wakeFlags(parsed.values, joined));
   return { timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
 }
 
@@ -266,7 +321,7 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
   const requested = peekRunId(argv);
   const taken = takeRunId({ runId: requested, logDir });
   try {
-    const { timeout, host, cwd, runId, affair, expect, redo } = await parseResumeArgs(argv);
+    const { timeout, host, cwd, runId, affair, expect, redo, notify } = await parseResumeArgs(argv);
     if (runId !== undefined && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
     const { start, point } = readResumePoint({ dir: logDir, runId: previous });
     const target = resolveFlowFile(point.flow);
@@ -305,6 +360,7 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
       resumePrint: print,
       lineage,
       ...(redo !== undefined ? { redo } : {}),
+      ...wakeOptions(notify),
       taken,
       affair: affair !== undefined ? affair : earlier.affair,
       ...((cwd ?? earlier.cwd) ? { cwd: cwd ?? earlier.cwd } : {}),
@@ -411,6 +467,31 @@ export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
   return { ok: true, lineage: journal.lineage, step, settled: settled.done ? "done" : "not-done", id };
 }
 
+/**
+ * `wake-lost`: tell of the runs whose process died without writing run.end, once each (wake.mjs). `--dry-run` says which and sends nothing.
+ *
+ * @param {string[]} argv the flags after `wake-lost`
+ * @param {{ logDir?: string, executor?: object, roster?: object, stewards?: object, timeoutMs?: number }} [options] the daemon asked, the roles and the
+ *   config's `stewards`, unless a test hands them in
+ */
+export async function runWakeLost(argv, { logDir = configuredLogDir(), executor, roster, stewards, timeoutMs } = {}) {
+  let parsed;
+  try {
+    parsed = parseArgs({ args: argv, options: { "dry-run": { type: "boolean" } }, allowPositionals: false, strict: true });
+  } catch (error) {
+    throw new UsageError(error.message);
+  }
+  const woken = await wakeLost({
+    dir: logDir,
+    executor: executor ?? paseoExecutor(),
+    roster: roster ?? (await loadRoster()),
+    stewards: stewards !== undefined ? stewards : loadConfig().stewards,
+    dryRun: parsed.values["dry-run"] === true,
+    timeoutMs,
+  });
+  return { ok: true, dryRun: parsed.values["dry-run"] === true, woken };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, target, ...rest] = process.argv.slice(2);
   const print = (value) => console.log(JSON.stringify(printable(value), null, 2));
@@ -421,6 +502,17 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       process.exit(0);
     } catch (error) {
       console.error(`${error.name}: ${error.message}`);
+      process.exit(2);
+    }
+  }
+
+  if (command === "wake-lost") {
+    try {
+      print(await runWakeLost([target, ...rest].filter((arg) => arg !== undefined)));
+      process.exit(0);
+    } catch (error) {
+      console.error(`${error.name}: ${error.message}`);
+      if (error.name === "UsageError") console.error(`\n${USAGE}`);
       process.exit(2);
     }
   }
@@ -445,6 +537,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (command === "settle") {
       print(settleRun(target, rest));
       process.exit(0);
+    }
+    if (command === "resume") {
+      const parsed = await parseResumeArgs(rest);
+      if (parsed.detach) {
+        print(startInBackground("resume", target, parsed.argv, parsed.runId));
+        process.exit(0);
+      }
     }
     const result = command === "resume" ? await resumeRun(target, rest) : await run(target, rest);
     print(result);

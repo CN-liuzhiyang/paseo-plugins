@@ -8,7 +8,8 @@
 //     "rolesDirs": ["D:\\private\\roles"],
 //     "flowsDirs": ["D:\\private\\flows"],
 //     "logDir": "D:\\private\\logs",
-//     "hosts": { "build-box": "ssh://me@build-box", "home": "https://app.paseo.sh/#offer=..." }
+//     "hosts": { "build-box": "ssh://me@build-box", "home": "https://app.paseo.sh/#offer=..." },
+//     "stewards": { "*": { "cwd": "D:\\private\\ops", "guide": ["D:\\private\\GUIDE.md"] }, "build-and-ship": { "agent": "<agent id>" } }
 //   }
 //
 // `flowsDirs` is where `orch.mjs run <name>` looks for a flow by its name (the
@@ -17,6 +18,11 @@
 // `hosts` names the daemons `orch.mjs run --host <name>` can reach. A pairing
 // URL is a credential -- whoever holds it can drive that daemon -- so it lives
 // here and runs record only the name.
+//
+// `stewards` says who is told when a run ends that nobody is waiting for (wake.mjs, CONVENTIONS.md "跑完叫醒"): by flow name, `*` for
+// the flows not named. Each is exactly one of `agent` (a session that is already there), `workspace` (a Paseo workspace id) or `cwd` (a
+// directory: its workspace is found or made), where a session with the label orch-steward is looked for and, if there is none, started;
+// `role` (a role of the roster, default "steward") is what that session runs as, and `guide` the files it is told to read first.
 //
 // Every key is optional; a missing file means all defaults. Parsing is strict
 // for the same reason roles are: a misspelled key that is silently ignored is a
@@ -30,6 +36,26 @@ import path from "node:path";
 
 export const CONFIG_HOME = path.join(os.homedir(), ".paseo-orchestration");
 
+const STEWARD_FLOW = /^(\*|[a-z][a-z0-9-]*)$/;
+const filled = (v) => typeof v === "string" && v.length > 0;
+
+/** Why `stewards` does not fit, or true. */
+function stewardsProblem(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return "it is an object of flow name (or *) to { agent | workspace | cwd }";
+  for (const [flow, spec] of Object.entries(value)) {
+    if (!STEWARD_FLOW.test(flow)) return `"${flow}" is not a flow name or *`;
+    if (spec === null || typeof spec !== "object" || Array.isArray(spec)) return `"${flow}" is not an object`;
+    const unknown = Object.keys(spec).filter((k) => !["agent", "workspace", "cwd", "role", "guide"].includes(k));
+    if (unknown.length > 0) return `"${flow}" has unknown key ${unknown.join(", ")}; keys: agent | workspace | cwd, role, guide`;
+    const where = ["agent", "workspace", "cwd"].filter((k) => k in spec);
+    if (where.length !== 1) return `"${flow}" says where in exactly one of agent, workspace, cwd`;
+    if (!filled(spec[where[0]])) return `"${flow}": ${where[0]} is a non-empty string`;
+    if ("role" in spec && !filled(spec.role)) return `"${flow}": role is a non-empty string`;
+    if ("guide" in spec && !(Array.isArray(spec.guide) && spec.guide.every(filled))) return `"${flow}": guide is a list of file paths`;
+  }
+  return true;
+}
+
 const KEYS = {
   paseoInstallDir: (v) => typeof v === "string" && v.length > 0,
   rolesDirs: (v) => Array.isArray(v) && v.every((d) => typeof d === "string" && d.length > 0),
@@ -37,6 +63,7 @@ const KEYS = {
   logDir: (v) => typeof v === "string" && v.length > 0,
   hosts: (v) =>
     v !== null && typeof v === "object" && !Array.isArray(v) && Object.values(v).every((e) => typeof e === "string" && e.length > 0),
+  stewards: stewardsProblem,
 };
 
 /** Parse one config document. Throws naming the file on anything unexpected. */
@@ -55,14 +82,16 @@ export function parseConfig(source, where) {
     if (!Object.hasOwn(KEYS, key)) {
       throw new Error(`${where}: unknown key "${key}"; known keys: ${Object.keys(KEYS).join(", ")}`);
     }
-    if (!KEYS[key](entry)) throw new Error(`${where}: "${key}" has the wrong shape`);
+    const verdict = KEYS[key](entry);
+    if (verdict !== true) throw new Error(`${where}: "${key}" has the wrong shape${typeof verdict === "string" ? `: ${verdict}` : ""}`);
   }
   return value;
 }
 
 let cached;
 
-/** @returns {{ paseoInstallDir?: string, rolesDirs?: string[], flowsDirs?: string[], logDir?: string }} */
+/** @returns {{ paseoInstallDir?: string, rolesDirs?: string[], flowsDirs?: string[], logDir?: string, hosts?: Record<string, string>,
+ *   stewards?: Record<string, { agent?: string, workspace?: string, cwd?: string, role?: string, guide?: string[] }> }} */
 export function loadConfig() {
   if (cached) return cached;
   const file = process.env.ORCH_CONFIG ?? path.join(CONFIG_HOME, "config.json");

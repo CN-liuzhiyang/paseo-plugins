@@ -192,6 +192,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const fixedRound = new Map(); // callId -> round of its latest call.fixed
   const caveatTexts = new Set();
   let runEnd = null;
+  let wakeSeen = false;
 
   events.forEach((event, index) => {
     need(event, event.v === EVENTS_VERSION, `v is ${event.v}, expected ${EVENTS_VERSION}`);
@@ -229,6 +230,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         added(event, "resumePrint", event.resumePrint === null || (typeof event.resumePrint === "string" && PRINT_SHAPE.test(event.resumePrint) && event.resumeOf !== null), "resumePrint is not null, or the fingerprint of the point a run that carries on another started from");
         added(event, "lineage", isString(event.lineage) && event.lineage !== "" && (event.resumeOf !== null || event.lineage === runId), "lineage is not the id of the first run of the line this run belongs to (its own id when it carries nothing on)");
         added(event, "redo", isNullableString(event.redo) && (event.redo === null || event.resumeOf !== null), "redo is not null, or the name of a step of the line of runs that a run which carries one on does again");
+        added(
+          event,
+          "notify",
+          event.notify === null || (isObject(event.notify) && isString(event.notify.agent) && event.notify.agent !== "" && ["explicit", "caller"].includes(event.notify.via)),
+          "notify is not null | { agent, via: explicit | caller }",
+        );
         break;
       }
       case "phase.start":
@@ -425,6 +432,19 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         const { v, seq, ts, runId: id, kind, ...point } = event;
         const bad = pointProblems(point);
         need(event, bad.length === 0, `not { cleared: true } and not a resume point: ${bad.join("; ")}`);
+        break;
+      }
+      case "wake": {
+        need(event, !wakeSeen, "a second wake");
+        wakeSeen = true;
+        need(event, isNullableString(event.to) && (event.to === null || event.to !== ""), "to is not null or an agent id");
+        need(event, [null, "explicit", "caller", "steward"].includes(event.via) && (event.to === null) === (event.via === null), "via is explicit | caller | steward when there is a recipient and null when there is none");
+        need(event, event.to === null ? event.ok === null || event.ok === false : typeof event.ok === "boolean", "ok is a boolean when there is a recipient, and null (false when looking for one failed) when there is none");
+        need(event, isNullableString(event.error) && (event.ok !== false || event.error !== null), "error is a string when delivering failed (ok false) and null or a string otherwise");
+        need(event, isNullableString(event.why), "why is not string | null");
+        need(event, typeof event.started === "boolean" && (!event.started || event.via === "steward"), "started is a boolean, and only a steward is started");
+        need(event, Number.isInteger(event.unseen) && event.unseen >= 0, "unseen is not a non-negative integer");
+        need(event, typeof event.ledger === "boolean", "ledger is not a boolean");
         break;
       }
       case "caveat":

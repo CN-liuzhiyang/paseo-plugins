@@ -299,6 +299,7 @@ export interface Flow<I extends Fields, R> {
   run(input: Shape<I>, $: Dollar<string>): Promise<R>;
   readonly summarize: Summarize | null;
   readonly resume: "auto" | null;
+  readonly wake: "problems" | null;
 }
 
 /**
@@ -320,6 +321,11 @@ export function flow<I extends Fields, const P extends readonly Phase[], R>(defi
    * taken from the journal. The flow promises that everything it cannot take back is in a `once` step.
    */
   resume?: "auto";
+  /**
+   * "problems": the steward (the session that watches the runs of flows, CONVENTIONS.md) is told only of runs that did not come to done.
+   * Left out, it is told of every run. A session that asked to be told (`--notify`, a `--detach`ed run) is told either way.
+   */
+  wake?: "problems";
 }): Flow<I, R>;
 
 export function isFlow(value: unknown): value is Flow<Fields, unknown>;

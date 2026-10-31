@@ -165,7 +165,7 @@ test("advisor: one ask, the answer is the value", async () => {
   assert.equal(result.outcome, "done");
   assert.deepEqual(result.value, { question: "Is this right?", advisor: { role: "fast", provider: "claude/claude-haiku-5-5" }, answer });
   const events = eventsOf(result);
-  assert.deepEqual(kinds(events), ["run.start", "call.start:c1", "caveat", "call.end:c1", "run.end"]);
+  assert.deepEqual(kinds(events), ["run.start", "call.start:c1", "caveat", "call.end:c1", "wake", "run.end"]);
   assert.equal(events[0].source, null);
   assert.deepEqual(events[0].input, { question: "Is this right?", role: "fast" });
   assert.equal(events[1].role, "fast");
@@ -210,7 +210,7 @@ test("$.phase / $.do / $.log / $.stop: stop inside a phase ends it cleanly and n
   assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one" });
   assert.deepEqual(result.value, { partial: true });
   const events = eventsOf(result);
-  assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "run.end"]);
+  assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "wake", "run.end"]);
   assert.equal(events[1].message, "starting now");
   assert.equal(events[3].output, `${"x".repeat(2_000)}…(truncated 3000 chars)`);
   assert.equal(events[3].agentId, null);
@@ -885,8 +885,8 @@ test("a thrown error is a failed run with a run.end", async () => {
   assert.equal(result.outcome, "failed");
   assert.deepEqual(result.error, { name: "RangeError", message: "bad" });
   const events = eventsOf(result);
-  assert.equal(events.at(-2).kind, "log");
-  assert.match(events.at(-2).message, /RangeError: bad/);
+  assert.equal(events.at(-3).kind, "log");
+  assert.match(events.at(-3).message, /RangeError: bad/);
 });
 
 // --- For people: titles, headlines, summaries ---------------------------
@@ -1234,7 +1234,7 @@ test("a run on another host needs a directory there, and cannot gate yet", async
 
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
-    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null, resumePrint: null, lineage: "r", redo: null },
+    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null, resumePrint: null, lineage: "r", redo: null, notify: null },
     { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [], resume: null },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);

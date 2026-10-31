@@ -18,12 +18,13 @@ runtime/
   flow.d.mts     写 flow 用的类型
   step.mjs       step 定义、schema 构造器、输入校验
   run.mjs        运行器：$ 原语、事件、成本、caveats、收尾
-  orch.mjs       命令行：run / resume / settle / steps / check / list
+  orch.mjs       命令行：run / resume / settle / steps / check / list / wake-lost
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
   claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
   resume.mjs     接着跑：读上一段留下的续跑点、检查它、一次停下只被接一次（`<runId>.resumed` 占位）；`orch.mjs resume` 用它
   resume-point.mjs  续跑点 `{ flow, input, from, spends }` 的形状和校验（运行器、契约检查、`resume` 共用）
+  wake.mjs       运行结束时告诉该知道的会话（`--notify`、`--detach` 的起运行方、配置里 `stewards` 的负责会话）并记账 `<logDir>/steward/ledger.jsonl`；`orch.mjs wake-lost` 补发进程已死的运行
   journal.mjs    一条"线"（一个运行加上接着它跑的那些）做过的事：`$.step` 的值、`$.ask`/`$.again` 的答案、人答过的卡；追加的 `runs/<线>/journal.jsonl`
   liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
@@ -90,6 +91,14 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
   `link` 就能点回去（形状和限制见 [EVENTS.md](EVENTS.md)）。运行时不认识具体的插件，`plugin` / `screen`
   是调用方的插件 id 和那个插件里注册的屏 id。JSON 里有引号，用命令行传不方便时写成文件：`--affair @affair.json`
   （`--input` 同样）。从代码里起子进程时用参数数组，不经过 shell，就没有引号问题。
+- `--notify <agent>` 让运行结束时往那个会话发一条消息（流程、结局、原因、事件文件、接着跑的命令）；`--detach` 把运行转到后台进程，
+  命令立刻返回 `{ detached: true, runId, events }`，运行结束时告诉起它的会话。两者都没有、配置 `stewards` 里也没有这个 flow 时，什么都不发。
+  谁在什么情况下被告诉、`stewards` 怎么写、账本和失联运行：[CONVENTIONS.md](CONVENTIONS.md)「跑完叫醒」。
+
+```bash
+node runtime/orch.mjs wake-lost --dry-run   # 进程已死、没写出 run.end、还没人被告诉的运行：列出来，不发
+node runtime/orch.mjs wake-lost             # 各补发一次
+```
 
 ### 先写意图，再起进程；重启后按文件判断
 

@@ -19,6 +19,8 @@
 //   providerAvailable(family)               true when Paseo lists it as available and enabled
 //   listWorkspaces()                        [{ workspaceId, name, cwd }], hidden ones too
 //   createWorkspace({ cwd, title })         { workspaceId } of a new background workspace on cwd
+//   notify(agentId, text, { file, timeoutMs })   a message into that agent's current turn (steer), not waited for; local daemon only
+//   listAgents(labels)                      [{ id, name, status, cwd }] of the agents (not archived, background ones too) with every label
 //
 // A request is { provider, thinking, mode, title, labels, prompt, cwd } plus,
 // for ask, { schema, timeout }, and `workspace` (a workspace id) when the agent
@@ -106,6 +108,24 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       return found[0]?.id ?? null;
     },
 
+    // `-g`, `--background`: the steward's workspace is a background one. Without `-a` an archived agent is not listed. The rows are
+    // { id, name, provider, status, cwd, ... } (cli/src/commands/agent/ls.ts), the cwd with the home directory shortened to "~".
+    listAgents: async (labels) => {
+      const args = ["ls", "-g", "--background"];
+      for (const [key, value] of Object.entries(labels)) args.push("--label", `${key}=${value}`);
+      const rows = (await runJson(args, opts())) ?? [];
+      return rows.map((row) => ({ id: row.id, name: row.name ?? null, status: row.status ?? null, cwd: typeof row.cwd === "string" ? row.cwd : null }));
+    },
+
+    // The wake-up (wake.mjs). Into the turn the agent is in, not after it and not in place of it (`--behavior steer`), and not waited for:
+    // the sender has no use for the answer. Always the local daemon -- the steward is on this machine whichever host the run's agents are on --
+    // so no `--host`. The text goes in a file for the same reason as in `send`.
+    notify: async (agentId, text, { file, timeoutMs = 30_000 }) => {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, text, "utf8");
+      await runJson(["send", agentId, "--prompt-file", file, "--behavior", "steer", "--no-wait"], { timeoutMs });
+    },
+
     // `inspect --json` is PascalCase, unlike `ls --json`. LastUsage is the
     // last turn, which for one structured call is the whole call. Codex
     // reports CostUsd 0 with real token counts; it is passed on as is.
@@ -114,6 +134,7 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       const usage = detail?.LastUsage ?? null;
       return {
         status: detail?.Status ?? null,
+        archived: typeof detail?.Archived === "boolean" ? detail.Archived : null,
         usage: usage
           ? { usd: usage.CostUsd ?? null, inputTokens: usage.InputTokens ?? null, outputTokens: usage.OutputTokens ?? null }
           : null,
