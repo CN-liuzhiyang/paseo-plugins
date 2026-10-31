@@ -240,6 +240,36 @@ test("a stop for an answer that never came right is a run that did not come to a
   assert.doesNotMatch(told.text, /verdict|analyze/, "the flow's own words are on the page");
 });
 
+test("a stop that has its kind is read by the kind, not by the words of its reason; a record from before the field is read by the words", () => {
+  const shape = (over: Partial<FlowEnd>): Pick<FlowEnd, "outcome" | "value" | "why" | "stopKind"> => ({ outcome: "stopped", value: null, why: NEVER, ...over });
+  assert.equal(unfinishedWhy(shape({ stopKind: "check", why: "words the reader has never seen" })), CHECK_FAILED_WORDS, "the kind says it, whatever the words");
+  for (const stopKind of ["flow", "unknown"] as const) assert.equal(unfinishedWhy(shape({ stopKind })), null, `${stopKind} with the words of a check: not one`);
+  assert.equal(unfinishedWhy(shape({})), CHECK_FAILED_WORDS, "no kind (an old file): the words");
+  // what the reader takes from a run.end, with and without the kind
+  const f = fixture();
+  try {
+    const stopOf = (reason: string, extra: Record<string, unknown> = {}) => end(ago(10 * MIN), "stopped", { stop: { reason, phase: null, ...extra } });
+    f.run("c1", [start(ago(30 * MIN), AFFAIR("tracker:1")), stopOf("words that no pattern knows", { kind: "check", step: "analyze" })], { claimAgeMs: null });
+    f.run("c2", [start(ago(30 * MIN), AFFAIR("tracker:2")), stopOf(NEVER)], { claimAgeMs: null });
+    f.run("c3", [start(ago(30 * MIN), AFFAIR("tracker:3")), stopOf(NEVER, { kind: "flow", step: null })], { claimAgeMs: null });
+    f.run("u1", [start(ago(30 * MIN), AFFAIR("tracker:4")), stopOf("another sentence of the runtime", { kind: "unknown", step: "deploy" })], { claimAgeMs: null });
+    f.run("u2", [start(ago(30 * MIN), AFFAIR("tracker:5")), stopOf(reasonOf("u2", "deploy"), { kind: "flow", step: null })], { claimAgeMs: null });
+    f.run("u3", [start(ago(30 * MIN), AFFAIR("tracker:6")), stopOf(reasonOf("u3", "deploy"))], { claimAgeMs: null });
+    assert.deepEqual(["c1", "c2", "c3", "u1", "u2", "u3"].map((id) => f.reader.probe(id, null).end!.stopKind ?? null), ["check", null, "flow", "unknown", "flow", null]);
+    assert.deepEqual(f.reader.probe("u1", null).end!.settle, { step: "deploy", title: null }, "by the kind and its step, though the words say nothing of it");
+    assert.equal(f.reader.probe("u2", null).end!.settle, null, "a flow's own stop is not a settle, whatever it says");
+    assert.deepEqual(f.reader.probe("u3", null).end!.settle, { step: "deploy", title: "发布到服务器" }, "an old file: by the command in the words");
+    assert.equal(f.reader.forCase("tracker:4")[0]!.settle!.commands[0], "orch.mjs settle u1 deploy --not-done");
+  } finally {
+    f.close();
+  }
+  assert.deepEqual(settleOf("stopped", "no words of it", { kind: "unknown", step: "a;rm" }), { step: null, title: null }, "a step name that cannot be typed is not put in a command");
+  assert.equal(settleOf("failed", "x", { kind: "unknown", step: "deploy" }), null);
+  const printed = (stop: Record<string, unknown>) => JSON.stringify({ ok: true, outcome: "stopped", value: null, summary: null, stop, cost: null }, null, 2);
+  assert.equal(probeFromRunnerOutput(printed({ reason: NEVER, phase: null, kind: "check", step: "analyze" }), 1)!.end!.stopKind, "check");
+  assert.equal(probeFromRunnerOutput(printed({ reason: NEVER, phase: null }), 1)!.end!.stopKind, null);
+});
+
 test("on the page it is 停了 with the sentence, the runtime's line behind the tap, and starting over as the way out (nothing was done that a second try would repeat)", () =>
   withFlows(async (w) => {
     const id = idFor(1, "k1");

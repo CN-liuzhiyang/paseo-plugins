@@ -274,6 +274,8 @@ export interface RunView {
   shortWhy?: string | null;
   /** What a person may do with it on the page now (the server decides): carry on, run it again from the start, take it over, or fold it away. */
   actions?: Array<"resume" | "retry" | "mine" | "fold">;
+  /** A carrying on that was refused only because the run before it still has a call out: nothing ran, there is nothing to deal with, press again in a while. */
+  wait?: true;
   /** The rule now gives another input for this run than the one it was run with (it is not run again for that). */
   inputDrifted?: boolean;
   /** A run still going that the rule's latest judgment no longer asks for (it is not stopped for that). */
@@ -325,6 +327,9 @@ export interface SettleView {
 
 /** What an answer that never came right is called: the runtime's `CheckFailed`, and the stop it makes when the flow does not catch it. */
 export const CHECK_FAILED_WORDS = "agent 的回答核对了几轮还不过";
+
+/** What a person is told when carrying on was refused only because the run before it still has a call out. */
+export const LINE_BUSY_WORDS = "上一段还有一步没回来，过一会儿再点";
 
 /** The top bar's first words for a run stopped at such a step. */
 export const SETTLE_KICKER = "要你：确认那一步做没做";

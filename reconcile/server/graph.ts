@@ -513,7 +513,7 @@ export function createGraph(deps: GraphDeps) {
       case "slow":
       case "notstarted":
       case "unchecked":
-        kicker = lastRun?.settle ? SETTLE_KICKER : lastRun?.actions?.includes("resume") ? "要你：处理好后点「接着跑」" : lastRun?.actions?.includes("retry") ? "要你：从头重跑，或你自己来" : "要你：看一眼";
+        kicker = lastRun?.settle ? SETTLE_KICKER : lastRun?.wait ? "过一会儿再点「接着跑」" : lastRun?.actions?.includes("resume") ? "要你：处理好后点「接着跑」" : lastRun?.actions?.includes("retry") ? "要你：从头重跑，或你自己来" : "要你：看一眼";
         line = lastRun ? (situation === "slow" ? `${named(lastRun)}${lastRun.maybeAsleep ? "没动静了，可能是电脑睡了一会儿" : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没动静`}` : troubleLine(lastRun)) : "";
         // What may already have been changed outside is the one thing worth saying up here; the cost and the rest are behind "原因全文".
         sub = lastRun && lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}` : "";

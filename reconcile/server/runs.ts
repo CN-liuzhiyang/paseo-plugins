@@ -131,7 +131,7 @@ interface RunRec {
   /** Calls that began after as many were kept as are (MAX_CALLS): their cost is missing from the sum. */
   skipped: number;
   /** `totalUsd` is the run.end's own sum of what the run cost (cost.totalUsd), null when the line did not give one or was not read. */
-  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null; resume?: ResumeOffer | null; settle?: Settle | null } | null;
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; stopKind?: StopKind | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null; resume?: ResumeOffer | null; settle?: Settle | null } | null;
 }
 
 /** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
@@ -203,17 +203,30 @@ export interface Settle {
   title: string | null;
 }
 
+/** Why the runtime stopped a run (`run.end.stop.kind`): the flow's own `$.stop`, an answer that never came right, a step that cannot be taken back and may or may not have been done. Files from before the field have none. */
+export type StopKind = "flow" | "check" | "unknown";
+
+export const stopKindOf = (stop: unknown): StopKind | null => {
+  const kind = obj(stop)?.kind;
+  return kind === "flow" || kind === "check" || kind === "unknown" ? kind : null;
+};
+
 const SETTLE_COMMAND = /orch\.mjs settle\s+\S+\s+(\S+)/u;
 const SETTLE_TITLE = /^「(.{1,80}?)」可能已经做了/u;
 /** A step name as the shell reads it as one word: nothing that quotes, expands or joins. */
 const STEP_NAME = /^[^\s'"`$&|;<>()\\*?{}[\]!#~]{1,80}$/u;
 
-/** From a run.end (or a runner's printed result): the settle it stopped at, or null for any other end. The reason is read whole, before it is cut for a line. */
-export function settleOf(outcome: unknown, reason: unknown): Settle | null {
+/**
+ * From a run.end (or a runner's printed result): the settle it stopped at, or null for any other end. The reason is read whole, before it is cut for a line.
+ * A stop that has a `kind` is read by it (and its `step`); one from before the field is known by the command its reason carries.
+ */
+export function settleOf(outcome: unknown, reason: unknown, stop?: unknown): Settle | null {
   const text = str(reason);
-  if (outcome !== "stopped" || text === null || !text.includes("orch.mjs settle")) return null;
-  const step = SETTLE_COMMAND.exec(text)?.[1];
-  return { step: step && STEP_NAME.test(step) ? step : null, title: cleanText(SETTLE_TITLE.exec(text)?.[1], 40) };
+  if (outcome !== "stopped") return null;
+  const kind = stopKindOf(stop);
+  if (kind !== null ? kind !== "unknown" : text === null || !text.includes("orch.mjs settle")) return null;
+  const step = kind !== null ? str(obj(stop)?.step) : text !== null ? SETTLE_COMMAND.exec(text)?.[1] : undefined;
+  return { step: step && STEP_NAME.test(step) ? step : null, title: cleanText(SETTLE_TITLE.exec(text ?? "")?.[1], 40) };
 }
 
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
@@ -315,7 +328,7 @@ function fold(run: RunRec, e: Record<string, unknown>) {
       const value = e.value === undefined ? null : e.value;
       const kept = valueWithin(value);
       const total = obj(e.cost)?.totalUsd;
-      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null, resume: offerOf(e.resume), settle: settleOf(e.outcome, stop?.reason) };
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), stopKind: stopKindOf(stop), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null, resume: offerOf(e.resume), settle: settleOf(e.outcome, stop?.reason, stop) };
     }
   }
 }
@@ -807,7 +820,7 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
     const cost = obj(result.cost);
     const total = cost?.totalUsd;
     const usd = typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null;
-    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd, resume: offerOf(result.resume), settle: settleOf(result.outcome, obj(result.stop)?.reason) };
+    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), stopKind: stopKindOf(result.stop), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd, resume: offerOf(result.resume), settle: settleOf(result.outcome, obj(result.stop)?.reason, result.stop) };
     // No `cost` at all is a run in which no agent was asked anything: nothing was spent.
     costUsd = usd ?? 0;
     costKnown = usd !== null || cost === null;

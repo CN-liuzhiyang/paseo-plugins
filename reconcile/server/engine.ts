@@ -879,6 +879,11 @@ export function createEngine(deps: EngineDeps) {
         const key = `flow-notify:${rec.runId}:${target.channel}:${target.to}`;
         const before = state.ledger[key];
         if (before?.status === "done" || before?.status === "suppressed") continue;
+        // Too early to carry on is no news: the person pressed the button on the page and sees it there.
+        if (rec.ended.lineBusy) {
+          append([{ type: "action", action: { ...action(key, "notify", rec.runId, `不发 ${labelOf(target)}：${rec.label} 只是上一段还没回来`, "suppressed", "线被占着，不算出错", nowMs), tries: before?.tries ?? 0 } }]);
+          continue;
+        }
         const tries = (before?.tries ?? 0) + 1;
         if (tries > MAX_NOTIFY_TRIES) continue;
         const came = (rec.ended.outcome === "done" || rec.ended.outcome === "stopped") && unfinishedWhy(rec.ended) === null;
@@ -933,23 +938,25 @@ export function createEngine(deps: EngineDeps) {
     const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId === rec.runId;
     const situation: RunView["situation"] = rec.dismissed
       ? "done"
-      : outcome === "done" || outcome === "stopped"
-        ? unfinished !== null
-          ? "unchecked"
-          : "done"
-        : outcome === "lost"
-          ? "lost"
-          : outcome === "not-started"
-            ? "notstarted"
-            : outcome !== null
-              ? "fail"
-              : live === "gate"
-                ? "me"
-                : live === "slow"
-                  ? "slow"
-                  : read?.situation === "unreadable" || read?.situation === "slow" || read?.situation === "me"
-                    ? read.situation
-                    : "doing";
+      : rec.ended?.lineBusy
+        ? "unchecked"
+        : outcome === "done" || outcome === "stopped"
+          ? unfinished !== null
+            ? "unchecked"
+            : "done"
+          : outcome === "lost"
+            ? "lost"
+            : outcome === "not-started"
+              ? "notstarted"
+              : outcome !== null
+                ? "fail"
+                : live === "gate"
+                  ? "me"
+                  : live === "slow"
+                    ? "slow"
+                    : read?.situation === "unreadable" || read?.situation === "slow" || read?.situation === "me"
+                      ? read.situation
+                      : "doing";
     // The way out is for a run in trouble in the stage the item is in; a stage it has left is history.
     const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
     const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
@@ -996,6 +1003,7 @@ export function createEngine(deps: EngineDeps) {
       // A stop for an answer that never came right keeps the runtime's whole line (which problem it was) behind the tap; the sentence is `shortWhy`.
       why: settle ? settleWhole(settle) : unfinished === CHECK_FAILED_WORDS ? (rec.ended?.why ?? unfinished) : (unfinished ?? rec.ended?.why ?? null),
       ...(settle ? { settle } : {}),
+      ...(rec.ended?.lineBusy ? { wait: true as const } : {}),
       // The words for a person: what the run's own file says in plain words, else the reason it ended with without the runtime's error name in front ("OutputMismatch：…").
       shortWhy: rec.ended && (unfinished ?? base.error?.plain ?? rec.ended.why) ? reasonShort(rec.ended.summary, unfinished ?? base.error?.plain ?? rec.ended.why!.replace(/^[A-Z][A-Za-z0-9]+：/u, "")) : null,
       ...(rec.dismissed ? { dismissed: rec.dismissed.how } : {}),

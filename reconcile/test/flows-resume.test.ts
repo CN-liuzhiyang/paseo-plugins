@@ -306,6 +306,53 @@ test("a carrying on that never ran (the runtime refused it, nothing spent) is ca
     { policy: POLICY({ perDay: 2 }) },
   ));
 
+test("a carrying on the runtime refused only because the run before it still has a call out is too early, not a failure: said so, offered again, no count for the day, no message of trouble", () =>
+  withFlows(
+    async (w) => {
+      const [r0, r1, r2] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1), idFor(1, "k1", "triage", 2)];
+      asks(w, 1, [req("k1")]);
+      await first(w);
+      w.flows.probes.set(r0, stopped());
+      await advance(w, 10);
+      w.deliveries.length = 0;
+      assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+      await advance(w, 10);
+      w.flows.probes.set(r1, probeOf({ state: "refused", refused: 'the line of runs "r-line" is being worked on by run r-other (pid 1 on host, since now): one run of a line writes at a time. Try again when it has ended' }));
+      await advance(w, 10);
+      const ended = flowsOf(w)[r1]!.ended!;
+      assert.deepEqual([ended.outcome, ended.costUsd, ended.lineBusy], ["refused", 0, true]);
+      assert.ok([...ended.why!].length <= 25, `a few words: ${ended.why}`);
+      assert.doesNotMatch(ended.why!, /line|lock|runtime|journal|run r-/i);
+      const shown = view(w, 1, r1);
+      assert.equal(shown.situation, "unchecked", "in trouble that is not a failure");
+      assert.equal(shown.wait, true);
+      assert.deepEqual(shown.actions, ["resume", "retry", "mine", "fold"], "carrying on stays offered");
+      assert.match(w.engine.graph("gcp-demo:1")!.hero.kicker, /过一会儿再点/);
+      assert.equal(w.deliveries.filter((d) => /出错/.test(JSON.stringify(d))).length, 0, "no message of an error for it");
+      const again = w.engine.resumeFlow(r1, "owner");
+      assert.equal(again.ok, true, again.detail);
+      assert.equal(flowsOf(w)[r2]!.resume!.from, r0, "from the run that stopped");
+    },
+    { policy: POLICY({ perDay: 2 }), persons: OWNER() },
+  ));
+
+test("another refusal of the runtime is still told as one", () =>
+  withFlows(async (w) => {
+    const [r0, r1] = [idFor(1, "k1"), idFor(1, "k1", "triage", 1)];
+    asks(w, 1, [req("k1")]);
+    await first(w);
+    w.flows.probes.set(r0, stopped());
+    await advance(w, 10);
+    assert.equal(w.engine.resumeFlow(r0, "owner").ok, true);
+    await advance(w, 10);
+    w.flows.probes.set(r1, probeOf({ state: "refused", refused: "someone says the line of runs is being worked on by run x" }));
+    await advance(w, 10);
+    const ended = flowsOf(w)[r1]!.ended!;
+    assert.equal(ended.lineBusy, undefined);
+    assert.match(ended.why!, /运行时拒绝了/);
+    assert.equal(view(w, 1, r1).situation, "fail");
+  }));
+
 test("a run that was cut off is offered to be carried on too, by what it said while it ran", () =>
   withFlows(async (w) => {
     const id = idFor(1, "k1");

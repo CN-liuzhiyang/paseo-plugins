@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { LauncherConfig, Policy } from "./config";
-import { CHECK_FAILED_WORDS, settleShort } from "../shared/graph";
+import { CHECK_FAILED_WORDS, LINE_BUSY_WORDS, settleShort } from "../shared/graph";
 import type { FlowEnd, FlowRec, FlowResult, FlowState, ResumeOffer } from "../shared/model";
 import type { RunProbe } from "./runs";
 import { localParts } from "./time";
@@ -151,10 +151,13 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
           // What it said about being carried on, for a run that did not come out whole (a finished one has none to give, and the runtime writes it as nothing).
           ...(outcome !== "done" && probe.resume ? { resume: probe.resume } : {}),
           ...(outcome === "stopped" && end.settle ? { settle: end.settle } : {}),
+          ...(outcome === "stopped" && end.stopKind ? { stopKind: end.stopKind } : {}),
         },
       });
     }
     case "refused":
+      // The line of runs still has a call out: not a failure, only too early, and the way to carry on stays as it was.
+      if (LINE_BUSY.test(probe.refused ?? "")) return calm({ kind: "end", end: { outcome: "refused", summary: null, costUsd: 0, value: null, valueDropped: false, why: LINE_BUSY_WORDS, lineBusy: true } });
       return calm(endOf("refused", `运行时拒绝了：${probe.refused ?? "没有说原因"}`));
     case "pending":
       return calm({ kind: "wait", live: "starting" });
@@ -197,7 +200,7 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
  * as is every other outcome. Returns the sentence, cleaned for a line; null for any run that is not such a stop. A value
  * too large to be kept (`valueDropped`) is not there to be read: that stop reads as finished.
  */
-export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why">>): string | null {
+export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why" | "stopKind">>): string | null {
   if (end.outcome !== "stopped") return null;
   // A stop at a step that may or may not have been done is one too, whatever the flow's value says: nothing has come of it until a person says.
   if (end.settle) return settleShort(end.settle);
@@ -206,8 +209,12 @@ export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value"> & Partial<
   // Only marks ("。", "...") is no sentence: it says nothing, so it is not a reason to call the run unfinished.
   if (why !== null && /[\p{L}\p{N}]/u.test(why)) return why;
   // An answer that never came right, and the flow did not catch it: the runtime stops the run there (value null), in a line of its own shape.
-  return CHECK_STOP.test(end.why ?? "") ? CHECK_FAILED_WORDS : null;
+  // A stop that has its kind is read by it; the sentence is for files from before the field.
+  return (end.stopKind ? end.stopKind === "check" : CHECK_STOP.test(end.why ?? "")) ? CHECK_FAILED_WORDS : null;
 }
+
+/** The runtime's refusal of a start whose line of runs is being written by another (EVENTS.md "日志", the line lock): it names the line and who holds it, and is told apart from any other refusal by its first words. */
+const LINE_BUSY = /^the line of runs ".*" is being worked on by /u;
 
 /** The line the runtime stops a run with when an agent's answer still did not pass after the corrections it was allowed (EVENTS.md `run.end`): `<step>：核对 N 轮还不过：<the first problem>`. */
 const CHECK_STOP = /^[^：]{1,80}：核对 \d+ 轮还不过：/u;
@@ -251,7 +258,7 @@ export function carryOnOf(rec: Pick<FlowRec, "runId" | "ended" | "resume">, fres
 const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
 /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
-export const noResult = (end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why">>): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
+export const noResult = (end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why" | "stopKind">>): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
 /**
  * What a rule is told of a run. `fresh`: the word of the run a refused carrying on was to carry on, as it stands now (see `carryOnOf`);
