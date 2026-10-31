@@ -315,8 +315,6 @@ async function runClaimed(target, options, taken) {
   let journal;
   try {
     journal = new Journal({ dir, lineage, redo });
-    // What a step to do again sets aside is written, so that the runs after this one leave it out too.
-    if (redo !== null) journal.persistRedo(runId);
   } catch (error) {
     if (error instanceof JournalError) throw new RunRefused(error.message);
     throw error;
@@ -1661,6 +1659,9 @@ async function runClaimed(target, options, taken) {
 
   // --- Run and settle -----------------------------------------------------
   const startedAt = Date.now();
+  // What a step to do again sets aside is written, so that the runs after this one leave it out too. Not before every check that can refuse
+  // the run has been made: a run that is refused changes nothing, and the one that carries the line on next would otherwise do the step again.
+  if (redo !== null) journal.persistRedo(runId);
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
   log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint, lineage, redo, notify });

@@ -7,7 +7,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { runFlow } from "../runtime/run.mjs";
+import { runFlow, RunRefused } from "../runtime/run.mjs";
 import { flow, define, text } from "../runtime/flow.mjs";
 import { readEvents } from "../runtime/events.mjs";
 import { Journal, fingerprint } from "../runtime/journal.mjs";
@@ -184,4 +184,40 @@ test("settle refuses a value bigger than a record may be", async () => {
   const first = await go(make(async ($) => $.stop("nothing")), logDir, { runId: "set-1" });
   assert.equal(first.outcome, "stopped");
   assert.throws(() => settleRun("set-1", ["publish", "--done", JSON.stringify("x".repeat(2 * 1024 * 1024))], { logDir }), UsageError);
+});
+
+test("a run that is refused changes nothing, a --redo one too: the next run that carries the line on still takes what was done", async () => {
+  const logDir = await tempDir("orch-void-");
+  let builds = 0;
+  let reports = 0;
+  const target = make(async ($) => ({
+    build: await $.step("build", () => (builds += 1, "built")),
+    report: await $.step("report", () => (reports += 1, "reported")),
+  }));
+  assert.equal((await go(target, logDir, { runId: "refuse-1" })).outcome, "done");
+  const journal = () => readFileSync(new Journal({ dir: logDir, lineage: "refuse-1" }).file, "utf8");
+  const before = journal();
+
+  // Each of these is turned away after the journal is looked at and before the run starts.
+  const refusals = [
+    { timeout: "0s" },
+    { timeout: "nonsense" },
+    { host: "https://app.example/#offer=abc", cwd: "C:/work" },
+    { input: { unexpected: 1 } },
+  ];
+  for (const refusal of refusals) {
+    await assert.rejects(() => carry(target, logDir, "refuse-1", { redo: "build", ...refusal }), RunRefused, JSON.stringify(refusal));
+    assert.equal(journal(), before, `nothing was written by a run refused for ${JSON.stringify(refusal)}`);
+  }
+  await assert.rejects(() => carry(`${logDir}/no-such-flow.mjs`, logDir, "refuse-1", { redo: "build" }), /cannot load/);
+  assert.equal(journal(), before, "nor by one whose flow cannot be loaded");
+
+  const next = await carry(target, logDir, "refuse-1");
+  assert.equal(next.outcome, "done");
+  assert.deepEqual([builds, reports], [1, 1], "the line carried on takes both: nothing was set aside by the refused runs");
+
+  // One that is not refused still sets aside what it was asked to, as before.
+  const redone = await carry(target, logDir, "refuse-1", { redo: "build" });
+  assert.equal(redone.outcome, "done");
+  assert.deepEqual([builds, reports], [2, 2]);
 });
