@@ -22,7 +22,7 @@ function hostOpenExternalUrl(): OpenExternalUrl | null {
  * outside address goes through the host's opener, which sends it to the system browser; `Linking`
  * is only for a host without one (on the web it would open a window of the app itself).
  */
-function follow(target: AffairTarget, openScreen: ReturnType<typeof openPluginScreenOf>): void {
+export function follow(target: AffairTarget, openScreen: ReturnType<typeof openPluginScreenOf>): void {
   if (target.kind === "screen") {
     // A screen the host cannot open is toasted by the host, which then throws as well.
     try {

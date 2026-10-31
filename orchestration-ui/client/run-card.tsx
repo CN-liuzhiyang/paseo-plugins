@@ -1,27 +1,29 @@
 import { useRpc, useAgent, type PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
-import { Text, View } from "react-native";
-import { isFinished, isOver, type RunCard } from "../shared/card";
-import { formatDuration, formatTime, formatUsd } from "../shared/format";
+import { Pressable, Text, View } from "react-native";
+import { cardButton, cardSentence, markOf, nameOf } from "../shared/bar";
+import { isOver, type RunCard } from "../shared/card";
+import { formatTime } from "../shared/format";
 import { readCardRpc } from "../shared/rpc";
 import { ms } from "../shared/run";
 import { useNow } from "./data";
-import { HERO_ICON } from "./looks";
-import { PhaseStrip } from "./run-list";
-import { Badge, Button, UiProvider, useUi } from "./ui";
+import { Button, UiProvider, useUi } from "./ui";
 
-// The card in the conversation that started a run. Read in three seconds: what flow on what
-// input and in what state; one sentence about what it is doing, what it needs from you, or how
-// it ended; how far through the phases, for how long and at what cost; and the one or two
-// buttons that take you to the run. The daemon replaces the card as the run moves; while the run
-// is live the card also asks for the latest itself, so its clock and state stay true.
+// The card in the conversation that started a run: one line. Which flow on what input, the one
+// sentence about where it is or what it needs, and one button -- to the flow bar beside the
+// conversation, or to the thing that waits for you. The daemon replaces the card as the run moves;
+// while the run is live the card also asks for the latest itself, so its clock and state stay true.
 
 const REFRESH_MS = 5_000;
+const TICK_MS = 10_000;
 
 export interface OpenRun {
-  /** Opens the run, in the workspace of the conversation when there is one. */
-  (input: { runId: string; workspaceId: string | null; select: string }): void;
+  /**
+   * Shows the run: beside the conversation when `aside`, otherwise in the workspace's 流程 tab. In
+   * the workspace of the conversation when there is one.
+   */
+  (input: { runId: string; workspaceId: string | null; select: string; aside: boolean }): void;
 }
 
 type Freshness = { card: RunCard; failed: string | null };
@@ -62,98 +64,49 @@ function useLiveCard(initial: RunCard): Freshness {
   return { card, failed };
 }
 
-function Numbers({ card, now }: { card: RunCard; now: number }) {
-  const ui = useUi();
-  const started = ms(card.startedAt);
-  const took =
-    card.durationMs ?? (started === null ? null : (isFinished(card.status) || card.status === "lost" ? (ms(card.lastEventAt) ?? now) : now) - started);
-  const parts = [
-    // A finished run's kicker already says how long it took.
-    took === null || card.kicker.includes("用时") ? null : `${isFinished(card.status) ? "用时" : "已运行"} ${formatDuration(took)}`,
-    card.costUsd === null ? null : `${formatUsd(card.costUsd)}${card.costNote && !isFinished(card.status) ? " 起" : ""}`,
-  ].filter(Boolean);
-  return <Text style={ui.styles.small}>{parts.join(" · ")}</Text>;
-}
-
-/** The line under the sentence: how long the gate has waited, or how the run went quiet. */
-function Detail({ card, now }: { card: RunCard; now: number }) {
-  const ui = useUi();
-  if (card.gate) {
-    const since = ms(card.gate.since);
-    const text = [
-      since === null ? null : `已等 ${formatDuration(now - since)}`,
-      card.gate.timeout ? `${card.gate.timeout} 内没人处理，人闸按过期拒绝` : null,
-    ]
-      .filter(Boolean)
-      .join("，");
-    return text ? <Text style={[ui.styles.small, { color: ui.tone("warning") }]}>{text}</Text> : null;
-  }
-  if (card.status === "lost") {
-    const last = ms(card.lastEventAt);
-    return (
-      <Text style={[ui.styles.small, { color: ui.tone("warning") }]}>
-        {last === null ? "" : `${formatDuration(now - last)}没有新事件。`}它起的 agent 没有被停掉，可能还在跑、还在花钱。
-      </Text>
-    );
-  }
-  return null;
-}
-
 function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string; openRun: OpenRun }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const { card, failed } = useLiveCard(initial);
   const live = !isOver(card);
-  const now = useNow(live);
+  const now = useNow(live, TICK_MS);
   const workspaceId = useAgent(agentId, (agent) => agent.workspaceId);
-  const tone = ui.tone(card.tone);
-  const name = [card.flow ?? "流程", card.label].filter(Boolean).join(" · ");
-  const open = (select: string) => openRun({ runId: card.runId, workspaceId, select });
+  const mark = markOf(card);
+  const tone = ui.tone(mark.tone);
+  const button = cardButton(card);
+  const name = nameOf(card);
+  const sentence = cardSentence(card, now);
+  const open = () => openRun({ runId: card.runId, workspaceId, select: button.select, aside: !ui.compact });
   return (
-    <View
-      accessibilityLabel={`流程 ${name}：${card.kicker}，${card.title}`}
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`流程 ${name}：${sentence}`}
+      onPress={open}
       style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 8,
         borderWidth: 1,
         borderColor: card.gate ? tone : c.border,
-        borderLeftWidth: 4,
+        borderLeftWidth: 3,
         borderLeftColor: tone,
-        borderRadius: 10,
+        borderRadius: 8,
         backgroundColor: card.gate ? ui.tint("warning", 0.08) : c.surface1,
-        padding: 12,
-        gap: 8,
+        paddingVertical: 6,
+        paddingHorizontal: 10,
         marginVertical: 4,
       }}
     >
-      <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
-        <View style={[ui.styles.row, { flexShrink: 1, minWidth: 0 }]}>
-          <Icon name={HERO_ICON[card.status]} size={14} color={tone} />
-          <Badge tone={card.tone} label={card.kicker} />
-          <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
-            {name}
-          </Text>
-        </View>
-        <Numbers card={card} now={now} />
-      </View>
-      <Text style={[ui.styles.strong, { fontSize: 15, lineHeight: 21 }]} selectable>
-        {card.title}
+      <Icon name={mark.icon} size={14} color={tone} />
+      <Text style={[ui.styles.muted, { flex: 1, minWidth: 0, fontSize: 13, lineHeight: 18 }]} numberOfLines={ui.compact ? 2 : 1}>
+        <Text style={{ color: c.foreground, fontWeight: "600" }}>{name}</Text>
+        {` · ${sentence}`}
+        {failed && live ? <Text style={ui.styles.small}>{` · ${formatTime(card.evaluatedAt, now)} 的状态`}</Text> : null}
       </Text>
-      <Detail card={card} now={now} />
-      <PhaseStrip strip={card.strip ?? []} status={card.status} />
-      {card.strip && card.strip.length > 0 ? (
-        <Text style={ui.styles.small} numberOfLines={2}>
-          {card.strip.map((segment) => segment.title).join(" → ")}
-        </Text>
-      ) : null}
-      <View style={[ui.styles.row, { gap: 8 }]}>
-        {card.gate ? <Button icon="ShieldCheck" label="去审批" primary onPress={() => open(card.gate!.callId)} /> : null}
-        <Button icon="Workflow" label="打开流程" primary={!card.gate} onPress={() => open(card.focus)} />
+      <View>
+        <Button small primary={card.gate !== null} label={button.label} onPress={open} />
       </View>
-      {failed && live ? (
-        <Text style={ui.styles.small}>
-          流程插件没有响应（{failed}），上面是 {formatTime(card.evaluatedAt, now)} 时的状态。
-        </Text>
-      ) : null}
-    </View>
+    </Pressable>
   );
 }
 

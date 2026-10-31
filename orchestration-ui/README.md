@@ -1,14 +1,29 @@
 # orchestration-ui：流程
 
-只读地查看编排运行时（[`../orchestration/`](../orchestration/)）每次运行干了什么。运行出现在三个地方：
+只读地查看编排运行时（[`../orchestration/`](../orchestration/)）每次运行干了什么。运行出现在四个地方：
 
-- **发起它的对话里的卡片**：从 Paseo agent 里跑的 flow，会在那个 agent 的对话里放一张卡片，跟着运行原地更新：
-  flow 和输入、一句话（在做什么 / 等你审批什么 / 结论）、阶段色带、用时、花费；人闸在等时卡片变黄，多一个
-  「去审批」。点「打开流程」进下面的标签页。
-- **workspace 里的「流程」标签页**：发起的 agent 和它派出的 agent 都在同一个 workspace 里，运行也作为
-  一个标签放在那里，去某个 agent 的对话、再回来，各点一次标签。顶上是这个 workspace 发起过的运行。
+- **发起它的对话里的一行卡片**：从 Paseo agent 里跑的 flow，会在那个 agent 的对话里放一行卡片，跟着运行原地更新：
+  `flow 名 输入 · 一句话状态`，加一个按钮（等批准时「去批准」，停了或出错时「看原因」，其余「在旁边看」）。一句话
+  的预算是 30 个字，不含 flow 名。按钮打开右边的流程栏（窄屏上打开下面的标签页）。
+- **会话旁的流程栏**：Explorer 里的「流程」标签，桌面上和对话并排、一直看得见。这个工作区里的运行，按「等你 / 在跑 /
+  停了」分组，完成的折叠成一行「完成 · 近 24 小时 N」。一行是 flow 名加一句不超过 20 字的状态，最多一个按钮：
+  「去批准」打开承载人闸的 agent，「事项页」打开这件事在别的插件里的页面。点一行在栏里展开这次运行：每个阶段一行，
+  各挂着的会话有「对话」按钮，最下面「看完整的图」打开标签页。
+- **workspace 里的「流程」标签页**：运行的完整视图（图、时间线、事件、抽屉）。发起的 agent 和它派出的 agent 都在同一个
+  workspace 里，运行也作为一个标签放在那里。顶上是这个 workspace 的运行。
 - **侧边栏「流程」**：上半是**有哪些流程**（已经开发好的，包括还没跑过的），下半是**运行记录**。终端里跑的
   （没有发起对话）、别的机器上的运行，只在这里。
+
+## 流程栏认哪些运行
+
+一个运行属于一个 workspace，当：运行时为它建的 workspace 就是这个（运行事件里的 `workspace` 事件，见
+`../orchestration/EVENTS.md`），或者发起它的 agent 在这个 workspace 里。两种都算，同一个运行不会出现两次。
+
+- 停了的运行（停下、出错、失联）留 7 天；有后一次运行接着它跑的（`run.start.resumeOf`）就不再列。完成的留 24 小时，
+  更早的去「流程」页看。
+- 栏用列表 RPC（3 秒一次，一次给全部运行）取数，每个运行带着和对话里同一份卡片数据，所以两处说的是同一句话。
+- 栏不知道人正在看哪个对话（宿主只告诉面板它在哪个 workspace），所以「对话」按钮是打开那个 agent，不是高亮。
+- 手机上 Explorer 是整屏覆盖层，不能和对话并排；那里卡片的按钮改开标签页。
 
 ## 有哪些流程
 
@@ -76,6 +91,9 @@ checkout 里，所以要在设置里填 **`orchPath`**（`paseo-plugins/orchestr
 它不启动运行、不批人闸、不改任何文件；唯一写的东西是发起对话里的那张卡片（在 daemon 内存里，见下）。
 
 ## 发起对话里的卡片
+
+卡片的数据是 `shared/card.ts` 的 `RunCard`，句子和分组在 `shared/bar.ts`（卡片和流程栏共用），栏里展开一次运行的阶段行在
+`shared/stages.ts`。
 
 - **贴给谁**：`run.start.caller` 那个 agent，三条都满足才贴：caller 不为 null（终端里跑的没有）；`run.start.hostname`
   是 daemon 所在的机器（别的机器上的 agent id 对这个 daemon 没意义）；daemon 认得这个 agent。
@@ -184,8 +202,10 @@ daemon（DevTools 的 URL 屏蔽拦不住 WebSocket）；Chrome 的本地网络�
 
 ```
 index.server.ts     注册设置和四个 RPC：runs.list / runs.read / runs.card / status；起卡片投递
-index.client.tsx    侧边栏入口、整页 screen、workspace 标签页、卡片渲染器、设置页、Command Center 项
+index.client.tsx    侧边栏入口、整页 screen、workspace 标签页、Explorer 里的流程栏、卡片渲染器、设置页、Command Center 项
 shared/card.ts      发起对话里那张卡片：数据、schema、去重键、哪些变化要立即贴
+shared/bar.ts       一行卡片和流程栏共用：分组、一句话状态（字数预算）、唯一的按钮、哪些运行列出来
+shared/stages.ts    栏里展开一次运行：每个阶段一行，挂着的会话
 shared/run.ts       事件折叠成运行状态（纯函数，daemon 和 app 共用）；运行/阶段/调用的状态判定、阶段访问
 shared/graph.ts     运行状态推出图（访问、并行列、循环、脚本组、占位）、结论条 hero、节点一句话 headline
 shared/format.ts    给人看的文字：时长、成本、「正在做什么」
@@ -205,7 +225,9 @@ client/drawer.tsx        选中节点的详情与折叠的证据
 client/value.tsx         按 schema 渲染结构化输出，长文本、长列表折叠
 client/fold.ts           折叠规则
 client/resize.tsx        可拖宽的抽屉；client/sizes.ts 是它的宽度上下限
-client/run-card.tsx      时间线里的运行卡片
+client/run-card.tsx      时间线里的运行卡片（一行）
+client/flow-bar.tsx      会话旁的流程栏（Explorer 面板）
+client/workspace-runs.tsx 一个 workspace 的运行：运行时建的 workspace 是它的，或发起的 agent 在里面
 client/run-panel.tsx     workspace 的「流程」标签页
 client/focus.ts          标签页显示哪个运行、哪个节点（打开它的地方先写，标签页读）
 client/surface.tsx       侧边栏 screen：列表或一个运行，运行 id 在 screen 参数里

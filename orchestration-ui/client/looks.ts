@@ -1,6 +1,7 @@
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import type { NodeState, StripState, VisitState } from "../shared/graph";
 import type { CallType, RunStatus } from "../shared/run";
+import type { StageState } from "../shared/stages";
 import type { Tone } from "./ui";
 
 // How each state looks. Words live in shared/format.ts and shared/graph.ts; this is color and icon.
@@ -43,6 +44,18 @@ export const VISIT_LOOK: Record<VisitState | StripState, { tone: Tone; label: st
   interrupted: { tone: "warning", label: "没有结束记录" },
   pending: { tone: "neutral", label: "还没到" },
   skipped: { tone: "neutral", label: "没有进入" },
+};
+
+/** One phase in the flow bar's list: a mark and its color. */
+export const STAGE_LOOK: Record<StageState, { mark: string; tone: Tone }> = {
+  done: { mark: "✓", tone: "success" },
+  running: { mark: "●", tone: "accent" },
+  waiting: { mark: "●", tone: "warning" },
+  failed: { mark: "✕", tone: "danger" },
+  stopped: { mark: "■", tone: "warning" },
+  interrupted: { mark: "?", tone: "warning" },
+  pending: { mark: "○", tone: "neutral" },
+  skipped: { mark: "–", tone: "neutral" },
 };
 
 /** The small badge on a node: who does the work. */

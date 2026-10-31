@@ -14,6 +14,8 @@ import {
   cardButton,
   cardSentence,
   groupOf,
+  NAME_LABEL_MAX,
+  nameOf,
   inWorkspace,
   rowAction,
   rowSentence,
@@ -190,6 +192,15 @@ test("one line: the sentence after the flow's name stays inside its budget, what
     assert.ok([...cardSentence(card, now)].length <= CARD_SENTENCE_MAX, `${name}: ${cardSentence(card, now)}`);
     assert.ok([...rowSentence(card, now)].length <= ROW_SENTENCE_MAX, `${name}: ${rowSentence(card, now)}`);
   }
+});
+
+test("one line: a flow's name carries the input that tells its runs apart, but only so much of it", () => {
+  const card = summary("committee-done").card!;
+  assert.ok(card.label !== null && [...card.label].length > NAME_LABEL_MAX, "the fixture's input is a long question");
+  assert.ok([...nameOf(card)].length <= card.flow!.length + 1 + NAME_LABEL_MAX);
+  assert.ok(nameOf(card).startsWith(`${card.flow} `));
+  assert.equal(nameOf({ flow: null, label: null }), "流程");
+  assert.equal(nameOf({ flow: "dev-task", label: "#1234" }), "dev-task #1234");
 });
 
 test("one line: a long reason, a long gate title and a lost run with agents still open are cut, not wrapped", () => {

@@ -18,6 +18,8 @@ export const BAR_TITLE: Record<BarGroup, string> = { waiting: "等你", running:
 /** Characters a status sentence may take, not counting the flow's name. */
 export const CARD_SENTENCE_MAX = 30;
 export const ROW_SENTENCE_MAX = 20;
+/** The input that tells a run from its siblings is cut to this many characters in a name. */
+export const NAME_LABEL_MAX = 16;
 
 /** A finished run older than this is left to the 流程 page. */
 export const DONE_WINDOW_MS = 24 * 60 * 60_000;
@@ -48,6 +50,11 @@ export function stageOf(card: Pick<RunCard, "strip">): string | null {
   if (at < 0) at = strip.findIndex((segment) => segment.state === "pending");
   if (at < 0) return null;
   return `${clip(strip[at]!.title, 8)} ${at + 1}/${strip.length}`;
+}
+
+/** "dev-task #996915": the flow, and the input that tells this run from the others, cut short. */
+export function nameOf(card: Pick<RunCard, "flow" | "label">): string {
+  return [card.flow ?? "流程", card.label === null ? null : clip(card.label, NAME_LABEL_MAX)].filter(Boolean).join(" ");
 }
 
 function sinceNow(iso: string | null, now: number): string | null {
