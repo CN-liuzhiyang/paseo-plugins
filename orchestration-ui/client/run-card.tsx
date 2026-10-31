@@ -2,7 +2,7 @@ import { useRpc, useAgent, type PluginTimelineItemProps } from "@getpaseo/plugin
 import { Icon } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { cardButton, cardSentence, markOf, nameOf } from "../shared/bar";
+import { cardButton, cardSentence, markOf, nameOf, nameParts } from "../shared/bar";
 import { isOver, type RunCard } from "../shared/card";
 import { formatTime } from "../shared/format";
 import { readCardRpc } from "../shared/rpc";
@@ -12,8 +12,9 @@ import { Button, UiProvider, useUi } from "./ui";
 
 // The card in the conversation that started a run: one line. Which flow on what input, the one
 // sentence about where it is or what it needs, and one button -- to the flow bar beside the
-// conversation, or to the thing that waits for you. The daemon replaces the card as the run moves;
-// while the run is live the card also asks for the latest itself, so its clock and state stay true.
+// conversation, or to the thing that waits for you (none once it has finished; the line opens it too).
+// The daemon replaces the card as the run moves; while the run is live the card also asks for the
+// latest itself, so its clock and state stay true.
 
 const REFRESH_MS = 5_000;
 const TICK_MS = 10_000;
@@ -75,8 +76,9 @@ function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string
   const tone = ui.tone(mark.tone);
   const button = cardButton(card);
   const name = nameOf(card);
+  const parts = nameParts(card);
   const sentence = cardSentence(card, now);
-  const open = () => openRun({ runId: card.runId, workspaceId, select: button.select, aside: !ui.compact });
+  const open = () => openRun({ runId: card.runId, workspaceId, select: button?.select ?? card.focus, aside: !ui.compact });
   return (
     <Pressable
       accessibilityRole="button"
@@ -99,13 +101,16 @@ function Card({ initial, agentId, openRun }: { initial: RunCard; agentId: string
     >
       <Icon name={mark.icon} size={14} color={tone} />
       <Text style={[ui.styles.muted, { flex: 1, minWidth: 0, fontSize: 13, lineHeight: 18 }]} numberOfLines={ui.compact ? 2 : 1}>
-        <Text style={{ color: c.foreground, fontWeight: "600" }}>{name}</Text>
+        <Text style={{ color: c.foreground, fontWeight: "600" }}>{parts.flow}</Text>
+        {parts.label ? ` ${parts.label}` : ""}
         {` · ${sentence}`}
         {failed && live ? <Text style={ui.styles.small}>{` · ${formatTime(card.evaluatedAt, now)} 的状态`}</Text> : null}
       </Text>
-      <View>
-        <Button small primary={card.gate !== null} label={button.label} onPress={open} />
-      </View>
+      {button ? (
+        <View>
+          <Button small primary={card.gate !== null} label={button.label} onPress={open} />
+        </View>
+      ) : null}
     </Pressable>
   );
 }

@@ -2,11 +2,11 @@ import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
-import { barAffair, barGroups, barRows, clip, markOf, nameOf, rowAction, rowSentence, type BarGroup, type BarRun } from "../shared/bar";
+import { barAffair, barGroups, barRows, clip, groupOf, markOf, nameOf, nameParts, rowAction, rowSentence, stateWord, type BarGroup, type BarRun } from "../shared/bar";
 import { cardOf } from "../shared/card";
 import { formatBrief, formatUsd } from "../shared/format";
 import { runStatus } from "../shared/run";
-import { stageRows, type StageRow, type Talk } from "../shared/stages";
+import { compactStages, stageRows, type StageRow, type Talk } from "../shared/stages";
 import { affairTarget, openPluginScreenOf, type Affair } from "../shared/affair";
 import { follow } from "./affair";
 import { useNow, useRun } from "./data";
@@ -45,6 +45,7 @@ function Row({ item, now, onOpen }: { item: BarRun; now: number; onOpen(): void 
   const mark = markOf(card);
   const action = rowAction(card, openAffair !== null);
   const name = nameOf(card);
+  const parts = nameParts(card);
   const openAgent = ui.navigation?.openAgent;
   return (
     <Pressable
@@ -64,7 +65,8 @@ function Row({ item, now, onOpen }: { item: BarRun; now: number; onOpen(): void 
       <Icon name={mark.icon} size={14} color={ui.tone(mark.tone)} />
       <View style={{ flex: 1, minWidth: 0, gap: 1 }}>
         <Text style={[ui.styles.strong, { fontSize: 13 }]} numberOfLines={1}>
-          {name}
+          {parts.flow}
+          {parts.label ? <Text style={{ color: ui.theme.colors.foregroundMuted, fontWeight: "400" }}>{` ${parts.label}`}</Text> : null}
         </Text>
         <Text style={[ui.styles.small, item.group === "waiting" ? { color: ui.tone("warning") } : null]} numberOfLines={2}>
           {rowSentence(card, now)}
@@ -146,21 +148,28 @@ function Opened({ runId, workspaceId, actions, onBack }: { runId: string; worksp
   }
   const mark = markOf(card);
   const name = [card.flow ?? "流程", card.label === null ? null : clip(card.label, 40)].filter(Boolean).join(" · ");
-  const rows = stageRows(run, status);
+  const rows = compactStages(stageRows(run, status));
+  const group = groupOf(card);
   const started = card.startedAt === null ? NaN : Date.parse(card.startedAt);
   const lastAt = Date.parse(card.endedAt ?? card.lastEventAt ?? "");
   const took = card.durationMs ?? (Number.isFinite(started) ? (card.status === "running" || card.status === "starting" ? now : lastAt) - started : null);
   const meta = [took === null || !Number.isFinite(took) ? null : formatBrief(took), card.costUsd === null ? null : formatUsd(card.costUsd)].filter(Boolean).join(" · ");
-  const stopped = card.status !== "running" && card.status !== "starting" && card.status !== "done";
+  const stopped = group === "stopped";
   return (
     <View style={{ gap: 12 }}>
-      <Back label={name} onBack={onBack} />
-      <View style={{ gap: 4, borderLeftWidth: 3, borderLeftColor: ui.tone(mark.tone), paddingLeft: 10 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+        <View style={{ flex: 1, minWidth: 0 }}>
+          <Back label={name} onBack={onBack} />
+        </View>
+        <Text style={{ color: ui.tone(mark.tone), fontSize: 12, fontWeight: "700" }}>{stateWord(card)}</Text>
+      </View>
+      {/* What is happening and what waits are in the rows below; only an ending needs a sentence. */}
+      {stopped || group === "done" ? (
         <Text style={[ui.styles.text, { fontSize: 13, lineHeight: 19 }]} numberOfLines={5} selectable>
           {card.title}
         </Text>
-        {meta ? <Text style={ui.styles.small}>{meta}</Text> : null}
-      </View>
+      ) : null}
+      {meta ? <Text style={ui.styles.small}>{meta}</Text> : null}
       <View style={{ gap: 8 }}>
         {rows.map((row) => (
           <StageLine key={row.key} row={row} remote={card.remote} />

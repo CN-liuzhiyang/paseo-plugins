@@ -24,6 +24,8 @@
 - 栏用列表 RPC（3 秒一次，一次给全部运行）取数，每个运行带着和对话里同一份卡片数据，所以两处说的是同一句话。
 - 栏不知道人正在看哪个对话（宿主只告诉面板它在哪个 workspace），所以「对话」按钮是打开那个 agent，不是高亮。
 - 手机上 Explorer 是整屏覆盖层，不能和对话并排；那里卡片的按钮改开标签页。
+- 宿主不会把插件的 Explorer 面板自动列成标签（`+` 菜单里没有它），所以流程栏要由插件打开：卡片的按钮、对话输入框里
+  的 `/flows`、Command Center 的「打开流程栏」。打开过的标签浏览器会记住。
 
 ## 有哪些流程
 
@@ -166,7 +168,7 @@ paseo plugin install /absolute/path/to/paseo-plugins/orchestration-ui
 
 要求 Paseo 0.11 及以上（screen 参数），发起对话里的卡片另外要 `server.paseo`（见上）。daemon 的
 `pluginsEnabled` 要开着。装完 `paseo plugin ls` 里应是 `running`，侧边栏出现「流程」，workspace 的
-新标签里有「流程」，Command Center 里有「打开流程」，设置 → 插件下有它的设置页。
+新标签里有「流程」，Command Center 里有「打开流程」「打开流程栏」（输入框里 `/flows` 同样打开流程栏），设置 → 插件下有它的设置页。
 
 ## 开发
 

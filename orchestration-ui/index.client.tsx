@@ -78,6 +78,16 @@ export default function contribute(client: PluginClientContext) {
         openPanel(BAR_ID, { location: "explorer" });
       },
     }),
+    // A phone has no Command Center, and the host lists no plugin panel in Explorer's + menu: this is how the bar is opened the first time there.
+    client.addSlashCommand({
+      name: "flows",
+      description: "打开流程栏",
+      argumentHint: "",
+      context: "workspace",
+      onSubmit({ openPanel }) {
+        openPanel(BAR_ID, { location: "explorer" });
+      },
+    }),
     client.addTimelineRenderer({
       kind: CARD_KIND,
       version: CARD_VERSION,

@@ -82,3 +82,21 @@ export function stageRows(run: RunState, status: RunStatus): StageRow[] {
     };
   });
 }
+
+/**
+ * Steps with nothing to open and nothing to say are one line when they sit together: the ones done
+ * ("读单、检查副本") and the ones still ahead ("更新 · 编译 · 提交").
+ */
+export function compactStages(rows: readonly StageRow[]): StageRow[] {
+  const plain = (row: StageRow) => row.talks.length === 0 && row.note === null && (row.state === "done" || row.state === "pending" || row.state === "skipped");
+  const out: StageRow[] = [];
+  for (const row of rows) {
+    const last = out.at(-1);
+    if (last && plain(last) && plain(row) && last.state === row.state) {
+      out[out.length - 1] = { ...last, key: `${last.key}+${row.key}`, title: `${last.title}${last.state === "done" ? "、" : " · "}${row.title}` };
+    } else {
+      out.push(row);
+    }
+  }
+  return out;
+}

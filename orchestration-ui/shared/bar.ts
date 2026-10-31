@@ -52,9 +52,14 @@ export function stageOf(card: Pick<RunCard, "strip">): string | null {
   return `${clip(strip[at]!.title, 8)} ${at + 1}/${strip.length}`;
 }
 
-/** "dev-task #996915": the flow, and the input that tells this run from the others, cut short. */
+/** "demo-flow" and "#1234": the flow, and the input that tells this run from the others, cut short. */
+export function nameParts(card: Pick<RunCard, "flow" | "label">): { flow: string; label: string | null } {
+  return { flow: card.flow ?? "流程", label: card.label === null ? null : clip(card.label, NAME_LABEL_MAX) };
+}
+
 export function nameOf(card: Pick<RunCard, "flow" | "label">): string {
-  return [card.flow ?? "流程", card.label === null ? null : clip(card.label, NAME_LABEL_MAX)].filter(Boolean).join(" ");
+  const { flow, label } = nameParts(card);
+  return label ? `${flow} ${label}` : flow;
 }
 
 function sinceNow(iso: string | null, now: number): string | null {
@@ -129,11 +134,27 @@ export function markOf(card: RunCard): { icon: string; tone: Tone } {
   }
 }
 
-/** The one button on the conversation's card, and the node it opens the run at. */
-export function cardButton(card: RunCard): { label: string; select: string } {
+/** The one word for where a run is, for the head of an opened run: what the group says, but an error is an error. */
+export function stateWord(card: RunCard): string {
   const group = groupOf(card);
-  if (group === "waiting") return { label: "去批准", select: card.gate!.callId };
-  return { label: group === "stopped" ? "看原因" : "在旁边看", select: card.focus };
+  return group === "stopped" && card.status !== "stopped" ? "出错了" : BAR_TITLE[group];
+}
+
+/**
+ * The one button on the conversation's card, and the node it opens the run at. A run that finished
+ * has none: there is nothing to do, and the line itself still opens it.
+ */
+export function cardButton(card: RunCard): { label: string; select: string } | null {
+  switch (groupOf(card)) {
+    case "waiting":
+      return { label: "去批准", select: card.gate!.callId };
+    case "stopped":
+      return { label: "看原因", select: card.focus };
+    case "running":
+      return { label: "在旁边看", select: card.focus };
+    case "done":
+      return null;
+  }
 }
 
 export type RowAction = { kind: "approve"; agentId: string } | { kind: "affair" } | null;

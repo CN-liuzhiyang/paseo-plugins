@@ -13,6 +13,7 @@ import {
   barRows,
   cardButton,
   cardSentence,
+  stateWord,
   groupOf,
   NAME_LABEL_MAX,
   nameOf,
@@ -25,7 +26,7 @@ import {
 import { cardOf, type RunCard } from "../shared/card";
 import type { RunSummary } from "../shared/rpc";
 import { foldEvents, runStatus } from "../shared/run";
-import { stageRows } from "../shared/stages";
+import { compactStages, stageRows, type StageRow } from "../shared/stages";
 import { summarize } from "./runs";
 
 const FIXTURES = path.join(import.meta.dirname, "..", "fixtures");
@@ -160,7 +161,7 @@ test("buttons: the card and the row each have at most one, and only a gate or a 
   const waiting = summary("docfix-waiting", { now: Date.parse("2026-09-24T06:03:58.000Z") }).card!;
   assert.equal(groupOf(waiting), "waiting");
   assert.deepEqual(rowAction(waiting, false), { kind: "approve", agentId: "dd44ee55-ff66-4a77-8b88-cc9900112204" });
-  assert.equal(cardButton(waiting).select, waiting.gate!.callId);
+  assert.equal(cardButton(waiting)?.select, waiting.gate!.callId);
   assert.equal(rowAction({ ...waiting, gate: { ...waiting.gate!, carrierAgentId: null } }, true), null, "a gate nobody carries cannot be opened");
 
   const stopped = summary("hotfix-stopped").card!;
@@ -172,14 +173,12 @@ test("buttons: the card and the row each have at most one, and only a gate or a 
   assert.equal(groupOf(running), "running");
   const done = summary("committee-done").card!;
   assert.equal(groupOf(done), "done");
-  for (const card of [running, done]) {
-    assert.equal(rowAction(card, true), null);
-    assert.equal(cardButton(card).select, card.focus);
-  }
-  // Every group has a button on the card, and the labels tell the groups apart.
-  const labels = new Map<BarGroup, string>([waiting, stopped, running, done].map((card) => [groupOf(card), cardButton(card).label]));
-  assert.equal(new Set(labels.values()).size, 3, "running and done share the button that opens the bar");
-  assert.notEqual(labels.get("waiting"), labels.get("stopped"));
+  for (const card of [running, done]) assert.equal(rowAction(card, true), null);
+  assert.equal(cardButton(running)?.select, running.focus);
+  assert.equal(cardButton(done), null, "a finished run has nothing to do; its line still opens it");
+  // Where there is a button on the card the labels tell the groups apart.
+  const labels = new Map<BarGroup, string>([waiting, stopped, running].map((card) => [groupOf(card), cardButton(card)!.label]));
+  assert.equal(new Set(labels.values()).size, 3);
 });
 
 test("one line: the sentence after the flow's name stays inside its budget, whatever the run is and however long ago", () => {
@@ -200,7 +199,7 @@ test("one line: a flow's name carries the input that tells its runs apart, but o
   assert.ok([...nameOf(card)].length <= card.flow!.length + 1 + NAME_LABEL_MAX);
   assert.ok(nameOf(card).startsWith(`${card.flow} `));
   assert.equal(nameOf({ flow: null, label: null }), "流程");
-  assert.equal(nameOf({ flow: "dev-task", label: "#1234" }), "dev-task #1234");
+  assert.equal(nameOf({ flow: "demo-flow", label: "#1234" }), "demo-flow #1234");
 });
 
 test("one line: a long reason, a long gate title and a lost run with agents still open are cut, not wrapped", () => {
@@ -266,4 +265,40 @@ test("the list carries the card, the workspaces and the page of the affair -- an
   const rows = barRows([linked], new Set(), Date.parse(linked.card!.endedAt!) + 1_000);
   assert.deepEqual(barAffair(rows), { label: "#1234 demo", link: LINK });
   assert.equal(barAffair([]), null);
+});
+
+test("the stages of an opened run: steps with nothing to open sit on one line, the ones with a conversation or a decision do not", () => {
+  const row = (key: string, state: StageRow["state"], extra: Partial<StageRow> = {}): StageRow => ({ key, title: key, state, note: null, talks: [], ...extra });
+  const talk = { callId: "x", agentId: "y", waiting: false, label: null };
+  const compact = compactStages([
+    row("a", "done"),
+    row("b", "done"),
+    row("c", "done", { talks: [talk] }),
+    row("d", "done", { note: "你批了" }),
+    row("e", "waiting", { note: "等你批准" }),
+    row("f", "pending"),
+    row("g", "pending"),
+    row("h", "pending"),
+  ]);
+  assert.deepEqual(
+    compact.map((entry) => entry.title),
+    ["a、b", "c", "d", "e", "f · g · h"],
+  );
+  assert.deepEqual(compactStages([]), []);
+  // On a real run nothing is lost: every step is still in a row, in order.
+  const rows = stageRows(foldEvents(fixture("hotfix-stopped")), "stopped");
+  const joined = compactStages(rows);
+  assert.ok(joined.length < rows.length);
+  assert.deepEqual(
+    joined.flatMap((entry) => entry.title.split(/、| · /)),
+    rows.map((entry) => entry.title),
+  );
+});
+
+test("the word for where a run is: an error is not a stop", () => {
+  const base = summary("committee-done").card!;
+  assert.equal(stateWord({ ...base, status: "stopped" }), "停了");
+  for (const status of ["failed", "timeout", "lost"] as const) assert.equal(stateWord({ ...base, status }), "出错了");
+  assert.equal(stateWord(base), "完成");
+  assert.equal(stateWord(summary("docfix-waiting", { now: Date.parse("2026-09-24T06:03:58.000Z") }).card!), "等你");
 });
