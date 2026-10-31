@@ -310,8 +310,14 @@ test("wakeText and duration, on their own", () => {
   assert.equal(lines[2], "运行 r1（接着线 r0） · 事件 E");
   assert.equal(wakeText({ ...facts, outcome: "lost", usd: 0.001, durationMs: null, lineage: "r1", reason: "gone" }).split("\n")[0], "[流程] f 失联了 · <$0.01");
   assert.deepEqual([45_000, 95_000, 3_600_000, 90_000_000, -1, NaN].map(duration), ["45s", "1m35s", "1h", "1d1h", null, null]);
-  // A run that ended with a call still going holds its line: carrying it on now would be refused, and the message says so.
-  assert.equal(wakeText({ ...facts, working: 2 }).split("\n").some((line) => /还有 2 个调用没回来/.test(line)), true);
+  // A run that ended with a call still going holds its line: carrying it on now would be refused, and the message says so -- and says that
+  // a process that has gone may have cut the call off, which is not waited out but settled.
+  const held = wakeText({ ...facts, working: 2 }).split("\n").find((line) => /还有 2 个调用没回来/.test(line));
+  assert.ok(held, "the line is there");
+  assert.match(held, /暂时被占着/);
+  assert.match(held, /进程还在.*等它们回来/);
+  assert.match(held, /进程已经退出.*截断.*settle/);
+  assert.doesNotMatch(held, /等它们回来再接着跑$/, "it does not promise that they come back");
   assert.equal(wakeText({ ...facts, working: 0 }).includes("没回来"), false);
 });
 

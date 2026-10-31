@@ -125,7 +125,9 @@ export function wakeText(facts) {
     lines.push(`原因：${oneLine(facts.reason)}`);
     lines.push(`运行 ${facts.runId}${facts.lineage && facts.lineage !== facts.runId ? `（接着线 ${facts.lineage}）` : ""} · 事件 ${facts.events}`);
     if (facts.resume) lines.push(`接着跑：node ${ORCH_PATH} resume ${facts.runId}（${oneLine(facts.resume.from, 80)}）`);
-    if (facts.working > 0) lines.push(`还有 ${facts.working} 个调用没回来，这条线还被占着：现在接着跑会被拒，等它们回来再接着跑`);
+    if (facts.working > 0) {
+      lines.push(`还有 ${facts.working} 个调用没回来，这条线暂时被占着，现在接着跑会被拒。运行的进程还在，就等它们回来再接着跑；进程已经退出（命令行入口跑完就退出），它们可能被截断，接着跑会停在“可能做了也可能没做”，要先用 settle 了结`);
+    }
     if (facts.manual) lines.push(`手册：${facts.manual}`);
   }
   if (facts.unseen > 0) lines.push(`账里自上次以来还有 ${facts.unseen} 次运行（${facts.ledger}）`);
