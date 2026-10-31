@@ -16,6 +16,35 @@ export const MAX_PLACES = 8;
 const NOW_LIMIT = 300;
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// --- What this module reads of a schema -------------------------------------
+
+/** Keywords that say nothing a value can break. */
+const ANNOTATIONS = ["description", "title", "default", "examples", "$comment"];
+/** The keywords `problemsOf`, `stripUndeclared` and `planFix` act on; a schema that has any other has rules this module cannot see. */
+const KEYWORDS = new Set([...ANNOTATIONS, "type", "enum", "items", "properties", "required", "additionalProperties"]);
+const TYPES = new Set(["string", "number", "integer", "boolean", "object", "array", "null"]);
+
+/** Whether this node of a schema holds only keywords this module acts on (what its children hold is not looked at). */
+const plainNode = (schema) => isObject(schema) && Object.keys(schema).every((key) => KEYWORDS.has(key));
+
+/**
+ * Whether this module reads `schema` completely: every keyword in it, at every depth, is one `problemsOf` checks, so that "no
+ * problems" means the value fits. What the builders make (step.mjs) is read completely; a hand-written schema with `minLength`,
+ * `pattern`, `$ref`, `oneOf`, `patternProperties`... is not, and for such a schema the CLI's own check of the whole reply is the only
+ * one that can say a value fits: an answer is then corrected as a whole, never place by place and put together here.
+ */
+export function readsFully(schema) {
+  if (!plainNode(schema)) return false;
+  const types = Array.isArray(schema.type) ? schema.type : schema.type === undefined ? [] : [schema.type];
+  if (!types.every((type) => TYPES.has(type))) return false;
+  if (schema.enum !== undefined && !Array.isArray(schema.enum)) return false;
+  if (schema.items !== undefined && !readsFully(schema.items)) return false;
+  if (schema.properties !== undefined && !(isObject(schema.properties) && Object.values(schema.properties).every(readsFully))) return false;
+  if (schema.required !== undefined && !(isObject(schema.properties) && Array.isArray(schema.required) && schema.required.every((key) => typeof key === "string"))) return false;
+  if (schema.additionalProperties !== undefined && (typeof schema.additionalProperties !== "boolean" || (schema.additionalProperties === false && !isObject(schema.properties)))) return false;
+  return true;
+}
 const kindOf = (v) => (Array.isArray(v) ? "array" : v === null ? "null" : typeof v);
 
 // --- Pointers -------------------------------------------------------------
@@ -107,6 +136,8 @@ export function schemaFailure(error) {
 /**
  * `value` without the fields an object schema does not declare (additionalProperties: false), and where they were.
  * A model that adds a field says something the flow has no place for; sending the answer back for it costs more than it is worth.
+ * Only where the schema is the builders' plain object: one that also declares fields some other way (`patternProperties`, `allOf`...)
+ * keeps what it was given, and the CLI's check of the whole reply is what says whether it fits.
  */
 export function stripUndeclared(schema, value, at = "") {
   if (schema?.type === "object" && isObject(value) && isObject(schema.properties)) {
@@ -117,7 +148,7 @@ export function stripUndeclared(schema, value, at = "") {
         const inner = stripUndeclared(schema.properties[key], entry, `${at}${pointer(key)}`);
         out[key] = inner.value;
         dropped.push(...inner.dropped);
-      } else if (schema.additionalProperties === false) dropped.push(`${at}${pointer(key)}`);
+      } else if (schema.additionalProperties === false && plainNode(schema)) dropped.push(`${at}${pointer(key)}`);
       else out[key] = entry;
     }
     return { value: out, dropped };
@@ -149,7 +180,8 @@ export function problemsOf(schema, value, at = "") {
     const problems = (schema.required ?? []).filter((key) => !Object.hasOwn(value, key)).map((key) => ({ at: `${at}${pointer(key)}`, say: "is missing" }));
     for (const [key, entry] of Object.entries(value)) {
       if (Object.hasOwn(schema.properties, key)) problems.push(...problemsOf(schema.properties[key], entry, `${at}${pointer(key)}`));
-      else if (schema.additionalProperties === false) problems.push({ at: `${at}${pointer(key)}`, say: "is not a field the schema declares" });
+      // (Not where another keyword may declare fields too: patternProperties, allOf... -- the CLI says whether such a field fits.)
+      else if (schema.additionalProperties === false && plainNode(schema)) problems.push({ at: `${at}${pointer(key)}`, say: "is not a field the schema declares" });
     }
     return problems;
   }
@@ -214,6 +246,9 @@ const isWithin = (inner, outer) => {
  *   problems: { at: string, say: string }[], schema: object, moves: { from: string, to: string }[] }}
  */
 export function planFix(schema, value, problems) {
+  // A schema with rules this module cannot see (`$ref` to a definition the correction would leave behind, `minLength`, `oneOf`...) is
+  // corrected as a whole: the reply is the whole answer under the whole schema, which the CLI checks.
+  if (!readsFully(schema)) return { whole: true, items: [], problems: problems.map(({ at, say }) => ({ at, say })), schema, moves: [] };
   const moves = [];
   const located = problems.map((p) => {
     const found = locate(schema, value, p.at);
@@ -254,6 +289,24 @@ const shown = (v) => {
   const text = JSON.stringify(v);
   return [...text].length > NOW_LIMIT ? `${[...text].slice(0, NOW_LIMIT).join("")}…` : text;
 };
+
+/**
+ * The complaints the CLI made of a correction's reply (`schemaFailure`), as problems of the answer: a place the reply names as
+ * `/f2/title` is the place `f2` stood for, so `<its pointer>/title`.
+ */
+export function fixErrors(plan, errors) {
+  if (plan.whole) return errors;
+  return errors.map(({ at, say }) => {
+    let segments;
+    try {
+      segments = segmentsOf(at);
+    } catch {
+      return { at: "", say: `${at} ${say}`.trim() };
+    }
+    const item = plan.items.find((i) => i.key === segments[0]);
+    return item ? { at: item.at + pointer(...segments.slice(1)), say } : { at: "", say: `${at} ${say}`.trim() };
+  });
+}
 
 /**
  * The message for a correction: only the problems, never the answer again. The schema of the reply is not in it -- the CLI

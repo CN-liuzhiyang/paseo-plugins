@@ -20,7 +20,7 @@ import path from "node:path";
 import { format } from "node:util";
 import { loadFlow, describeFlow, scanSource, DEFAULT_GRANTS } from "./flow.mjs";
 import { isStep, validate } from "./step.mjs";
-import { CheckFailed, applyFix, extractJson, fixPrompt, normalizeProblems, planFix, problemsOf, schemaFailure, stripUndeclared } from "./answer.mjs";
+import { CheckFailed, applyFix, extractJson, fixErrors, fixPrompt, normalizeProblems, planFix, problemsOf, schemaFailure, stripUndeclared } from "./answer.mjs";
 import { unknownOption } from "./paseo-cli.mjs";
 import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
@@ -752,9 +752,11 @@ async function runClaimed(target, options, taken) {
       if (reply.text === null && (reply.value === null || reply.value === undefined)) throw Object.assign(new Error("the agent handed in nothing to the correction"), { name: "NoAnswer" });
       state.rounds = round;
       const given = tidy(plan.schema, reply.value, `the reply of round ${round}`);
-      const fits = given !== undefined && problemsOf(plan.schema, given).length === 0;
+      const fits = given !== undefined && reply.cliErrors.length === 0 && problemsOf(plan.schema, given).length === 0;
       whenOpen("call.fixed", { callId: record.callId, round, answer: reply.value ?? reply.text ?? null, ok: fits, cost: roundCost, durationMs: Date.now() - sentAt });
       value = applyFix(value, plan, given);
+      // What the CLI said was wrong with the reply is a problem of the answer as it stands now, the next time round.
+      cliErrors = fixErrors(plan, reply.cliErrors);
     }
   };
 

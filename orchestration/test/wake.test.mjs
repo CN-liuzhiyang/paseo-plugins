@@ -335,11 +335,11 @@ test("a message that cannot be delivered, or is too late, is a line in the event
   assert.equal(readLedger(dir)[0].ok, false);
   assert.equal(unseenCount(readLedger(dir)), 1, "a message that did not arrive leaves the run unheard of");
 
-  const slow = fakeExecutor({ notifyDelayMs: 400 });
+  const slow = fakeExecutor({ notifyDelayMs: 3_000 });
   withSteward(slow, "steward-1");
   const started = Date.now();
   const late = await go(finished, dir, { executor: slow, stewards, wakeTimeoutMs: 50 });
-  assert.ok(Date.now() - started < 380, "the run did not wait for it");
+  assert.ok(Date.now() - started < 2_500, "the run did not wait for it");
   assert.equal(late.result.outcome, "done");
   assert.deepEqual([late.wake.ok, late.wake.error], [false, "Error: no answer in 0.05s"]);
 
