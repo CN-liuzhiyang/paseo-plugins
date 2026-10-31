@@ -662,6 +662,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         caveat("answer: this Paseo CLI's `send` does not take --output-schema, so what is wrong with an answer cannot be sent back to its agent; a reply that does not fit is not corrected, and a check that fails ends the call", record.callId);
         throw unsendable();
       }
+      // Nothing came back at all (the CLI printed nothing): the agent did not answer, which is not a round.
+      if (reply.text === null && (reply.value === null || reply.value === undefined)) throw Object.assign(new Error("the agent handed in nothing to the correction"), { name: "NoAnswer" });
       state.rounds = round;
       const given = tidy(plan.schema, reply.value, `the reply of round ${round}`);
       const fits = given !== undefined && problemsOf(plan.schema, given).length === 0;

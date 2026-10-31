@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { CheckFailed, MAX_PLACES, applyFix, extractJson, fixPrompt, normalizeProblems, planFix, pointer, problemsOf, schemaFailure, segmentsOf, stripUndeclared } from "../runtime/answer.mjs";
 import { objectSchema, text, count, choice, list, group } from "../runtime/step.mjs";
-import { PaseoCliError, unknownOption } from "../runtime/paseo-cli.mjs";
+import { PaseoCliError, describeFailure, errorBody, unknownOption } from "../runtime/paseo-cli.mjs";
 
 const schema = objectSchema({
   headline: text("one line"),
@@ -191,4 +191,24 @@ test("CheckFailed: the line a person reads names the step, the rounds and the fi
   assert.equal(failed.name, "CheckFailed");
   assert.equal(failed.reason, "patch：核对 3 轮还不过：/m/0 no {code}");
   assert.equal(failed.rounds, 3);
+});
+
+test("describeFailure: a reply that did not fit is told apart from an answer that never came", () => {
+  const say = (error) => describeFailure(["run"], 1, "", error);
+  const mismatch = say({ code: "OUTPUT_SCHEMA_FAILED", message: "m", details: { validationErrors: ["/a: x"], lastResponse: "{}" } });
+  const silent = say({ code: "OUTPUT_SCHEMA_FAILED", message: "m" });
+  assert.match(mismatch, /answered, but not in the shape/);
+  assert.doesNotMatch(mismatch, /permission request/);
+  assert.match(silent, /did not hand in a structured answer/);
+  assert.match(silent, /permission request/);
+  assert.match(say({ code: "INVALID_OUTPUT_SCHEMA", message: "m" }), /could not parse the schema/);
+  assert.equal(say({ code: "OTHER", message: "m" }), "paseo run failed: OTHER -- m");
+  assert.match(describeFailure(["run"], 3, "plain text", null), /exited 3: plain text/);
+});
+
+test("errorBody: the CLI's JSON error behind a line it said first", () => {
+  const raw = 'Using workspace w1\n{\n  "error": {\n    "code": "OUTPUT_SCHEMA_FAILED",\n    "message": "m",\n    "details": { "lastResponse": "{\\"a\\": 1}" }\n  }\n}\n';
+  assert.deepEqual(errorBody(raw).details, { lastResponse: '{"a": 1}' });
+  assert.equal(errorBody("error: unknown option '--x'"), null);
+  assert.equal(errorBody('{ "not": "an error" }'), null);
 });

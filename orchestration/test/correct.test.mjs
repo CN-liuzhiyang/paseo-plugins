@@ -369,3 +369,26 @@ test("answer-smoke: the first tag cannot pass, so one field goes back to the sam
   assert.deepEqual(Object.keys(executor.sends[0].schema.properties), ["f1"]);
   assert.equal(of(eventsOf(result), "call.end")[0].rounds, 2);
 });
+
+test("a correction that gets no answer fails the call and is not a round", async () => {
+  const wrong = { ...good, messages: ["a"] };
+  const silent = [
+    ["an empty reply the CLI refused", cliError("OUTPUT_SCHEMA_FAILED", { validationErrors: ["(root): must be object"], lastResponse: "" })],
+    ["a failure with no reply at all", cliError("OUTPUT_SCHEMA_FAILED", null)],
+    ["nothing printed", null],
+  ];
+  for (const [label, reply] of silent) {
+    const executor = withFirst(wrong, { replies: [reply] });
+    const result = await run(asking({ check: noCode }), executor);
+    assert.equal(result.outcome, "failed", label);
+    const events = eventsOf(result);
+    assert.equal(of(events, "call.fixed").length, 0, label);
+    const end = of(events, "call.end")[0];
+    assert.deepEqual([end.ok, end.rounds], [false, 1], label);
+    near(end.cost.usd, 0.02);
+  }
+  const text = withFirst(wrong, { replies: [refused("I would rather not."), { f1: "a {code}" }] });
+  const result = await run(asking({ check: noCode }), text);
+  assert.equal(result.outcome, "done", "a reply with words in it is an answer, if a wrong one: the next round asks again");
+  assert.equal(of(eventsOf(result), "call.end")[0].rounds, 3);
+});
