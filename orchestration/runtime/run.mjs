@@ -33,6 +33,7 @@ import { FROM_LIMIT, pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.
 import { paseoExecutor, sentTitle } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, contentDigest, INPUT_REDACTED } from "./gate.mjs";
 import { Journal, JournalError, MAX_VALUE_BYTES, fingerprint, known, shortPrint } from "./journal.mjs";
+import { LineBusy, takeLine } from "./line-lock.mjs";
 import { loadConfig, logDir as configuredLogDir, resolveHost } from "./config.mjs";
 import { AGENT_ID, wakeAtEnd } from "./wake.mjs";
 
@@ -222,6 +223,8 @@ export async function runFlow(target, options = {}) {
     return await runClaimed(target, options, taken);
   } catch (error) {
     settleRefusal(taken, error);
+    // A refusal before run.start, or a failure of the runner itself: the line is not held on for a run that is not there.
+    taken.line?.release();
     throw error;
   } finally {
     taken.claim.stop();
@@ -266,7 +269,8 @@ export function settleRefusal({ runId, dir, claim, callerGiven }, error) {
   else claim.discard();
 }
 
-async function runClaimed(target, options, { runId, dir, claim }) {
+async function runClaimed(target, options, taken) {
+  const { runId, dir, claim } = taken;
   // --- Before anything is spent -----------------------------------------
   const affair = options.affair ?? null;
   const badAffair = affairProblems(affair);
@@ -293,7 +297,14 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   }
   if (options.detached !== undefined && typeof options.detached !== "boolean") throw new RunRefused("detached is true or false");
   if (options.wakeTimeoutMs !== undefined && !(Number.isFinite(options.wakeTimeoutMs) && options.wakeTimeoutMs > 0)) throw new RunRefused("wakeTimeoutMs is a positive number of milliseconds");
-  // Read once: the journal is what a run of this line did before this one, and nothing else writes it while this one works.
+  // The line is taken before its journal is read, and held until nothing this run started can write to it (line-lock.mjs): the journal is
+  // what the runs of this line did before this one, and it is read once.
+  try {
+    taken.line = takeLine({ dir, lineage, runId });
+  } catch (error) {
+    if (error instanceof LineBusy) throw new RunRefused(error.message);
+    throw error;
+  }
   let journal;
   try {
     journal = new Journal({ dir, lineage, redo });
@@ -434,6 +445,16 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   const stepScope = new AsyncLocalStorage();
   // Set while the `fn` of a `once` step runs (not its `before`): the step is already written as begun.
   const onceAct = new AsyncLocalStorage();
+  // The calls that can write to the journal, until each has returned. A run that ends (a timeout, a stop in another branch) with one of them
+  // still going -- above all a step that cannot be taken back, already begun -- keeps the line until it is over (line-lock.mjs).
+  const inflight = new Set();
+  const writing = (primitive) => (...args) => {
+    const work = (async () => primitive(...args))();
+    const over = work.then(() => {}, () => {});
+    inflight.add(over);
+    over.then(() => inflight.delete(over));
+    return work;
+  };
   const stepNames = new Set();
   const counters = new Map();
   const nextId = (kind, name = null) => {
@@ -1078,7 +1099,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   };
 
   // --- Primitives -------------------------------------------------------
-  const $ = Object.freeze({
+  const primitives = {
     /**
      * One agent call. Resolves to exactly what the step's schema declares.
      * Everything that can be wrong without an agent -- the step, the role,
@@ -1211,6 +1232,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       }
       if (verdict === "unknown") {
         const found = await lookOutside(probe, name);
+        // The run may have ended while the probe looked: nothing is written for a run that is over.
+        if (ending) throw new RunEnded();
         const from = { runId: entry?.runId ?? runId, callId: entry?.callId ?? null };
         if (found?.done === true) {
           taken = journal.append({ id, kind: "step", state: "settled", done: true, once: true, keyPrint: print, ...(found.value === undefined ? { undefined: true } : { value: found.value }), by: "probe", ...from }, { sync: true });
@@ -1239,6 +1262,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       try {
         const raw = await stepScope.run(name, async () => {
           const given = before ? await before() : undefined;
+          // A run that ended while `before` waited (a timeout, a stop in another branch) does not start the act: it could not be told of it.
+          if (ending) throw new RunEnded();
           if (once) {
             // Written and on the disk before the act: from here, whatever happens, a run that finds this line knows the step may have taken effect.
             journal.append({ id, kind: "step", state: "begun", once: true, keyPrint: print, runId, callId: record.callId }, { sync: true });
@@ -1553,7 +1578,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
      * role as input checks it here, before its first spend.
      */
     ctx: Object.freeze({ runId, caller, cwd, host, runDir, events: log.file, role, lineage, lineDir: path.join(dir, "runs", lineage), resumed: resumeOf !== null }),
-  });
+  };
+  const $ = Object.freeze({ ...primitives, ask: writing(primitives.ask), again: writing(primitives.again), step: writing(primitives.step), gate: writing(primitives.gate) });
 
   // --- Run and settle -----------------------------------------------------
   const startedAt = Date.now();
@@ -1704,6 +1730,16 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   log.emit("wake", woken.event);
   log.emit("run.end", { outcome, value: recorded, summary, stop, error, durationMs, cost, caveats: [...caveats], resume });
   process.removeListener("exit", sweepInputs);
+  // The line goes back when nothing this run started can write to it any more; a step that cannot be taken back, begun before the run
+  // ended, may still be acting, and a run that carried this one on now would do it again.
+  const line = taken.line;
+  taken.line = null;
+  const settle = async () => {
+    while (inflight.size > 0) await Promise.all([...inflight]);
+    line.release();
+  };
+  if (inflight.size === 0) line.release();
+  else void settle();
 
   const result = {
     ok: outcome === "done" || outcome === "stopped",

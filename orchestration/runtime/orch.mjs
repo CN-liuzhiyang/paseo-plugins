@@ -68,6 +68,7 @@ import { listFlows } from "./catalog.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
 import { claimResumption, lineageOf, readResumePoint, ResumeRefused } from "./resume.mjs";
 import { Journal, JournalError, known } from "./journal.mjs";
+import { LineBusy, takeLine } from "./line-lock.mjs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
 import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
@@ -372,8 +373,8 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
   }
 }
 
-/** The journal of the line a run belongs to, found through the run's own run.start. */
-function journalOf(dir, runId) {
+/** The line a run belongs to, found through the run's own run.start. */
+function lineageOfRun(dir, runId) {
   let start;
   try {
     start = readEvents(eventsFile(dir, runId))[0];
@@ -381,7 +382,12 @@ function journalOf(dir, runId) {
     throw new UsageError(`run ${runId} has no events to read in ${dir} (${error.code ?? error.message}); the log directory is ORCH_LOG_DIR, then config.json's logDir`);
   }
   if (start?.kind !== "run.start") throw new UsageError(`the events of run ${runId} do not begin with run.start`);
-  return new Journal({ dir, lineage: lineageOf(start, runId) });
+  return lineageOf(start, runId);
+}
+
+/** The journal of the line a run belongs to. */
+function journalOf(dir, runId) {
+  return new Journal({ dir, lineage: lineageOfRun(dir, runId) });
 }
 
 /** What a journal holds, for a person: one row per place in the flow, in the order they were last written. */
@@ -433,7 +439,23 @@ export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
       throw new UsageError(`--done is the step's value as JSON (${error.message})`);
     }
   }
-  const journal = journalOf(logDir, runId);
+  // The line is held while its journal is read and written, as for a run: a run of the line that is working would not see what is said here.
+  const lineage = lineageOfRun(logDir, runId);
+  let line;
+  try {
+    line = takeLine({ dir: logDir, lineage, runId: `settle:${runId}` });
+  } catch (error) {
+    if (error instanceof LineBusy) throw new SettleRefused(error.message);
+    throw error;
+  }
+  try {
+    return settleHeld(new Journal({ dir: logDir, lineage }), { runId, step, doneText, value, logDir });
+  } finally {
+    line.release();
+  }
+}
+
+function settleHeld(journal, { runId, step, doneText, value, logDir }) {
   const id = `step:${step}`;
   const entry = journal.get(id);
   // With lines in the file that cannot be read, a step with no line may be one whose line was among them: that is settled as well.

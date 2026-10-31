@@ -1280,10 +1280,12 @@ test("the committed committee fixture conforms to the contract", async () => {
   assert.match(events.at(-1).summary, /^第 3 轮收敛（1 次调用失败）：/);
 });
 
-test("nothing is left in the log directory but runs/", async () => {
-  // The per-day audit files are gone: one run, one file, nothing else.
+test("nothing is left in the log directory but runs/, and the locks of lines whose runs have a call still going", async () => {
+  // The per-day audit files are gone: one run, one file, nothing else. (A run that timed out with a call that never returned still holds its
+  // line, line-lock.mjs, for as long as this process lives; every other run has given its line back.)
   const entries = await readdir(logDir);
-  assert.deepEqual(entries, ["runs"]);
+  assert.deepEqual(entries.filter((entry) => entry !== "lines"), ["runs"]);
+  if (entries.includes("lines")) assert.ok((await readdir(path.join(logDir, "lines"))).every((f) => f.endsWith(".lock")));
   const files = await readdir(path.join(logDir, "runs"));
   assert.ok(files.every((f) => f.endsWith(".jsonl") || f.endsWith(".claim") || !f.includes(".")), files.join(", "));
   assert.ok((await readFile(path.join(logDir, "runs", files.find((f) => f.endsWith(".jsonl"))), "utf8")).endsWith("\n"));
