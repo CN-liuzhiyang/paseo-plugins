@@ -21,14 +21,26 @@ export const COMMAND_LINE_BUDGET = 32_000;
 const DEFAULT_INSTALL_DIR = path.join(process.env.LOCALAPPDATA ?? "", "Programs", "Paseo");
 
 export class PaseoCliError extends Error {
-  constructor(message, { argv, exitCode, stdout, stderr }) {
+  /** `code` and `details` are the CLI's own { error: { code, details } }, when it said why in JSON. */
+  constructor(message, { argv, exitCode, stdout, stderr, code = null, details = null }) {
     super(message);
     this.name = "PaseoCliError";
     this.argv = argv;
     this.exitCode = exitCode;
     this.stdout = stdout;
     this.stderr = stderr;
+    this.code = code;
+    this.details = details;
   }
+}
+
+/**
+ * The option an older CLI does not know, from the "error: unknown option '--x'" its argument parser prints before it does
+ * anything (so nothing was started or spent). Null for any other failure.
+ */
+export function unknownOption(error) {
+  if (error?.name !== "PaseoCliError" || typeof error.exitCode !== "number" || error.exitCode === 0) return null;
+  return /^error: unknown option '(--[\w-]+)'/m.exec(`${error.stderr ?? ""}\n${error.stdout ?? ""}`)?.[1] ?? null;
 }
 
 function resolveLaunch(installDir) {
@@ -152,26 +164,39 @@ export function runPaseo(args, options = {}) {
  * The hint is what the next person needs in order to act, not a restatement.
  */
 const ERROR_HINTS = {
-  OUTPUT_SCHEMA_FAILED:
-    "The agent raised a permission request and nothing answered it, so it never produced structured output. " +
-    "Unattended structured calls must use a mode that finishes without a human -- notably not Claude's `plan` " +
-    "mode, which always asks at the end of a turn. The mode comes from the step's effects: see runtime/fences.mjs.",
   INVALID_OUTPUT_SCHEMA:
     "Paseo could not parse the schema JSON. If this came from a shell, quoting ate it: pass arguments as an " +
     "array through runtime/paseo-cli.mjs rather than through cmd.exe or PowerShell.",
 };
 
-function describeFailure(argv, exitCode, stdout, stderr) {
-  const raw = stderr.trim() || stdout.trim();
+// OUTPUT_SCHEMA_FAILED means two things. With validationErrors the agent answered and the answer did not fit; without
+// them it never handed in an answer (timed out, waited on a permission request, finished empty).
+const SCHEMA_MISMATCH_HINT =
+  "The agent answered, but not in the shape the schema asks for. A $.ask corrects this in place (check, fixes); " +
+  "seeing it means there was no reply text to work from, or the CLI was too old to take it back.";
+const NO_ANSWER_HINT =
+  "The agent did not hand in a structured answer: it timed out, finished empty, or raised a permission request " +
+  "that nothing answered. Unattended structured calls must use a mode that finishes without a human -- notably not " +
+  "Claude's `plan` mode, which always asks at the end of a turn. The mode comes from the step's effects: see runtime/fences.mjs.";
+
+const hintFor = (error) => (error.code === "OUTPUT_SCHEMA_FAILED" ? (error.details?.validationErrors ? SCHEMA_MISMATCH_HINT : NO_ANSWER_HINT) : ERROR_HINTS[error.code]);
+
+// { error: { code, message, details } } as the CLI prints it, behind any line it said first (the workspace it used).
+export function errorBody(raw) {
+  const at = raw.search(/^\{/m);
+  if (at < 0) return null;
   try {
-    const parsed = JSON.parse(raw);
-    const code = parsed?.error?.code;
-    if (code) {
-      const hint = ERROR_HINTS[code];
-      return `paseo ${argv[0]} failed: ${code} -- ${parsed.error.message}${hint ? `\n\n${hint}` : ""}`;
-    }
+    const error = JSON.parse(raw.slice(at))?.error;
+    return typeof error?.code === "string" ? error : null;
   } catch {
-    // Not JSON; fall through to the raw text.
+    return null;
+  }
+}
+
+export function describeFailure(argv, exitCode, raw, error) {
+  if (error) {
+    const hint = hintFor(error);
+    return `paseo ${argv[0]} failed: ${error.code} -- ${error.message}${hint ? `\n\n${hint}` : ""}`;
   }
   return `paseo ${argv[0]} exited ${exitCode}: ${raw}`;
 }
@@ -181,11 +206,15 @@ export async function runPaseoJson(args, options = {}) {
   const { stdout, stderr, exitCode } = await runPaseo(argv, options);
 
   if (exitCode !== 0) {
-    throw new PaseoCliError(describeFailure(argv, exitCode, stdout, stderr), {
+    const raw = stderr.trim() || stdout.trim();
+    const body = errorBody(raw);
+    throw new PaseoCliError(describeFailure(argv, exitCode, raw, body), {
       argv,
       exitCode,
       stdout,
       stderr,
+      code: body?.code ?? null,
+      details: body?.details ?? null,
     });
   }
 

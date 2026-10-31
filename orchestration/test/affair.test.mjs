@@ -2,13 +2,14 @@
 // once, the affair it belongs to, and a flow found by name. Nothing here talks
 // to Paseo and nothing is spent.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -25,11 +26,12 @@ import { parseConfig } from "../runtime/config.mjs";
 import { resolveFlowFile, resolveTarget, isFlowName, FLOWS_DIR, FlowLookupError } from "../runtime/resolve.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const run = promisify(execFile);
 let roster;
-const tmp = (name) => mkdtemp(path.join(os.tmpdir(), `orch-${name}-`));
+const tmp = (name) => tempDir(`orch-${name}-`);
 
 before(async () => {
   roster = await loadRoster([ROLES_DIR]);
@@ -51,7 +53,8 @@ test("run id: the caller's id names the files, and the claim says who holds it",
   const done = await result;
   assert.equal(done.runId, "release-24.attempt_1");
   assert.equal(done.events, eventsFile(dir, "release-24.attempt_1"));
-  assert.deepEqual(await names(dir), ["release-24.attempt_1.claim", "release-24.attempt_1.jsonl"]);
+  // (The directory is the run's journal: what it asked is kept there for a run that carries it on.)
+  assert.deepEqual(await names(dir), ["release-24.attempt_1", "release-24.attempt_1.claim", "release-24.attempt_1.jsonl"]);
 
   const events = readEvents(done.events);
   assert.deepEqual(checkEvents(events, { strict: true, complete: true }), []);
@@ -68,7 +71,7 @@ test("run id: the caller's id names the files, and the claim says who holds it",
 test("run id: a generated id still takes a claim, and the claim is not touched after the run", async () => {
   const dir = await tmp("generated");
   const done = await advise(dir).result;
-  assert.deepEqual(await names(dir), [`${done.runId}.claim`, `${done.runId}.jsonl`]);
+  assert.deepEqual(await names(dir), [done.runId, `${done.runId}.claim`, `${done.runId}.jsonl`]);
 });
 
 test("run id: a malformed id is refused, and nothing is created for it", async () => {

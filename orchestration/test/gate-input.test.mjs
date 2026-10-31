@@ -2,13 +2,13 @@
 // value, and a secret value is nowhere in what the run writes. Nothing here talks to Paseo; the provider's side
 // of the same gate is in orchestration-gate/server (input.test.ts, contract.test.ts).
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { runFlow, SUMMARY_LIMIT } from "../runtime/run.mjs";
 import { printable } from "../runtime/orch.mjs";
@@ -17,6 +17,7 @@ import { readEvents, checkEvents, EventLog } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { requestApproval, prepareGate, inputProblem, INPUT_REDACTED } from "../runtime/gate.mjs";
 import { fakeExecutor, carryAs } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 let logDir;
@@ -24,7 +25,7 @@ const CODE = "483921";
 
 before(async () => {
   roster = await loadRoster([ROLES_DIR]);
-  logDir = await mkdtemp(path.join(os.tmpdir(), "orch-input-test-"));
+  logDir = await tempDir("orch-input-test-");
 });
 
 const run = (target, options) =>
@@ -112,7 +113,7 @@ test("a secret value is scrubbed from everything the run writes, wherever the fl
 });
 
 test("EventLog.addSecret: both spellings, keys and arrays, and not the envelope", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-scrub-"));
+  const dir = await tempDir("orch-scrub-");
   const log = new EventLog({ dir, runId: "r-2026" });
   log.addSecret('a"b\\c2026');
   log.emit("log", { level: "info", message: 'x a"b\\c2026 y', json: JSON.stringify({ v: 'a"b\\c2026' }), list: ['a"b\\c2026'], 'a"b\\c2026': 1 });
@@ -193,7 +194,7 @@ test("$.gate({ input }) is checked at the call", async () => {
 
 test("requestApproval: the value file is cleared before the gate starts and deleted after, whatever the outcome", async () => {
   const prepare = async () => {
-    const dir = await mkdtemp(path.join(os.tmpdir(), "orch-input-gate-"));
+    const dir = await tempDir("orch-input-gate-");
     return prepareGate({
       carrier: "provider",
       holdPath: path.join(dir, "gate", "c1.receipt.txt"),
@@ -232,7 +233,7 @@ test("requestApproval: the value file is cleared before the gate starts and dele
     assert.equal(existsSync(gate.inputPath), false, `${carrier}: nothing is left on disk`);
   }
   // An ordinary gate has no value file and its decision has no `input`.
-  const plain = await prepareGate({ carrier: "provider", holdPath: path.join(await mkdtemp(path.join(os.tmpdir(), "orch-plain-")), "c1.receipt.txt"), title: "t", content: "x", runId: "r", callId: "c1" });
+  const plain = await prepareGate({ carrier: "provider", holdPath: path.join(await tempDir("orch-plain-"), "c1.receipt.txt"), title: "t", content: "x", runId: "r", callId: "c1" });
   assert.equal(plain.inputPath, null);
   const decision = await requestApproval(io((p) => carryAs("approve", p, {})), plain, { pollMs: 5 });
   assert.equal(decision.outcome, "allowed");
@@ -477,7 +478,7 @@ test("an allow the provider takes after the gate has cleaned up is swept by the 
 });
 
 test("requestApproval with an aborted signal closes the card and takes nothing, even a receipt that is already there", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-abort-"));
+  const dir = await tempDir("orch-abort-");
   const gate = prepareGate({
     carrier: "provider",
     holdPath: path.join(dir, "gate", "c1.receipt.txt"),

@@ -24,6 +24,7 @@
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
 // `answerAfterMs` is how long after it is spawned the carrier answers (5 by default; a long gate under a mocked clock).
+// `spawnDelayMs` is how long starting a session takes: it is in `requests` from the start, and can be listed only once it is made.
 // A denied card is closed: the carrier does not answer it afterwards (the provider ignores a late allow), unless
 // `answerOnDeny`: the allow had already been taken when the deny came, so its files are written as the deny returns.
 // `lateWrite`: the allow is taken only after the gate has given up on the card and cleaned up -- its files appear
@@ -118,6 +119,9 @@ export function fakeExecutor({
   archiveOnStart = false,
   workspaceFlag = true,
   archiveFails = null,
+  notifyFails = null,
+  notifyDelayMs = 0,
+  spawnDelayMs = 0,
 } = {}) {
   const archivedAgents = [];
   const refused = [];
@@ -141,6 +145,7 @@ export function fakeExecutor({
     }
   };
   const agents = new Map();
+  const notifications = [];
   const requests = [];
   const denied = [];
   const transcripts = [];
@@ -155,6 +160,7 @@ export function fakeExecutor({
 
   return {
     agents,
+    notifications,
     archivedAgents,
     requests,
     refused,
@@ -179,8 +185,11 @@ export function fakeExecutor({
     async spawn(request) {
       checkWorkspace(request, "spawn");
       requests.push(request);
+      // The session is not there to be listed until the command returns, as with the real CLI.
+      await sleep(spawnDelayMs);
       const id = start(request, "running");
-      if (carrier !== "hang") {
+      // A long-lived session (the steward) is not a gate's carrier: nothing answers for it.
+      if (carrier !== "hang" && !request.labels?.["orch-steward"]) {
         setTimeout(() => {
           if (!agents.get(id).closed) carry(request.prompt).then(() => (agents.get(id).status = "idle"));
         }, answerAfterMs);
@@ -215,14 +224,44 @@ export function fakeExecutor({
       return null;
     },
 
+    /** An agent that was there before the run, as a person left it (a session that carries a label). */
+    addAgent({ id, labels = {}, cwd = null, status = "idle", archived = false }) {
+      agents.set(id, { id, labels, status, archived, request: { labels, cwd, prompt: "" } });
+      return id;
+    },
+
+    async listAgents(labels) {
+      return [...agents.values()]
+        .filter((agent) => !agent.archived && Object.entries(labels).every(([key, value]) => agent.labels?.[key] === value))
+        .map((agent) => ({
+          id: agent.id,
+          name: agent.request.title ?? null,
+          status: agent.status,
+          cwd: workspaces.find((w) => w.workspaceId === agent.request.workspace)?.cwd ?? agent.request.cwd ?? null,
+        }));
+    },
+
+    // The wake-up: what it was sent, and when the sender stopped waiting for it.
+    async notify(agentId, text, options = {}) {
+      await sleep(notifyDelayMs);
+      if (notifyFails) throw new Error(`fake failure of send: ${notifyFails}`);
+      if (!agents.has(agentId)) throw Object.assign(new Error(`no agent ${agentId}`), { code: "AGENT_NOT_FOUND" });
+      // Like the real one, the text goes through a file.
+      if (options.file) {
+        await mkdir(path.dirname(options.file), { recursive: true });
+        await writeFile(options.file, text, "utf8");
+      }
+      notifications.push({ agentId, text, ...options });
+    },
+
     async inspect(agentId) {
       const agent = agents.get(agentId);
-      if (!agent) throw new Error(`no agent ${agentId}`);
+      if (!agent) throw Object.assign(new Error(`no agent ${agentId}`), { code: "AGENT_NOT_FOUND" });
       if (lateWrite && agent.closed && !agent.late) {
         agent.late = true;
         await carry(agent.request.prompt);
       }
-      return { status: agent.status, usage: { usd, inputTokens: 1200, outputTokens: 300 } };
+      return { status: agent.status, archived: agent.archived === true, usage: { usd, inputTokens: 1200, outputTokens: 300 } };
     },
 
     // Like `paseo logs --filter`: "assistant_message" is what the agent said;

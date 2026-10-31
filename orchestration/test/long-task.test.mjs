@@ -11,13 +11,12 @@
 //   - a gate of eight hours expires as `expired`, with the card closed by the runtime's deny, and one answered at
 //     seven hours is allowed, value and all.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, mock, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
+import { readFile } from "node:fs/promises";
 import { runFlow } from "../runtime/run.mjs";
 import { flow } from "../runtime/flow.mjs";
 import { readEvents, checkEvents } from "../runtime/events.mjs";
@@ -25,6 +24,7 @@ import { readRunState } from "../runtime/state.mjs";
 import { staleAfterMs, STALE_BASE_MS, LIVE_WITHIN_MS } from "../runtime/liveness.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -44,7 +44,7 @@ const flush = async (turns = 4) => {
  * once per simulated `sampleEveryMs`. The real clock is not waited on.
  */
 async function runLong(target, options, { stepMs = 10_000, limitMs = 12 * HOUR, sampleEveryMs = HOUR, sample = () => {} } = {}) {
-  const logDir = await mkdtemp(path.join(os.tmpdir(), "orch-long-"));
+  const logDir = await tempDir("orch-long-");
   mock.timers.enable({ apis: ["Date", "setTimeout", "setInterval"], now: Date.now() });
   try {
     let result = null;

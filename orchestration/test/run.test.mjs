@@ -1,11 +1,12 @@
 // The runner end to end on a fake executor: flows run, events come out, and
 // the events conform to EVENTS.md. Nothing here talks to Paseo.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -24,6 +25,7 @@ import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
 import gateSmoke from "../flows/gate-smoke.mjs";
 import { fakeExecutor, committeeAnswers, carryAs } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let roster;
@@ -32,7 +34,7 @@ let logDir;
 before(async () => {
   // Shipped roles only: a private rolesDirs entry must not change what these test.
   roster = await loadRoster([ROLES_DIR]);
-  logDir = await mkdtemp(path.join(os.tmpdir(), "orch-test-"));
+  logDir = await tempDir("orch-test-");
 });
 
 const run = (target, options) =>
@@ -164,7 +166,7 @@ test("advisor: one ask, the answer is the value", async () => {
   assert.equal(result.outcome, "done");
   assert.deepEqual(result.value, { question: "Is this right?", advisor: { role: "fast", provider: "claude/claude-haiku-5-5" }, answer });
   const events = eventsOf(result);
-  assert.deepEqual(kinds(events), ["run.start", "call.start:c1", "caveat", "call.end:c1", "run.end"]);
+  assert.deepEqual(kinds(events), ["run.start", "call.start:c1", "caveat", "call.end:c1", "wake", "run.end"]);
   assert.equal(events[0].source, null);
   assert.deepEqual(events[0].input, { question: "Is this right?", role: "fast" });
   assert.equal(events[1].role, "fast");
@@ -172,7 +174,7 @@ test("advisor: one ask, the answer is the value", async () => {
 });
 
 test("input is checked before run.start: a refused run leaves no events file", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-refused-"));
+  const dir = await tempDir("orch-refused-");
   await assert.rejects(
     runFlow(advisor, { roster, logDir: dir, executor: fakeExecutor(), input: { question: "q" } }),
     (error) => error instanceof RunRefused && /input\.role: missing/.test(error.message),
@@ -206,10 +208,10 @@ test("$.phase / $.do / $.log / $.stop: stop inside a phase ends it cleanly and n
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one" });
+  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one", kind: "flow", step: null });
   assert.deepEqual(result.value, { partial: true });
   const events = eventsOf(result);
-  assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "run.end"]);
+  assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "wake", "run.end"]);
   assert.equal(events[1].message, "starting now");
   assert.equal(events[3].output, `${"x".repeat(2_000)}…(truncated 3000 chars)`);
   assert.equal(events[3].agentId, null);
@@ -241,7 +243,7 @@ test("$.stop cannot be swallowed: caught and returned, the run is still stopped"
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "first reason", phase: "one" });
+  assert.deepEqual(result.stop, { reason: "first reason", phase: "one", kind: "flow", step: null });
   assert.deepEqual(result.value, { partial: 1 });
   const events = eventsOf(result);
   assert.deepEqual(events.find((e) => e.kind === "phase.end").ok, true);
@@ -625,7 +627,7 @@ test("requestApproval: a model carrier whose timeline cannot be read is not coun
 
 /** A gate prepared for requestApproval, in a fresh directory. */
 async function prepared(carrier, extra = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-"));
+  const dir = await tempDir("orch-gate-");
   return prepareGate({
     carrier,
     holdPath: path.join(dir, "gate", "c1.receipt.txt"),
@@ -884,8 +886,8 @@ test("a thrown error is a failed run with a run.end", async () => {
   assert.equal(result.outcome, "failed");
   assert.deepEqual(result.error, { name: "RangeError", message: "bad" });
   const events = eventsOf(result);
-  assert.equal(events.at(-2).kind, "log");
-  assert.match(events.at(-2).message, /RangeError: bad/);
+  assert.equal(events.at(-3).kind, "log");
+  assert.match(events.at(-3).message, /RangeError: bad/);
 });
 
 // --- For people: titles, headlines, summaries ---------------------------
@@ -1125,7 +1127,7 @@ test("scanSource: undeclared phases and a gate without its grant, before any spe
 });
 
 test("a flow file with an undeclared phase is refused before run.start", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-flowfile-"));
+  const dir = await tempDir("orch-flowfile-");
   const file = path.join(dir, "typo.mjs");
   const runtime = path.join(HERE, "..", "runtime", "flow.mjs").replace(/\\/g, "/");
   await writeFile(
@@ -1233,7 +1235,7 @@ test("a run on another host needs a directory there, and cannot gate yet", async
 
 test("checkEvents catches what a reader would trip on", () => {
   const good = [
-    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null, resumePrint: null },
+    { v: 1, seq: 0, ts: "2026-09-24T00:00:00.000Z", runId: "r", kind: "run.start", flow: { name: "f", description: "d", phases: [{ id: "a", title: "A" }], inputs: {}, grants: [] }, source: null, input: {}, caller: null, cwd: "C:/", host: null, pid: 1, hostname: "h", affair: null, resumeOf: null, resumePrint: null, lineage: "r", redo: null, notify: null },
     { v: 1, seq: 1, ts: "2026-09-24T00:00:01.000Z", runId: "r", kind: "run.end", outcome: "done", value: null, summary: null, stop: null, error: null, durationMs: 1, cost: null, caveats: [], resume: null },
   ];
   assert.deepEqual(checkEvents(good, { strict: true, complete: true }), []);
@@ -1279,10 +1281,25 @@ test("the committed committee fixture conforms to the contract", async () => {
   assert.match(events.at(-1).summary, /^第 3 轮收敛（1 次调用失败）：/);
 });
 
-test("nothing is left in the log directory but runs/", async () => {
-  // The per-day audit files are gone: one run, one file, nothing else.
+test("a run that stops says why in a word: the flow's own $.stop is kind flow, with no step", async () => {
+  const result = await run(flow({ name: "stop-kind", description: "d", phases: [], inputs: {}, grants: [], run: (_, $) => $.stop("because", { n: 1 }) }), { executor: fakeExecutor() });
+  assert.deepEqual(result.stop, { reason: "because", phase: null, kind: "flow", step: null });
+  assert.deepEqual(checkEvents(readEvents(result.events), { strict: true, complete: true }), []);
+  const old = readEvents(result.events);
+  delete old.at(-1).stop.kind;
+  delete old.at(-1).stop.step;
+  assert.deepEqual(checkEvents(old, { complete: true }), [], "a file written before the kind was added still reads");
+  assert.notDeepEqual(checkEvents(old, { strict: true, complete: true }), [], "and strict asks for it");
+  old.at(-1).stop = { reason: "x", phase: null, kind: "unknown", step: null };
+  assert.notDeepEqual(checkEvents(old, { complete: true }), [], "unknown is for a step, which is named");
+});
+
+test("nothing is left in the log directory but runs/, and the locks of lines whose runs have a call still going", async () => {
+  // The per-day audit files are gone: one run, one file, nothing else. (A run that timed out with a call that never returned still holds its
+  // line, line-lock.mjs, for as long as this process lives; every other run has given its line back.)
   const entries = await readdir(logDir);
-  assert.deepEqual(entries, ["runs"]);
+  assert.deepEqual(entries.filter((entry) => entry !== "lines"), ["runs"]);
+  if (entries.includes("lines")) assert.ok((await readdir(path.join(logDir, "lines"))).every((f) => f.endsWith(".lock")));
   const files = await readdir(path.join(logDir, "runs"));
   assert.ok(files.every((f) => f.endsWith(".jsonl") || f.endsWith(".claim") || !f.includes(".")), files.join(", "));
   assert.ok((await readFile(path.join(logDir, "runs", files.find((f) => f.endsWith(".jsonl"))), "utf8")).endsWith("\n"));

@@ -3,17 +3,16 @@
 //
 //   node --test test/item-glance.test.mjs        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { runFlow } from "../runtime/run.mjs";
 import { checkFlow } from "../runtime/flow.mjs";
 import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import itemGlance, { ROLE } from "../flows/item-glance.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 let logDir;
@@ -21,7 +20,7 @@ let logDir;
 before(async () => {
   // Shipped roles only: a private rolesDirs entry must not change what these test.
   roster = await loadRoster([ROLES_DIR]);
-  logDir = await mkdtemp(path.join(os.tmpdir(), "orch-glance-"));
+  logDir = await tempDir("orch-glance-");
 });
 
 const INPUT = {
@@ -142,6 +141,30 @@ test("it runs as the glance role, changing nothing; the summary is what it looke
   const end = events.find((e) => e.kind === "run.end");
   assert.equal(end.summary, "看了一眼：读了任务，没有新记录");
   assert.deepEqual(end.value, PROPOSAL);
+});
+
+test("a look the steward hears of only when it did not come to done: a look is not a message to anyone when it went well", async () => {
+  assert.equal(itemGlance.wake, "problems");
+  const stewards = { "*": { agent: "steward-1" } };
+  const watched = () => {
+    const executor = fakeExecutor({ answer: () => PROPOSAL });
+    executor.addAgent({ id: "steward-1" });
+    return executor;
+  };
+  const executor = watched();
+  const { result } = await look(INPUT, { executor, stewards });
+  assert.equal(result.outcome, "done");
+  const wake = readEvents(result.events).find((e) => e.kind === "wake");
+  assert.deepEqual([wake.to, wake.ok], [null, null]);
+  assert.match(wake.why, /problems/);
+  assert.equal(executor.notifications.length, 0);
+
+  // One that failed is the case the steward is there for.
+  const none = { defaultRole: roster.defaultRole, roles: { [roster.defaultRole]: roster.roles[roster.defaultRole] } };
+  const broken = watched();
+  const failed = await runFlow(itemGlance, { roster: none, logDir, executor: broken, cwd: "C:/work", caller: null, input: INPUT, stewards });
+  assert.equal(failed.outcome, "failed");
+  assert.deepEqual([broken.notifications.length, broken.notifications[0]?.agentId], [1, "steward-1"]);
 });
 
 test("where it runs: the directory it is given, else the run's own", async () => {

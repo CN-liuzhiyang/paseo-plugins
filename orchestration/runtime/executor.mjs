@@ -6,7 +6,9 @@
 // run a whole flow without spending anything, and so moving execution into
 // the daemon one day replaces this file and nothing else.
 //
-//   ask(request)          run an agent to completion; resolves to its structured output
+//   ask(request)          run an agent to completion; resolves to its structured output. With `maxRetries: 0` a reply that
+//                         does not fit rejects (PaseoCliError, code OUTPUT_SCHEMA_FAILED, details.lastResponse) instead of being asked for again
+//   send({ agentId, prompt, schema, timeout, file })   another turn for that agent, same shape of result and failure; absent on an executor that cannot
 //   spawn(request)        start an agent without waiting; resolves to { agentId }
 //   findAgent(labels)     id of the agent carrying every one of these labels, or null
 //   inspect(agentId)      { status, usage: { usd, inputTokens, outputTokens } | null }
@@ -17,12 +19,16 @@
 //   providerAvailable(family)               true when Paseo lists it as available and enabled
 //   listWorkspaces()                        [{ workspaceId, name, cwd }], hidden ones too
 //   createWorkspace({ cwd, title })         { workspaceId } of a new background workspace on cwd
+//   notify(agentId, text, { file, timeoutMs })   a message into that agent's current turn (steer), not waited for; local daemon only
+//   listAgents(labels)                      [{ id, name, status, cwd }] of the agents (not archived, background ones too) with every label
 //
 // A request is { provider, thinking, mode, title, labels, prompt, cwd } plus,
 // for ask, { schema, timeout }, and `workspace` (a workspace id) when the agent
 // is to be started in that workspace. A workspace's agents all work in the
 // workspace's own directory: `paseo run --workspace` ignores --cwd.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { runPaseo, runPaseoJson } from "./paseo-cli.mjs";
 import { cutTitle } from "./workspaces.mjs";
 
@@ -58,11 +64,32 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
   return {
     // `--output-schema` makes stdout the agent's structured output, with no
     // agent id in it; the runner finds the agent again by its labels.
+    // `maxRetries` 0: the CLI hands back a reply that does not fit instead of asking again itself, and the runner
+    // sends back only what is wrong (answer.mjs). Left out, the CLI retries as it always did.
     ask: (request) =>
       runJson(
-        ["run", ...agentArgs(request), ...where(request.cwd), "--wait-timeout", request.timeout, "--output-schema", JSON.stringify(request.schema), request.prompt],
+        [
+          "run",
+          ...agentArgs(request),
+          ...where(request.cwd),
+          "--wait-timeout",
+          request.timeout,
+          "--output-schema",
+          JSON.stringify(request.schema),
+          ...(request.maxRetries === undefined ? [] : ["--max-retries", String(request.maxRetries)]),
+          request.prompt,
+        ],
         opts(request.cwd),
       ),
+
+    // Another turn for an agent that already answered, with its own schema. The prompt goes in a file because `send`
+    // can read one, and an argument is capped (paseo-cli.mjs). The file is read by the CLI process, which is on this
+    // machine whichever host the agent is on.
+    send: async ({ agentId, prompt, schema, timeout, file }) => {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, prompt, "utf8");
+      return runJson(["send", agentId, "--prompt-file", file, "--output-schema", JSON.stringify(schema), "--max-retries", "0", "--wait-timeout", timeout], opts());
+    },
 
     // Paseo rejects --output-schema with --background, so only unstructured
     // agents (the gate's carrier) are spawned.
@@ -81,6 +108,24 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       return found[0]?.id ?? null;
     },
 
+    // `-g`, `--background`: the steward's workspace is a background one. Without `-a` an archived agent is not listed. The rows are
+    // { id, name, provider, status, cwd, ... } (cli/src/commands/agent/ls.ts), the cwd with the home directory shortened to "~".
+    listAgents: async (labels) => {
+      const args = ["ls", "-g", "--background"];
+      for (const [key, value] of Object.entries(labels)) args.push("--label", `${key}=${value}`);
+      const rows = (await runJson(args, opts())) ?? [];
+      return rows.map((row) => ({ id: row.id, name: row.name ?? null, status: row.status ?? null, cwd: typeof row.cwd === "string" ? row.cwd : null }));
+    },
+
+    // The wake-up (wake.mjs). Into the turn the agent is in, not after it and not in place of it (`--behavior steer`), and not waited for:
+    // the sender has no use for the answer. Always the local daemon -- the steward is on this machine whichever host the run's agents are on --
+    // so no `--host`. The text goes in a file for the same reason as in `send`.
+    notify: async (agentId, text, { file, timeoutMs = 30_000 }) => {
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, text, "utf8");
+      await runJson(["send", agentId, "--prompt-file", file, "--behavior", "steer", "--no-wait"], { timeoutMs });
+    },
+
     // `inspect --json` is PascalCase, unlike `ls --json`. LastUsage is the
     // last turn, which for one structured call is the whole call. Codex
     // reports CostUsd 0 with real token counts; it is passed on as is.
@@ -89,6 +134,7 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       const usage = detail?.LastUsage ?? null;
       return {
         status: detail?.Status ?? null,
+        archived: typeof detail?.Archived === "boolean" ? detail.Archived : null,
         usage: usage
           ? { usd: usage.CostUsd ?? null, inputTokens: usage.InputTokens ?? null, outputTokens: usage.OutputTokens ?? null }
           : null,

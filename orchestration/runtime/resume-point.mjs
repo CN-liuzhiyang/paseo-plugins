@@ -53,7 +53,7 @@ export function pointProblems(point) {
 export const pointOf = (point) => ({ flow: point.flow, input: point.input, from: point.from, spends: point.spends });
 
 /** Keys in the order of their names, at every depth: the same value however it was written. (The same as reconcile's `canonical`; EVENTS.md says what it is.) */
-function canonical(value) {
+export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.keys(value)

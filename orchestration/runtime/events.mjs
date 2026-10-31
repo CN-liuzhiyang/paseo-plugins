@@ -187,8 +187,12 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const agents = new Map(); // callId -> agentId from call.agent
   const endedOk = new Set(); // calls whose call.end said ok
   const archived = new Set(); // calls that have a call.archive
+  const agentOf = new Map(); // callId -> the agent it ended with
+  const fixRound = new Map(); // callId -> round of its latest call.fix
+  const fixedRound = new Map(); // callId -> round of its latest call.fixed
   const caveatTexts = new Set();
   let runEnd = null;
+  let wakeSeen = false;
 
   events.forEach((event, index) => {
     need(event, event.v === EVENTS_VERSION, `v is ${event.v}, expected ${EVENTS_VERSION}`);
@@ -224,6 +228,14 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         added(event, "resumeOf", isNullableString(event.resumeOf), "resumeOf is not string | null");
         added(event, "resumePrint", event.resumePrint === null || (typeof event.resumePrint === "string" && PRINT_SHAPE.test(event.resumePrint) && event.resumeOf !== null), "resumePrint is not null, or the fingerprint of the point a run that carries on another started from");
+        added(event, "lineage", isString(event.lineage) && event.lineage !== "" && (event.resumeOf !== null || event.lineage === runId), "lineage is not the id of the first run of the line this run belongs to (its own id when it carries nothing on)");
+        added(event, "redo", isNullableString(event.redo) && (event.redo === null || event.resumeOf !== null), "redo is not null, or the name of a step of the line of runs that a run which carries one on does again");
+        added(
+          event,
+          "notify",
+          event.notify === null || (isObject(event.notify) && isString(event.notify.agent) && event.notify.agent !== "" && ["explicit", "caller"].includes(event.notify.via)),
+          "notify is not null | { agent, via: explicit | caller }",
+        );
         break;
       }
       case "phase.start":
@@ -247,10 +259,19 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           break;
         }
         calls.set(event.callId, event);
-        need(event, ["ask", "do", "gate"].includes(event.type), `type "${event.type}" is not ask | do | gate`);
+        need(event, ["ask", "do", "gate", "step"].includes(event.type), `type "${event.type}" is not ask | do | gate | step`);
         need(event, isString(event.name) && isString(event.title), "name / title are not strings");
         need(event, event.phase === null || phases.has(event.phase), `phase ${JSON.stringify(event.phase)} is not null or declared`);
         if (event.type === "gate") need(event, event.name === "gate", 'a gate call is named "gate"');
+        if (event.type !== "do") {
+          // Taken from the journal rather than done: what it was taken from. callId is null for a record that no call of the journal's run made (a probe or `settle` wrote it).
+          const reused = event.reused;
+          added(event, "reused", reused === null || (isObject(reused) && isString(reused.runId) && (isString(reused.callId) || reused.callId === null)), "reused is not null | { runId, callId }");
+        }
+        if (event.type === "step") {
+          need(event, typeof event.once === "boolean", "once is not a boolean");
+          need(event, isString(event.key) && /^[0-9a-f]{16}$/.test(event.key), "key is not the 16 hex digits of the fingerprint of the step's key");
+        }
         if (event.type === "ask") {
           need(event, isNullableString(event.role), "role is not string | null");
           need(event, isString(event.provider), "provider is not a string");
@@ -272,6 +293,13 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
             "headline is not null or a field of schema",
           );
           added(event, "archive", event.archive === null || event.archive === "after", 'archive is not null | "after"');
+          for (const key of ["continues", "revises"]) {
+            const ref = event[key];
+            added(event, key, ref === null || (isObject(ref) && isString(ref.runId) && isString(ref.callId)), `${key} is not null | { runId, callId }`);
+            // Within this run the call it names must have started before this one.
+            if (isObject(ref) && ref.runId === runId) need(event, calls.has(ref.callId), `${key} names ${ref.callId}, which has not started`);
+          }
+          need(event, !(event.continues && event.revises), "a call that continues an agent does not also revise an answer: a new agent revises, the same one continues");
         }
         if (event.type === "gate") {
           for (const key of ["brief", "content", "sha256", "timeout"]) need(event, isString(event[key]), `${key} is not a string`);
@@ -288,7 +316,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
           break;
         }
-        need(event, start.type !== "do", "a do call has no agent");
+        need(event, start.type !== "do" && start.type !== "step", `a ${start.type} call has no agent`);
         need(event, !ended.has(event.callId), "call.agent after the call's call.end");
         need(event, !agents.has(event.callId), "second call.agent for this call");
         need(event, isString(event.agentId) && event.agentId.length > 0, "agentId is not a string");
@@ -310,9 +338,18 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, event.error === null || isError(event.error), "error is not { name, message } | null");
         need(event, event.ok ? event.error === null : event.error !== null, "ok and error disagree");
         need(event, isNullableString(event.agentId), "agentId is not string | null");
-        if (start.type === "do") need(event, event.agentId === null, "a do call has no agent");
+        if (start.type === "do" || start.type === "step") need(event, event.agentId === null, `a ${start.type} call has no agent`);
         if (agents.has(event.callId) && event.agentId !== null) {
           need(event, event.agentId === agents.get(event.callId), "agentId differs from the call's call.agent");
+        }
+        if (event.agentId) agentOf.set(event.callId, event.agentId);
+        {
+          // A call that asked an agent again ends with that agent.
+          const asked = start.continues?.runId === runId ? agentOf.get(start.continues.callId) : undefined;
+          if (asked && event.agentId) need(event, event.agentId === asked, `agentId differs from ${start.continues.callId}'s, which this call continues`);
+        }
+        if (start.type === "ask") {
+          added(event, "rounds", Number.isInteger(event.rounds) && event.rounds >= Math.max(1, fixedRound.get(event.callId) ?? 0), "rounds is not an integer of at least 1, and at least the last round that call.fixed answered");
         }
         need(
           event,
@@ -324,6 +361,43 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           const output = event.output;
           need(event, isObject(output) && GATE_FIELDS.every((key) => key in output), `gate output lacks ${GATE_FIELDS.filter((k) => !(k in (output ?? {}))).join(", ")}`);
           need(event, GATE_OUTCOMES.includes(output?.outcome), `gate outcome "${output?.outcome}" is unknown`);
+        }
+        break;
+      }
+      case "call.fix":
+      case "call.fixed": {
+        const start = calls.get(event.callId);
+        if (!start) {
+          bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
+          break;
+        }
+        const fixing = event.kind === "call.fix";
+        need(event, start.type === "ask", `${event.kind} for a call that is not an ask`);
+        need(event, !ended.has(event.callId), `${event.kind} after the call's call.end`);
+        need(event, Number.isInteger(event.round) && event.round >= 2, "round is not an integer of at least 2 (round 1 is the first answer)");
+        const before = fixRound.get(event.callId) ?? 1;
+        if (fixing) {
+          need(event, event.round > before, "round does not come after the call's earlier call.fix");
+          need(event, (fixedRound.get(event.callId) ?? 1) === before, "call.fix while the call's earlier call.fix has no call.fixed");
+          fixRound.set(event.callId, event.round);
+          need(
+            event,
+            Array.isArray(event.problems) && event.problems.length > 0 && event.problems.every((p) => isObject(p) && isString(p.at) && isString(p.say)),
+            "problems is not a non-empty [{ at, say }]",
+          );
+          need(event, isString(event.prompt) && event.prompt.length > 0, "prompt is missing");
+          need(event, isObject(event.schema), "schema is not an object");
+        } else {
+          need(event, event.round === before && (fixedRound.get(event.callId) ?? 1) < before, "call.fixed is not the answer to the call's latest call.fix");
+          fixedRound.set(event.callId, event.round);
+          need(event, "answer" in event, "answer is missing");
+          need(event, typeof event.ok === "boolean", "ok is not a boolean");
+          need(event, typeof event.durationMs === "number" && event.durationMs >= 0, "durationMs is not a number");
+          need(
+            event,
+            event.cost === null || (isObject(event.cost) && isNullableNumber(event.cost.usd) && isNullableNumber(event.cost.inputTokens) && isNullableNumber(event.cost.outputTokens)),
+            "cost is not { usd, inputTokens, outputTokens } | null",
+          );
         }
         break;
       }
@@ -360,6 +434,19 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, bad.length === 0, `not { cleared: true } and not a resume point: ${bad.join("; ")}`);
         break;
       }
+      case "wake": {
+        need(event, !wakeSeen, "a second wake");
+        wakeSeen = true;
+        need(event, isNullableString(event.to) && (event.to === null || event.to !== ""), "to is not null or an agent id");
+        need(event, [null, "explicit", "caller", "steward"].includes(event.via) && (event.to === null) === (event.via === null), "via is explicit | caller | steward when there is a recipient and null when there is none");
+        need(event, event.to === null ? event.ok === null || event.ok === false : typeof event.ok === "boolean", "ok is a boolean when there is a recipient, and null (false when looking for one failed) when there is none");
+        need(event, isNullableString(event.error) && (event.ok !== false || event.error !== null), "error is a string when delivering failed (ok false) and null or a string otherwise");
+        need(event, isNullableString(event.why), "why is not string | null");
+        need(event, typeof event.started === "boolean" && (!event.started || event.via === "steward"), "started is a boolean, and only a steward is started");
+        need(event, Number.isInteger(event.unseen) && event.unseen >= 0, "unseen is not a non-negative integer");
+        need(event, typeof event.ledger === "boolean", "ledger is not a boolean");
+        break;
+      }
       case "caveat":
         need(event, event.callId === null || calls.has(event.callId), "callId is not null or a started call");
         need(event, isString(event.text), "text is not a string");
@@ -383,8 +470,21 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(
           event,
           outcome === "stopped" ? isObject(event.stop) && isString(event.stop.reason) && isNullableString(event.stop.phase) : event.stop === null,
-          "stop must be { reason, phase } when stopped and null otherwise",
+          "stop must be { reason, phase, kind, step } when stopped and null otherwise",
         );
+        // `kind` was added after files were written: strict wants it, and a reader of older files takes it as absent.
+        if (outcome === "stopped" && isObject(event.stop)) {
+          const { kind, step } = event.stop;
+          if (!("kind" in event.stop) && !("step" in event.stop)) {
+            if (strict) bad(event, "stop.kind is missing");
+          } else {
+            need(
+              event,
+              ["flow", "check", "unknown"].includes(kind) && (kind === "flow" ? step === null : isString(step) && step !== ""),
+              "stop.kind is flow (step null), check or unknown (step the name of the step)",
+            );
+          }
+        }
         need(
           event,
           outcome === "failed" || outcome === "timeout" ? isError(event.error) : event.error === null,

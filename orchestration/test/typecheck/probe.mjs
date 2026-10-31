@@ -1,6 +1,6 @@
 // Each @ts-expect-error below is a mistake the editor must catch; tsc fails
 // if any of them stops being an error.
-import { flow, define, text, choice, list, group, flag } from "../../runtime/flow.mjs";
+import { flow, define, text, choice, list, group, flag, pointer } from "../../runtime/flow.mjs";
 
 const analyze = define({
   name: "analyze",
@@ -40,6 +40,25 @@ export default flow({
     if (answer.confidence === "certain") return null;
     // @ts-expect-error mode is gone
     await $.ask(analyze, { question }, { role: "planner", mode: "auto" });
+    await $.ask(analyze, { question }, { check: (a) => (a.confidence === "low" ? [{ at: pointer("items", 0, "target"), say: "name the file" }] : null), fixes: 1 });
+    await $.ask(analyze, { question }, { check: async (a) => (a.items.length > 0 ? undefined : "no items") });
+    // @ts-expect-error a check reads the step's answer, so a misspelled field is caught
+    await $.ask(analyze, { question }, { check: (a) => a.diagnosys });
+    // @ts-expect-error a problem is { at, say }
+    await $.ask(analyze, { question }, { check: () => [{ where: "/a", say: "x" }] });
+    // @ts-expect-error fixes is a number
+    await $.ask(analyze, { question }, { fixes: "2" });
+    const next = await $.again(answer, "name the file");
+    /** @type {"low" | "medium" | "high"} */
+    const again = next.confidence;
+    await $.again(answer, analyze, { question }, { check: null, archive: null, fresh: false });
+    await $.again(answer, "redo", { fresh: true, role: "worker", check: (a) => (a.items.length > 0 ? [] : "no items") });
+    // @ts-expect-error the question is a string
+    await $.again(answer, 42);
+    // @ts-expect-error a misspelled field of the answer is caught in the check
+    await $.again(answer, "redo", { check: (a) => a.diagnosys });
+    // @ts-expect-error fresh is true or false
+    await $.again(answer, "redo", { fresh: "yes" });
     // @ts-expect-error phase id not declared
     await $.phase("debate", async () => null);
     // @ts-expect-error inputs are the declared ones
@@ -77,7 +96,60 @@ export default flow({
     await $.resumeWith({ flow: "C:\\flows\\build-resume", input: {}, from: "x", spends: "nothing" });
     // @ts-expect-error a point is an object or null
     await $.resumeWith("build-resume");
-    return { d, c, ok };
+    // In a flow that runs again by itself, a point is only what differs from that.
+    await $.resumeWith({ from: "核对已过：从回填接着", spends: "nothing" });
+    // @ts-expect-error spends is one of two words
+    await $.resumeWith({ spends: "sometimes" });
+    // @ts-expect-error another flow is the whole point
+    await $.resumeWith({ flow: "other" });
+
+    const built = await $.step("build", () => ({ n: 1 }), { key: { question }, still: (value) => value.n > 0 });
+    /** @type {number} */
+    const n = built.n;
+    // @ts-expect-error the value of a step is what its function returns
+    built.m;
+    // @ts-expect-error still reads the step's value
+    await $.step("build", () => ({ n: 1 }), { still: (value) => value.m > 0 });
+    // @ts-expect-error a step is named
+    await $.step(() => 1);
+    // @ts-expect-error a step has a function
+    await $.step("build", 1);
+    // @ts-expect-error once is true or false
+    await $.step("commit", () => 1, { once: "yes" });
+    // @ts-expect-error a probe finds the step's value when it was done
+    await $.step("commit", () => ({ n: 1 }), { once: true, probe: () => ({ done: true }) });
+    const committed = await $.step("commit", (given) => ({ ok: given.approved }), {
+      once: true,
+      before: () => $.gate({ title: "t", content: "c", input: { label: "验证码" } }),
+      probe: () => ({ done: false }),
+    });
+    /** @type {boolean} */
+    const approved = committed.ok;
+    // @ts-expect-error what before returns is what the step's function is given
+    await $.step("send", (given) => given.nothing, { once: true, before: () => $.gate({ title: "t", content: "c" }) });
+    await $.ask(analyze, { question }, { reuse: (a) => a.confidence === "low" });
+    // @ts-expect-error reuse reads the step's answer
+    await $.ask(analyze, { question }, { reuse: (a) => a.diagnosys });
+    /** @type {string} */
+    const line = $.ctx.lineage;
+    /** @type {boolean} */
+    const resumed = $.ctx.resumed;
+    return { d, c, ok, n, approved, line, resumed };
   },
   summarize: (value, { outcome }) => `${outcome}: ${value.d}`,
+  resume: "auto",
+  wake: "problems",
+});
+
+flow({
+  name: "quiet",
+  description: "d",
+  phases: [],
+  inputs: {},
+  grants: [],
+  // @ts-expect-error wake is "problems" or left out
+  wake: "always",
+  async run() {
+    return 1;
+  },
 });

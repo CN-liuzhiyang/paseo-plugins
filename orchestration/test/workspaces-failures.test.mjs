@@ -3,12 +3,12 @@
 // before an agent exists, parallel gates, a lock that fails, directory spellings,
 // the title. Same fake daemon as workspaces.test.mjs.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runFlow } from "../runtime/run.mjs";
 import { flow, define, text } from "../runtime/flow.mjs";
@@ -19,6 +19,7 @@ import { PaseoCliError } from "../runtime/paseo-cli.mjs";
 import { fakeExecutor, refusalError } from "./fake-executor.mjs";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 before(async () => {
@@ -48,7 +49,7 @@ const gateOnly = flow({
 
 const AFFAIR = { label: "Release 2.4 · blocked", link: { plugin: "tracker", screen: "case", params: { id: "24" } } };
 
-const freshLogDir = () => mkdtemp(path.join(os.tmpdir(), "orch-wsf-"));
+const freshLogDir = () => tempDir("orch-wsf-");
 
 const run = (target, { logDir, ...options }) =>
   runFlow(target, { roster, logDir, cwd: "C:/work", caller: null, gatePollMs: 5, agentProbeDelays: [5], ...options });

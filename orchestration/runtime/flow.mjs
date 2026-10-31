@@ -22,6 +22,7 @@ import { loadRoster } from "./roster.mjs";
 import { FENCES } from "./fences.mjs";
 
 export { define, text, flag, count, choice, list, group } from "./step.mjs";
+export { pointer, CheckFailed } from "./answer.mjs";
 
 const FLOW = Symbol.for("paseo-orchestration.flow");
 
@@ -42,7 +43,7 @@ export const GRANTS = {
 };
 
 /** Inputs share a namespace with the runner's own flags. */
-const RESERVED_INPUTS = ["input", "timeout", "host", "cwd", "help", "runId", "affair"];
+const RESERVED_INPUTS = ["input", "timeout", "host", "cwd", "help", "runId", "affair", "notify", "detach"];
 
 const ID = /^[a-z][a-z0-9-]*$/;
 const INPUT_NAME = /^[a-z][a-zA-Z0-9]*$/;
@@ -62,9 +63,9 @@ function fail(name, message) {
  */
 export function flow(definition) {
   if (!definition || typeof definition !== "object") throw new TypeError("flow() needs a definition object");
-  const { name, description, phases, inputs, grants, run, summarize } = definition;
+  const { name, description, phases, inputs, grants, run, summarize, resume, wake } = definition;
 
-  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize"].includes(key));
+  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize", "resume", "wake"].includes(key));
   if (unknown.length > 0) fail(name, `unknown key ${unknown.join(", ")}`);
   if (typeof name !== "string" || !ID.test(name)) fail(name, `name must match ${ID}`);
   if (typeof description !== "string" || description.trim() === "") fail(name, "description is required");
@@ -109,6 +110,11 @@ export function flow(definition) {
   if (summarize !== undefined && typeof summarize !== "function") {
     fail(name, "summarize must be a function (value, { outcome }) => string");
   }
+  // "auto" is the flow's promise that everything it cannot take back is in a `once` step (CONVENTIONS.md): only then is running
+  // it again, with the same input, a way to carry it on.
+  if (resume !== undefined && resume !== "auto") fail(name, 'resume is "auto" or left out');
+  // Whom the end of a run is told to is not the flow's to say (wake.mjs); only how much of it the steward hears.
+  if (wake !== undefined && wake !== "problems") fail(name, 'wake is "problems" (the steward is told only of runs that did not come to done) or left out');
 
   return Object.freeze({
     [FLOW]: true,
@@ -119,6 +125,8 @@ export function flow(definition) {
     grants: Object.freeze([...grants]),
     run,
     summarize: summarize ?? null,
+    resume: resume ?? null,
+    wake: wake ?? null,
   });
 }
 
@@ -150,6 +158,75 @@ export function scanSource(f, source) {
 }
 
 /**
+ * The top-level arguments of the call whose `(` is at `open`, as source text, or null when the parentheses do not balance. Strings,
+ * template literals and comments are skipped over; a regular expression literal with a quote or bracket in it is not understood (the
+ * scan then gives up or misreads, which only costs a warning).
+ */
+function callArguments(source, open) {
+  const args = [];
+  let depth = 0;
+  let from = open + 1;
+  const skipString = (i, quote) => {
+    for (i += 1; i < source.length; i += 1) {
+      if (source[i] === "\\") i += 1;
+      else if (source[i] === quote) return i;
+      else if (quote === "`" && source[i] === "$" && source[i + 1] === "{") i = skipBraces(i + 1);
+    }
+    return source.length;
+  };
+  const skipBraces = (i) => {
+    let level = 0;
+    for (; i < source.length; i += 1) {
+      const c = source[i];
+      if (c === '"' || c === "'" || c === "`") i = skipString(i, c);
+      else if (c === "{") level += 1;
+      else if (c === "}" && (level -= 1) === 0) return i;
+    }
+    return source.length;
+  };
+  for (let i = open; i < source.length; i += 1) {
+    const c = source[i];
+    if (c === '"' || c === "'" || c === "`") i = skipString(i, c);
+    else if (c === "/" && source[i + 1] === "/") i = source.indexOf("\n", i) === -1 ? source.length : source.indexOf("\n", i);
+    else if (c === "/" && source[i + 1] === "*") i = source.indexOf("*/", i) === -1 ? source.length : source.indexOf("*/", i) + 1;
+    else if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        args.push(source.slice(from, i));
+        return args;
+      }
+    } else if (c === "," && depth === 1) {
+      args.push(source.slice(from, i));
+      from = i + 1;
+    }
+  }
+  return null;
+}
+
+/**
+ * Warnings for a `once` step whose function asks a card for a value (`$.step("x", fn, { once: true })` with `.gate({ ..., input })` in
+ * the inline `fn`): the card belongs in `before` (CONVENTIONS.md). A text scan like `scanSource`: a function that is not written
+ * inline in the call, or a gate built elsewhere, is not seen -- the run says the same at the moment it happens.
+ */
+export function scanOnceGates(source) {
+  const warnings = [];
+  for (const match of source.matchAll(/\.step\s*\(/g)) {
+    const args = callArguments(source, match.index + match[0].length - 1);
+    if (!args || args.length < 3 || !/\bonce\s*:\s*true\b/.test(args[2])) continue;
+    const name = /^\s*["'`]([^"'`]+)["'`]/.exec(args[0])?.[1] ?? "?";
+    for (const gate of args[1].matchAll(/\.gate\s*\(/g)) {
+      const inner = callArguments(args[1], gate.index + gate[0].length - 1);
+      if (inner && /\binput\s*:/.test(inner.join(","))) {
+        warnings.push(`the once step "${name}" asks a card for a value inside its function: put the card in the step's \`before\`, so that a run cut off while the person decides is not read as one that may have done it`);
+        break;
+      }
+    }
+  }
+  return [...new Set(warnings)];
+}
+
+/**
  * A flow module's default export, with its path and source text. A flow
  * value passes through (source and text are null then).
  */
@@ -168,6 +245,7 @@ export const NOT_CHECKED = [
   "prompts: rendering one needs an input; a prompt that reads a field its caller does not pass throws at call time, before the call starts",
   "steps defined inside run(), and steps of a module that was already imported in this process",
   "phase ids and gates spelled other than $.phase(\"id\", ...) and .gate(...): the scan is textual",
+  "a card that asks for a value inside a once step's function, when the function is not written in the $.step(...) call itself",
   "whether a structured answer fits the flow's use of it: Paseo enforces the schema, the flow's logic is not run",
 ];
 
@@ -193,6 +271,7 @@ export async function checkFlow(target, { roster } = {}) {
     .map((s) => ({ name: s.name, title: s.title ?? null, headline: s.headline, effects: s.effects, timeout: s.timeout ?? null, fingerprint: s.fingerprint }));
   const problems = text === null ? [] : scanSource(f, text);
   const warnings = steps.filter((s) => s.timeout === null).map((s) => `step "${s.name}" declares no timeout (R7); it gets the 30m default`);
+  if (text !== null) warnings.push(...scanOnceGates(text));
 
   const roles = roster ?? (await loadRoster());
   for (const [name, entry] of Object.entries(roles.roles)) {

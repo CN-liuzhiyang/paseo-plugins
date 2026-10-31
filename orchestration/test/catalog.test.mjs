@@ -1,23 +1,23 @@
 // `orch.mjs list`: the flows that exist, as data. Nothing here talks to Paseo and nothing is spent.
 //
-//   node --test        (from orchestration/)
+//   npm test        (from orchestration/)
 
+import "./hermetic.mjs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { listFlows } from "../runtime/catalog.mjs";
 import { FLOWS_DIR } from "../runtime/resolve.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
-const tmp = () => mkdtemp(path.join(os.tmpdir(), "orch-catalog-"));
+const tmp = () => tempDir("orch-catalog-");
 
 const FLOW_MODULE = JSON.stringify(pathToFileURL(path.join(HERE, "..", "runtime", "flow.mjs")).href);
 
@@ -95,6 +95,6 @@ test("catalog: `orch.mjs list` prints it as JSON, and takes no argument", async 
   writeFileSync(config, JSON.stringify({ flowsDirs: [dir] }));
   const { stdout } = await exec(process.execPath, [orch, "list"], { env: { ...process.env, ORCH_CONFIG: config } });
   const names = JSON.parse(stdout).flows.map((f) => f.name);
-  assert.deepEqual(names, ["advisor", "committee", "gate-smoke", "item-glance", "resume-smoke", "triage"]);
+  assert.deepEqual(names, ["advisor", "again-smoke", "answer-smoke", "committee", "gate-smoke", "item-glance", "resume-smoke", "triage"]);
   await assert.rejects(exec(process.execPath, [orch, "list", "extra"], { env: { ...process.env, ORCH_CONFIG: config } }), (error) => error.code === 2);
 });

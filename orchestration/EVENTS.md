@@ -117,6 +117,9 @@
 | `affair` | `{ label, url?, link?, key? }` \| null | 这次运行属于哪件事，调用方给的（`orch.mjs run --affair '<json>'`，选项 `affair`），原样记在这里；没给为 null。后加的字段（2026-10-23），旧文件没有，读者按 null 处理。形状见下 |
 | `resumeOf` | string \| null | 这次运行接着的是哪一次运行（`orch.mjs resume <runId>`，选项 `resumeOf`），那一次的 runId；不是接着跑的为 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 | `resumePrint` | string \| null | 接着跑的运行是从哪个续跑点起的：那个点的**流程名和输入**的指纹（SHA-256 的前 16 位十六进制，对 `{ flow, input }` 的规范 JSON——每一层的键按名字排序——取；`resume-point.mjs` 的 `pointPrint`）。不是接着跑的为 null。读者拿它和自己给人看过的点的指纹比，就知道起来的是不是给人看的那个。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `lineage` | string | 这次运行属于的那条"线"：一个运行和接着它跑的那些运行共用一份日志（见下面"日志"），线以第一个运行的 runId 为名。不接着谁跑的运行，`lineage` 就是自己的 runId；接着跑的运行取它接着的那一次的 `lineage`。后加的字段（2026-10-31），旧文件没有，读者按 `runId` 处理 |
+| `redo` | string \| null | 接着跑时要求重做的步骤名（`orch.mjs resume --redo <步骤>`）：这一步和它之后能撤回的记录这次都当没有；不是则 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `notify` | `{ agent, via }` \| null | 运行结束时要告诉的会话：`via` 是 `explicit`（`orch.mjs run --notify <agent>`，选项 `notify`）或 `caller`（`--detach` 起的后台运行，告诉起它的那个会话）。都没有为 null——负责的会话（steward）不在这里，它由配置和 flow 名定，结果记在 `wake` 事件里。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
 `affair` 是通用的，运行时不认识任何具体的插件或事务种类，只检查形状；界面只画它拿到的：
 
@@ -163,6 +166,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 或者 `{ cleared: true }`（`$.resumeWith(null)`）：flow 把之前的声明收回了，这个运行没有可接的地方。
 
+- `resume: "auto"` 的流程不用自己声明：运行一开始运行时就记一条"用同样的输入再跑一遍这个流程"（`spends: "maybe"`），`from` 是运行时按日志写的一句话（"前面 N 步沿用……"），日志每多一条记录就按新情况重写一次、再发一行 `resume`。流程自己调 `$.resumeWith({ ... })` 给的字段盖在它上面（只给 `from` 就不再被重写），`$.resumeWith(null)` 收回。
 - **最后一次为准。** 不合格的声明（流程名是路径或找不到、输入对不上那个流程、`from` 不合规、秘密值）**不写这一行**，写一条
   `log` warn 和一条 `caveat`（`resume: …`），运行不因此失败，之前的声明照旧。
 - 读者读到的"现在能怎么接"，对**没写出 `run.end`** 的运行（`lost`）就是最后一行 `resume`；对已经结束的就读 `run.end.resume`。
@@ -179,19 +183,34 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 ### `call.start`
 
-一次调用：agent 调用（`ask`）、脚本自己的动作（`do`）、人闸（`gate`）。
+一次调用：agent 调用（`ask`）、脚本自己的动作（`do`）、人闸（`gate`）、流程里做一次的一步（`step`，后加，2026-10-31）。
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
 | `callId` | string | 本次运行内唯一（运行时写成 `c1`、`c2`……，按开始顺序）。Paseo 上的 agent 带 `orch-run=<runId>` 和 `orch-call=<callId>` 两个标签，两个一起才唯一 |
-| `type` | `"ask"` \| `"do"` \| `"gate"` | |
+| `type` | `"ask"` \| `"do"` \| `"gate"` \| `"step"` | |
 | `name` | string | `ask`：step 名；`do`：动作名；`gate`：`"gate"` |
-| `title` | string | 给人看的标题。`ask`：调用点的 `$.ask(step, input, { title })` → step 的 `define({ title })` → `` `[${name}]` ``，取第一个有的，截到 120 字符，和发给 Paseo 的 agent 标题（`--title`）是同一个值；`do`：`$.do(name, fn, { title })` 的 `title`，没给就等于 `name`；`gate`：`$.gate` 的 `title`，截到 120 字符 |
+| `title` | string | 给人看的标题。`ask`：调用点的 `$.ask(step, input, { title })` → step 的 `define({ title })` → `` `[${name}]` ``，取第一个有的，截到 120 字符，和发给 Paseo 的 agent 标题（`--title`）是同一个值；`do`：`$.do(name, fn, { title })` 的 `title`，没给就等于 `name`；`gate`：`$.gate` 的 `title`，截到 120 字符；`step`：`$.step(name, fn, { title })` 的 `title`，没给就等于 `name` |
 | `phase` | string \| null | 所在阶段，不在任何阶段内为 null |
 
 所有 `timeout` 字段是运行时 `parseDuration` 接受的格式：正则 `^\d+(s|m|h)$`，即一个非负整数紧跟一个单位
 `s`（秒）、`m`（分）、`h`（时），例如 `90s`、`12m`、`2h`。没有小数、空格、组合（`1h30m` 不合法）。
 `ask` 的是单次调用的上限（step 的 `timeout`，没写时为 `30m`）；`gate` 的是等人的上限（默认 `2h`）。
+
+`ask`、`gate`、`step` 另有（后加，2026-10-31，缺省 null）：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `reused` | `{ runId, callId }` \| null | 这次调用没有做，是从日志里拿了前面某次运行的结果：那次运行的 `runId` 和它当时的 `callId`（那条记录不是某次调用写的——探查或 `orch.mjs settle` 写的——时 `callId` 为 null）。拿来的 `ask`：没有起 agent，`archive` 为 null，`call.end.cost` 为 null，`call.agent` 和 `call.end.agentId` 是**当初给出这个答案的 agent**（让人能点进去看），不是这次起的；拿来的 `gate`：没有起载体、没有问人，`call.end.output` 是人当时的判定对象原样（含当时的 `decidedAt`）；拿来的 `step`：函数没有跑，`call.end.output` 是当时的值。不是拿来的为 null |
+
+`type: "step"` 另有：
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `once` | boolean | `$.step` 的 `once`：这一步不能撤回（开始前先落盘，开始了没有结果就不凭猜测再做一遍） |
+| `key` | string | `$.step` 的 `key` 的指纹，16 位十六进制（没给 `key` 就是 null 的指纹） |
+
+`step` 没有 agent：`call.end.agentId` 与 `cost` 为 null。`step` 里面的 `ask`、`gate` 是它的子调用，各有各的 `call.start`（`step` 是从日志拿的，就没有这些子调用）。
 
 `type: "ask"` 另有：
 
@@ -208,6 +227,8 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `timeout` | string | |
 | `archive` | `"after"` \| null | 调用点的 `$.ask(step, input, { archive })`：flow 要求这次调用交卷以后归档它的 agent。没要求为 null。后加的字段（2026-10-29），旧文件没有，读者按 null 处理 |
 | `headline` | string \| null | step 的 `define({ headline })`：`schema.properties` 里的一个键，说明回答里哪个字段可以当这次调用的一句话（界面在节点上显示 `call.end.output[headline]`）。step 没声明时为 null。运行时写的每条 `ask` 都有这个字段；之前写的文件没有，读者按 null 处理 |
+| `continues` | `{ runId, callId }` \| null | `$.again` 接着问的是哪次调用的 agent：同一个 agent，对话接着往下。现在总是本次运行里的调用（`runId` 是本次的）。这时 `call.agent` 在 `call.start` 之后立刻发，`call.end.agentId` 与那次调用的相同。普通 `$.ask` 为 null。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
+| `revises` | `{ runId, callId }` \| null | `$.again` 起的是**新** agent（flow 要求 `fresh: true`，或原来的 agent 已经不在、CLI 太旧而退回）：它改的是哪次调用的答案，上一版放在 `<runDir>/answers/<callId>.json`，提示词里说了。和 `continues` 不会同时有。后加的字段（2026-10-31），缺省 null |
 
 `type: "gate"` 另有：
 
@@ -243,9 +264,10 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `callId` | string | |
 | `agentId` | string | |
 
-- 只有 `ask` 和 `gate` 会有；`do` 没有。
+- 只有 `ask` 和 `gate` 会有；`do`、`step` 没有。从日志拿来的 `ask` 在 `call.start` 之后立刻发一条，`agentId` 是当初那个 agent。
 - 每个调用**最多一条**，而且一定在该调用的 `call.end` 之前；调用结束后不再为它发。
-- `gate` 在载体 agent 起来之后立刻发。`ask` 的 agent id 不会随 `run --output-schema` 返回，运行时在后台按
+- **一个 agent 可以对应多个调用**：`$.again` 接着问的调用带着同一个 agent（`call.start.continues` 指向前一次）。按 `agentId` 归并调用的读者要处理这一点；一个调用对应一个 agent 仍然成立。
+- `gate` 在载体 agent 起来之后立刻发。`$.again` 接着问的 `ask` 在 `call.start` 之后立刻发（agent 是已知的，中间至多隔几条 `caveat`）。别的 `ask` 的 agent id 不会随 `run --output-schema` 返回，运行时在后台按
   标签找：调用开始后约 3 秒找第一次，找不到就隔一段再试，总共最多 5 次（约 78 秒内）。所以短调用、
   或者一直没找到的调用，**可能没有** `call.agent`——那时以 `call.end.agentId` 为准。
 - 两条都有时，`call.end.agentId` 与 `call.agent.agentId` 相同。
@@ -257,10 +279,11 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `callId` | string | |
 | `ok` | boolean | |
 | `durationMs` | number | |
-| `output` | any | `ask`：schema 形状的结构化结果（回答不合 schema 时调用记失败，`error.name` 为 `"OutputMismatch"`，`output` 是原样收到的回答）；`do`：返回值（可 JSON 化，过长的字符串会被截断并加 `"…(truncated N chars)"`）；`gate`：判定对象，见下 |
+| `output` | any | `ask`：schema 形状的结构化结果，即核对过、合并过的最终答案（没有可以打回的路时回答不合 schema，调用记失败，`error.name` 为 `"OutputMismatch"`；打回用完仍不过，`error.name` 为 `"CheckFailed"`；两种情况 `output` 都是最后手里那份答案）；`do`：返回值（可 JSON 化，过长的字符串会被截断并加 `"…(truncated N chars)"`）；`step`：函数返回的值（也是 JSON，同样的截断）；`gate`：判定对象，见下 |
 | `error` | `{ name, message }` \| null | |
-| `agentId` | string \| null | 这次调用对应的 Paseo agent（`ask`、`gate` 有；`do` 为 null；查不到时为 null） |
-| `cost` | `{ usd: number \| null, inputTokens: number \| null, outputTokens: number \| null }` \| null | 该 agent 的 `LastUsage`。失败的调用照样有（钱已经花了）。Codex 的 `usd` 是 0，照实给 |
+| `agentId` | string \| null | 这次调用对应的 Paseo agent（`ask`、`gate` 有；`do`、`step` 为 null；查不到时为 null）。从日志拿来的 `ask` 是当初的 agent |
+| `cost` | `{ usd: number \| null, inputTokens: number \| null, outputTokens: number \| null }` \| null | 该 agent 的 `LastUsage`；`ask` 打回过的，是每一轮 `LastUsage` 之和（每一轮单独的在 `call.fixed.cost`）。失败的调用照样有（钱已经花了）。Codex 的 `usd` 是 0，照实给 |
+| `rounds` | number | 仅 `ask`：作答了几轮，1 是一次过；打回一次是 2。失败的调用也有（第一轮没交出答案算 1）。后加的字段（2026-10-31），旧文件没有，读者按 1 处理 |
 
 每个 `call.start` 都有且只有一条 `call.end`。运行结束时还没结束的调用（总超时，或 flow 抛错时没等它），
 在 `run.end` 之前补一条：`ok: false`，`error.name` 为 `"RunEnded"`，`agentId` 照常查。那个 agent
@@ -320,6 +343,31 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `"nobody (the run ended)"` | `error`（后加）：运行结束（总超时、`$.stop`、flow 抛错）时这个闸还在等人。运行器对卡片发 deny、停载体，不读任何回执和值，`reason` 写明运行以什么结束 |
 | `"nobody (the receipt and the answer record disagree)"` | `error`（后加）：`provider` 载体有回执，应答记录却不是 `allow`（缺失、出错或是拒绝），`reason` 写明记的是什么；或者反过来，记的是 `allow`、回执却没写出来（`reason` 是 `an allow was recorded but the receipt was not written`） |
 
+### `call.fix` 和 `call.fixed`
+
+`$.ask` 的答案不合 schema，或者 flow 给的 `check` 指出了问题时，运行时在**同一个 agent** 里只把出问题的几处发回去改（`paseo send`），最多 `fixes` 轮（缺省 2）。后加的事件（2026-10-31）。`call.fix` 在发出去**之前**写，让运行视图马上能显示"第 2 轮：在改 /edits/4"；`call.fixed` 在这一轮交回来之后写。
+
+| `call.fix` 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId` | string | 一定是 `ask` |
+| `round` | number | 这一轮的序号，从 2 起（第 1 轮是原来那次作答）；同一个调用里递增 |
+| `problems` | `{ at, say }[]` | 要改的地方：`at` 是 JSON 指针（`/edits/4/old`），`""` 是整份答案；`say` 是发给模型的一句话。非空 |
+| `prompt` | string | 发出去的消息全文。**不含 schema**：CLI 会把 `schema` 字段拼在它后面 |
+| `schema` | object | 这一轮的回答要符合的 schema：只含出问题的几处（`{ f1, f2, … }`，每个是原 schema 里那一处的子 schema），或者整份答案时就是 step 的 schema |
+
+| `call.fixed` 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId`、`round` | | 同它的 `call.fix` |
+| `answer` | any | 这一轮交回来的原样：读出的 JSON（只含 `f1`…，整份时是整份答案）；读不出 JSON 时是 agent 写的原文（字符串）；都没有为 null |
+| `ok` | boolean | 交回来的是 JSON，而且合这一轮的 schema。不合的地方保持原样，下一轮再问 |
+| `cost` | 同 `call.end.cost` | 这一轮的 `LastUsage` |
+| `durationMs` | number | |
+
+- 每个 `call.fix` 之后最多一条 `call.fixed`；发送失败（agent 不在了、超时）时没有，错误在 `call.end` 里，那一轮的钱照样记进 `call.end.cost`。
+- 都在该调用的 `call.end` 之前；运行已经定了结局之后不再发（调用已经被补了 `RunEnded`）。
+- 一个 `ask` 调用里这几条和 `call.agent` 对应的是**同一个 agent**：打回不起新 agent。`$.again` 接着问的调用，打回也在那个 agent 里。
+- 运行时没法打回的情况（Paseo CLI 太旧，没有 `send --output-schema` / `--max-retries`，或找不到这次调用的 agent）不写这两个事件，写一条 caveat：该 CLI 自己重试不合 schema 的回答，`check` 指出的问题发不回去，调用以 `CheckFailed` 结束。
+
 ### `call.archive`
 
 `$.ask` 带 `archive: "after"` 且这次调用成功（`call.end.ok` 为 true）时，运行时在交卷之后试着归档它的 agent（`paseo archive`，不加 `--force`），**不管成没成都写一条**。后加的事件（2026-10-29）。
@@ -353,17 +401,43 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `level` | `"info"` \| `"warn"` \| `"error"` | |
 | `message` | string | |
 
+### `wake`
+
+运行结束时告诉谁、告诉成没成，一次运行最多一行，写在 `run.end` **之前**一刻（后加的事件，2026-10-31）。要告诉的人是这样定的，先到先得：
+`run.start.notify`（`--notify`，或 `--detach` 起它的会话）→ 前台起它的会话（`run.start.caller` 有值，它自己从命令输出里读结果，不告诉）→ 配置 `stewards`
+里这个 flow 的负责会话（flow 名一栏，没有就取 `*`）→ 没人。
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `to` | string \| null | 收消息的 agent id；没人要告诉为 null |
+| `via` | `"explicit"` \| `"caller"` \| `"steward"` \| null | 为什么是它；`to` 为 null 时为 null |
+| `ok` | boolean \| null | 有收件人时：消息送到了没有（`send` 命令成了，**不等于它读了**）；没收件人为 null，找负责会话时就出了错为 false |
+| `error` | string \| null | 没送成或找不到时的一行原话（最多 300 字符）；送成了为 null |
+| `why` | string \| null | 没发的原因，给人看的一句话（没配负责会话、flow 说只听出问题的、前台的会话自己读结果、配置的 agent 不在了……）；同一个 label 下有几个会话时也在这里说「取了第一个」 |
+| `started` | boolean | 负责会话是这一下才起的（消息是它的第一条，`ok` 即为 true）；只有 `via` 是 `steward` 时才会是 true |
+| `unseen` | number | 这条消息发出前，账里「自从上一条送到负责会话的以来」的运行数，消息里的「账里自上次以来还有 N 次运行」就是它；没有配负责会话为 0 |
+| `ledger` | boolean | 这次运行已经记进账本 `<logDir>/steward/ledger.jsonl` 了。有负责会话配置（不管有没有人收到）才记 |
+
+- **送不出去只是这一行，不改变结局**，不写 `caveat` 也不让运行失败。每次投递最长等 30 秒，超时算没送成（`error` 里写「no answer in 30s」）。
+- 消息一律是 `paseo send <agent> --prompt-file <文件> --behavior steer --no-wait`：并进对方正在跑的那一轮，不排队等。文件放
+  `<logDir>/steward/wake/<runId>.txt`（消息正文，经过脱敏），读者想看发了什么就看它。
+- **账本 `<logDir>/steward/ledger.jsonl`** 只追加，一行一次运行：`{ v, at, runId, lineage, flow, affair: { key, label } | null, outcome, why, durationMs, usd, to, via, ok, started }`。
+  负责会话隔了一阵被叫醒、或换了一个会话时，靠它知道漏了什么；读者对读不懂的行当没有。
+- **失联的运行**（同一台机器上进程已不在、没写出 `run.end`）自己不会发 `wake`，由 `orch.mjs wake-lost` 找出来补发一次：消息里说「失联了」，账本里记一行（`outcome: "lost"`）；
+  **不往那个运行的事件文件里写**（它已经没有人在写了）。已经有 `wake` 事件或账本里已经有它的运行不会再发；没有定时器，什么时候跑 `wake-lost` 由人或别的程序定。
+- 之前的文件没有这个事件，读者忽略不认识的 `kind`。
+
 ### `run.end`（最后一行）
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`）；`failed`：抛错；`timeout`：超出运行总时限 |
+| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`），或者 `$.ask` 的 `CheckFailed`（答案打回用完仍不过）没有被 flow 接住，`stop.reason` 是 `<step>：核对 N 轮还不过：<第一条问题>`，`value` 为 null；`failed`：抛错；`timeout`：超出运行总时限 |
 | `value` | any | `done` / `stopped` 时 flow 给出的结果 |
 | `summary` | string \| null | 给人看的一句话结论，来自 flow 的 `summarize(value, { outcome })`（`value` 就是本行的 `value`）。只在 `done` / `stopped` 时调用；flow 没声明 `summarize`、结局是 `failed` / `timeout`、它抛错（这时前面有一条 `log` warn 说原因）或返回的不是非空字符串时为 null。超过 200 字符（按 Unicode 码点算）截断并加 `…`。它出错不影响结局。运行时写的每条 `run.end` 都有这个字段；之前写的文件没有，读者按 null 处理 |
-| `stop` | `{ reason: string, phase: string \| null }` \| null | 仅 `stopped` |
+| `stop` | `{ reason, phase, kind, step }` \| null | 仅 `stopped`。`reason` 是给人看的一句话，**读者不要靠它的措辞认原因，认 `kind`**：`flow`：流程自己调了 `$.stop`（`step` 为 null）；`check`：`$.ask` 的答案打回用完仍不过，没被流程接住（`step` 是被问的 step 名，`reason` 是「`<step>`：核对 N 轮还不过：…」）；`unknown`：一个撤不回的 `$.step` 开始过、不知道做没做，又没有 `probe` 能查出来（`step` 是那一步的名字，`value` 是 `{ step, unknown: true }`；用 `orch.mjs settle` 了结）。`kind`、`step` 是后加的（2026-10-31），旧文件没有，读者按 null 处理、退回认 `reason` |
 | `error` | `{ name, message }` \| null | 仅 `failed` / `timeout` |
 | `durationMs` | number | |
-| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 只算最后一轮 `LastUsage`；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
+| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是这次运行用过的 agent 数（从日志拿来的答案不算：那是前面某次运行起的 agent，这次没花钱）。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 每一轮算它的 `LastUsage`，一个调用的各轮加起来；CLI 在一条命令里自己重试的那几轮只算最后一轮；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
 | `caveats` | string[] | 本次运行所有 caveat 的去重列表 |
 | `resume` | `{ flow, input, from, spends }` \| null | 这个运行没走到头时，flow 最后一次声明的续跑点（同上面 `resume` 事件）；没声明或收回了为 null。**`outcome` 是 `done` 时恒为 null**：完成了的运行没有可接的。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
@@ -389,11 +463,65 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 `orch.mjs resume <runId> --expect <指纹>` 在占位之前再读一次上一段的点，指纹（`pointPrint`：流程名和输入，不含给人看的那句话）对不上就拒，什么都不占、不花；
 起来的运行在 `run.start.resumePrint` 里记着它从哪个点起，读者事后也能核对。
 
+## 日志（journal）
+
+`$.step`、`$.ask`、`$.again`、`$.gate` 做完的事记在一份**日志**里，接着跑的运行从那里拿，而不是再做一遍。一个运行和接着它跑的那些运行（`run.start.resumeOf` 串起来的一条链）共用一份：
+
+```
+<logDir>/runs/<lineage>/journal.jsonl
+```
+
+`lineage` 是线上第一个运行的 runId（`run.start.lineage`）。只追加，不改写；一行一个 JSON 对象：
+
+| 字段 | 含义 |
+|---|---|
+| `v` | 1。读者对不认识的版本，把这一行当"有，但不知道是什么" |
+| `id` | 这个位置的名字：`step:<名>`、`ask:<step 名>#<第几次>`、`again:<前一个 id>#<第几次>`、`gate#<第几次>`。在某个 `$.step` 里面的，带上那一步的名字作前缀（`ask:build/analyze#1`、`gate:commit#1`），所以一个被沿用的 `step` 不会把后面的名字挤歪 |
+| `kind` | `step` \| `ask` \| `again` \| `gate` |
+| `state` | `done`；`begun`（`once` 的步骤开始了，还没有结果）；`failed`（`once` 的步骤抛了错）；`settled`（人用 `orch.mjs settle` 或探查说了结果，`by` 是 `cli` 或 `probe`，`done` 说做没做）；`voided`（这个位置要重做，之前的记录作废：`by` 是 `redo`、`again`（`key` 变了或 `still` 说不成立）、`other-prompt`、`reuse`、`check`、`workspace`、`asked-again`；`get` 当没有，后面再写的 `done` 盖过它） |
+| `keyPrint` | 做这件事的依据的指纹：`step` 的 `key`；`ask` 的提示词（角色的指令已在其中）、schema、provider、thinking、effects，和它问的**目录**与**主机**（换了目录，旧答案描述的是另一棵树）；`again` 是它接着的那份答案、那份答案当时的指纹（前一问的提示词变了就不算数）、那个 agent，问的话或步骤，effects，目录和主机，`fresh` 时还有角色**现在解析出来**的 provider、thinking 和指令（不是流程里写的角色名）；`gate` 的标题和内容。依据变了，这一条就不算数 |
+| `value` | 结果（JSON，最多 1 MB；`step` 的值超过或写不成 JSON，这一步失败）。含这次运行的秘密值的，或 `ask` / `again` 的答案过大，不记（这一条干脆没有，接着跑时重做；`once` 的步骤记 `done` 加 `dropped: true`，没有值）。要人填一个值（`input`）的人闸不进日志 |
+| `scope` | 可选。这条记录是在哪几个 `$.step` 里面写下的，由外到内的步骤名（不在任何步骤里的没有这个字段）。`--redo <外层步骤>` 靠它连里面的子步骤和 `ask` 一起作废（里面的记录先于外层步骤写下，光看写入顺序找不到） |
+| `runId`、`callId` | 哪个运行、哪次调用写下的 |
+| `at` | 时间 |
+
+同一个 `id` 取**最后一行**。日志在运行开始时读一次；一条线上同一时刻只有一个运行在写（见下面「同一条线只有一个运行在写」）。读不懂的行分两种：
+
+- **末尾没写完的一行**（没有换行）：那次写没有完成，没有任何动作是凭它做的，当没有。写入方（运行器、`settle`）在这条线上写第一行之前把它**截掉**并落盘，新的一行从行首开始，不会和它粘在一起。
+- **写完了（有换行）却读不懂的行**（不是 JSON、没有 `id`）：文件被什么弄坏了，里面是什么不知道。读者当没有，但要报出来；运行时在 `run.start` 之后写一条 `caveat`，**没有记录的 `once` 步骤也不再当作"没做过"**——按"可能做了"处理（有 `probe` 就去外面查，没有就停下等人 `settle`）。
+
+### 同一条线只有一个运行在写
+
+日志在运行开始时读一次，所以同一条线的两个运行同时写，会各自读到"还什么都没做"，不可逆的步骤就做两遍。写这条线的一方——`runFlow`（所有入口都走它：`orch.mjs run` / `resume`、代码调用）和 `orch.mjs settle`——先取这条线的锁，再读日志：
+
+```
+<logDir>/lines/<lineage>.lock     { pid, hostname, runId, startedAt }；独占创建（wx），用完删掉；目录空了也删
+```
+
+- **取不到就拒绝**：`runFlow` 抛 `RunRefused`（"the line of runs … is being worked on by run …"），`settle` 抛 `SettleRefused`，什么都没花、没写。
+- **持锁的一方走了才能接手**：锁里的 `hostname` 是本机、`pid` 已不存在（`pidFact`，只证明死亡），后来者才把它清掉自己取；pid 还在、在别的机器上，一律当作还在干活，**不管多久以前开始的**——对撤不回的步骤，宁可多等也不能做两遍。确知是残留的锁（比如重启后同一个 pid 被别的进程用了）由人删掉。读不出内容的锁（空的、写了一半）先当作正在写；超过几秒没动过，就是建锁的进程在写入之前死了，后来者清掉它。文件系统暂时不让开、不让读（Windows 上别的进程正在删它：`EPERM`/`EACCES`/`EBUSY`）也当作被占着，短暂等两次后报被占，不抛系统的错。
+- **持到什么时候**：不是到 `run.end`，而是到这个运行里**所有可能写日志的调用都回来**：运行因超时、另一个分支 `$.stop` 结束时，如果有 `$.step` / `$.ask` / `$.again` / `$.gate` 还在进行中（尤其是已经写了 `begun`、还在动作里的撤不回的步骤），锁留着，直到它们返回；那时它们照常把结果写进日志。所以 `run.end` 之后马上 `orch.mjs resume` 可能被拒，过一会儿再来。
+- **`once` 步骤的 `before`（和 `probe`、`still`）醒来时运行已经结束了，就不再开始动作**：`$.step` 在 `before` 返回之后、写 `begun` 之前再看一眼运行是不是已经结束，结束了就不写 `begun`、不调用函数。
+
+什么算沿用（接着跑的运行里）：
+
+- `step`：`done`，`key` 指纹相同，`still`（若有）说还成立。
+- `ask`：指纹相同，而且 step 的 `effects` 是 `none`（会改文件的 agent，答案说明不了文件现在的样子；调用点的 `reuse` 选项让流程看一眼再说）。
+- `again`：同上，另外它接着的那份答案、那个 agent 也要和日志里的相同。
+- `gate`：只沿用人**批了**或**不批**的，内容指纹相同；过期、出错、内容不一致的，以及要人填值的，每次都重新问。
+- `$.do` 不记，每次都做。
+
+`once` 的步骤（不能撤回的）：`before`（若有，是授权它的那张卡，不进日志）跑完以后，先写 `begun` 并落盘（fsync），才执行；做完写 `done`，抛错写 `failed`。接着跑时见到 `begun`、`failed`，或值没记下的 `done`，**不凭猜测再做一遍**：有 `probe` 就先去外面查；没有或查不出，就停下（`stop.reason` 里写着怎么了结）：`orch.mjs settle <runId> <步骤> --done '<值的 JSON>'` 或 `--not-done`，写一条 `settled`，下一个运行按人说的做。只有 `still` 说不再成立的 `done` 才会重做；`key` 变了的不会（做过的事不因为依据变了就再做一遍）。
+
+`orch.mjs steps <runId>` 列出这条线的日志；`orch.mjs resume <runId> --redo <步骤>` 让这一步、它里面的子记录和它之后能撤回的记录都作废（`run.start.redo`；运行一开始就把它们写成 `voided`，所以这一次停在半路，再下一次接着跑也不会把旧结果取回来），不能撤回的步骤和人答过的卡不动。
+
+**决定重做、而新结果又存不下来**（含这次运行的秘密、超过 1 MB）时，旧记录同样作废：写在日志里的是「这个位置要重做」，而不是「这次没追加一行」。沿用的 `ask` / `again` 答案还要通过**这一次**的 `check`（它可能读了变了的状态，或者修好了），不通过就作废、重新问（新 agent，`caveat` 说明）。`probe` 找到的值按步骤自己的值一样处理：太大或含秘密就只记「做了」，不记值（`dropped: true`）。
+
 ## 演进规则
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`wake` 事件、`run.start.notify`、`run.end.stop.kind` / `stop.step`（2026-10-31，缺省分别是没有这种事件、null、没有这两个字段）；journal 的 `voided` 状态和 `scope`（2026-10-31，旧日志没有）；`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`run.start.lineage`、`run.start.redo`、`call.start.reused`、`call.start.type: "step"` 及它的 `once` / `key`（2026-10-31，缺省分别是取 `runId`、null、null、没有这种调用）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

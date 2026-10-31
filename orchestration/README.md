@@ -18,12 +18,15 @@ runtime/
   flow.d.mts     写 flow 用的类型
   step.mjs       step 定义、schema 构造器、输入校验
   run.mjs        运行器：$ 原语、事件、成本、caveats、收尾
-  orch.mjs       命令行：run / resume / check / list
+  orch.mjs       命令行：run / resume / settle / steps / check / list / wake-lost
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
   claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
   resume.mjs     接着跑：读上一段留下的续跑点、检查它、一次停下只被接一次（`<runId>.resumed` 占位）；`orch.mjs resume` 用它
   resume-point.mjs  续跑点 `{ flow, input, from, spends }` 的形状和校验（运行器、契约检查、`resume` 共用）
+  wake.mjs       运行结束时告诉该知道的会话（`--notify`、`--detach` 的起运行方、配置里 `stewards` 的负责会话）并记账 `<logDir>/steward/ledger.jsonl`；`orch.mjs wake-lost` 补发进程已死的运行
+  line-lock.mjs  一条"线"同一时刻只有一个运行在写：`<logDir>/lines/<lineage>.lock`，读日志之前取，到它启动的调用都返回了才还；`runFlow` 和 `orch.mjs settle` 都走它
+  journal.mjs    一条"线"（一个运行加上接着它跑的那些）做过的事：`$.step` 的值、`$.ask`/`$.again` 的答案、人答过的卡；追加的 `runs/<线>/journal.jsonl`
   liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
@@ -37,7 +40,7 @@ runtime/
   roster.mjs     读 roles/，严格解析；角色绑定
   config.mjs     本机配置（~/.paseo-orchestration/config.json）
   smoke.mjs      升级后回归检查（经真实 Paseo）
-flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱）
+flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱；answer-smoke 是打回冒烟、again-smoke 是接着问冒烟，都是几分钱）
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例
@@ -89,6 +92,14 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
   `link` 就能点回去（形状和限制见 [EVENTS.md](EVENTS.md)）。运行时不认识具体的插件，`plugin` / `screen`
   是调用方的插件 id 和那个插件里注册的屏 id。JSON 里有引号，用命令行传不方便时写成文件：`--affair @affair.json`
   （`--input` 同样）。从代码里起子进程时用参数数组，不经过 shell，就没有引号问题。
+- `--notify <agent>` 让运行结束时往那个会话发一条消息（流程、结局、原因、事件文件、接着跑的命令）；`--detach` 把运行转到后台进程，
+  命令立刻返回 `{ detached: true, runId, events }`，运行结束时告诉起它的会话。两者都没有、配置 `stewards` 里也没有这个 flow 时，什么都不发。
+  谁在什么情况下被告诉、`stewards` 怎么写、账本和失联运行：[CONVENTIONS.md](CONVENTIONS.md)「跑完叫醒」。
+
+```bash
+node runtime/orch.mjs wake-lost --dry-run   # 进程已死、没写出 run.end、还没人被告诉的运行：列出来，不发
+node runtime/orch.mjs wake-lost             # 各补发一次
+```
 
 ### 先写意图，再起进程；重启后按文件判断
 
@@ -140,7 +151,9 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
 在 [CONVENTIONS.md](CONVENTIONS.md)「接着跑」，事件在 [EVENTS.md](EVENTS.md)。
 
 ```bash
-node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>]
+node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>] [--redo <步骤>]
+node runtime/orch.mjs steps <runId>                                  # 这条线的日志里记了什么
+node runtime/orch.mjs settle <runId> <步骤> --done '<值的 JSON>' | --not-done   # 了结一个"可能做了也可能没做"的步骤
 ```
 
 - 起的是声明里的流程和输入，是一次**新的运行**，`run.start.resumeOf` 是上一段的 runId。上一段的事项（`affair`）、
@@ -154,7 +167,10 @@ node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新
 - **没有 `run.end` 的运行**（进程被杀、机器重启）只有在确知进程已经没了时才接：占位过期**并且**同一台机器上 pid 不在。
   占位只是过期（机器睡着了、进程被挂起）、或者在别的机器上，一律拒绝：两个进程同时动一个工作目录，比多花一次钱糟。
 - 清日志时 `.resumed` 和 `.claim`、`.jsonl` 一样要成对处理：删掉它就等于把"这次停下已经被接过"忘了。
-- 要试一遍不花钱的：`flows/resume-smoke.mjs`（两段，各一张人闸卡，第一段停下并声明第二段）。
+- **前面做过的不重做。** 流程用 `$.step` 把一件事圈出来，`$.ask`、`$.gate` 本来就是可沿用的：同一条线上的运行共用一份日志，接着跑的运行从日志里拿
+  值、答案、人答过的卡，而不是再做、再花钱、再问人。不能撤回的步骤（`once`）开始前先落盘，开始了没有结果就不凭猜测再做一遍，停下等人用 `settle` 了结。
+  声明 `resume: "auto"` 的流程，"接着跑"就是用同样的输入再跑一遍。规范见 [CONVENTIONS.md](CONVENTIONS.md)「做过的事不重做」。
+- 要试一遍不花钱的：`flows/resume-smoke.mjs`（`resume: "auto"`，两段，各一张人闸卡：第一段停下，接着跑时第一段的步骤和卡沿用，起第二张卡）。
 
 ## 数据不在这里
 
@@ -240,8 +256,8 @@ CLI 已经覆盖全部编排动作：
 `ls -g -a --label orch-run=... --label orch-call=...` 找回、`inspect` 收成本，写进这次调用的 `call.end`；
 `run.end.cost` 是它们的和。失败的调用也收——钱已经花了。
 
-`LastUsage` 只是最后一轮；一次结构化调用只发一个 prompt，应该就是一轮，所以按调用收是准的（推断，
-没有拿多轮 agent 对比过）。Codex agent 的 `CostUsd` 读出来是 0，
+`LastUsage` 只是最后一轮：一次结构化调用若被打回过（`$.ask` 的 `check`，CONVENTIONS.md），运行时每一轮交卷后
+各 `inspect` 一次再加起来；CLI 在一条命令里自己重试的几轮看不见。Codex agent 的 `CostUsd` 读出来是 0，
 所以 `totalUsd` 只含 Claude 系。
 
 ## 一个未决问题
