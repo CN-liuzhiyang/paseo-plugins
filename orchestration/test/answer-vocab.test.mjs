@@ -23,8 +23,16 @@ before(async () => {
 /** What `paseo send --output-schema` does with a reply that does not fit. */
 const refused = (reply, validationErrors) =>
   new PaseoCliError("paseo failed", { argv: ["send"], exitCode: 1, stdout: "", stderr: "", code: "OUTPUT_SCHEMA_FAILED", details: { lastResponse: JSON.stringify(reply), validationErrors } });
-const run = async (step, askOptions, { first, replies = [] }) => {
+const run = async (step, askOptions, { first, replies = [], refusedFirst = null }) => {
   const base = fakeExecutor({ answer: () => first });
+  // The first reply is the agent's and the CLI refuses it, having made the agent (its cost is collected from it).
+  if (refusedFirst) {
+    const ask = base.ask;
+    base.ask = async (request) => {
+      await ask(request);
+      throw refusedFirst;
+    };
+  }
   const sends = [];
   const queue = [...replies];
   const executor = {
@@ -131,4 +139,37 @@ test("data a `patternProperties` schema declares survives a successful reply", a
   const { result } = await run(step, {}, { first: { data: { x1: "keep" } } });
   assert.equal(result.outcome, "done");
   assert.deepEqual(result.value, { data: { x1: "keep" } });
+});
+
+test("a field the schema forbids is not accepted because the CLI's complaint of it was left out: only where answer.mjs drops it is the complaint left out", async () => {
+  // A hand-written schema, which answer.mjs does not read completely: it keeps the extra field, so the CLI's word is what stands.
+  const schema = { type: "object", properties: { data: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false, minProperties: 1 } }, required: ["data"], additionalProperties: false };
+  const step = define({ name: "forbids", effects: "none", timeout: "5m", returns: schema, prompt: () => "answer" });
+  const extra = { data: { a: "x", extra: "y" } };
+  const complaint = [{ instancePath: "/data", message: "must NOT have additional properties" }];
+  const { result, sends, events } = await run(step, {}, { first: extra, refusedFirst: refused(extra, complaint), replies: [{ data: { a: "x" } }] });
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(result.value, { data: { a: "x" } }, "the value has no field the schema forbids");
+  assert.equal(sends.length, 1, "it was sent back, as a whole");
+  assert.deepEqual(sends[0].schema, schema);
+  const [fix] = events.filter((e) => e.kind === "call.fix");
+  assert.deepEqual(fix.problems, [{ at: "/data", say: "must NOT have additional properties" }]);
+
+  // A reply that still has it is not taken: the runner has no way of telling the field is allowed, and the CLI says it is not.
+  const stuck = await run(step, {}, { first: extra, refusedFirst: refused(extra, complaint), replies: [refused(extra, complaint), refused(extra, complaint), refused(extra, complaint)] });
+  assert.notEqual(stuck.result.outcome, "done", JSON.stringify(stuck.result.value));
+});
+
+test("dynamic keys a `patternProperties` schema declares are kept, and one it does not declare is refused by the CLI and told back", async () => {
+  const schema = { type: "object", properties: { data: { type: "object", properties: { a: { type: "string" } }, patternProperties: { "^x": { type: "string" } }, additionalProperties: false } }, required: ["data"], additionalProperties: false };
+  const step = define({ name: "dynamic-forbids", effects: "none", timeout: "5m", returns: schema, prompt: () => "answer" });
+  const answer = { data: { x1: "x", y1: "y" } };
+  const { result, events } = await run(step, {}, {
+    first: answer,
+    refusedFirst: refused(answer, [{ instancePath: "/data", message: "must NOT have additional properties" }]),
+    replies: [{ data: { x1: "x" } }],
+  });
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(result.value, { data: { x1: "x" } }, "x1 stays, y1 is gone");
+  assert.equal(events.filter((e) => e.kind === "call.fix").length, 1);
 });

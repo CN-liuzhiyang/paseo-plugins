@@ -667,13 +667,13 @@ async function runClaimed(target, options, taken) {
     let roundCost = null;
     // A turn's reply as the value it holds: what the CLI handed over, or, when it refused the reply as not fitting
     // the schema, the JSON read out of what the agent wrote. The turn's cost is taken whichever way it went.
-    const read = async (turn) => {
+    const read = async (turn, schema) => {
       let began = true;
       try {
         return { value: await turn(), text: null, cliErrors: [] };
       } catch (error) {
         began = unknownOption(error) === null;
-        const refused = schemaFailure(error);
+        const refused = schemaFailure(error, schema);
         if (!refused) throw error;
         return { value: extractJson(refused.text), text: refused.text, cliErrors: refused.errors };
       } finally {
@@ -699,7 +699,7 @@ async function runClaimed(target, options, taken) {
       if (open.has(record.callId)) log.emit(kind, fields);
     };
 
-    let reply = await read(() => first(targeted() ? 0 : undefined));
+    let reply = await read(() => first(targeted() ? 0 : undefined), step.schema);
     let value = tidy(step.schema, reply.value, "the answer");
     let cliErrors = reply.cliErrors;
     for (;;) {
@@ -745,6 +745,7 @@ async function runClaimed(target, options, taken) {
             timeout: `${Math.ceil(left / 1_000)}s`,
             file: path.join(runDir, "prompts", `${record.callId}.r${round}.txt`),
           }),
+          plan.schema,
         );
       } catch (error) {
         // Nothing was sent: the CLI refused the option before it began.

@@ -129,7 +129,7 @@ const patch = await $.ask(patchStep, input, {
   没接住，运行以 **`stopped`** 结束（不是 `failed`），`stop.reason` 是"`<step>`：核对 3 轮还不过：<第一条问题>"。整个调用共用 step 的 `timeout`。
 - **只按看得懂的 schema 逐处打回。** 逐处核对、删多余字段、拼回去，都只在 schema 全由 builder 的那几个关键字写成时做（`type`、`enum`、`items`、`properties`、`required`、`additionalProperties`，加不影响取值的 `description` 之类）。
   手写的 schema 里只要有别的（`minLength`、`pattern`、`$ref`、`oneOf`、`patternProperties`……），运行时看不见那些规则：**不删它没声明的字段**（`patternProperties` 之类可能声明了），
-  **打回整份答案**，带整份 schema（`$ref` 指到的 `$defs` 也在里面），由 CLI 对整份回复核一遍。CLI 说回复不合 schema，那一轮就不算改好，它的话原样成为下一轮的问题。
+  **打回整份答案**，带整份 schema（`$ref` 指到的 `$defs` 也在里面），由 CLI 对整份回复核一遍。CLI 说回复不合 schema，那一轮就不算改好，它的话原样成为下一轮的问题——包括"有 schema 没声明的字段"：只有运行时自己删得掉的地方（上面那几个关键字写成的 object 节点）才不把这句当问题，别处它还在。
 - `fixes: 0`：不打回，schema 不合时仍交给 CLI 自己重试，`check` 不过立刻 `CheckFailed`。
 - 事件里每轮有 `call.fix`（发出去之前）和 `call.fixed`，`call.end.rounds` 是作答的轮数，`call.end.cost` 是各轮之和（EVENTS.md）。
 - 要 fork CLI 的 `send --output-schema --max-retries`。Paseo CLI 太旧时（第一次见到 `unknown option '--max-retries'`）整次运行退回老办法：

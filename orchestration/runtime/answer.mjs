@@ -115,10 +115,11 @@ function firstJson(text) {
 }
 
 /**
- * The reply of a CLI call that refused it as not fitting the schema (`--max-retries 0`): its text, and the CLI's own
+ * The reply of a CLI call that refused it as not fitting `schema` (`--max-retries 0`): its text, and the CLI's own
  * complaints as problems. Null for any other failure, and for a reply with nothing in it (an agent that never answered).
+ * A complaint of extra fields is left out where `stripUndeclared` drops them; anywhere else nothing drops them, and it stands.
  */
-export function schemaFailure(error) {
+export function schemaFailure(error, schema) {
   if (error?.code !== "OUTPUT_SCHEMA_FAILED") return null;
   const text = error.details?.lastResponse;
   if (typeof text !== "string" || text.trim() === "") return null;
@@ -129,9 +130,28 @@ export function schemaFailure(error) {
     }
     return isObject(e) && typeof e.message === "string" ? [{ at: typeof e.instancePath === "string" ? e.instancePath : "", say: e.message }] : [];
   });
-  // The extra fields are dropped before the answer is looked at again (stripUndeclared), so these say nothing now.
-  return { text, errors: errors.filter((e) => !/additional propert/i.test(e.say)) };
+  return { text, errors: errors.filter((e) => !(/additional propert/i.test(e.say) && dropsExtras(nodeAt(schema, e.at)))) };
 }
+
+/** The part of `schema` that the place `at` is under, walked down the way stripUndeclared walks; null where it cannot be walked. */
+function nodeAt(schema, at) {
+  let segments;
+  try {
+    segments = segmentsOf(at);
+  } catch {
+    return null;
+  }
+  let node = schema;
+  for (const segment of segments) {
+    if (node?.type === "object" && isObject(node.properties) && Object.hasOwn(node.properties, segment)) node = node.properties[segment];
+    else if (node?.type === "array" && isObject(node.items) && /^(0|[1-9]\d*)$/.test(segment)) node = node.items;
+    else return null;
+  }
+  return node;
+}
+
+/** Whether stripUndeclared takes the fields a schema does not declare out of an object under this node. */
+const dropsExtras = (node) => node?.type === "object" && isObject(node.properties) && node.additionalProperties === false && plainNode(node);
 
 /**
  * `value` without the fields an object schema does not declare (additionalProperties: false), and where they were.

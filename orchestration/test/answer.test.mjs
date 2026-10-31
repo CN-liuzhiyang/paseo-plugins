@@ -169,12 +169,24 @@ test("applyFix: places come back to their own index; a reply that does not fit l
 
 test("schemaFailure: the reply the CLI refused, and what it said was wrong with it", () => {
   const error = (details) => new PaseoCliError("x", { argv: [], exitCode: 1, stdout: "", stderr: "", code: "OUTPUT_SCHEMA_FAILED", details });
-  const failure = schemaFailure(error({ lastResponse: '{"a": 1}', validationErrors: ["/a: must be string", "(root): must NOT have additional properties", { instancePath: "/b", message: "is required", keyword: "required" }] }));
+  const details = { lastResponse: '{"a": 1}', validationErrors: ["/a: must be string", "(root): must NOT have additional properties", { instancePath: "/b", message: "is required", keyword: "required" }] };
+  // The schema is what the reply was checked against: where it drops the fields it does not declare, the complaint of them says nothing more.
+  const plain = { type: "object", properties: { a: { type: "string" }, b: { type: "string" } }, required: ["a", "b"], additionalProperties: false };
+  const failure = schemaFailure(error(details), plain);
   assert.equal(failure.text, '{"a": 1}');
   assert.deepEqual(failure.errors, [{ at: "/a", say: "must be string" }, { at: "/b", say: "is required" }]);
-  assert.equal(schemaFailure(error({ lastResponse: "  " })), null, "an agent that never answered is not a reply to correct");
-  assert.equal(schemaFailure(error({})), null);
-  assert.equal(schemaFailure(new PaseoCliError("x", { argv: [], exitCode: 1, stdout: "", stderr: "", code: "AGENT_NOT_FOUND", details: { lastResponse: "{}" } })), null);
+  // Where it does not (another keyword may declare fields, or the place is not one the schema can be walked down to), nothing drops them and the complaint stands.
+  const kept = [{ at: "/a", say: "must be string" }, { at: "", say: "must NOT have additional properties" }, { at: "/b", say: "is required" }];
+  assert.deepEqual(schemaFailure(error(details), { ...plain, minProperties: 1 }).errors, kept);
+  assert.deepEqual(schemaFailure(error(details), { ...plain, patternProperties: { "^x": { type: "string" } } }).errors, kept);
+  assert.deepEqual(schemaFailure(error(details), { ...plain, additionalProperties: undefined }).errors, kept, "extra fields are allowed here: the CLI would not have said so");
+  assert.deepEqual(schemaFailure(error(details)).errors, kept, "no schema, nothing is dropped");
+  const nested = { type: "object", properties: { data: { type: "object", properties: { a: { type: "string" } }, additionalProperties: false }, rows: { type: "array", items: plain } }, additionalProperties: false };
+  const where = (at, schema) => schemaFailure(error({ lastResponse: "{}", validationErrors: [{ instancePath: at, message: "must NOT have additional properties" }] }), schema).errors.length;
+  assert.deepEqual([where("/data", nested), where("/rows/3", nested), where("/rows/x", nested), where("/nowhere", nested), where("~", nested)], [0, 0, 1, 1, 1]);
+  assert.equal(schemaFailure(error({ lastResponse: "  " }), plain), null, "an agent that never answered is not a reply to correct");
+  assert.equal(schemaFailure(error({}), plain), null);
+  assert.equal(schemaFailure(new PaseoCliError("x", { argv: [], exitCode: 1, stdout: "", stderr: "", code: "AGENT_NOT_FOUND", details: { lastResponse: "{}" } }), plain), null);
 });
 
 test("unknownOption: only the argument parser's refusal, with the option it names", () => {
