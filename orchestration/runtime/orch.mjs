@@ -67,7 +67,7 @@ import { resolveFlowFile, resolveTarget } from "./resolve.mjs";
 import { listFlows } from "./catalog.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
 import { claimResumption, lineageOf, readResumePoint, ResumeRefused } from "./resume.mjs";
-import { Journal, JournalError, known } from "./journal.mjs";
+import { Journal, JournalError, MAX_VALUE_BYTES, known } from "./journal.mjs";
 import { LineBusy, takeLine } from "./line-lock.mjs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
@@ -438,6 +438,7 @@ export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
     } catch (error) {
       throw new UsageError(`--done is the step's value as JSON (${error.message})`);
     }
+    if (Buffer.byteLength(doneText) > MAX_VALUE_BYTES) throw new UsageError("--done is bigger than 1 MB, which is more than a step's value may be; put it in a file and give the path");
   }
   // The line is held while its journal is read and written, as for a run: a run of the line that is working would not see what is said here.
   const lineage = lineageOfRun(logDir, runId);

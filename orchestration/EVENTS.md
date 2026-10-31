@@ -478,9 +478,10 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `v` | 1。读者对不认识的版本，把这一行当"有，但不知道是什么" |
 | `id` | 这个位置的名字：`step:<名>`、`ask:<step 名>#<第几次>`、`again:<前一个 id>#<第几次>`、`gate#<第几次>`。在某个 `$.step` 里面的，带上那一步的名字作前缀（`ask:build/analyze#1`、`gate:commit#1`），所以一个被沿用的 `step` 不会把后面的名字挤歪 |
 | `kind` | `step` \| `ask` \| `again` \| `gate` |
-| `state` | `done`；`begun`（`once` 的步骤开始了，还没有结果）；`failed`（`once` 的步骤抛了错）；`settled`（人用 `orch.mjs settle` 或探查说了结果，`by` 是 `cli` 或 `probe`，`done` 说做没做） |
+| `state` | `done`；`begun`（`once` 的步骤开始了，还没有结果）；`failed`（`once` 的步骤抛了错）；`settled`（人用 `orch.mjs settle` 或探查说了结果，`by` 是 `cli` 或 `probe`，`done` 说做没做）；`voided`（这个位置要重做，之前的记录作废：`by` 是 `redo`、`again`（`key` 变了或 `still` 说不成立）、`other-prompt`、`reuse`、`check`、`workspace`、`asked-again`；`get` 当没有，后面再写的 `done` 盖过它） |
 | `keyPrint` | 做这件事的依据的指纹：`step` 的 `key`；`ask` 的提示词、schema、provider、thinking、effects；`again` 再加上它接着的那份答案和那个 agent；`gate` 的标题和内容。依据变了，这一条就不算数 |
 | `value` | 结果（JSON，最多 1 MB；`step` 的值超过或写不成 JSON，这一步失败）。含这次运行的秘密值的，或 `ask` / `again` 的答案过大，不记（这一条干脆没有，接着跑时重做；`once` 的步骤记 `done` 加 `dropped: true`，没有值）。要人填一个值（`input`）的人闸不进日志 |
+| `scope` | 可选。这条记录是在哪几个 `$.step` 里面写下的，由外到内的步骤名（不在任何步骤里的没有这个字段）。`--redo <外层步骤>` 靠它连里面的子步骤和 `ask` 一起作废（里面的记录先于外层步骤写下，光看写入顺序找不到） |
 | `runId`、`callId` | 哪个运行、哪次调用写下的 |
 | `at` | 时间 |
 
@@ -512,7 +513,9 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 `once` 的步骤（不能撤回的）：`before`（若有，是授权它的那张卡，不进日志）跑完以后，先写 `begun` 并落盘（fsync），才执行；做完写 `done`，抛错写 `failed`。接着跑时见到 `begun`、`failed`，或值没记下的 `done`，**不凭猜测再做一遍**：有 `probe` 就先去外面查；没有或查不出，就停下（`stop.reason` 里写着怎么了结）：`orch.mjs settle <runId> <步骤> --done '<值的 JSON>'` 或 `--not-done`，写一条 `settled`，下一个运行按人说的做。只有 `still` 说不再成立的 `done` 才会重做；`key` 变了的不会（做过的事不因为依据变了就再做一遍）。
 
-`orch.mjs steps <runId>` 列出这条线的日志；`orch.mjs resume <runId> --redo <步骤>` 让这一步和它之后能撤回的记录这次都当没有（`run.start.redo`），不能撤回的步骤和人答过的卡不动。
+`orch.mjs steps <runId>` 列出这条线的日志；`orch.mjs resume <runId> --redo <步骤>` 让这一步、它里面的子记录和它之后能撤回的记录都作废（`run.start.redo`；运行一开始就把它们写成 `voided`，所以这一次停在半路，再下一次接着跑也不会把旧结果取回来），不能撤回的步骤和人答过的卡不动。
+
+**决定重做、而新结果又存不下来**（含这次运行的秘密、超过 1 MB）时，旧记录同样作废：写在日志里的是「这个位置要重做」，而不是「这次没追加一行」。沿用的 `ask` / `again` 答案还要通过**这一次**的 `check`（它可能读了变了的状态，或者修好了），不通过就作废、重新问（新 agent，`caveat` 说明）。`probe` 找到的值按步骤自己的值一样处理：太大或含秘密就只记「做了」，不记值（`dropped: true`）。
 
 ## 演进规则
 

@@ -11,6 +11,10 @@
 // The journal is read once, when a run starts. Only one run of a line works at a time (line-lock.mjs holds the line for the run that
 // writes; this file does not lock), and appends within a process are synchronous.
 //
+// A place that is to be done again is written as `voided` (and not just left out of what this run reads): `--redo`, a `still` that says
+// no, a record for another key, an answer that no longer passes the check. The next run of the line reads the same, and a place whose new
+// result could not be kept (a secret, too big) does not bring back the old one.
+//
 // A write that was cut off leaves a last line without its newline. It was never acknowledged -- an append returns after the newline is
 // on the disk, and nothing is done on the strength of a line before that -- so it says nothing, and the first append after it takes it
 // away (`#mend`) rather than join its own line to it. A line that is complete (it has its newline) and cannot be read is another
@@ -96,6 +100,21 @@ export class Journal {
     if (redo !== null) this.#redo(redo);
   }
 
+  /** Set aside, in this journal and for the runs that follow, what `redo` named: write `voided` for every place it left out. */
+  persistRedo(runId) {
+    for (const id of [...this.ignored]) {
+      const entry = this.current.get(id)?.entry;
+      if (entry) this.append({ id, kind: entry.kind, state: "voided", by: "redo", runId }, { sync: true });
+    }
+  }
+
+  /** This place is to be done again: whatever the journal holds for it is not to be taken by this run or by a later one. */
+  setAside(id, why, runId) {
+    const entry = this.current.get(id)?.entry;
+    if (!entry || entry.state === "voided" || entry.once === true) return;
+    this.append({ id, kind: entry.kind, state: "voided", by: why, runId }, { sync: true });
+  }
+
   #redo(name) {
     const target = this.current.get(`step:${name}`);
     if (!target) {
@@ -103,15 +122,19 @@ export class Journal {
       throw new JournalError(`there is no step "${name}" in this line of runs to do again${known.length > 0 ? `; its steps: ${known.join(", ")}` : ""}`);
     }
     if (target.entry.once === true) throw new JournalError(`step "${name}" cannot be undone, so it is not done again; settle it (orch.mjs settle) if its record is wrong`);
+    // What came after it, and what it was made of: the steps and asks inside it were written before it was (a step is written when it
+    // returns), which is what `scope` -- the names of the steps a place was inside -- is for.
     for (const [id, { entry, at }] of this.current) {
-      if (at >= target.at && entry.once !== true && REDONE_KINDS.includes(entry.kind)) this.ignored.add(id);
+      if (entry.state === "voided" || entry.once === true || !REDONE_KINDS.includes(entry.kind)) continue;
+      if (at >= target.at || (Array.isArray(entry.scope) && entry.scope.includes(name))) this.ignored.add(id);
     }
   }
 
   /** The last entry of `id`, or null when there is none or it is to be done again. */
   get(id) {
     if (this.ignored.has(id)) return null;
-    return this.current.get(id)?.entry ?? null;
+    const entry = this.current.get(id)?.entry ?? null;
+    return entry?.state === "voided" ? null : entry;
   }
 
   /** The last entry of every id, in the order they were last written. */
