@@ -436,14 +436,15 @@ export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
   const journal = journalOf(logDir, runId);
   const id = `step:${step}`;
   const entry = journal.get(id);
-  if (!entry) throw new SettleRefused(`there is no step "${step}" in the journal of this line of runs (orch.mjs steps ${runId} lists them)`);
-  const undecided = !known(entry) || (entry.once === true && (entry.state === "begun" || entry.state === "failed" || (entry.state === "done" && entry.dropped === true)));
+  // With lines in the file that cannot be read, a step with no line may be one whose line was among them: that is settled as well.
+  if (!entry && journal.damaged.length === 0) throw new SettleRefused(`there is no step "${step}" in the journal of this line of runs (orch.mjs steps ${runId} lists them)`);
+  const undecided = !entry || !known(entry) || (entry.once === true && (entry.state === "begun" || entry.state === "failed" || (entry.state === "done" && entry.dropped === true)));
   if (!undecided) {
     throw new SettleRefused(
       `step "${step}" is ${entry.state}${entry.state === "settled" ? (entry.done ? " as done" : " as not done") : ""}, not a step that may or may not have been done; only such a step is settled`,
     );
   }
-  if (typeof entry.runId === "string") {
+  if (typeof entry?.runId === "string") {
     const state = readRunState({ dir: logDir, runId: entry.runId });
     if (!(state.state === "ended" || (state.state === "lost" && state.processAlive === false))) {
       throw new SettleRefused(`run ${entry.runId}, which began step "${step}", is not known to be over (${state.state}); settle it once that run has ended or its process is gone`);
@@ -456,11 +457,11 @@ export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
       state: "settled",
       done: doneText !== undefined,
       once: true,
-      keyPrint: typeof entry.keyPrint === "string" ? entry.keyPrint : null,
+      keyPrint: typeof entry?.keyPrint === "string" ? entry.keyPrint : null,
       ...(doneText !== undefined ? (value === undefined ? { undefined: true } : { value }) : {}),
       by: "cli",
-      runId: typeof entry.runId === "string" ? entry.runId : runId,
-      callId: entry.callId ?? null,
+      runId: typeof entry?.runId === "string" ? entry.runId : runId,
+      callId: entry?.callId ?? null,
     },
     { sync: true },
   );

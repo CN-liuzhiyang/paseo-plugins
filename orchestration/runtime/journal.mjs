@@ -8,11 +8,17 @@
 // far it got. Of every id the last line is the one that counts. A step that cannot be undone (`once`) writes `begun` before it
 // acts and fsyncs it, so a process that dies in the middle leaves a line that says "started, no word of how it ended".
 //
-// The journal is read once, when a run starts. Only one run of a line works at a time (claim.mjs, resume.mjs), and appends
-// within a process are synchronous, so nothing here locks.
+// The journal is read once, when a run starts. Only one run of a line works at a time (line-lock.mjs holds the line for the run that
+// writes; this file does not lock), and appends within a process are synchronous.
+//
+// A write that was cut off leaves a last line without its newline. It was never acknowledged -- an append returns after the newline is
+// on the disk, and nothing is done on the strength of a line before that -- so it says nothing, and the first append after it takes it
+// away (`#mend`) rather than join its own line to it. A line that is complete (it has its newline) and cannot be read is another
+// thing: something damaged the file, and what it held is not known. It is kept, counted in `damaged`, and a step that cannot be
+// taken back is not done on the strength of there being no line for it.
 
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, ftruncateSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { canonical } from "./resume-point.mjs";
 
@@ -40,26 +46,34 @@ export const fingerprint = (value) => createHash("sha256").update(canonical(valu
 /** The first 16 hex digits: what events and listings show. */
 export const shortPrint = (print) => print.slice(0, 16);
 
-/** The complete lines of the file that read as entries; a last line without its newline is a write in progress. */
+/**
+ * The complete lines of the file that read as entries, and the complete lines that do not (their number and a start of them); a last
+ * line without its newline is a write in progress and is neither.
+ */
 function readEntries(file) {
   let text;
   try {
     text = readFileSync(file, "utf8");
   } catch (error) {
-    if (error.code === "ENOENT") return [];
+    if (error.code === "ENOENT") return { entries: [], damaged: [] };
     throw error;
   }
   const entries = [];
-  for (const line of text.slice(0, text.lastIndexOf("\n") + 1).split("\n")) {
-    if (line === "") continue;
-    try {
-      const entry = JSON.parse(line);
-      if (entry !== null && typeof entry === "object" && typeof entry.id === "string") entries.push(entry);
-    } catch {
-      // A line that is not JSON says nothing.
-    }
-  }
-  return entries;
+  const damaged = [];
+  text
+    .slice(0, text.lastIndexOf("\n") + 1)
+    .split("\n")
+    .forEach((line, index) => {
+      if (line === "") return;
+      try {
+        const entry = JSON.parse(line);
+        if (entry !== null && typeof entry === "object" && typeof entry.id === "string") entries.push(entry);
+        else damaged.push({ line: index + 1, start: line.slice(0, 80) });
+      } catch {
+        damaged.push({ line: index + 1, start: line.slice(0, 80) });
+      }
+    });
+  return { entries, damaged };
 }
 
 export class Journal {
@@ -72,9 +86,12 @@ export class Journal {
     this.lineage = lineage;
     /** @type {Map<string, { entry: object, at: number }>} the last entry of every id, and where in the file it is */
     this.current = new Map();
-    const entries = readEntries(this.file);
+    const { entries, damaged } = readEntries(this.file);
     entries.forEach((entry, at) => this.current.set(entry.id, { entry, at }));
     this.next = entries.length;
+    /** @type {{ line: number, start: string }[]} complete lines that could not be read: what they held is not known */
+    this.damaged = damaged;
+    this.mended = false;
     this.ignored = new Set();
     if (redo !== null) this.#redo(redo);
   }
@@ -117,7 +134,12 @@ export class Journal {
     mkdirSync(path.dirname(this.file), { recursive: true });
     const fd = openSync(this.file, "a");
     try {
-      writeSync(fd, text);
+      if (!this.mended) {
+        this.#mend();
+        this.mended = true;
+      }
+      // writeFileSync goes on until all of it is written; writeSync may stop short.
+      writeFileSync(fd, text);
       if (sync) fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -125,6 +147,22 @@ export class Journal {
     this.current.set(entry.id, { entry, at: this.next++ });
     this.ignored.delete(entry.id);
     return entry;
+  }
+
+  // A last line without its newline is a write that was cut off: cut it away, so that the next line starts on a line of its own and is not
+  // read as part of it. Flushed, because a line written after this one must not be able to come back together with it. The caller holds the
+  // line (line-lock.mjs), so no one else is in the middle of an append.
+  #mend() {
+    const content = readFileSync(this.file);
+    if (content.length === 0 || content[content.length - 1] === 0x0a) return;
+    // Not through the descriptor that appends: on Windows that one may not truncate.
+    const fd = openSync(this.file, "r+");
+    try {
+      ftruncateSync(fd, content.lastIndexOf(0x0a) + 1);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
   }
 }
 

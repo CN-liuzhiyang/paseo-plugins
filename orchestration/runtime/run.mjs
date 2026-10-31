@@ -1205,10 +1205,13 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         } else {
           verdict = "unknown";
         }
+      } else if (journal.damaged.length > 0) {
+        // No line for it, but there are lines the file holds that cannot be read, and one of them may be what this step wrote before it acted.
+        verdict = "unknown";
       }
       if (verdict === "unknown") {
         const found = await lookOutside(probe, name);
-        const from = { runId: entry.runId ?? runId, callId: entry.callId ?? null };
+        const from = { runId: entry?.runId ?? runId, callId: entry?.callId ?? null };
         if (found?.done === true) {
           taken = journal.append({ id, kind: "step", state: "settled", done: true, once: true, keyPrint: print, ...(found.value === undefined ? { undefined: true } : { value: found.value }), by: "probe", ...from }, { sync: true });
           verdict = "taken";
@@ -1218,7 +1221,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         } else {
           lastBad = title;
           return stopNow(
-            `「${title}」可能已经做了、也可能没做（它开始过，没有留下结果）：去外面查一下，用 orch.mjs settle ${runId} ${name} --done '<值的 JSON>' 或 --not-done 了结，再接着跑`,
+            `「${title}」可能已经做了、也可能没做（${entry === null ? "日志里有读不懂的行，它可能就在其中" : "它开始过，没有留下结果"}）：去外面查一下，用 orch.mjs settle ${runId} ${name} --done '<值的 JSON>' 或 --not-done 了结，再接着跑`,
             { step: name, unknown: true },
           );
         }
@@ -1557,6 +1560,10 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
   log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint, lineage, redo, notify });
+  if (journal.damaged.length > 0) {
+    const where = journal.damaged.slice(0, 3).map((d) => d.line).join(", ");
+    caveat(`journal: ${journal.damaged.length} line(s) of ${journal.file} cannot be read (line ${where}${journal.damaged.length > 3 ? ", ..." : ""}), so what they held is not known; a step that cannot be taken back and has no record is not done on that account`, null);
+  }
 
   let outcome;
   let value = null;
