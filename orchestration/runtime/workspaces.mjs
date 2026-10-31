@@ -163,7 +163,7 @@ function release(file, token) {
 }
 
 /** Run `fn` holding the lock file (`wx`: of any number of processes, one creates it). */
-async function withLock(file, { waitMs, staleMs, pollMs }, fn) {
+export async function withLock(file, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS, pollMs = LOCK_POLL_MS } = {}, fn) {
   mkdirSync(path.dirname(file), { recursive: true });
   const startedAt = Date.now();
   for (;;) {

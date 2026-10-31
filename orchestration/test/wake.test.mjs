@@ -7,7 +7,7 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -196,6 +196,54 @@ test("a directory: its workspace is found or made, and the steward is started th
   assert.equal(odd.result.outcome, "stopped");
   assert.equal(odd.wake.ok, false);
   assert.match(odd.wake.error, /Unknown role "no-such-role"/);
+});
+
+const stewardStarts = (executor) => executor.requests.filter((r) => r.labels?.["orch-steward"]).length;
+
+test("runs that end together start one steward between them, not one each", async () => {
+  const dir = await logs();
+  const executor = fakeExecutor({ spawnDelayMs: 600 });
+  const stewards = { "*": { cwd: "C:/ops" } };
+  const ended = await Promise.all([1, 2, 3].map(() => go(stops, dir, { executor, stewards })));
+  assert.equal(stewardStarts(executor), 1, "one session was started");
+  assert.equal(ended.filter((e) => e.wake.started).length, 1, "and one run says it started it");
+  assert.equal(new Set(ended.map((e) => e.wake.to)).size, 1, "the others were told the one that was started");
+  assert.ok(ended.every((e) => e.wake.ok === true), ended.map((e) => e.wake.error).join());
+  assert.equal(executor.notifications.length, 2, "it was given the first message as its first; the other two were told");
+  assert.equal(readdirSync(path.join(dir, "steward")).filter((name) => name.endsWith(".lock")).length, 0, "no lock is left");
+});
+
+test("a delivery that gives up does not let go of the start: the next run waits for it and uses what it made", async () => {
+  const dir = await logs();
+  const executor = fakeExecutor({ spawnDelayMs: 700 });
+  const stewards = { "*": { cwd: "C:/ops" } };
+  const early = await go(stops, dir, { executor, stewards, wakeTimeoutMs: 100 });
+  assert.deepEqual([early.wake.ok, early.wake.error], [false, "Error: no answer in 0.1s"], "the first stopped waiting");
+  assert.equal(stewardStarts(executor), 1, "the session is being made");
+  const next = await go(stops, dir, { executor, stewards, wakeTimeoutMs: 5_000 });
+  assert.equal(stewardStarts(executor), 1, "and the next run did not start another");
+  assert.deepEqual([next.wake.started, next.wake.ok], [false, true]);
+  assert.equal(next.wake.to, [...executor.agents.keys()].at(-1));
+  assert.equal(executor.notifications.length, 1);
+});
+
+test("a steward that was started and is not in the listing is found by the id written down; one that is gone is not", async () => {
+  const dir = await logs();
+  const executor = fakeExecutor();
+  const stewards = { "*": { cwd: "C:/ops" } };
+  const first = await go(stops, dir, { executor, stewards });
+  assert.equal(first.wake.started, true);
+  // The listing does not show it (as when the daemon is slow to list what it has just made); the id written down does.
+  const listing = executor.listAgents;
+  executor.listAgents = async (labels) => (labels["orch-steward"] ? [] : listing(labels));
+  const second = await go(stops, dir, { executor, stewards });
+  assert.deepEqual([second.wake.to, second.wake.started, second.wake.ok], [first.wake.to, false, true]);
+  assert.equal(stewardStarts(executor), 1);
+  // Archived, it is not used: a new one is started.
+  executor.agents.get(first.wake.to).archived = true;
+  const third = await go(stops, dir, { executor, stewards });
+  assert.deepEqual([third.wake.started, third.wake.ok], [true, true]);
+  assert.notEqual(third.wake.to, first.wake.to);
 });
 
 test("when a flow is told of: every run, or only those that did not come to done; a session that asked is told either way", async () => {

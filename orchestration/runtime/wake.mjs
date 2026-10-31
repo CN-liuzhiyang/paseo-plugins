@@ -12,12 +12,13 @@
 //
 // A run whose process died before it could write run.end says nothing itself; `wakeLost` is for what finds those (orch.mjs wake-lost).
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bindRole, composePrompt } from "./roster.mjs";
-import { affairKey, cutTitle, ensureWorkspace, samePath } from "./workspaces.mjs";
+import { affairKey, cutTitle, ensureWorkspace, normalizeDir, samePath, withLock } from "./workspaces.mjs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
 
@@ -150,6 +151,35 @@ export function stewardIntro({ guide, ledger }) {
 const listedDir = (cwd) => (typeof cwd === "string" && cwd.startsWith("~") ? path.join(os.homedir(), cwd.slice(1)) : cwd);
 
 /**
+ * Looking for the steward and starting one is one step for everyone: runs that end together would each find none and each start one. The lock
+ * is per (label, directory), held until the session is started and its id is written down, and it belongs to the work, not to whoever waits
+ * for it -- a delivery that gives up (`within`) leaves the work, and the lock, to finish.
+ */
+const STEWARD_LOCK = { waitMs: WAKE_TIMEOUT_MS, staleMs: 120_000, pollMs: 100 };
+
+/** Where the steward started for (label, cwd) is written down (`json`), and its lock (`lock`). */
+const stewardFile = (dir, label, cwd, ext) =>
+  path.join(dir, "steward", `${createHash("sha256").update(`${label}\0${normalizeDir(cwd)}`).digest("hex").slice(0, 32)}.${ext}`);
+
+/** The agent id written down in `file` if that session is still there, else null. Throws what the daemon throws, but "not found". */
+async function recordedSteward(file, executor) {
+  let agentId;
+  try {
+    agentId = JSON.parse(readFileSync(file, "utf8")).agentId;
+  } catch {
+    // None written, or not readable: the listing is all there is to go by.
+    return null;
+  }
+  if (typeof agentId !== "string" || !AGENT_ID.test(agentId)) return null;
+  try {
+    return (await executor.inspect(agentId)).archived === true ? null : agentId;
+  } catch (error) {
+    if (error?.code === "AGENT_NOT_FOUND") return null;
+    throw error;
+  }
+}
+
+/**
  * The steward session for `target`, started if there is none: { agentId, started } -- `started` when it was made just now, with `message` as its
  * first one -- or { none } saying why there is nobody. Throws what the daemon throws.
  */
@@ -174,20 +204,30 @@ async function findSteward({ target, executor, roster, dir, runId, message }) {
     const made = await ensureWorkspace({ dir, key: "steward", cwd: spec.cwd, title: cutTitle("Flow steward"), runId, executor });
     [workspaceId, cwd] = [made.workspaceId, spec.cwd];
   }
-  const found = (await executor.listAgents({ [STEWARD_LABEL]: label })).filter((row) => row.cwd && samePath(listedDir(row.cwd), cwd));
-  if (found.length > 0) return { agentId: found[0].id, started: false, several: found.length > 1 };
-  const bound = bindRole(roster, { role: spec.role ?? "steward" });
-  const prompt = composePrompt(bound, `${stewardIntro({ guide: spec.guide ?? [], ledger: ledgerFile(dir) })}\n\n${message}`);
-  const spawned = await executor.spawn({
-    provider: bound.provider,
-    thinking: bound.thinking,
-    title: "Flow steward",
-    labels: { [STEWARD_LABEL]: label },
-    prompt,
-    cwd,
-    workspace: workspaceId,
+  mkdirSync(path.join(dir, "steward"), { recursive: true });
+  return withLock(stewardFile(dir, label, cwd, "lock"), STEWARD_LOCK, async () => {
+    const found = (await executor.listAgents({ [STEWARD_LABEL]: label })).filter((row) => row.cwd && samePath(listedDir(row.cwd), cwd));
+    if (found.length > 0) return { agentId: found[0].id, started: false, several: found.length > 1 };
+    const recorded = await recordedSteward(stewardFile(dir, label, cwd, "json"), executor);
+    if (recorded) return { agentId: recorded, started: false };
+    const bound = bindRole(roster, { role: spec.role ?? "steward" });
+    const prompt = composePrompt(bound, `${stewardIntro({ guide: spec.guide ?? [], ledger: ledgerFile(dir) })}\n\n${message}`);
+    const spawned = await executor.spawn({
+      provider: bound.provider,
+      thinking: bound.thinking,
+      title: "Flow steward",
+      labels: { [STEWARD_LABEL]: label },
+      prompt,
+      cwd,
+      workspace: workspaceId,
+    });
+    try {
+      writeFileSync(stewardFile(dir, label, cwd, "json"), JSON.stringify({ label, cwd, agentId: spawned.agentId, at: new Date().toISOString() }));
+    } catch {
+      // The session is started and is given what ran; the listing finds it for the next one. Only the second way of finding it is lost.
+    }
+    return { agentId: spawned.agentId, started: true };
   });
-  return { agentId: spawned.agentId, started: true };
 }
 
 const timedOut = (ms) => `no answer in ${ms / 1000}s`;

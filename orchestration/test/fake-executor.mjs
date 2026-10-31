@@ -24,6 +24,7 @@
 //   "decline"    model only: the carrier makes no write and says why (no card is raised)
 //   "hang"       never finishes (the gate expires)
 // `answerAfterMs` is how long after it is spawned the carrier answers (5 by default; a long gate under a mocked clock).
+// `spawnDelayMs` is how long starting a session takes: it is in `requests` from the start, and can be listed only once it is made.
 // A denied card is closed: the carrier does not answer it afterwards (the provider ignores a late allow), unless
 // `answerOnDeny`: the allow had already been taken when the deny came, so its files are written as the deny returns.
 // `lateWrite`: the allow is taken only after the gate has given up on the card and cleaned up -- its files appear
@@ -120,6 +121,7 @@ export function fakeExecutor({
   archiveFails = null,
   notifyFails = null,
   notifyDelayMs = 0,
+  spawnDelayMs = 0,
 } = {}) {
   const archivedAgents = [];
   const refused = [];
@@ -183,6 +185,8 @@ export function fakeExecutor({
     async spawn(request) {
       checkWorkspace(request, "spawn");
       requests.push(request);
+      // The session is not there to be listed until the command returns, as with the real CLI.
+      await sleep(spawnDelayMs);
       const id = start(request, "running");
       // A long-lived session (the steward) is not a gate's carrier: nothing answers for it.
       if (carrier !== "hang" && !request.labels?.["orch-steward"]) {

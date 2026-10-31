@@ -650,7 +650,9 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 5. 都没有：不发，`wake { to: null, why }` 说为什么。
 
 负责会话的找法：配置的 `agent` 还在（没归档）就用它；`agent` 不在了、或配的是 `workspace` / `cwd`，就在那个 workspace 里找标签 `orch-steward=<flow 名>`（`*` 是 `all`）的、没归档的会话；
-找不到就**现起一个**（角色见上），消息连同一段交代身份的开场白是它的第一条（`started: true`），之后的运行找到它、直接发。没配 `stewards`、也没给 `--notify` / `--detach` 的运行，什么都不发、也不记账，事件里只多一行 `wake { to: null }`。
+找不到就**现起一个**（角色见上），消息连同一段交代身份的开场白是它的第一条（`started: true`），之后的运行找到它、直接发。
+"找，找不到就起"是一步：同时结束的几个运行不会各起一个。按（标签，目录）取锁 `<logDir>/steward/<名>.lock`，持到会话起好、id 写进同名的 `.json` 为止；
+发送方等不及（30 秒）放弃时锁照持，由起会话的那一步自己放，下一个运行排在它后面、用它起的会话。列表里看不到时也认 `.json` 里记的、还没归档的那个。没配 `stewards`、也没给 `--notify` / `--detach` 的运行，什么都不发、也不记账，事件里只多一行 `wake { to: null }`。
 
 **每条消息都是** `paseo send <agent> --prompt-file <文件> --behavior steer --no-wait`，最长等 30 秒，失败只是事件里一行（`wake.ok = false`、`error`），不改结局。运行时没有重试，也不会去找别的会话顶替。
 `done` 也发一行（跑完的记一笔就行）；flow 想让负责会话只听出问题的，声明 `wake: "problems"`：`done` 就不发（`wake.why` 说明），但账里照记。它只管 steward 这一路，显式的 `--notify` 照发。
