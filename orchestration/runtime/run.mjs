@@ -418,6 +418,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // The enclosing `$.step`: what is asked inside a step is named by it, so that a step taken from the journal (whose inside does not run)
   // does not move the names of what comes after it.
   const stepScope = new AsyncLocalStorage();
+  // Set while the `fn` of a `once` step runs (not its `before`): the step is already written as begun.
+  const onceAct = new AsyncLocalStorage();
   const stepNames = new Set();
   const counters = new Map();
   const nextId = (kind, name = null) => {
@@ -1225,7 +1227,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
             journal.append({ id, kind: "step", state: "begun", once: true, keyPrint: print, runId, callId: record.callId }, { sync: true });
             began = true;
           }
-          return fn(given);
+          return once ? onceAct.run(name, () => fn(given)) : fn(given);
         });
         let kept;
         try {
@@ -1378,6 +1380,12 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         const decision = structuredClone(taken.value);
         endCall(record, { ok: true, output: decision, error: null, agentId: null, cost: null });
         return decision;
+      }
+      // A card with a value is asked afresh on every run, so it belongs before the step it authorises, not inside it: once the step is
+      // written as begun, a run that is cut off while the person is still deciding reads as one that may have done the act.
+      const acting = onceAct.getStore();
+      if (input && acting) {
+        caveat(`gate "${oneLineTitle}" asks for a value inside the act of the once step "${acting}": the step is already written as begun, so a run cut off while the person decides is read as one that may have done it, and has to be settled by hand; put the card in the step's \`before\``, record.callId);
       }
       if (input) {
         caveat(
