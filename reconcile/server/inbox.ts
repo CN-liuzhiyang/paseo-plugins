@@ -52,7 +52,7 @@ export function questionRequest(cardId: string, content: CardContent, permission
     name: "事项追踪",
     kind: "question",
     title: content.title,
-    description: "选一个答案；选项都不对就写在「其他」里。收起不算回答，到时候会再问。",
+    description: "选项都不对就写在「其他」里",
     input: {
       questions: content.questions.map((q) => ({
         question: q.question,

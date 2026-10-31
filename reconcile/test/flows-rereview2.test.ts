@@ -231,18 +231,16 @@ test("N7C-06: what the flow says in a message -- its summary, why it stopped, th
   const rec = { label: "初查", caseId: "gcp-demo:7" };
   const base = { at: "2026-10-13T02:00:00.000Z", costUsd: 0, valueDropped: false };
   const raw = "[点这里](https://evil.example/x) <b>x</b> `c` **b** _i_ ~s~ a|b @all #1 db_main";
-  const plain = "［点这里］(https://evil.example/x) ＜b＞x＜/b＞ ｀c｀ ＊＊b＊＊ ＿i＿ ～s～ a｜b ＠all ＃1 db＿main";
+  const plain = "［点这里］(https://evil.example/x) ＜b＞x＜/b＞ ｀c｀ ＊＊b＊＊";
   const done = endedMessage(rec, { ...base, outcome: "done", summary: raw, value: null, why: null });
-  assert.equal(done.text, `#7 初查好了：${plain}。详情在「事项追踪」里。`);
+  assert.ok(done.text.startsWith(`#7 初查好了：${plain}`), done.text);
+  const unfinished = endedMessage(rec, { ...base, outcome: "stopped", summary: null, value: { why: raw }, why: "x" });
+  assert.ok(unfinished.text.startsWith("#7 初查停了：［点这里］(https://evil.example/x) ＜b＞x＜/b＞"), `cut to a few words, and what is left is as words: ${unfinished.text}`);
+  for (const m of [done, unfinished]) assert.equal(/[[\]<>`@*_~|#]/.test(m.text.replace("#7 ", "")), false, m.text);
+  // a message tells what became of a run and not what the machine said about it: the error is on the page, so no mark of it can reach the push
   const failed = endedMessage(rec, { ...base, outcome: "failed", summary: null, value: null, why: `OutputMismatch：${raw}` });
-  assert.equal(failed.text, `#7 初查没跑完：流程失败了（OutputMismatch：${plain}），要自己看。`);
-  const unfinished = endedMessage(rec, { ...base, outcome: "stopped", summary: "摘要", value: { why: raw }, why: "x" });
-  assert.equal(unfinished.text, `#7 初查没跑完：${plain}。详情在「事项追踪」里。`);
-  for (const m of [done, failed, unfinished]) assert.equal(/[[\]<>`@*_~|#]/.test(m.text.replace("#7 ", "")), false, m.text);
-  // a reason with nothing to say is left out, not told as "null"
-  assert.equal(endedMessage(rec, { ...base, outcome: "failed", summary: null, value: null, why: "\u0000" }).text, "#7 初查没跑完：流程失败了，要自己看。");
-  // the words of the machine's own, and the numbers, are as they were
-  assert.equal(endedMessage(rec, { ...base, outcome: "lost", summary: null, value: null, why: "失联：心跳停了；已花 $0.40" }).text, "#7 初查没跑完：流程中途断了（失联：心跳停了；已花 $0.40），要自己看。");
+  assert.match(failed.text, /^#7 初查出错了：[^[\]<>`@*_~|]*$/, failed.text);
+  assert.ok(!failed.text.includes("evil.example"), "none of the machine's words");
 });
 
 test("N7C-06: a summary that is a good news goes through the same on its way to the person", () =>
@@ -254,7 +252,7 @@ test("N7C-06: a summary that is a good news goes through the same on its way to 
       await advance(w, 10);
       const sent = w.deliveries.find((d) => d.text.startsWith("#1"))!;
       assert.equal(sent.title, "初查好了");
-      assert.equal(sent.text, "#1 初查好了：［打开报告］(https://evil.example/r) ＊＊全好＊＊。详情在「事项追踪」里。");
+      assert.equal(sent.text, "#1 初查好了：［打开报告］(https://evil.example/r) ＊＊全好＊＊。");
     },
     { persons: OWNER() },
   ));

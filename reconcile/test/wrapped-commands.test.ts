@@ -52,7 +52,7 @@ test("a drop said with --said - in the admin's own chat, run through powershell,
     const id = w.say({ cmd: "say", item: "D1", kind: "drop", said: "-" });
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "applied", w.receipt(id)!.text);
-    assert.match(w.receipt(id)!.text, /要撤销/);
+    assert.match(w.receipt(id)!.text, /撤销：reconcile-say undo --id a_[0-9a-f]{12}/, "the way back is kept for the agent");
     const drop = Object.values(w.store.state.annotations).find((a) => a.kind === "drop")!;
     assert.deepEqual([drop.said, drop.how, drop.waived], [words, "own-words", true]);
     assert.equal(w.store.state.requests[id]!.waived, true);

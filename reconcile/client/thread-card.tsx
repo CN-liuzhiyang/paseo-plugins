@@ -25,7 +25,7 @@ function Item({ data }: { data: ThreadData }) {
   const ui = useUi();
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   if (data.shape === "line") return <Line text={data.text} />;
-  if (data.state !== "open") return <Line text={`事项追踪 · ${data.no} ${data.header}：${data.line ?? ""}`} />;
+  if (data.state !== "open") return <Line text={`${data.no} ${data.header}：${data.line ?? ""}`} />;
   const ask: AskView = {
     commitmentId: data.commitmentId,
     round: data.round,

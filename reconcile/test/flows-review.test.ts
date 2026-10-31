@@ -497,13 +497,14 @@ test("R7B-07: two requests in one stage are two: the success of one does not hid
     const g = w.engine.graph("gcp-demo:1")!;
     assert.equal(g.runs.find((r) => r.runId === idFor(1, "a"))!.situation, "fail");
     assert.equal(g.runs.find((r) => r.runId === idFor(1, "b"))!.situation, "done");
-    assert.match(g.hero.kicker, /流程失败了/, "the failure of the first is still the item's condition");
+    assert.equal(g.situation, "fail", "the failure of the first is still the item's condition");
+    assert.match(g.hero.line, /出错了/);
     // asked again (a new round): the second round is the one that counts for that request
     assert.equal(w.engine.retryFlow(idFor(1, "a"), "owner").ok, true);
     await look(w, 60);
     w.flows.probes.set(idFor(1, "a", "triage", 1), finished({ ok: true }));
     await look(w, 60);
-    assert.doesNotMatch(w.engine.graph("gcp-demo:1")!.hero.kicker, /流程失败了/, "the round that came to a result replaced the one that did not");
+    assert.notEqual(w.engine.graph("gcp-demo:1")!.situation, "fail", "the round that came to a result replaced the one that did not");
   }));
 
 // ---- R7B-08: a late end is not news ----------------------------------------------------------------------

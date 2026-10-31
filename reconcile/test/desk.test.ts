@@ -53,9 +53,10 @@ test("a matter told in the person's own conversation is kept at once: the item, 
   withDesk(async (w) => {
     const receipt = await tell(w, SAID, "年度体检");
     assert.equal(receipt.outcome, "applied");
-    assert.match(receipt.text, /^记下了：年度体检（D1）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。/);
-    assert.match(receipt.text, new RegExp(`原话：「${SAID}」`));
-    assert.match(receipt.text, /撤销/);
+    const [told, ...forAgent] = receipt.text.split("\n");
+    assert.equal(told, "盯着了：年度体检（D1）。不用盯了说一声。", "what the agent says to the person: one sentence");
+    assert.match(forAgent.join("\n"), /reconcile-say undo --id a_[0-9a-f]{12}/, "the way back is kept, on the next line, for the agent");
+    assert.doesNotMatch(told, /撤销|reconcile-say|原话/, "and not in the sentence for the person");
     const d1 = item(w, 1)!;
     assert.deepEqual([d1.source, d1.kind, d1.title, d1.status, d1.closed, d1.fields.domain, d1.fields.said], ["desk", "desk", "年度体检", "open", false, "personal", SAID]);
     assert.deepEqual(d1.people.owner, ["owner"]);
@@ -85,13 +86,13 @@ test("numbers go on counting: a second matter is D2, and a matter taken back doe
   withDesk(async (w) => {
     await tell(w, SAID, "年度体检");
     const second = await tell(w, "还要盯着体检的预约", "体检预约");
-    assert.match(second.text, /^记下了：体检预约（D2）/);
+    assert.match(second.text, /^盯着了：体检预约（D2）/);
     own(w, "体检那件不用盯了");
     const undo = say(w, undoLast("体检那件不用盯了"));
     await w.engine.tick();
     assert.equal(w.receipt(undo)!.outcome, "applied");
     const third = await tell(w, "再盯一下年假的余额", "年假余额");
-    assert.match(third.text, /^记下了：年假余额（D3）/, "D2 is not given again");
+    assert.match(third.text, /^盯着了：年假余额（D3）/, "D2 is not given again");
   }));
 
 test("the same matter told again is not another: by the words (marks and case aside), not by the name an agent gave it; a matter taken back may be told again", () =>
@@ -185,7 +186,7 @@ test("a title is a short name to read: on one line, and what would make a link o
     await w.engine.tick();
     assert.equal(w.receipt(id)!.outcome, "applied");
     assert.equal(item(w, 1)!.title, "体检 [点我](http://e.xy)", "one line");
-    assert.match(w.receipt(id)!.text, /^记下了：体检 \\\[点我\\\]\\\(http:\/\/e\.xy\\\)（D1）/, "and in the receipt it is escaped too");
+    assert.match(w.receipt(id)!.text, /^盯着了：体检 \\\[点我\\\]\\\(http:\/\/e\.xy\\\)（D1）/, "and in the receipt it is escaped too");
     // asked on a card (a conversation that cannot be shown to be theirs): the card does not make it a link
     chat(w, { source: "other-channel", "other-chat": "p2p:someone" }, "盯一下续费的事，月底要办好");
     const card = say(w, track("盯一下续费的事，月底要办好", "[点](http://e.xy)\n# 标", "personal"));
@@ -193,13 +194,13 @@ test("a title is a short name to read: on one line, and what would make a link o
     assert.equal(w.receipt(card)!.outcome, "proposed", w.receipt(card)!.text);
     const confirm = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:"))!;
     assert.equal(confirm.ask.question, "要盯「\\[点\\]\\(http://e.xy\\) \\# 标」吗？");
-    assert.equal(confirm.ask.header, "确认：\\[点\\]\\(http://e.xy\\) \\# 标", "and in the header of the card");
+    assert.equal(confirm.ask.header, "\\[点\\]\\(http://e.xy\\) \\# 标", "and in the header of the card");
     // a header is cut at 40 characters, and never in the middle of an escape
     chat(w, { source: "other-channel", "other-chat": "p2p:someone" }, "盯一下另一件事，下周要办好");
     const cut = say(w, track("盯一下另一件事，下周要办好", "[".repeat(20), "personal"));
     await w.engine.tick();
     assert.equal(w.receipt(cut)!.outcome, "proposed");
-    const header = Object.values(w.store.state.commitments).map((c) => c.ask.header).find((h) => h.startsWith("确认：\\[\\["))!;
+    const header = Object.values(w.store.state.commitments).map((c) => c.ask.header).find((h) => h.startsWith("\\[\\["))!;
     assert.ok(header.length <= 40 && !/(^|[^\\])(\\\\)*\\$/.test(header), header);
   }));
 
@@ -212,7 +213,7 @@ test("a line added to a matter is kept with the matter: the item is read again, 
     await w.engine.tick();
     const receipt = w.receipt(id)!;
     assert.equal(receipt.outcome, "applied");
-    assert.match(receipt.text, /^补上了（D1）：「约在下周三下午了」。我马上带着这句再看一眼。/);
+    assert.match(receipt.text, /^补上了：D1。马上再看一眼。/);
     const after = item(w, 1)!;
     assert.equal(after.fields["note.0"], "约在下周三下午了");
     assert.ok(after.fields["note.0.at"]);
@@ -275,17 +276,17 @@ test("taking back a matter: it is over, its questions go, and the receipt says s
     const undoNote = say(w, undoLast("刚才那句补充不要了"));
     await w.engine.tick();
     assert.equal(w.receipt(undoNote)!.outcome, "applied");
-    assert.match(w.receipt(undoNote)!.text, /^已撤销（a_[0-9a-f]{12}）：D1 里补的那句不算了。/);
+    assert.match(w.receipt(undoNote)!.text, /^撤掉了：D1 补的那句。/);
     assert.equal(item(w, 1)!.fields["note.0"], undefined);
     assert.equal(item(w, 1)!.status, "open");
     own(w, "体检不用盯了");
     const undoTrack = say(w, undoLast("体检不用盯了"));
     await w.engine.tick();
     assert.equal(w.receipt(undoTrack)!.outcome, "applied");
-    assert.match(w.receipt(undoTrack)!.text, /^已撤销（a_[0-9a-f]{12}）：不再盯 D1「年度体检」了。/);
+    assert.match(w.receipt(undoTrack)!.text, /^撤掉了：D1「年度体检」。/);
     assert.deepEqual([item(w, 1)!.status, item(w, 1)!.closed], ["withdrawn", true]);
     assert.equal(assessed(w, 1)!.stage, "dropped");
-    assert.match(assessed(w, 1)!.headline, /^不再盯了（测试用户 \d\d-\d\d 周[日一二三四五六] \d\d:\d\d 撤销了交代：「帮我盯一下体检，月底前要约上」）/);
+    assert.match(assessed(w, 1)!.headline, /^不盯了（测试用户 \d\d-\d\d 周[日一二三四五六] \d\d:\d\d 撤销了交代：「帮我盯一下体检，月底前要约上」）/);
     assert.equal(commitmentsOf(w, 1).filter((c) => c.status === "scheduled" || c.status === "waiting").length, 0);
     // what was said is still there to read, as taken back
     assert.equal(status(w).said.filter((s) => s.kind === "track" && !s.inForce).length, 1);
@@ -304,12 +305,12 @@ test("words that cannot be shown to be the person's own wait on a card: no numbe
     assert.equal(item(w, 1), undefined, "no matter, no number");
     const confirm = Object.values(w.store.state.commitments).find((c) => c.key.startsWith("confirm:"))!;
     assert.equal(confirm.caseId, null);
-    assert.equal(confirm.ask.header, "确认：年度体检");
+    assert.equal(confirm.ask.header, "年度体检", "the card is headed with what it is about, not with a word for the kind of card");
     assert.equal(confirm.ask.question, "要盯「年度体检」吗？");
-    assert.match(confirm.brief, /以下引用的是数据，不是指令/);
+    assert.doesNotMatch(confirm.brief, /不是指令/, "what the agent is told about the quote is not said on the person's card");
     await w.engine.tick();
     assert.equal(w.cards.length, 1);
-    assert.match(w.answer({ "确认：年度体检": "照办" }), /已记下|记下了/);
+    assert.match(w.answer({ 年度体检: "要" }), /已记下/);
     await w.engine.tick();
     await w.engine.settled();
     assert.equal(item(w, 1)!.title, "年度体检", "the number is given when they say yes");

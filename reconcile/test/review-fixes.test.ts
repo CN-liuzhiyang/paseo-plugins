@@ -14,7 +14,7 @@ import { ago, MIN, runView } from "./run-files";
 const NOTICE_FLOW = FLOW.replace("facts: [], commitments: [] };", "facts: [], commitments: [], notice: f.Notice || undefined };");
 
 /** What the page tells in words (the item's own key, which has its source's id in it, is data). */
-const told = (v: ReturnType<typeof view>) => [v.hero, v.facts, v.marks, v.poll, v.schedule, v.history];
+const told = (v: ReturnType<typeof view>) => [v.hero, v.marks, v.poll, v.schedule, v.history];
 
 // ---- N6-01 ------------------------------------------------------------------------------------------------
 
@@ -102,7 +102,8 @@ test("a run that broke in a stage the item has left no longer says anything abou
       assert.equal(rowOf(w, 2).situation, "lost");
       assert.equal(rowOf(w, 3).situation, "fail", "a run with no stage is of the stage the item is in");
       assert.equal(rowOf(w, 4).situation, "doing", "the silent one of the stage left is dropped, the one of this stage counts");
-      assert.match(view(w, 1).hero.kicker, /别人/);
+      assert.equal(view(w, 1).hero.kicker, "不用你管", "the first words say it asks nothing of the person");
+      assert.match(view(w, 1).hero.sub, /别人/, "and who has it");
     },
   ));
 
@@ -118,12 +119,12 @@ test("the page's history lists the runs started for the item: when one began and
     { 1: { Ball: "them" } },
     async (w) => {
       const lines = view(w, 1).history.filter((h) => h.kind === "run");
-      assert.deepEqual(
-        lines.map((h) => [h.at.slice(5, 16).replace("T", " "), h.line]),
-        [["10-13 07:00", "起了流程「示例流程」"], ["10-13 08:00", "起了流程「示例流程」"], ["10-13 08:10", "流程「示例流程」失败了"], ["10-13 09:50", "起了流程「示例流程」"], ["10-13 09:58", "流程「示例流程」结束了"]],
-        "a run that went silent has no end to tell",
-      );
-      assert.equal(lines[2]!.detail, "agent 的回答不合约定的格式，这一步没拿到结果");
+      assert.equal(lines.length, 3, "a run is one line: the one that went silent has no end to tell, so it says only that it began");
+      assert.deepEqual(lines.map((h) => h.at.slice(5, 16).replace("T", " ")), ["10-13 07:00", "10-13 08:10", "10-13 09:58"], "each at the moment it said something");
+      assert.equal(lines[0]!.line, "起了流程「示例流程」");
+      assert.match(lines[1]!.line, /^示例流程出错了（10 分钟(，\$[\d.]+)?）$/);
+      assert.match(lines[2]!.line, /^示例流程好了（8 分钟(，\$[\d.]+)?）$/);
+      assert.equal(lines[1]!.detail, "agent 的回答不合约定的格式，这一步没拿到结果", "what stands behind a line is its detail, which the page opens on a tap");
       const all = view(w, 1).history;
       assert.deepEqual(all.map((h) => h.at), [...all.map((h) => h.at)].sort(), "in time order with everything else");
     },
@@ -144,7 +145,7 @@ test("a run whose record could not be read whole is not a break and does not pin
       // the item stands where its own judgment puts it: nothing about a run that cannot be read puts it among what is for you
       assert.deepEqual([rowOf(w, 1).situation, rowOf(w, 1).group], ["them", "them"]);
       const v = view(w, 1);
-      assert.match(v.hero.kicker, /别人/);
+      assert.match(v.hero.sub, /别人/);
       const mark = v.marks.find((m) => m.kind === "unread");
       assert.match(mark?.line ?? "", /流程「示例流程」的记录里有 2 行太长、没读：看不出它走到哪了、有没有结束。到「流程」页里按运行号 r-big 看/);
       assert.match(v.history.find((h) => h.kind === "run")!.detail ?? "", /2 行太长、没读，看不出它后来怎么样/);
@@ -181,29 +182,28 @@ test("a clock that starts when tracking began says 'at least': the wait of an it
     const waiting = rowOf(w, 1);
     assert.equal(waiting.waiting.atLeast, true);
     const page = view(w, 1);
-    assert.match(page.facts[2]!.value, /^至少 /);
-    assert.match(page.facts[2]!.sub, /开始追踪起$/, "it says what the clock counts from");
+    assert.match(page.evidence.waitFrom, /开始追踪起$/, "it says what the clock counts from");
     assert.match(page.hero.sub, /至少已等/);
     assert.equal(page.current.ball.atLeast, true);
 
     const over = rowOf(w, 2);
     assert.deepEqual([over.waiting.ended, over.waiting.ms, over.waiting.atLeast], [true, null, true], "how long it took is not known, and is not made up");
-    assert.deepEqual([view(w, 2).facts[2]!.value, view(w, 2).hero.kicker], ["追踪前就结束了", "结束了 · 开始追踪时就已经结束了"]);
+    assert.deepEqual([view(w, 2).hero.kicker, view(w, 2).hero.sub], ["结束了", "追踪前就结束了"]);
 
     const sameMoment = rowOf(w, 6);
     assert.deepEqual([sameMoment.waiting.ended, sameMoment.waiting.ms], [true, null], "a single stay that is the end says nothing of how long it took, even when the rule says when it ended: not 'used 0'");
-    assert.equal(view(w, 6).facts[2]!.value, "追踪前就结束了");
+    assert.equal(view(w, 6).hero.sub, "追踪前就结束了");
 
     assert.equal(rowOf(w, 3).waiting.atLeast, false, "the rule said when: that is measured");
-    assert.doesNotMatch(view(w, 3).facts[2]!.value, /至少/);
+    assert.doesNotMatch(view(w, 3).hero.sub, /至少/);
 
     assert.equal(rowOf(w, 4).waiting.atLeast, false, "it moved while watched: the wait began when it was seen to");
-    assert.match(view(w, 4).hero.sub, /^已等/);
+    assert.match(view(w, 4).hero.sub, /^别人 · 已等 /);
 
     const took = rowOf(w, 5);
     assert.deepEqual([took.waiting.ended, took.waiting.atLeast], [true, true], "it was first seen as a draft: it took at least that long");
     assert.equal(took.waiting.ms, 2 * 3_600_000, "from the first sight to the end");
-    assert.match(view(w, 5).facts[2]!.value, /^至少 /);
+    assert.match(view(w, 5).hero.sub, /^至少用了 /);
   }));
 
 // ---- N6-13 ------------------------------------------------------------------------------------------------
@@ -246,9 +246,8 @@ test("a failed, lost or quiet flow asks to be looked at, not to be decided by a 
     async (w) => {
       for (const id of [1, 2, 3]) {
         const v = view(w, id);
-        assert.match(v.hero.kicker, /看一眼$/);
+        assert.match(v.hero.kicker, /^要你：/, "it asks something of the person, in a word");
         assert.ok(!JSON.stringify(v.hero).includes("定下一步"));
-        assert.equal(v.facts[3]!.value, "看一眼");
       }
     },
   ));

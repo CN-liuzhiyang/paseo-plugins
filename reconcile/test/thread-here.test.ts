@@ -123,7 +123,7 @@ test("how a confirmation card ended is told in the conversation the words were s
     await pass(w, 5);
     const told = w.threads.filter((t) => t.item.id.startsWith("told:"));
     assert.equal(told.length, 1);
-    assert.match((told[0]!.item.data as { text: string }).text, /^事项追踪：照办了。记下了/);
+    assert.match((told[0]!.item.data as { text: string }).text, /^事项追踪：照办了。盯着了/);
     assert.equal(told[0]!.item.id, lineItemId(confirm.key.slice(confirm.key.lastIndexOf(":") + 1)));
     assert.equal(assessed(w, 1) !== undefined, true);
   }));

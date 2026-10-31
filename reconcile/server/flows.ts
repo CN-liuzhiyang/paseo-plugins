@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { LauncherConfig, Policy } from "./config";
+import { CHECK_FAILED_WORDS, LINE_BUSY_WORDS, settleShort } from "../shared/graph";
 import type { FlowEnd, FlowRec, FlowResult, FlowState, ResumeOffer } from "../shared/model";
 import type { RunProbe } from "./runs";
 import { localParts } from "./time";
@@ -94,6 +95,9 @@ export function limitWhy(recs: FlowRec[], ahead: FlowRec[], limits: FlowLimits, 
   return null;
 }
 
+/** What a person who pressed a button is told when the day's limits say no: how long to wait, not which limit. */
+export const blockedText = (blocked: { until: "tomorrow" | "later" }): string => (blocked.until === "tomorrow" ? "今天的额度用完了，明天再点" : "已经有一个在跑，等它停了再点");
+
 // ---- what to do with a run ---------------------------------------------------------------------------
 
 /** How long a state that may be a pause (a machine asleep) is looked at before it is taken for what it says. */
@@ -146,10 +150,14 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
           why,
           // What it said about being carried on, for a run that did not come out whole (a finished one has none to give, and the runtime writes it as nothing).
           ...(outcome !== "done" && probe.resume ? { resume: probe.resume } : {}),
+          ...(outcome === "stopped" && end.settle ? { settle: end.settle } : {}),
+          ...(outcome === "stopped" && end.stopKind ? { stopKind: end.stopKind } : {}),
         },
       });
     }
     case "refused":
+      // The line of runs still has a call out: not a failure, only too early, and the way to carry on stays as it was.
+      if (LINE_BUSY.test(probe.refused ?? "")) return calm({ kind: "end", end: { outcome: "refused", summary: null, costUsd: 0, value: null, valueDropped: false, why: LINE_BUSY_WORDS, lineBusy: true } });
       return calm(endOf("refused", `运行时拒绝了：${probe.refused ?? "没有说原因"}`));
     case "pending":
       return calm({ kind: "wait", live: "starting" });
@@ -192,14 +200,24 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
  * as is every other outcome. Returns the sentence, cleaned for a line; null for any run that is not such a stop. A value
  * too large to be kept (`valueDropped`) is not there to be read: that stop reads as finished.
  */
-export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value">): string | null {
+export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why" | "stopKind">>): string | null {
   if (end.outcome !== "stopped") return null;
+  // A stop at a step that may or may not have been done is one too, whatever the flow's value says: nothing has come of it until a person says.
+  if (end.settle) return settleShort(end.settle);
   const value = end.value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const why = cleanText((value as Record<string, unknown>).why, 300);
+  const why = value && typeof value === "object" && !Array.isArray(value) ? cleanText((value as Record<string, unknown>).why, 300) : null;
   // Only marks ("。", "...") is no sentence: it says nothing, so it is not a reason to call the run unfinished.
-  return why !== null && /[\p{L}\p{N}]/u.test(why) ? why : null;
+  if (why !== null && /[\p{L}\p{N}]/u.test(why)) return why;
+  // An answer that never came right, and the flow did not catch it: the runtime stops the run there (value null), in a line of its own shape.
+  // A stop that has its kind is read by it; the sentence is for files from before the field.
+  return (end.stopKind ? end.stopKind === "check" : CHECK_STOP.test(end.why ?? "")) ? CHECK_FAILED_WORDS : null;
 }
+
+/** The runtime's refusal of a start whose line of runs is being written by another (EVENTS.md "日志", the line lock): it names the line and who holds it, and is told apart from any other refusal by its first words. */
+const LINE_BUSY = /^the line of runs ".*" is being worked on by /u;
+
+/** The line the runtime stops a run with when an agent's answer still did not pass after the corrections it was allowed (EVENTS.md `run.end`): `<step>：核对 N 轮还不过：<the first problem>`. */
+const CHECK_STOP = /^[^：]{1,80}：核对 \d+ 轮还不过：/u;
 
 /** What a place that may draw Markdown or tags (a message) draws from a character: a link, a tag, code, a mention, emphasis, a table, a heading. */
 const DRAWN: Record<string, string> = { "[": "［", "]": "］", "<": "＜", ">": "＞", "`": "｀", "@": "＠", "*": "＊", "_": "＿", "~": "～", "|": "｜", "#": "＃" };
@@ -240,7 +258,7 @@ export function carryOnOf(rec: Pick<FlowRec, "runId" | "ended" | "resume">, fres
 const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
 /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
-export const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
+export const noResult = (end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why" | "stopKind">>): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
 /**
  * What a rule is told of a run. `fresh`: the word of the run a refused carrying on was to carry on, as it stands now (see `carryOnOf`);
@@ -277,38 +295,37 @@ export const WAITING_ON_YOU: ReadonlySet<FlowResult["state"]> = new Set(["failed
 
 // ---- telling a person --------------------------------------------------------------------------------
 
-/** What a run that did not come to a result says, in a sentence. */
-export function plainWhy(end: Pick<FlowEnd, "outcome" | "why">): string {
-  switch (end.outcome) {
-    case "lost":
-      return "流程中途断了";
-    case "not-started":
-      return "流程没起来";
-    case "refused":
-      return "流程被运行时拒了";
-    case "timeout":
-      return "流程超时了";
-    case "failed":
-      return "流程失败了";
-    default:
-      return "流程没跑完";
-  }
-}
+/** The request's name without the item's number it carries ("开发任务 · #7" is "开发任务"): the message says the number once, in front. */
+const nameWithout = (label: string, number: string): string => label.split(number).join("").replace(/\s*[·・:：-]\s*$/u, "").replace(/^\s*[·・:：-]\s*/u, "").trim() || label;
 
-/** The one message for a run that ended: the rule's label, and the flow's own summary or why it did not come to a result. */
+/** A reason in a few words: the flow's short sentence when it gave one (its summary), else the long one cut. */
+export const reasonShort = (summary: string | null, long: string | null, max = 40): string => {
+  const short = summary ? cleanText(summary, max + 1) : null;
+  return (short && [...short].length <= max ? short : (cleanText(long ?? summary, max) ?? "")).replace(/[。.]+$/u, "");
+};
+const shortReason = (summary: string | null, long: string | null, max = 40): string => plainForMessage(reasonShort(summary, long, max));
+
+const ERRORED: Record<string, string> = { lost: "进程断了", "not-started": "没起来", refused: "没被接受", timeout: "超时", failed: "没成功" };
+
+/** What became of a run in one word, as the message and the record of it say: 好了, 停了 (the flow stopped on purpose without getting done what it was for), 出错了. */
+export const endedWord = (end: FlowEnd): "好了" | "停了" | "出错了" => (unfinishedWhy(end) !== null ? "停了" : end.outcome === "done" || end.outcome === "stopped" ? "好了" : "出错了");
+
+/** The one message for a run that ended: the request's name, and in a line what became of it. The long version is on the item's page. */
 export function endedMessage(rec: Pick<FlowRec, "label" | "caseId" | "selfRetry">, end: FlowEnd): { title: string; text: string; status: "succeeded" | "failed" } {
   const number = `#${rec.caseId.slice(rec.caseId.lastIndexOf(":") + 1)}`;
+  const name = nameWithout(rec.label, number);
   const unfinished = unfinishedWhy(end);
-  // One sentence of way out, for a run that did not finish and said how it could be carried on (not for one the rule takes care of itself:
-  // that one has no button). The words are the flow's own; the message only points at the button.
-  const carryOn = end.resume && !rec.selfRetry && noResult(end) ? `处理好以后在事项页点「接着跑」（${plainForMessage((cleanText(end.resume.from, 80) ?? end.resume.from).replace(/[。.]+$/u, ""))}）。` : "";
-  // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done".
-  if (unfinished !== null) return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainForMessage(cleanText(unfinished, 200) ?? unfinished).replace(/[。.]+$/u, "")}。${carryOn}详情在「事项追踪」里。`, status: "failed" };
-  if (end.outcome === "done" || end.outcome === "stopped") {
-    return { title: `${rec.label}好了`, text: `${number} ${rec.label}好了：${plainForMessage(end.summary ?? (end.outcome === "done" ? "完成了" : "中止了"))}。详情在「事项追踪」里。`, status: "succeeded" };
+  // A stop that says it did not get done what it was for is read as that, in the flow's own words: not looked at this time, not "done". The way
+  // out is a button on the page (not for a run the rule takes care of itself: that one has no button).
+  if (unfinished !== null) {
+    const carryOn = end.resume && !rec.selfRetry && noResult(end) ? "处理好后在事项页点「接着跑」。" : "";
+    return { title: `${name}停了`, text: `${number} ${name}停了：${shortReason(end.summary, unfinished)}。${carryOn}`, status: "failed" };
   }
-  const why = end.why ? cleanText(end.why, 120) : null;
-  return { title: `${rec.label}没跑完`, text: `${number} ${rec.label}没跑完：${plainWhy(end)}${why ? `（${plainForMessage(why)}）` : ""}，要自己看。${carryOn}`, status: "failed" };
+  if (end.outcome === "done" || end.outcome === "stopped") {
+    return { title: `${name}好了`, text: `${number} ${name}好了：${shortReason(end.summary ?? (end.outcome === "done" ? "完成了" : "中止了"), null, 60)}。`, status: "succeeded" };
+  }
+  const carryOn = end.resume && !rec.selfRetry && noResult(end) ? "处理好后在事项页点「接着跑」。" : "要人看，在事项页。";
+  return { title: `${name}出错了`, text: `${number} ${name}出错了：${ERRORED[end.outcome] ?? "没成功"}。${carryOn}`, status: "failed" };
 }
 
 // ---- the affair a run is for -------------------------------------------------------------------------

@@ -219,12 +219,13 @@ test("the message for a run that ended says what was found, or that it did not c
   const end = (over: Partial<FlowEnd>): FlowEnd => ({ at: "2026-10-13T10:09:00+08:00", outcome: "done", summary: "找到 2 处", costUsd: 0, value: null, valueDropped: false, why: null, ...over });
   const ok = endedMessage(rec(), end({}));
   assert.deepEqual([ok.title, ok.status], ["初查好了", "succeeded"]);
-  assert.match(ok.text, /^#1 初查好了：找到 2 处。详情在「事项追踪」里。$/);
+  assert.equal(ok.text, "#1 初查好了：找到 2 处。", "what was found, once, with no pointer to a page");
   assert.match(endedMessage(rec(), end({ summary: null })).text, /好了：完成了/);
   const bad = endedMessage(rec(), end({ outcome: "lost", why: "失联：心跳停了" }));
-  assert.deepEqual([bad.title, bad.status], ["初查没跑完", "failed"]);
-  assert.match(bad.text, /^#1 初查没跑完：流程中途断了（失联：心跳停了），要自己看。$/);
-  for (const [outcome, words] of [["not-started", "流程没起来"], ["failed", "流程失败了"], ["timeout", "流程超时了"], ["refused", "流程被运行时拒了"]] as const) assert.match(endedMessage(rec(), end({ outcome })).text, new RegExp(words), outcome);
+  assert.deepEqual([bad.title, bad.status], ["初查出错了", "failed"]);
+  assert.match(bad.text, /^#1 初查出错了：进程断了。/, "one word for what happened, then what to do");
+  assert.match(bad.text, /要人看/);
+  for (const [outcome, words] of [["not-started", "没起来"], ["failed", "没成功"], ["timeout", "超时"], ["refused", "没被接受"]] as const) assert.match(endedMessage(rec(), end({ outcome })).text, new RegExp(`^#1 初查出错了：${words}。`), outcome);
 });
 
 test("a run is told to the runtime as the item it is for, the stage it was asked in and a link back, and an address only when it is a plain one", () => {

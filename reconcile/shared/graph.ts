@@ -25,12 +25,12 @@ export const SITUATION: Record<Situation, { tone: StatusTone; icon: string; name
   stuck: { tone: "danger", icon: "!", name: "卡住了" },
   error: { tone: "danger", icon: "×", name: "检查出错" },
   mine: { tone: "neutral", icon: "你", name: "你在做" },
-  dropped: { tone: "neutral", icon: "–", name: "不再追踪" },
-  fail: { tone: "danger", icon: "×", name: "流程失败了" },
-  lost: { tone: "warning", icon: "?", name: "流程断了" },
+  dropped: { tone: "neutral", icon: "–", name: "不盯了" },
+  fail: { tone: "danger", icon: "×", name: "出错了" },
+  lost: { tone: "warning", icon: "?", name: "出错了" },
   slow: { tone: "warning", icon: "…", name: "可能卡住了" },
-  notstarted: { tone: "warning", icon: "?", name: "流程没起来" },
-  unchecked: { tone: "warning", icon: "?", name: "没查成" },
+  notstarted: { tone: "warning", icon: "?", name: "出错了" },
+  unchecked: { tone: "warning", icon: "?", name: "停了" },
   done: { tone: "success", icon: "✓", name: "结束了" },
 };
 
@@ -102,7 +102,7 @@ export function normalizeStages(raw: ReadonlyArray<string | StageSpec>): StageMe
   for (const m of metas) {
     if (m.named) continue;
     // "dropped" is the id the engine itself gives to the end of not following an item.
-    m.label = m.end || m.id === "dropped" ? (m.endKind === "other" ? "另一种结束" : m.endKind === "dropped" || m.id === "dropped" ? "不再追踪" : "结束") : m.side ? `岔路 ${++detours}` : `第 ${route.indexOf(m.id) + 1} 步`;
+    m.label = m.end || m.id === "dropped" ? (m.endKind === "other" ? "另一种结束" : m.endKind === "dropped" || m.id === "dropped" ? "不盯了" : "结束") : m.side ? `岔路 ${++detours}` : `第 ${route.indexOf(m.id) + 1} 步`;
   }
   metas.forEach((m, i) => {
     if (specs[i]!.next !== undefined || m.end) return;
@@ -204,6 +204,8 @@ export interface HistoryLine {
   line: string;
   detail: string | null;
   beforeTracking: boolean;
+  /** The system's own bookkeeping: told in the evidence, not in the history. */
+  inner?: boolean;
 }
 
 export interface LinkView {
@@ -268,8 +270,12 @@ export interface RunView {
   maybeAsleep?: boolean;
   /** Why a run that did not come to a result did not, in a sentence. */
   why?: string | null;
+  /** The same in a few words: the flow's own short summary when it gave one, else `why` cut. What the page and the message say; `why` is behind "原因全文". */
+  shortWhy?: string | null;
   /** What a person may do with it on the page now (the server decides): carry on, run it again from the start, take it over, or fold it away. */
   actions?: Array<"resume" | "retry" | "mine" | "fold">;
+  /** A carrying on that was refused only because the run before it still has a call out: nothing ran, there is nothing to deal with, press again in a while. */
+  wait?: true;
   /** The rule now gives another input for this run than the one it was run with (it is not run again for that). */
   inputDrifted?: boolean;
   /** A run still going that the rule's latest judgment no longer asks for (it is not stopped for that). */
@@ -299,20 +305,53 @@ export interface RunView {
   carriedOn?: { by: string; line: string; spends: "nothing" | "maybe" } | null;
   /** For the newest round of a request that has had more than one: how many rounds, and what they cost together (the ones that have ended). */
   ledger?: { rounds: number; costUsd: number };
+  /**
+   * The line of runs it belongs to (run.start's `lineage`): the first run's id, shared by the runs that carry it on; its own id for a run that carries
+   * none on, and for a file from before the runtime wrote it. What a line shares is the runtime's journal, where the work already done is kept; what
+   * the page counts as one request (`request`, `round`) is the person's, and can be wider (starting over is the same request on a new line).
+   */
+  lineage?: string;
+  /** The step it was asked to do again although the journal had it (run.start's `redo`), when it was. */
+  redo?: string;
+  /** How many of its calls were not made but taken from the journal of an earlier run on the line: they spent nothing now and changed nothing now. Absent: none. */
+  reused?: number;
+  /** Set when the run stopped at a step it cannot take back and does not know whether it was done: a person says (the runtime's `orch.mjs settle`) before it goes on. */
+  settle?: SettleView;
 }
 
-export interface Fact {
-  label: string;
-  value: string;
-  sub: string;
-  /** The one that wants you. */
-  hot: boolean;
+/** What a person has to do about a step that may or may not have been done: what it is called, and the commands that tell the system which it was. */
+export interface SettleView {
+  title: string | null;
+  commands: string[];
 }
+
+/** What an answer that never came right is called: the runtime's `CheckFailed`, and the stop it makes when the flow does not catch it. */
+export const CHECK_FAILED_WORDS = "agent 的回答核对了几轮还不过";
+
+/** What a person is told when carrying on was refused only because the run before it still has a call out. */
+export const LINE_BUSY_WORDS = "上一段还有一步没回来，过一会儿再点";
+
+/** The top bar's first words for a run stopped at such a step. */
+export const SETTLE_KICKER = "要你：确认那一步做没做";
+
+/** From the runtime's word on a stop that it can't tell whether a step was done (`step` as the command takes it, null where it can't be typed as one). */
+export const settleView = (runId: string, settle: { step: string | null; title: string | null }): SettleView => ({
+  title: settle.title,
+  commands: settle.step ? [`orch.mjs settle ${runId} ${settle.step} --not-done`, `orch.mjs settle ${runId} ${settle.step} --done '<值的 JSON>'`] : [],
+});
+
+/** The short sentence: what it is, and that nobody knows. */
+export const settleShort = (settle: Pick<SettleView, "title">): string => (settle.title ? `「${settle.title}」可能已经做了，也可能没做` : "有一步可能已经做了，也可能没做");
+
+/** The whole reason: the short sentence and what to do about it (the commands themselves are lines of their own). */
+export const settleWhole = (settle: SettleView): string => `${settleShort(settle)}。去外面看一眼它做了没有，${settle.commands.length > 0 ? "再用下面的命令告诉系统" : "再用 orch.mjs settle 告诉系统（命令在运行记录的停止原因里）"}，然后接着跑`;
 
 export interface GraphView {
   case: string;
   number: string;
+  /** The title without the source's 【label】, which is `tag`. */
   title: string;
+  tag: string | null;
   url: string | null;
   /** The time of this reading. */
   now: string;
@@ -321,8 +360,8 @@ export interface GraphView {
   trackingSince: string | null;
   situation: Situation;
   marks: Mark[];
+  /** `kicker`: whether it wants you ("不用你管", "要你：…"); `line`: what is going on; `sub`: who has the ball, for how long, when it is looked at next. */
   hero: { kicker: string; line: string; sub: string };
-  facts: Fact[];
   graph: { stages: StageMeta[]; normal: string[] };
   visits: Visit[];
   deviations: Deviation[];
@@ -346,6 +385,8 @@ export interface GraphView {
   said: Array<{ id: string; kind: Annotation["kind"]; label: string; said: string; by: string; at: string; until: string | null; how: "own-words" | "confirmed" | "confirmed-here"; inForce: boolean; revokedAt: string | null }>;
   history: HistoryLine[];
   evidence: {
+    /** Where the wait in the top bar is counted from, and why it is only "at least" when it is; empty when the item is over. */
+    waitFrom: string;
     facts: Array<{ field: string; value: string; evidence: string | null; at: string; by: string }>;
     sources: Array<{ id: string; state: string; lastOkAt: string | null; nextPollAt: string | null }>;
     /** The stages of the rule by the id it wrote them with: ids are for here, the rest of the page uses the names. */
@@ -360,13 +401,13 @@ export interface GraphView {
 
 export type Group = "me" | "errors" | "them" | "system" | "mine" | "done";
 
-export const GROUP_LABEL: Record<Group, { name: string; sub: string }> = {
-  me: { name: "要你做的", sub: "回答问题、批准、看一眼卡住的" },
-  errors: { name: "检查出错的", sub: "不是事项本身的问题，是判断它的时候出错了" },
-  them: { name: "在等别人的", sub: "谁、在干什么、等了多久" },
-  system: { name: "系统在查的", sub: "不用管，有变化或到点会叫你" },
-  mine: { name: "你自己在开发的", sub: "不催你，开发完成后自动接着跟" },
-  done: { name: "结束了的", sub: "最近的" },
+export const GROUP_LABEL: Record<Group, { name: string }> = {
+  me: { name: "要你做的" },
+  errors: { name: "检查出错的" },
+  them: { name: "在等别人" },
+  system: { name: "系统盯着" },
+  mine: { name: "你在开发" },
+  done: { name: "结束了" },
 };
 
 export type StripCell = "done" | "cur" | "todo" | "skip" | "pre";
@@ -519,39 +560,41 @@ export const clockWeekText = (iso: string): string => {
   return `${iso.slice(5, 10)} 周${"日一二三四五六"[new Date(Date.UTC(y!, m! - 1, d!)).getUTCDay()]} ${iso.slice(11, 16)}`;
 };
 
-/** What the page calls a run that came to no result (or went quiet), in a word. */
-export const troubleWord = (situation: RunView["situation"]): string =>
-  situation === "notstarted" ? "没起来" : situation === "unchecked" ? "没查成" : situation === "lost" ? "断了" : situation === "slow" ? "可能卡住了" : "失败了";
+/** What the page calls a run that came to no result (or went quiet): a stop the flow chose is "停了", the rest is "出错了". */
+export const troubleWord = (situation: RunView["situation"]): string => (situation === "unchecked" ? "停了" : situation === "slow" ? "可能卡住了" : "出错了");
 
-/** The line over the way out of a run in trouble: which run, what became of it and why in the flow's own words (no double stop). */
-export const troubleLine = (run: Pick<RunView, "flow" | "situation" | "why" | "actions">): string => {
-  const why = run.why?.replace(/[。.]+$/u, "");
-  return `流程「${run.flow}」${troubleWord(run.situation)}${why ? `：${why}` : ""}。${run.actions?.includes("resume") ? "处理好原因以后点「接着跑」，不会自己重来。" : "不会自动重来。"}`;
+/** A text cut to a few words for a line: marks of the end taken off, "…" where it was cut. */
+export const cutText = (text: string | null | undefined, max = 40): string => {
+  const chars = [...(text ?? "").replace(/\s+/g, " ").trim().replace(/[。.]+$/u, "")];
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : chars.join("");
 };
 
-/**
- * What the button that runs it again says: whether it will cost, and what the last round cost. Next to "接着跑" it is called "从头重跑"
- * (carrying on and starting over are two buttons, and the names say which is which); on its own it is "重新跑一次".
- */
-export const retryLabel = (run: Pick<RunView, "situation" | "retry" | "actions">): string => {
-  const name = run.actions?.includes("resume") ? "从头重跑" : "重新跑一次";
+/** The line over the way out of a run in trouble: the request's name, what became of it, and why in a few words (all of it is behind "原因全文"). */
+export const troubleLine = (run: Pick<RunView, "flow" | "title" | "situation" | "why" | "shortWhy"> & { error?: { plain: string } | null }): string => {
+  const why = run.shortWhy ?? cutText(run.why ?? run.error?.plain);
+  return `${run.title ?? run.flow}${troubleWord(run.situation)}${why ? `：${why}` : ""}`;
+};
+
+/** What the button that starts a request over is called. What it costs is not on the button: it is behind "原因全文", and said again once it is pressed. */
+export const RETRY_LABEL = "从头重跑";
+
+/** What starting over costs, for the place that has room to say it. */
+export const retryCost = (run: Pick<RunView, "situation" | "retry">): string => {
   // A cost that is known wins over how the last round came out: a carrying on that never started spent nothing, but running from the start still costs what it did.
   const known = run.retry?.estimateUsd ?? 0;
-  return known === 0 && (run.situation === "notstarted" || run.situation === "unchecked")
-    ? `${name}（上次没花钱）`
-    : `${name}（会再花钱${known > 0 ? `，上次花了 $${known.toFixed(2)}` : ""}）`;
+  return known === 0 && (run.situation === "notstarted" || run.situation === "unchecked") ? "从头重跑：上次没花钱" : `从头重跑：会再花钱${known > 0 ? `，上次 $${known.toFixed(2)}` : ""}`;
 };
 
-/** What stands beside the "接着跑" button: where it carries on from (the flow's own words) and whether it calls a model, with what the round it carries on cost. */
+/** What stands beside the "接着跑" button: where it carries on from (the flow's own words, short) and whether it calls a model. */
 export const resumeNote = (run: Pick<RunView, "resume" | "costUsd">): string => {
   const offer = run.resume;
   if (!offer) return "";
-  const model = offer.spends === "nothing" ? "不调模型" : `可能会调模型${run.costUsd > 0 ? `（上一轮花了 $${run.costUsd.toFixed(2)}）` : ""}`;
-  return `${offer.line.replace(/[。.]+$/u, "")} · ${model}`;
+  const model = offer.spends === "nothing" ? "不调模型" : `可能调模型${run.costUsd > 0 ? `（上一轮 $${run.costUsd.toFixed(2)}）` : ""}`;
+  return `${cutText(offer.line, 24)} · ${model}`;
 };
 
-/** The sum of a request's rounds, for the line over its way out: "已经跑了 3 次，一共花了 $1.14". */
-export const ledgerText = (ledger: RunView["ledger"]): string => (ledger && ledger.rounds > 1 ? `这件事已经跑了 ${ledger.rounds} 次，一共花了 $${ledger.costUsd.toFixed(2)}。` : "");
+/** The sum of a request's rounds, for the full reason: "跑了 3 次，一共 $1.14". */
+export const ledgerText = (ledger: RunView["ledger"]): string => (ledger && ledger.rounds > 1 ? `跑了 ${ledger.rounds} 次，一共 $${ledger.costUsd.toFixed(2)}` : "");
 
 // One pass, so that what an escape protects is read as the character it stands for and not as a mark: `\#` is a
 // "#", and the "#" it makes is not the start of a heading. An escape is a backslash before ASCII punctuation (the

@@ -189,10 +189,10 @@ test("a rule written the old way (stage ids as plain strings, no metadata, no `s
       await w.run("2026-10-13 10:30");
       const v = view(w, 41);
       // a rule with no end of its own gets one for "not following it any more", so that a word of the person's has somewhere to go
-      assert.deepEqual(v.graph.stages.map((s) => [s.id, s.label, s.side, s.end]), [["one", "第 1 步", false, false], ["two", "第 2 步", false, false], ["dropped", "不再追踪", false, true]]);
+      assert.deepEqual(v.graph.stages.map((s) => [s.id, s.label, s.side, s.end]), [["one", "第 1 步", false, false], ["two", "第 2 步", false, false], ["dropped", "不盯了", false, true]]);
       assert.equal(rowOf(w, 41).stageLabel, "第 1 步", "the list says the same, not the id");
       assert.equal(v.current.stageLabel, "第 1 步");
-      assert.match(v.facts[0]!.value, /第 1 步/);
+      assert.match(v.graph.stages[0]!.label, /第 1 步/);
       assert.deepEqual(v.evidence.stages.filter((s) => !s.named).map((s) => [s.id, s.label]), [["one", "第 1 步"], ["two", "第 2 步"]], "where the ids are");
       // what is for the page to show: the stage ids the data carries for logic (visits, current) are not text
       const shown = JSON.stringify({ ...v, evidence: null, graph: null, current: { ...v.current, stage: "" }, visits: v.visits.map((x) => ({ ...x, stage: "" })) });
@@ -297,13 +297,11 @@ test("a wait the rules changed hands is counted from the rule's evidence, or, wi
 
     const none = rowOf(w, 71).waiting;
     assert.deepEqual([none.since, none.atLeast, none.rulesAt], [changed, true, changed]);
-    assert.match(view(w, 71).facts[2]!.value, /^至少 /);
-    assert.match(view(w, 71).facts[2]!.sub, /^从 10-13 11:\d\d 起：判断方法这时更新，才算到你这边，之前多久不知道$/);
+    assert.match(view(w, 71).evidence.waitFrom, /^从 10-13 11:\d\d 起：判断方法这时更新，才算到你这边，之前多久不知道$/, "why, in the evidence");
 
     const told = rowOf(w, 72).waiting;
     assert.deepEqual([told.since?.slice(0, 16), told.atLeast, told.rulesAt], ["2026-10-13T10:20", false, changed]);
-    assert.match(view(w, 72).facts[2]!.sub, /^从 10-13 10:20 起（判断方法 10-13 11:\d\d 更新后才算到你这边）$/);
-    assert.doesNotMatch(view(w, 72).facts[2]!.value, /至少/);
+    assert.match(view(w, 72).evidence.waitFrom, /^从 10-13 10:20 起（判断方法 10-13 11:\d\d 更新后才算到你这边）$/);
 
     assert.deepEqual([rowOf(w, 73).waiting.since, rowOf(w, 73).waiting.atLeast], [changed, true], "a time before the turn before it is not believed");
     assert.deepEqual([rowOf(w, 77).waiting.since, rowOf(w, 77).waiting.atLeast], [changed, true], "nor one after the judgment");

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
-import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
+import { CHECK_FAILED_WORDS, HOME_SCREEN, RUN_SCREEN, settleView, settleWhole, type RunView } from "../shared/graph";
 import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type ResumeOffer, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
 import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, passesOf, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
@@ -17,7 +17,7 @@ import { dropKept, fingerprintOf, judge, keptFiles, loadRules, makeContext, outp
 import type { CaptureInput } from "./capsule";
 import { ADMIN_CHAT_UNDO_MS, adminChat, answerWords, clip, clipMd, DESK_TITLE_MAX, finishRequest, freshInChat, KIND_LABEL, mentions, OPEN_TO_ADMIN_CHAT, ownWords, readRequests, REQUESTS_PER_HOUR, SAID_FROM_CHAT, sweepRequests, vouchKey, withoutMention, confirmWords, personsOwn, commandStep, type AskedAt, type AnswerRequest, type ConfirmRequest, type Conversation, type NoteRequest, type Receipt, type Request, type SayRequest, type TrackRequest } from "./requests";
 import type { ListedRow, Poll, PollInput, Source } from "./sources/source";
-import { actFor, affairOf, carryOnOf, deferredResult, endedMessage, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, noResult, ranNothing, resultOf, runIdOf, unfinishedWhy, type CarryOn, type Launcher, type Live } from "./flows";
+import { actFor, affairOf, blockedText, carryOnOf, deferredResult, endedMessage, endedWord, inputHashOf, limitWhy, MAX_SPAWN_FAILURES, noResult, ranNothing, reasonShort, resultOf, runIdOf, unfinishedWhy, type CarryOn, type Launcher, type Live } from "./flows";
 import type { AgentArchiver } from "./archive";
 import type { RunProbe } from "./runs";
 import { flowKeyOf, type EventBody, type RulesDiff } from "./state";
@@ -879,17 +879,22 @@ export function createEngine(deps: EngineDeps) {
         const key = `flow-notify:${rec.runId}:${target.channel}:${target.to}`;
         const before = state.ledger[key];
         if (before?.status === "done" || before?.status === "suppressed") continue;
+        // Too early to carry on is no news: the person pressed the button on the page and sees it there.
+        if (rec.ended.lineBusy) {
+          append([{ type: "action", action: { ...action(key, "notify", rec.runId, `不发 ${labelOf(target)}：${rec.label} 只是上一段还没回来`, "suppressed", "线被占着，不算出错", nowMs), tries: before?.tries ?? 0 } }]);
+          continue;
+        }
         const tries = (before?.tries ?? 0) + 1;
         if (tries > MAX_NOTIFY_TRIES) continue;
         const came = (rec.ended.outcome === "done" || rec.ended.outcome === "stopped") && unfinishedWhy(rec.ended) === null;
-        const summary = `发 ${labelOf(target)}：${rec.label}${came ? "好了" : "没跑完"}`;
+        const summary = `发 ${labelOf(target)}：${rec.label}${endedWord(rec.ended)}`;
         // Told while it is news: past FLOW_TELL_MS it is left for the next card (the page has it), however it came to be late.
         if (nowMs - Date.parse(rec.ended.completedAt ?? rec.ended.at) > (came ? FLOW_TELL_MS : FLOW_TELL_BAD_MS)) {
           append([{ type: "action", action: { ...action(key, "notify", rec.runId, summary, "suppressed", "结束得太久了，不单发，并进下一张卡", nowMs), tries: before?.tries ?? 0 } }]);
           continue;
         }
         if (!mayReach(person, [domain], 0, nowMs, calendar).send) {
-          plan.push({ at: nowIso(nowMs), kind: "deferred", person: person.id, summary: `不打扰时段，先不发 ${labelOf(target)}：${rec.label} ${came ? "好了" : "没跑完"}` });
+          plan.push({ at: nowIso(nowMs), kind: "deferred", person: person.id, summary: `不打扰时段，先不发 ${labelOf(target)}：${rec.label} ${endedWord(rec.ended)}` });
           continue;
         }
         const message = endedMessage(rec, rec.ended);
@@ -933,29 +938,33 @@ export function createEngine(deps: EngineDeps) {
     const latest = state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId === rec.runId;
     const situation: RunView["situation"] = rec.dismissed
       ? "done"
-      : outcome === "done" || outcome === "stopped"
-        ? unfinished !== null
-          ? "unchecked"
-          : "done"
-        : outcome === "lost"
-          ? "lost"
-          : outcome === "not-started"
-            ? "notstarted"
-            : outcome !== null
-              ? "fail"
-              : live === "gate"
-                ? "me"
-                : live === "slow"
-                  ? "slow"
-                  : read?.situation === "unreadable" || read?.situation === "slow" || read?.situation === "me"
-                    ? read.situation
-                    : "doing";
+      : rec.ended?.lineBusy
+        ? "unchecked"
+        : outcome === "done" || outcome === "stopped"
+          ? unfinished !== null
+            ? "unchecked"
+            : "done"
+          : outcome === "lost"
+            ? "lost"
+            : outcome === "not-started"
+              ? "notstarted"
+              : outcome !== null
+                ? "fail"
+                : live === "gate"
+                  ? "me"
+                  : live === "slow"
+                    ? "slow"
+                    : read?.situation === "unreadable" || read?.situation === "slow" || read?.situation === "me"
+                      ? read.situation
+                      : "doing";
     // The way out is for a run in trouble in the stage the item is in; a stage it has left is history.
     const here = rec.stage === null || currentStage === undefined || rec.stage === currentStage;
     const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
     // Only for the newest round of its request: an earlier one is history (the request is the person's to set aside, not each round of it).
     const point = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? carryOnPoint(rec) : null;
-    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(point ? (["resume"] as const) : []), ...(outcome !== null ? (["retry"] as const) : []), "mine", "fold"] : [];
+    // A run stopped at a step it cannot take back and does not know was done is not started over from the start: that would do the step again, on a new line of runs, where nothing of it is kept.
+    const settle = rec.ended?.settle ? settleView(rec.runId, rec.ended.settle) : null;
+    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(point ? (["resume"] as const) : []), ...(outcome !== null && !settle ? (["retry"] as const) : []), "mine", "fold"] : [];
     const rounds = latest ? roundsOf(rec) : [];
     // "From the start" costs what the request cost when it last ran from the start, not what a carrying on cost.
     const fromStart = [...rounds].reverse().find((r) => !r.resume && r.ended);
@@ -987,16 +996,21 @@ export function createEngine(deps: EngineDeps) {
       situation,
       endedAt: rec.ended ? (rec.ended.completedAt ?? rec.ended.at) : base.endedAt,
       request: flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key),
-      outcome: rec.ended ? (unfinished !== null ? `没查成：${unfinished}` : (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome)))) : base.outcome,
+      outcome: rec.ended ? (unfinished !== null ? (settle ? unfinished : `没查成：${unfinished}`) : (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome)))) : base.outcome,
       costUsd: rec.ended?.costUsd ?? base.costUsd,
       own: true,
       round: rec.round,
-      why: unfinished ?? rec.ended?.why ?? null,
+      // A stop for an answer that never came right keeps the runtime's whole line (which problem it was) behind the tap; the sentence is `shortWhy`.
+      why: settle ? settleWhole(settle) : unfinished === CHECK_FAILED_WORDS ? (rec.ended?.why ?? unfinished) : (unfinished ?? rec.ended?.why ?? null),
+      ...(settle ? { settle } : {}),
+      ...(rec.ended?.lineBusy ? { wait: true as const } : {}),
+      // The words for a person: what the run's own file says in plain words, else the reason it ended with without the runtime's error name in front ("OutputMismatch：…").
+      shortWhy: rec.ended && (unfinished ?? base.error?.plain ?? rec.ended.why) ? reasonShort(rec.ended.summary, unfinished ?? base.error?.plain ?? rec.ended.why!.replace(/^[A-Z][A-Za-z0-9]+：/u, "")) : null,
       ...(rec.dismissed ? { dismissed: rec.dismissed.how } : {}),
       ...(suspects.has(rec.runId) && situation !== "done" ? { maybeAsleep: true } : {}),
       ...(drifted.has(rec.runId) ? { inputDrifted: true } : {}),
       ...(unwanted(rec) ? { unwanted: true } : {}),
-      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry ? { round: rec.round + 1, estimateUsd: rec.resume ? estimateOf(fromStart) : estimateOf(rec) } : null,
+      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry && !settle ? { round: rec.round + 1, estimateUsd: rec.resume ? estimateOf(fromStart) : estimateOf(rec) } : null,
       ...(rec.selfRetry ? { selfRetry: true } : {}),
       ...(rec.title ? { title: rec.title } : {}),
       actions: actions,
@@ -1025,27 +1039,28 @@ export function createEngine(deps: EngineDeps) {
   /** A person sets a run aside ("mine": they take it from here; "fold": just not shown). Only a run that is in trouble; by run id. */
   function dismissFlow(runId: string, how: "mine" | "fold", by: string): { ok: boolean; detail: string } {
     const rec = state.flows?.[runId];
-    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
+    if (!rec) return { ok: false, detail: "没有这个运行" };
     if (rec.dismissed) return { ok: false, detail: "已经收起过了" };
     const trouble = (rec.ended && noResult(rec.ended)) || (!rec.ended && liveOf.get(runId) === "slow");
-    if (!trouble) return { ok: false, detail: rec.ended ? "这个运行是正常结束的，不用收起" : "这个运行还在正常地跑，没有出问题" };
+    if (!trouble) return { ok: false, detail: rec.ended ? "这次是正常结束的" : "还在跑，没出问题" };
     append([{ type: "flow.dismissed", runId, how, by }]);
-    return { ok: true, detail: how === "mine" ? "记下了：这件事你自己来，流程的失败不再算在事项头上" : "收起了" };
+    return { ok: true, detail: how === "mine" ? "好，你来" : "收起了" };
   }
 
   /** A person asks for a run again: the next round of its key, under the day's limits, with the input the rule asks with now (else the last one). */
   function retryFlow(runId: string, by: string): { ok: boolean; detail: string } {
     const nowMs = deps.now();
     const rec = state.flows?.[runId];
-    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
-    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
-    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用再跑" : "这个运行还没结束" };
-    if (rec.selfRetry) return { ok: false, detail: "这个流程没成的时候，判断方法会自己再起一次，不用手动重跑" };
-    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
+    if (!rec) return { ok: false, detail: "没有这个运行" };
+    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "已经有更新的一轮了" };
+    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "已经有结果了" : "还没停" };
+    if (rec.selfRetry) return { ok: false, detail: "系统会自己重试" };
+    if (rec.ended.settle) return { ok: false, detail: "那一步可能已经做了，从头重跑会再做一遍；先确认它做没做（命令在原因全文里），再接着跑" };
+    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "演练中，不起流程" : "这里没配起流程的命令" };
     const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}), byPerson: true }, nowMs, tz);
-    if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
+    if (blocked) return { ok: false, detail: blockedText(blocked) };
     const input = lastAsked.get(rec.caseId)?.find((a) => a.name === rec.name && a.flow === rec.flow && a.key === rec.key)?.input ?? rec.input;
-    if (!input) return { ok: false, detail: "上一轮的输入没留下，没法照样再跑" };
+    if (!input) return { ok: false, detail: "上一轮的输入没留下" };
     const next: FlowRec = {
       ...rec,
       runId: runIdOf(deps.instanceId, rec.caseId, rec.name, rec.flow, rec.key, rec.round + 1),
@@ -1071,7 +1086,7 @@ export function createEngine(deps: EngineDeps) {
       { type: "flow.retry", caseId: rec.caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, by, estimateUsd: estimate },
       { type: "flow.intent", rec: next },
     ]);
-    return { ok: true, detail: `记下了，这就${carryOnPoint(rec) ? "从头重跑" : "重新跑一次"}（第 ${next.round + 1} 轮）；上一轮花了 $${rec.ended.costUsd.toFixed(2)}` };
+    return { ok: true, detail: `从头重跑了（上一轮 $${rec.ended.costUsd.toFixed(2)}）` };
   }
 
   /**
@@ -1083,20 +1098,20 @@ export function createEngine(deps: EngineDeps) {
   function resumeFlow(runId: string, by: string): { ok: boolean; detail: string } {
     const nowMs = deps.now();
     const rec = state.flows?.[runId];
-    if (!rec) return { ok: false, detail: "没有这个运行（不是这个控制器起的）" };
-    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "这个键已经有更新的一轮了" };
-    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "这个运行已经有结果了，不用接着跑" : "这个运行还没结束" };
-    if (rec.selfRetry) return { ok: false, detail: "这个流程没成的时候，判断方法会自己再起一次，不用手动接着跑" };
-    if (rec.dismissed) return { ok: false, detail: "这个运行已经被收起（或者说了「我自己来」），不再接着跑" };
-    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "现在只演练，不起流程" : "这个实例没有配起流程的命令（flows.json）" };
-    if (declaredFlow(rec.caseId, rec.name) !== rec.flow) return { ok: false, detail: "判断方法现在不起这个流程了，没法接着它跑" };
+    if (!rec) return { ok: false, detail: "没有这个运行" };
+    if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "已经有更新的一轮了" };
+    if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "已经有结果了" : "还没停" };
+    if (rec.selfRetry) return { ok: false, detail: "系统会自己重试" };
+    if (rec.dismissed) return { ok: false, detail: "已经收起了" };
+    if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "演练中，不起流程" : "这里没配起流程的命令" };
+    if (declaredFlow(rec.caseId, rec.name) !== rec.flow) return { ok: false, detail: "系统现在不起这个流程了" };
     const point = carryOnPoint(rec);
-    if (!point) return { ok: false, detail: "这个运行没说过能从哪里接着跑" };
+    if (!point) return { ok: false, detail: "没说过能从哪接着跑" };
     // The earlier run is looked for where it was started, and the new one is made there too.
     const logDir = logDirOf(rec);
-    if (logDir === null) return { ok: false, detail: "不知道上一轮的运行日志在哪个目录，没法接着它跑" };
+    if (logDir === null) return { ok: false, detail: "找不到上一轮的日志" };
     const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}), byPerson: true }, nowMs, tz);
-    if (blocked) return { ok: false, detail: `${blocked.why}，${blocked.until === "tomorrow" ? "明天再点" : "等有空位再点"}` };
+    if (blocked) return { ok: false, detail: blockedText(blocked) };
     const next: FlowRec = {
       ...rec,
       runId: runIdOf(deps.instanceId, rec.caseId, rec.name, rec.flow, rec.key, rec.round + 1),
@@ -1116,7 +1131,7 @@ export function createEngine(deps: EngineDeps) {
       { type: "flow.resume", caseId: rec.caseId, name: rec.name, key: rec.key, round: next.round, runId: next.runId, from: point.from, flow: point.flow, by },
       { type: "flow.intent", rec: next },
     ]);
-    return { ok: true, detail: `记下了，这就接着跑（第 ${next.round + 1} 次）：${point.line.replace(/[。.]+$/u, "")}` };
+    return { ok: true, detail: "接着跑了" };
   }
 
   /**
@@ -1357,7 +1372,7 @@ export function createEngine(deps: EngineDeps) {
 
   /** Why a say request cannot be done as asked; null when it can. */
   function checkSay(r: SayRequest, caseId: string, nowMs: number): string | null {
-    if (r.kind === "drop" && inForce(caseId, "drop", nowMs).length > 0) return `${numberOf(caseId)} 已经不再追踪了`;
+    if (r.kind === "drop" && inForce(caseId, "drop", nowMs).length > 0) return `${numberOf(caseId)} 已经不盯了`;
     if (r.kind === "hold") {
       if (!r.until) return "先别问要说到哪天（--until YYYY-MM-DD，那天起照常问）";
       const today = localParts(nowMs, tz).date;
@@ -1594,14 +1609,12 @@ export function createEngine(deps: EngineDeps) {
     const via = conversation!.labels.source ? `chat:${clip(conversation!.labels.source, 20)}` : "chat";
     const { events, label } = answerEvents(c, "option" in pick ? pick.option.label : pick.other, at, via, `chat\u0000${c.id}\u0000${c.rounds}`, personName(c.ask.person));
     events.push(...closingCards(c, at));
-    const head = `记下了：${noOf(c)}「${clip(c.ask.header, 40)}」，`;
-    const detail = isConfirm(c)
-      ? "option" in pick && pick.option.id === "yes"
-        ? `${head}你选了「${label}」，下一次检查（一分钟内）就照办。`
-        : `${head}你回的是${"option" in pick ? `「${label}」` : label}，不是「照办」，那句话不会生效。`
-      : `${head}${"option" in pick ? `你选了「${label}」` : `你说${label}`}。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。`;
+    const detail = isConfirm(c) ? ("option" in pick && pick.option.id === "yes" ? "好，照办。" : "好，不办：那句话不会生效。") : `好，${noOf(c)} 记下：${label}。`;
     return { outcome: "applied", detail, annotation: null, caseId: c.caseId, events, immediate: true, vouch: `${message}\u0001a:${c.id}`, ...(waive && !!conversation?.labels.source ? { waived: true as const } : {}) };
   }
+
+  /** The line of a receipt that is for the agent, not the person: how to take back what it just recorded. The first line is what is told. */
+  const undoNote = (annotationId: string): string => `（给你用，不用转给人）撤销：reconcile-say undo --id ${annotationId}，或者人在同一个对话里说「刚才那条不要了」。`;
 
   function applySaid(r: SayRequest | Extract<Request, { cmd: "undo" }>, caseId: string, target: Annotation | null, by: string, how: Annotation["how"], nowMs: number): Handled {
     const n = numberOf(caseId);
@@ -1609,8 +1622,8 @@ export function createEngine(deps: EngineDeps) {
       const t = target!;
       // What a matter a person told is, read again without what is taken back: a line taken back is no longer said, and a matter taken back is over.
       const again: EventBody[] = t.kind === "track" || t.kind === "note" ? [{ type: "item.snapshot", item: deskItem(trackOf(caseId)!, notesOf(caseId), new Set([t.id])) }] : [];
-      const first = t.kind === "track" ? `已撤销（${t.id}）：不再盯 ${n}「${t.title ?? ""}」了。` : t.kind === "note" ? `已撤销（${t.id}）：${n} 里补的那句不算了。` : `已撤销（${t.id}）：${n}「${KIND_LABEL[t.kind]}」那条不再生效。`;
-      const detail = [first, `原来的话：「${clip(t.said, 80)}」`, ...(t.kind === "wrong" ? ["当时记下的评测候选留着。"] : [])].join("\n");
+      const first = t.kind === "track" ? `撤掉了：${n}「${t.title ?? ""}」。` : t.kind === "note" ? `撤掉了：${n} 补的那句。` : `撤掉了：${n}「${KIND_LABEL[t.kind]}」。`;
+      const detail = [first, ...(t.kind === "wrong" ? ["（给你用，不用转给人）当时记下的评测候选留着。"] : [])].join("\n");
       return { outcome: "applied", detail, annotation: t.id, caseId, events: [{ type: "annotation.revoked", id: t.id, said: r.said, by }, ...again], ...(again.length > 0 ? { immediate: true } : {}) };
     }
     const annotation: Annotation = {
@@ -1631,15 +1644,15 @@ export function createEngine(deps: EngineDeps) {
     const events: EventBody[] = [{ type: "annotation.added", annotation }, ...withdrawMoot(caseId, annotation, r.id, nowMs)];
     const first =
       r.kind === "drop"
-        ? `已记下（${annotation.id}）：不再追踪 ${n}。`
+        ? `${n} 不盯了。说「撤回」可以撤。`
         : r.kind === "hold"
-          ? `已记下（${annotation.id}）：${r.until} 之前不问${r.person ? ` ${personName(r.person)} ` : "你"} ${n} 的事，那天起照常问；最后期限跟着顺延。`
-          : `已记下（${annotation.id}）：${n} 这个判断错了，记成了一条评测候选，以后改判断方法时拿它核对。现状不会因此改变；要这个事项照对的走，另外说一句（比如"不再追踪"）。`;
+          ? `好，${r.until} 前不问${r.person ? ` ${personName(r.person)} ` : "你"}${n}。`
+          : `记下了：${n} 判断错了。现状不变，要改就再说一句。`;
     if (r.kind === "wrong") {
       const detail = [`「${clip(r.said, 200)}」`, r.what ? `错在：${r.what}` : "", r.expected ? `应该：${r.expected}` : ""].filter(Boolean).join("；");
       events.push({ type: "eval.candidate", kind: "correction", subject: caseId, detail: clip(detail, 600) });
     }
-    const detail = [first, `原话：「${clip(r.said, 100)}」`, `要撤销：在同一个对话里说一句（比如"刚才那条不要了"），或者 reconcile-say undo --id ${annotation.id}`].join("\n");
+    const detail = [first, undoNote(annotation.id)].join("\n");
     return { outcome: "applied", detail, annotation: annotation.id, caseId, events };
   }
 
@@ -1652,11 +1665,8 @@ export function createEngine(deps: EngineDeps) {
     const n = deskNo(key);
     const why = cannotLook();
     const detail = [
-      why === null
-        ? `记下了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。我现在先看一眼，一分钟左右在「事项追踪」里能看到我打算什么时候再看。不用盯了就说一声。`
-        : `记下了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。不过这里现在不会自己去看（${why}），先记着。不用盯了就说一声。`,
-      `原话：「${clip(r.said, 100)}」`,
-      `要撤销：在同一个对话里说一句（比如"刚才那条不要了"），或者 reconcile-say undo --id ${annotation.id}`,
+      why === null ? `盯着了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。不用盯了说一声。` : `记着了：${clipMd(annotation.title ?? "", DESK_TITLE_MAX)}（${n}）。这里现在不会自己去看（${why}）。`,
+      undoNote(annotation.id),
     ].join("\n");
     return { outcome: "applied", detail, annotation: annotation.id, caseId: key, events: [{ type: "annotation.added", annotation }, { type: "item.snapshot", item: deskItem(annotation, []) }], immediate: true };
   }
@@ -1682,10 +1692,7 @@ export function createEngine(deps: EngineDeps) {
       text: null,
     };
     const why = cannotLook();
-    const detail = [
-      `补上了（${numberOf(caseId)}）：「${clip(r.said, 100)}」。${why === null ? "我马上带着这句再看一眼。" : `不过这里现在不会自己去看（${why}），先记着。`}`,
-      `要撤销：在同一个对话里说一句（比如"刚才那条不要了"），或者 reconcile-say undo --id ${annotation.id}`,
-    ].join("\n");
+    const detail = [`补上了：${numberOf(caseId)}。${why === null ? "马上再看一眼。" : `这里现在不会自己去看（${why}）。`}`, undoNote(annotation.id)].join("\n");
     return { outcome: "applied", detail, annotation: annotation.id, caseId, events: [{ type: "annotation.added", annotation }, { type: "obs", obs }, { type: "item.snapshot", item: after }], immediate: true };
   }
 
@@ -1693,14 +1700,14 @@ export function createEngine(deps: EngineDeps) {
    * Words that may not be the person's own become a question to the admin: yes applies them as
    * said. One a day per item and kind, so that a chat full of "有点问题" is not a card each.
    */
-  /** What a request does, as a verb phrase ("盯「体检」", "不再追踪 D1", "撤掉 D1 …"): what a confirmation card and the question asked in a conversation both say. */
+  /** What a request does, as a verb phrase ("盯「体检」", "不盯 D1", "撤掉 D1 …"): what a confirmation card and the question asked in a conversation both say. */
   function whatOf(r: Exclude<Request, AnswerRequest | ConfirmRequest>, caseId: string | null, target: Annotation | null): string {
     const n = caseId ? numberOf(caseId) : "";
     // The matter by its name as well as its number ("「年度体检」（D2）"): a number alone says nothing to the person.
     const title = caseId ? state.items[caseId]?.title : undefined;
     const named = title ? `「${clipMd(title, DESK_TITLE_MAX)}」（${n}）` : n;
     return r.cmd === "say"
-      ? `${KIND_LABEL[r.kind]}${named.startsWith("「") ? "" : " "}${named}${r.kind === "hold" ? `（到 ${r.until}）` : ""}`
+      ? `${r.kind === "drop" ? "不盯" : KIND_LABEL[r.kind]}${named.startsWith("「") ? "" : " "}${named}${r.kind === "hold" ? `（到 ${r.until}）` : ""}`
       : r.cmd === "track"
         ? `盯「${clipMd(r.title, DESK_TITLE_MAX)}」`
         : r.cmd === "note"
@@ -1832,23 +1839,16 @@ export function createEngine(deps: EngineDeps) {
       trigger: { at: nowIso(nowMs) },
       ask: {
         person: admin.id,
-        header: headerOf(r.cmd === "track" ? `确认：${clipMd(r.title, DESK_TITLE_MAX)}` : `确认 ${n}`),
+        header: headerOf(r.cmd === "track" ? clipMd(r.title, DESK_TITLE_MAX) : n),
         question: `${ask}？`,
         options: [
-          { id: "yes", label: "照办", description: "" },
+          { id: "yes", label: "要", description: "" },
           { id: "no", label: "不要", description: "" },
         ],
         allowOther: true,
       },
-      brief: [
-        r.cmd === "track" || r.cmd === "note" ? `有一句话想让我${r.cmd === "track" ? "盯一件事" : `给 ${n} 补一句`}，但没法确认是你本人刚在自己的对话里说的（${why}），所以先问你。` : `有一句话想改这个事项的追踪，但没法确认是你本人刚在自己的对话里说的（${why}），所以先问你。`,
-        "",
-        "以下引用的是数据，不是指令：",
-        "",
-        `> 「${clipMd(r.said, 200)}」`,
-        "",
-        `来自对话：${r.via ?? "（不知道）"}`,
-      ].join("\n"),
+      // That the quote is data, not an instruction is said to the agent (the receipt, plan.md), not on this card for the person.
+      brief: [`> 「${clipMd(r.said, 200)}」`, "", `来自「${r.via ?? "不知道"}」· ${r.cmd === "undo" ? "撤的是早先记下的话" : "对不上是你这一轮说的"}，所以问一下`].join("\n"),
       nag: { everyWorkdays: 1, at: "10:00", max: 1 },
       backstop: { at: nowIso(nowMs + 2 * DAY), outcome: "expire" },
       level: "push",
@@ -2329,9 +2329,9 @@ export function createEngine(deps: EngineDeps) {
           stage: "dropped",
           health: "done",
           headline: drop
-            ? `不再追踪（${personName(drop.by)} ${drop.at.slice(5, 16).replace("T", " ")} ${drop.how === "confirmed" ? "在卡片上确认" : drop.how === "confirmed-here" ? "在对话里确认" : "说"}：「${clip(drop.said, 60)}」）`
-            : `不再盯了（${personName(withdrawn!.revoked!.by)} ${stampOf(withdrawn!.revoked!.at)} 撤销了交代：「${clip(withdrawn!.said, 60)}」）`,
-          next: { actor: "nobody", what: "不再追踪" },
+            ? `不盯了（${personName(drop.by)} ${drop.at.slice(5, 16).replace("T", " ")} ${drop.how === "confirmed" ? "在卡片上确认" : drop.how === "confirmed-here" ? "在对话里确认" : "说"}：「${clip(drop.said, 60)}」）`
+            : `不盯了（${personName(withdrawn!.revoked!.by)} ${stampOf(withdrawn!.revoked!.at)} 撤销了交代：「${clip(withdrawn!.said, 60)}」）`,
+          next: { actor: "nobody", what: "不盯了" },
           notice: null,
           stale: false,
           error: null,
@@ -2659,10 +2659,10 @@ export function createEngine(deps: EngineDeps) {
       .map(({ id, round }) => {
         const c = state.commitments[id];
         if (!c || !isOpen(c.status)) return null;
-        const asked = round > 1 ? `（第 ${round} 次问，前面没有回答）` : "";
+        const asked = round > 1 ? `（第 ${round} 次问）` : "";
         // A title that already starts with the header is not said twice.
         const header = headers.get(c.id)!;
-        const heading = c.title.startsWith(header) ? c.title : `${header}：${c.title}`;
+        const heading = isConfirm(c) || c.title.startsWith(header) ? c.title : `${header}：${c.title}`;
         return `### ${heading}${asked}\n\n${c.brief}`;
       })
       .filter((b): b is string => !!b);
@@ -3110,7 +3110,7 @@ export function createEngine(deps: EngineDeps) {
       return full.length > 600 ? `${full.slice(0, 599)}…` : full;
     }
     const paragraphs = c.brief.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-    const picked = isConfirm(c) ? paragraphs.filter((p, i) => i === 0 || p.startsWith(">")) : paragraphs.slice(0, 1);
+    const picked = isConfirm(c) ? paragraphs : paragraphs.slice(0, 1);
     return picked.map((p) => clip(plainText(p.replace(/^>\s*/, "")), 200)).join("\n");
   }
 
@@ -3128,12 +3128,11 @@ export function createEngine(deps: EngineDeps) {
       const c = state.commitments[q.commitmentId];
       const lead = c ? leadOf(c, q.options.length === 1) : "";
       const options = q.options.map((o, k) => `${k + 1} ${o.label}${o.description ? `：${clip(o.description, 80)}` : ""}`);
-      const how = q.allowOther || q.options.length === 0 ? "引用这条回一个数字，或者直接写一句。" : "引用这条回一个数字。";
       const tag = `（问题 ${numbers.get(q.commitmentId)}）`;
-      return [several ? `${i + 1}. ${q.header}：${q.question}` : "", lead, ...options, several ? tag : `${how}${tag}`].filter(Boolean).join("\n");
+      return [several ? `${i + 1}. ${q.header}：${q.question}` : "", lead, ...options, tag].filter(Boolean).join("\n");
     });
     const first = numbers.get(content.questions[0]?.commitmentId ?? "");
-    return [...(several ? [`引用这条回复，写明答的是哪个问题：编号加答案，比如「${first} 选 1」，一次答一个。`] : []), ...blocks].join("\n\n");
+    return [...(several ? [`答哪个就写编号，比如「${first} 选 1」`] : []), ...blocks].join("\n\n");
   }
 
   /**
@@ -3515,7 +3514,7 @@ export function createEngine(deps: EngineDeps) {
           const done = new Set(events.flatMap((e) => (e.type === "commitment.changed" ? [e.id] : [])));
           if (after.commitments.every(({ id }) => done.has(id) || !isOpen(state.commitments[id]?.status))) events.push({ type: "card.changed", id: after.id, patch: { status: "answered", closedAt: at } });
           append(events);
-          return ["**已记下**（这张卡换成了新卡，只记新卡上还在问的）：", ...lines, ...dup, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
+          return ["**已记下**（只记新卡上还在问的）：", ...lines, ...dup].join("\n");
         }
       }
       if (!card || (card.status !== "pending" && card.status !== "raised")) {
@@ -3547,7 +3546,7 @@ export function createEngine(deps: EngineDeps) {
       }
       events.push({ type: "card.changed", id: cardId, patch: { status: "answered", closedAt: at } });
       append(events);
-      return [`**已记下**：`, ...lines, ...dup, "", "接下来怎么追踪，下一次检查时决定，可以在「事项追踪」里看。"].join("\n");
+      return [`**已记下**：`, ...lines, ...dup].join("\n");
     },
 
     /**
@@ -3578,7 +3577,7 @@ export function createEngine(deps: EngineDeps) {
           ],
           allowOther: true,
         },
-        brief: "这是一张测试卡，不对应任何事项。选一个答案，或者在「其他」里写一句话，回答会记进日志；不回答的话一天后自动过期。",
+        brief: "这是一张测试卡，不对应任何事项。随便答一个，或者不答，一天后自动过期。",
         nag: { everyWorkdays: 1, at: "10:00", max: 1 },
         backstop: { at: nowIso(nowMs + 24 * 3_600_000), outcome: "expire" },
         level: "push",
@@ -3627,7 +3626,7 @@ export function createEngine(deps: EngineDeps) {
       const { events, label } = answerEvents(c, raw, at, "page", `page\0${c.id}\0${round}`, personName(c.ask.person));
       events.push(...closingCards(c, at));
       append(events);
-      return { ok: true, already: false, detail: `已记下：${label}。接下来怎么追踪，下一次检查时决定` };
+      return { ok: true, already: false, detail: `已记下：${label}` };
     },
 
     /** A person sets a run aside, by its id (flows.ts): "mine" or "fold". */

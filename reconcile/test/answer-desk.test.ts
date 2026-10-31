@@ -35,7 +35,7 @@ test("the push of a look's question: the matter and the question in the title, t
       await asked(w);
       assert.equal(w.deliveries.length, 1);
       assert.equal(w.deliveries[0]!.title, "年度体检（D1）：体检约上了吗？");
-      assert.equal(w.deliveries[0]!.text, "年度体检：任务还没完成\n1 已约上了\n2 还没约\n3 过 3 天再看\n4 不用盯了\n引用这条回一个数字，或者直接写一句。（问题 D1-1）");
+      assert.equal(w.deliveries[0]!.text, "年度体检：任务还没完成\n1 已约上了\n2 还没约\n3 过 3 天再看\n4 不用盯了\n（问题 D1-1）");
     },
     { persons: persons() },
   ));
@@ -46,7 +46,7 @@ test("answering 过 3 天再看 by its number: the look that was waiting is not 
       await asked(w);
       const receipt = await answerIn(w, quoted(w.deliveries[0]!.text, "3"), "D1-1");
       assert.equal(receipt.outcome, "applied");
-      assert.equal(receipt.text, "记下了：D1-1「年度体检（D1）」，你选了「过 3 天再看」。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。");
+      assert.equal(receipt.text, "好，D1-1 记下：过 3 天再看。");
       await pass(w, 5);
       assert.equal(w.flows.launcher.started.length, 1, "no look for an answer that costs none");
       assert.match(fact(w, 1, "next"), /^2026-10-16T10:00/);
@@ -62,7 +62,7 @@ test("answering with a sentence: the look that follows is told it, as it is when
       await asked(w);
       const receipt = await answerIn(w, quoted(w.deliveries[0]!.text, "还没约，打算下周一去约"), "D1-1");
       assert.equal(receipt.outcome, "applied");
-      assert.match(receipt.text, /你说「还没约，打算下周一去约」/);
+      assert.match(receipt.text, /记下：「还没约，打算下周一去约」/);
       await pass(w, 5);
       assert.equal(w.flows.launcher.started.length, 2, "a look is asked for by the words");
     },
@@ -96,7 +96,7 @@ test("plan.md: the questions waiting with their numbers, then the list by group 
       assert.match(text, /\n {2}- 第 1 次看（\d\d-\d\d \d\d:\d\d）：读了飞书任务，没有预约记录 → 任务还没完成；下次 10-15 10:00\n/);
       assert.ok(text.indexOf("## 没答的问题") < text.indexOf("## 要你做的"), "what waits for the person comes first");
       assert.ok(text.indexOf("## 要你做的") < text.indexOf("## 这次检查打算做的"));
-      assert.ok(!/^## 在等别人的/m.test(text) && !/^## 系统在查的/m.test(text), "a group with nothing in it has no heading");
+      assert.ok(!/^## 在等别人/m.test(text) && !/^## 系统盯着/m.test(text), "a group with nothing in it has no heading");
       assert.match(text, /\n冷的 0 个事项不判断、不显示。\n/);
     },
     { persons: persons() },
@@ -111,7 +111,7 @@ test("plan.md: answered, the question is gone from the list of waiting ones and 
       const text = planText(w.engine.status());
       assert.ok(!text.includes("## 没答的问题"));
       assert.ok(!/^## 要你做的/m.test(text), "nothing waits for the person now");
-      assert.match(text, /\n## 系统在查的（1）\n- D1 年度体检：/);
+      assert.match(text, /\n## 系统盯着（1）\n- D1 年度体检：/);
     },
     { persons: persons() },
   ));

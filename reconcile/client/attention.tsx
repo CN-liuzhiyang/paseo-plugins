@@ -40,7 +40,7 @@ export function useAttention(): number | null {
 export function CountBadge({ count, theme }: { count: number; theme: PluginSidebarItemProps["theme"] }) {
   const c = theme.colors;
   return (
-    <View accessibilityLabel={`${count} 件要你做的`} style={{ minWidth: 18, height: 18, paddingHorizontal: 5, borderRadius: 9, backgroundColor: c.statusWarning, alignItems: "center", justifyContent: "center" }}>
+    <View accessibilityLabel={`事项追踪 · ${count}`} style={{ minWidth: 18, height: 18, paddingHorizontal: 5, borderRadius: 9, backgroundColor: c.statusWarning, alignItems: "center", justifyContent: "center" }}>
       <Text style={{ color: c.surface0, fontSize: 11, fontWeight: "700" }}>{countLabel(count)}</Text>
     </View>
   );

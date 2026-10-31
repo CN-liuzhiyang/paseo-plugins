@@ -128,7 +128,7 @@ test("a question the look puts is a question on a card with the person's own way
     await pass(w, 5);
     assert.equal(w.cards.length, 1, "the person is asked, once");
     // the line under the question says when it was asked and when it is asked again, with the day of the week
-    assert.match(w.engine.graph("desk:D1")!.hero.sub, /^10-13 周二 10:\d\d 问的。不答的话10-14 周三 10:00 再问，最多 2 次。/);
+    assert.match(w.engine.graph("desk:D1")!.hero.sub, /^你 · 已等 [^·]+ · 10-14 10:00 再问$/, "who has it, how long, and when it is asked again: three things, no sentence");
     // days go by: it is not looked at again for the clock's sake while the question is open
     await pass(w, 24 * 60 * 2, 60);
     assert.equal(w.flows.launcher.started.length, 1);
@@ -253,7 +253,7 @@ test("a look that failed is the rule's to ask again, tomorrow: told as that, no 
     // in words for a person: not the runtime's (OutputMismatch, what it says about the answer), which the log and the run's page keep
     assert.equal(a.headline, "这次没看成：交回来的格式不对；10-14 周三 10:00 再看");
     assert.doesNotMatch(JSON.stringify([a, w.engine.graph("desk:D1")!.hero, w.engine.graph("desk:D1")!.history]), /OutputMismatch|回答不合格式/);
-    assert.match(w.engine.graph("desk:D1")!.history.map((h) => h.line + " " + (h.detail ?? "")).join(" | "), /「看一眼」失败了 → 下次看 10-14 周三 10:00/);
+    assert.match(w.engine.graph("desk:D1")!.history.map((h) => h.line + " " + (h.detail ?? "")).join(" | "), /看一眼出错了.* → 下次看 10-14 周三 10:00/);
     assert.deepEqual([a.next.actor, a.next.what], ["system", "下次看 10-14 周三 10:00"]);
     assert.equal(a.stage, "watching");
     assert.equal(fact(w, 1, "fails"), "1");
@@ -265,7 +265,7 @@ test("a look that failed is the rule's to ask again, tomorrow: told as that, no 
     // pressing the button some other way is refused too
     const refused = w.engine.retryFlow(idOf(1, 1), "page");
     assert.equal(refused.ok, false);
-    assert.match(refused.detail, /会自己再起一次/);
+    assert.match(refused.detail, /自己重试/);
     assert.match(log(w)[0]!.looked, /^没看成：/);
     assert.match(w.engine.graph("desk:D1")!.runs[0]!.error?.plain ?? w.engine.graph("desk:D1")!.runs[0]!.why ?? "", /.+/, "the run's own page still has its words");
     // tomorrow: the next key, and a look that comes back clears it
@@ -358,7 +358,7 @@ test("while the rules are held nothing is looked at, and the matter says so, wit
       assert.doesNotMatch(assessed(w, 1)!.headline, /正在看/);
       // another, told while they are held: the receipt does not promise a look in a minute, and the line is the same truth
       const second = await tell(w, "还要盯着续费", "续费", "personal");
-      assert.match(second.text, /不过这里现在不会自己去看（判断方法的改动停着等放行/);
+      assert.match(second.text, /这里现在不会自己去看（判断方法的改动停着等放行/);
       assert.doesNotMatch(second.text, /一分钟左右/);
       assert.equal(assessed(w, 2)!.headline, assessed(w, 1)!.headline);
       await pass(w, 30);
@@ -454,11 +454,12 @@ test("the matter's page names the look as people do, and the end of each look sa
     const going = w.engine.graph("desk:D1")!;
     assert.equal(going.hero.line, "正在看第一眼", "what the rule says it is doing, not 'flow ... is running'");
     assert.doesNotMatch(going.hero.sub, /只算已经结束的调用/);
+    assert.ok(going.history.some((h) => h.line === "起了「看一眼」"), "while it goes, one line says it began");
     comes(w, 1, 1, proposal({ nextLook: "2026-10-15 10:00" }));
     await pass(w, 10);
     const lines = w.engine.graph("desk:D1")!.history.map((h) => (h.detail ? h.line + " " + h.detail : h.line));
-    assert.ok(lines.some((l) => l === "起了「看一眼」"), lines.join(" | "));
-    assert.ok(lines.some((l) => /^「看一眼」结束了 看了一眼：.* → 下次看 10-15 周四 10:00$/.test(l)), lines.join(" | "));
+    assert.ok(lines.some((l) => /^看一眼好了（.+） 看了一眼：.* → 下次看 10-15 周四 10:00$/.test(l)), lines.join(" | "));
+    assert.ok(!lines.some((l) => l === "起了「看一眼」"), "a look that has ended is one line, not a start and an end");
     assert.ok(!lines.join(" ").includes("item-glance") && !lines.join(" ").includes("流程「"));
   }));
 

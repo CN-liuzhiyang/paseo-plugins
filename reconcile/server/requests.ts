@@ -118,7 +118,7 @@ export type NoteRequest = Extract<Request, { cmd: "note" }>;
 export type AnswerRequest = Extract<Request, { cmd: "answer" }>;
 export type ConfirmRequest = Extract<Request, { cmd: "confirm" }>;
 
-export const KIND_LABEL: Record<Annotation["kind"], string> = { drop: "不再追踪", hold: "先别问", wrong: "判断错了", track: "交代", note: "补一句" };
+export const KIND_LABEL: Record<Annotation["kind"], string> = { drop: "不盯了", hold: "先别问", wrong: "判断错了", track: "交代", note: "补一句" };
 
 /** One request file read: a request, or why it was refused (with its id when the name was one). */
 export type Incoming = { id: string; request: Request } | { id: string; error: string };

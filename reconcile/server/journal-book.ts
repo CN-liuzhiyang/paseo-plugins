@@ -82,6 +82,8 @@ export interface RawEntry {
   kind: HistoryLine["kind"];
   text(f: Fmt): string;
   detail: string | null;
+  /** The system's own bookkeeping (a question scheduled, taken back, or already told in the line of its answer): kept for the evidence, not told in the history. */
+  inner?: boolean;
 }
 
 export interface NoteRec {
@@ -143,6 +145,8 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
   const offsets = new Map<string, number>();
   const chains = new Map<string, Chain>();
   const commitments = new Map<string, { caseId: string | null; owner: string; title: string }>();
+  /** The line that says a question was asked, by commitment (the latest time): the line of its answer takes its place. */
+  const askedLines = new Map<string, RawEntry>();
   const annotations = new Map<string, { caseId: string; kind: Annotation["kind"] }>();
 
   const chainOf = (caseId: string): Chain => {
@@ -287,7 +291,7 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
         commitments.set(c.id, { caseId: c.caseId, owner: c.owner, title: c.title });
         if (c.caseId && c.origin.by === "rule") {
           const when = "at" in c.trigger ? c.trigger.at.slice(5, 16).replace("T", " ") : null;
-          entry(chainOf(c.caseId), { at: at, seq, kind: "ask", text: () => `排了：${when ? `${when} 问` : "到时候问"}「${c.title}」`, detail: c.ask.question });
+          entry(chainOf(c.caseId), { at: at, seq, kind: "ask", text: () => `排了：${when ? `${when} 问` : "到时候问"}「${c.title}」`, detail: c.ask.question, inner: true });
         }
         return;
       }
@@ -300,7 +304,10 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
           const a = patch.answer;
           const said = a.text ?? a.label;
           const where = answeredWhere(a.via);
-          entry(chain, { at: a.at, seq, kind: "answer", text: (f) => `${f.person(info.owner)}${where}回答：${clip(said, 80)}`, detail: null });
+          // One line for the question and its answer: the line that said it was asked is only told once.
+          const asked = askedLines.get(e.id as string);
+          if (asked) asked.inner = true;
+          entry(chain, { at: a.at, seq, kind: "answer", text: (f) => `问「${clip(info.title, 30)}」→ ${f.person(info.owner)}${where}回答：${clip(said, 80)}`, detail: null });
         } else if (patch.status === "cancelled" || patch.status === "expired") {
           const why = patch.reason;
           entry(chain, {
@@ -309,6 +316,8 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
             kind: "ask",
             text: () => `「${info.title}」${patch.status === "expired" ? "到兜底时间没人答，记成过期" : "不用问了"}${why ? `（${why}）` : ""}`,
             detail: null,
+            // A question taken back because the rules no longer ask it is the system changing its mind: not something that happened to the item.
+            inner: patch.status === "cancelled",
           });
         }
         return;
@@ -319,7 +328,9 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
         const [, cid, round] = a.key.split(":");
         const info = cid ? commitments.get(cid) : undefined;
         if (!info?.caseId) return;
-        entry(chainOf(info.caseId), { at, seq, kind: "ask", text: () => `${a.summary.replace(/^问 /, "问了 ")}${round && round !== "1" ? `（第 ${round} 次）` : ""}`, detail: null });
+        const line: RawEntry = { at, seq, kind: "ask", text: () => `${a.summary.replace(/^问 /, "问了 ")}${round && round !== "1" ? `（第 ${round} 次）` : ""}`, detail: null };
+        askedLines.set(cid, line);
+        entry(chainOf(info.caseId), line);
         return;
       }
       case "annotation.added": {
@@ -398,6 +409,7 @@ export function createJournalBook(dir: string, shared: ReadonlySet<string>, tz: 
             offsets.clear();
             chains.clear();
             commitments.clear();
+            askedLines.clear();
             annotations.clear();
             eaten = 0;
             for (const again of files) readFile(again);

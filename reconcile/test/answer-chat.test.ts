@@ -66,7 +66,7 @@ test("the push of one question: the title names the matter, the text the situati
   withQuestions([1], async (w) => {
     assert.equal(w.deliveries.length, 1);
     assert.equal(w.deliveries[0]!.title, "Q1：q gcp-demo:1?");
-    assert.equal(push(w), "b\n1 A\n2 过 3 天再看\n引用这条回一个数字，或者直接写一句。（问题 #1-1）");
+    assert.equal(push(w), "b\n1 A\n2 过 3 天再看\n（问题 #1-1）", "the situation, the options with their numbers, the number of the question; how to answer is told once in the settings, not in every push");
     assert.ok(push(w).endsWith("（问题 #1-1）"), "nothing after it: what follows it is taken as what the person typed");
   }));
 
@@ -74,7 +74,7 @@ test("a card of several questions: each question has its number, and the text te
   withQuestions([1, 2], async (w) => {
     assert.equal(w.deliveries.length, 1, "one card");
     const text = push(w);
-    assert.match(text, /^引用这条回复，写明答的是哪个问题：编号加答案，比如「#1-1 选 1」，一次答一个。\n\n1\. Q1：q gcp-demo:1\?\nb\n1 A\n2 过 3 天再看\n（问题 #1-1）\n\n2\. Q2：q gcp-demo:2\?\nb\n1 A\n2 过 3 天再看\n（问题 #2-1）$/);
+    assert.match(text, /^答哪个就写编号，比如「#1-1 选 1」\n\n1\. Q1：q gcp-demo:1\?\nb\n1 A\n2 过 3 天再看\n（问题 #1-1）\n\n2\. Q2：q gcp-demo:2\?\nb\n1 A\n2 过 3 天再看\n（问题 #2-1）$/, "one line on how to say which is answered, then each question with its number last");
   }));
 
 test("question numbers are the item's number and which question of its own it is, counted over all of them, answered or not, so a number keeps meaning one question", async () => {
@@ -107,7 +107,7 @@ test("a reply to the push with a number: that option, recorded as given in the c
     const cardId = w.cards[0]!.card.id;
     const receipt = await answerIn(w, MINE, reply(w, "2"), "#1-1");
     assert.equal(receipt.outcome, "applied");
-    assert.equal(receipt.text, "记下了：#1-1「Q1」，你选了「过 3 天再看」。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。");
+    assert.equal(receipt.text, "好，#1-1 记下：过 3 天再看。", "one line: which question, what was recorded");
     const c = commitment(w, 1);
     assert.equal(c.status, "done");
     assert.deepEqual([c.answer!.option, c.answer!.label, c.answer!.text, c.answer!.via], ["b", "过 3 天再看", null, "chat:chatapp"]);
@@ -128,7 +128,7 @@ test("the option by its words, with or without the punctuation a chat adds; and 
 test("a sentence of their own: recorded as 其他 with their words, and the receipt says so", async () =>
   withQuestions([1], async (w) => {
     const receipt = await answerIn(w, MINE, reply(w, "约在 11-04 周三下午了"), "#1-1");
-    assert.equal(receipt.text, "记下了：#1-1「Q1」，你说「约在 11-04 周三下午了」。接下来怎么追踪，下一次检查时决定，在「事项追踪」页面上看得到。");
+    assert.equal(receipt.text, "好，#1-1 记下：「约在 11-04 周三下午了」。", "their own words, in quotes, in place of an option");
     assert.deepEqual([commitment(w, 1).answer!.option, commitment(w, 1).answer!.label, commitment(w, 1).answer!.text], [null, "其他", "约在 11-04 周三下午了"]);
   }));
 
@@ -509,12 +509,13 @@ test("a confirmation is pushed with its number and the words it is about, and �
       assert.equal(w.receipt(told)!.outcome, "proposed");
       assert.equal(w.deliveries.length, 1);
       const text = push(w);
-      assert.match(text, /^有一句话想让我盯一件事，但没法确认是你本人刚在自己的对话里说的/);
       assert.ok(text.includes(`「${SAID}」`), "the words it is about");
-      assert.match(text, /1 照办\n2 不要\n引用这条回一个数字，或者直接写一句。（问题 确认-1）$/);
+      assert.match(text, /对不上是你这一轮说的/, "and why it is asked");
+      assert.doesNotMatch(text, /不是指令/, "the card is for the person: the note that the quote is data is for the agent");
+      assert.match(text, /1 要\n2 不要\n（问题 确认-1）$/);
       const receipt = await answerIn(w, MINE, quoted(text, "1"), "确认-1");
       assert.equal(receipt.outcome, "applied");
-      assert.equal(receipt.text, "记下了：确认-1「确认：年度体检」，你选了「照办」，下一次检查（一分钟内）就照办。");
+      assert.equal(receipt.text, "好，照办。");
       await w.engine.tick();
       assert.equal(w.store.state.items["desk:D1"]?.title, "年度体检", "applied as said, once the round is taken");
     },
@@ -529,7 +530,7 @@ test("a reply that is not 照办 to a confirmation: recorded, and the receipt sa
       await w.engine.tick();
       const receipt = await answerIn(w, MINE, quoted(push(w), "好的"), "确认-1");
       assert.equal(receipt.outcome, "applied");
-      assert.equal(receipt.text, "记下了：确认-1「确认：年度体检」，你回的是「好的」，不是「照办」，那句话不会生效。");
+      assert.equal(receipt.text, "好，不办：那句话不会生效。");
       await w.engine.tick();
       assert.equal(w.store.state.items["desk:D1"], undefined, "nothing was started");
     },
@@ -546,7 +547,8 @@ test("a question that takes no words of their own: a sentence that is none of th
   try {
     w.items.set("gcp-demo:1", issue(1, { release: "2026-10-14" }));
     await w.run("2026-10-14 18:30");
-    assert.match(push(w), /^b\n1 A\n2 过 3 天再看\n引用这条回一个数字。（问题 #1-1）$/, "and the push does not offer to write");
+    assert.match(push(w), /^b\n1 A\n2 过 3 天再看\n（问题 #1-1）$/);
+    assert.doesNotMatch(push(w), /直接写一句/, "and the push does not offer to write");
     const refused = await answerIn(w, MINE, reply(w, "随便哪个"), "#1-1");
     assert.equal(refused.outcome, "rejected");
     assert.equal(refused.text, "没收下：这个问题只能从选项里选（1 A；2 过 3 天再看），他写的「随便哪个」对不上任何一项");

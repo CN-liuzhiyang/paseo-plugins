@@ -4,9 +4,9 @@ import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useEffect, useState } from "react";
 import { Text, View } from "react-native";
 import { HOME_SCREEN } from "../shared/graph";
-import { overviewRpc, releaseRulesRpc, testCardRpc, tickRpc } from "../shared/rpc";
+import { overviewRpc, releaseRulesRpc, tickRpc } from "../shared/rpc";
 import { describeChanges, PLAN_LABEL, troubleOf, type PlanEntry, type Status } from "../shared/status";
-import { Badge, Banner, Block, Button, Fold, OpenAgent, Section, UiProvider, useUi, type Tone } from "./ui";
+import { Badge, Banner, Block, Button, Fold, OpenAgent, UiProvider, useUi, type Tone } from "./ui";
 import { ItemPage } from "./item";
 import { GroupedList } from "./list";
 
@@ -79,7 +79,6 @@ function Inbox({ openSettings, caseParam }: { openSettings(): void; caseParam: s
   useEffect(() => setPicked(caseParam), [caseParam]);
   const tick = useRpc(tickRpc);
   const release = useRpc(releaseRulesRpc);
-  const testCard = useRpc(testCardRpc);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const status = data?.status as Status | null | undefined;
@@ -112,13 +111,12 @@ function Inbox({ openSettings, caseParam }: { openSettings(): void; caseParam: s
       <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
         <View style={ui.styles.row}>
           <Text style={ui.styles.title}>事项追踪</Text>
-          {/* Whether it asks at all, before anything else: an empty list while rehearsing means nothing. */}
-          {status ? <Badge tone={status.mode === "live" ? "success" : "warning"} label={status.mode === "live" ? "发卡中" : "演练（不发卡）"} /> : null}
+          {/* Said only when it is not so: an empty list while rehearsing means nothing. */}
+          {status && status.mode !== "live" ? <Badge tone="warning" label="演练中：不发问题" /> : null}
         </View>
         <View style={ui.styles.row}>
           <Button icon="RefreshCw" label={busy === "tick" ? "正在检查…" : "现在检查"} disabled={busy !== null || !status} onPress={() => run("tick", () => tick({}))} />
-          <Button icon="FlaskConical" label={busy === "test" ? "正在排…" : "发测试卡"} disabled={busy !== null || !status} onPress={() => run("test", () => testCard({}))} />
-          <Button icon="Settings" label="设置" onPress={openSettings} />
+          <Button icon="Settings" label="设置" iconOnly onPress={openSettings} />
         </View>
       </View>
       {error ? (
@@ -226,6 +224,7 @@ function Body({ status, busy, onOpen, onRelease }: { status: Status; busy: strin
         </Banner>
       ) : null}
 
+      {rows.every((r) => r.group !== "me") && loose.length === 0 ? <Text style={ui.styles.muted}>没有要你做的</Text> : null}
       <GroupedList
         rows={rows}
         onOpen={onOpen}
@@ -249,7 +248,7 @@ function Body({ status, busy, onOpen, onRelease }: { status: Status; busy: strin
       {unread > 0 ? <Text style={ui.styles.small}>另有 {unread} 个事项这一刻读不出来，下一轮检查后会出现。</Text> : null}
 
       {said.length > 0 ? (
-        <Section title={`对话里说过的（${said.filter((a) => a.inForce).length} 条在生效）`}>
+        <Fold label={`对话里说过的（${said.filter((a) => a.inForce).length} 条在生效）`}>
           {said.map((a) => (
             <View key={a.id} style={ui.styles.card}>
               <Text style={a.inForce ? ui.styles.strong : ui.styles.muted}>
@@ -261,30 +260,26 @@ function Body({ status, busy, onOpen, onRelease }: { status: Status; busy: strin
               </Text>
             </View>
           ))}
-          <Text style={ui.styles.muted}>要撤掉一条，在对话里说一句（比如"刚才那条不要了"）。</Text>
-        </Section>
+        </Fold>
       ) : null}
 
-      {alarm ? null : <Alive status={status} />}
-
-      <Fold label={`这一轮检查${status.mode === "live" ? "做了" : "打算做"}的事（${acts.length}）`} initiallyOpen={status.mode !== "live"}>
-        {acts.length === 0 ? <Text style={ui.styles.muted}>没有要做的。</Text> : <Block text={acts.map(planLine).join("\n")} />}
-        {notes.length > 0 ? (
-          <Fold label={`另外记下 ${notes.length} 条事实`}>
-            <Block text={notes.map(planLine).join("\n")} />
-          </Fold>
-        ) : null}
+      <Fold label="系统自己的记录" initiallyOpen={status.mode !== "live"}>
+        {alarm ? null : <Alive status={status} />}
+        <Fold label={`这一轮检查${status.mode === "live" ? "做了" : "打算做"}的事（${acts.length}）`} initiallyOpen={status.mode !== "live"}>
+          {acts.length === 0 ? <Text style={ui.styles.muted}>没有要做的。</Text> : <Block text={acts.map(planLine).join("\n")} />}
+          {notes.length > 0 ? (
+            <Fold label={`另外记下 ${notes.length} 条事实`}>
+              <Block text={notes.map(planLine).join("\n")} />
+            </Fold>
+          ) : null}
+        </Fold>
+        <Text style={ui.styles.small}>
+          {status.instanceId ? `实例 ${status.instanceId} · ` : ""}每 {status.tickSeconds} 秒检查一次 · 判断方法 {status.rules.fingerprint?.slice(0, 12) ?? "—"}（{status.rules.files.join("、") || "没有判断文件"}） · 评测候选 {status.evals} 条 · 冷的事项 {status.cold.length} 个 · 今天发卡{" "}
+          {Object.entries(status.pushesToday)
+            .map(([name, n]) => `${name} ${n}`)
+            .join("、")}
+        </Text>
       </Fold>
-
-      <Text style={ui.styles.small}>
-        另有 {status.cold.length} 个事项是冷的：没有要问的、最近没人动、日期不在近期、关联的开关也没变，所以不判断、不显示；其中任何一样变了会自动回来。
-      </Text>
-      <Text style={ui.styles.small}>
-        {status.instanceId ? `实例 ${status.instanceId} · ` : ""}每 {status.tickSeconds} 秒检查一次 · 判断方法 {status.rules.fingerprint?.slice(0, 12) ?? "—"}（{status.rules.files.join("、") || "没有判断文件"}） · 评测候选 {status.evals} 条 · 今天发卡{" "}
-        {Object.entries(status.pushesToday)
-          .map(([name, n]) => `${name} ${n}`)
-          .join("、")}
-      </Text>
     </>
   );
 }

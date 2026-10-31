@@ -129,7 +129,7 @@ export function Fold({ label, initiallyOpen = false, children }: { label: string
   );
 }
 
-export function Button({ icon, label, onPress, primary = false, disabled = false }: { icon?: string; label: string; onPress(): void; primary?: boolean; disabled?: boolean }) {
+export function Button({ icon, label, onPress, primary = false, disabled = false, iconOnly = false }: { icon?: string; label: string; onPress(): void; primary?: boolean; disabled?: boolean; iconOnly?: boolean }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const fg = primary ? c.surface0 : c.foreground;
@@ -156,7 +156,17 @@ export function Button({ icon, label, onPress, primary = false, disabled = false
       })}
     >
       {icon ? <Icon name={icon} size={14} color={fg} /> : null}
-      <Text style={{ color: fg, fontSize: 13, fontWeight: "600" }}>{label}</Text>
+      {iconOnly && icon ? null : <Text style={{ color: fg, fontSize: 13, fontWeight: "600" }}>{label}</Text>}
+    </Pressable>
+  );
+}
+
+/** A word that does something, drawn as text: for what is there but not the thing to do (the way a secondary action stands beside a button). */
+export function TextLink({ label, onPress, disabled = false }: { label: string; onPress(): void; disabled?: boolean }) {
+  const ui = useUi();
+  return (
+    <Pressable accessibilityRole="link" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={{ opacity: disabled ? 0.5 : 1 }}>
+      <Text style={{ color: ui.theme.colors.foregroundMuted, fontSize: 13, textDecorationLine: "underline" }}>{label}</Text>
     </Pressable>
   );
 }

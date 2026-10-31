@@ -71,7 +71,7 @@ export const start = (ts: string, affair: unknown, phases = ["collect", "draft",
 });
 export const phaseStart = (ts: string, phase: string) => ({ kind: "phase.start", ts, phase });
 export const phaseEnd = (ts: string, phase: string, ok = true) => ({ kind: "phase.end", ts, phase, ok });
-export const callStart = (ts: string, callId: string, type: "ask" | "do" | "gate", extra: Record<string, unknown> = {}) => ({ kind: "call.start", ts, callId, type, name: callId, title: `调用 ${callId}`, phase: null, ...extra });
+export const callStart = (ts: string, callId: string, type: "ask" | "do" | "gate" | "step", extra: Record<string, unknown> = {}) => ({ kind: "call.start", ts, callId, type, name: callId, title: `调用 ${callId}`, phase: null, ...extra });
 export const callEnd = (ts: string, callId: string, ok = true, extra: Record<string, unknown> = {}) => ({ kind: "call.end", ts, callId, ok, durationMs: 1000, output: null, error: null, agentId: null, cost: { usd: 0.25, inputTokens: 1, outputTokens: 1 }, ...extra });
 
 export const only = (f: Fixture, caseId = "tracker:1"): RunView => {

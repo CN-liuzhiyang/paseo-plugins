@@ -182,6 +182,22 @@ test("failed: the error in plain words with the runtime's own beside it, what th
   }
 });
 
+test("an answer that was sent back and still did not pass, or that was sent back and got no reply, is told in plain words, with the runtime's own beside it", () => {
+  const f = fixture();
+  try {
+    const bad = (name: string, message: string) => ({ kind: "run.end", ts: ago(10 * MIN), outcome: "failed", value: null, summary: null, stop: null, error: { name, message }, durationMs: 1, cost: null, caveats: [] });
+    f.run("check", [start(ago(30 * MIN), AFFAIR("tracker:1")), callStart(ago(29 * MIN), "c1", "ask"), callEnd(ago(28 * MIN), "c1", false, { error: { name: "CheckFailed", message: "check failed after 3 rounds: verdict is empty" }, rounds: 3 }), bad("CheckFailed", "check failed after 3 rounds: verdict is empty")], { claimAgeMs: null });
+    f.run("mute", [start(ago(25 * MIN), AFFAIR("tracker:1")), callStart(ago(24 * MIN), "c1", "ask"), callEnd(ago(23 * MIN), "c1", false, { error: { name: "NoAnswer", message: "the agent handed in nothing to the correction" } }), bad("NoAnswer", "the agent handed in nothing to the correction")], { claimAgeMs: null });
+    const by = Object.fromEntries(f.reader.forCase("tracker:1").map((r) => [r.runId, r]));
+    assert.deepEqual([by.check!.situation, by.check!.error!.name, by.check!.error!.plain], ["fail", "CheckFailed", "agent 的回答核对了几轮还不过，这一步没拿到结果"]);
+    assert.deepEqual([by.mute!.situation, by.mute!.error!.name, by.mute!.error!.plain], ["fail", "NoAnswer", "让 agent 改回答的时候，它没回话，这一步没拿到结果"]);
+    assert.equal(by.check!.error!.raw, "CheckFailed: check failed after 3 rounds: verdict is empty", "the runtime's own words stay beside it");
+    for (const r of Object.values(by)) assert.doesNotMatch(r.error!.plain, /CheckFailed|NoAnswer|schema|打回/, "no word of the runtime or the flow's trade");
+  } finally {
+    f.close();
+  }
+});
+
 test("done and stopped are both over without a problem; a timeout is a failure; an unknown error is shown as the runtime told it", () => {
   const f = fixture();
   try {
@@ -267,16 +283,13 @@ test("a run's state decides where the item stands on the list and what the page 
     // a finished run is no longer what the item is doing: the item's own judgment says (someone else has the ball)
     assert.deepEqual([1, 2, 3, 4, 5, 6].map(cell), [["doing", "system"], ["fail", "me"], ["lost", "me"], ["slow", "me"], ["me", "me"], ["them", "them"]]);
     const fail = w.engine.graph("gcp-demo:2")!;
-    assert.match(fail.hero.kicker, /流程失败了/);
-    assert.match(fail.hero.line, /agent 的回答不合约定的格式/);
-    assert.match(fail.hero.sub, /拷贝示例文件/, "what it may already have changed is told");
-    assert.match(fail.hero.sub, /不会自动重来/);
+    assert.match(fail.hero.kicker, /^要你：/);
+    assert.match(fail.hero.line, /^示例流程出错了：agent 的回答不合约定的格式/);
+    assert.match(fail.hero.sub, /拷贝示例文件/, "what it may already have changed is told, the one thing up there that is not a word for what became of it");
     assert.equal(fail.runs.length, 1);
     const gate = w.engine.graph("gcp-demo:5")!;
     assert.match(gate.hero.line, /把示例改动放进目录/);
-    assert.match(gate.hero.sub, /审批卡上点/, "approval is not done on this page");
-    assert.deepEqual([gate.facts[3]!.value, gate.facts[3]!.hot], ["要", true], "a run waiting for approval is something for you to do");
-    assert.match(gate.facts[3]!.sub, /审批卡/);
+    assert.equal(gate.hero.kicker, "要你：批准", "a run waiting for approval is something for you to do, said in the first words");
     assert.match(w.engine.graph("gcp-demo:1")!.hero.line, /示例流程/);
   } finally {
     w.close();

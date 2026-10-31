@@ -404,12 +404,52 @@ export function StageChart({ view, selected, onSelect, openRun, focusAsk }: { vi
           <Seq pieces={pieces} ctx={ctx} />
         </View>
       </ScrollView>
-      <ChartLegend />
     </View>
   );
 }
 
-function ChartLegend() {
+/** The route in one line: where it has been (✓), where it is (●), what is left (○). */
+export function StageStrip({ view }: { view: GraphView }) {
+  const ui = useUi();
+  const c = ui.theme.colors;
+  const real = view.visits.filter((v) => !v.superseded);
+  const cur = real.find((v) => v.cur);
+  const detour = cur && !view.graph.normal.includes(cur.stage) ? stageOf(view, cur.stage) : null;
+  const color = ui.tone(SITUATION[view.situation].tone);
+  return (
+    <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 6, rowGap: 2 }}>
+      {view.graph.normal.map((id, i) => {
+        const here = real.filter((v) => v.stage === id);
+        const kind = here.some((v) => v.cur) ? "cur" : here.length > 0 ? "done" : "todo";
+        return (
+          <View key={id} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <Text style={{ color: kind === "cur" ? color : kind === "done" ? c.foreground : c.foregroundMuted, fontSize: 13, fontWeight: kind === "cur" ? "700" : "400" }}>
+              {kind === "done" ? "✓" : kind === "cur" ? "●" : "○"} {stageOf(view, id).label}
+            </Text>
+            {i < view.graph.normal.length - 1 ? <Text style={ui.styles.small}>→</Text> : null}
+          </View>
+        );
+      })}
+      {detour ? <Text style={{ color, fontSize: 13, fontWeight: "700" }}>（岔路：{detour.label}）</Text> : null}
+    </View>
+  );
+}
+
+/** What the marks of the chart mean, behind a "?" so that the page does not carry them. */
+export function ChartLegend({ note }: { note?: string | null }) {
+  const ui = useUi();
+  const [open, setOpen] = useState(false);
+  return (
+    <View style={{ gap: 6, alignItems: "flex-start" }}>
+      <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} accessibilityLabel="图例" onPress={() => setOpen((value) => !value)} style={{ width: 22, height: 22, borderRadius: 11, borderWidth: 1, borderColor: ui.theme.colors.border, alignItems: "center", justifyContent: "center" }}>
+        <Text style={{ color: ui.theme.colors.foregroundMuted, fontSize: 12, fontWeight: "700" }}>?</Text>
+      </Pressable>
+      {open ? <LegendKey note={note ?? null} /> : null}
+    </View>
+  );
+}
+
+function LegendKey({ note }: { note: string | null }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const swatch = (style: object) => <View style={[{ width: 14, height: 10, borderRadius: 3, borderWidth: 1, borderColor: c.border }, style]} />;
@@ -420,13 +460,16 @@ function ChartLegend() {
     </View>
   );
   return (
-    <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 14 }}>
-      {item(<Dot kind="ok" />, "走过")}
-      {item(swatch({ borderColor: ui.tone("accent"), borderWidth: 2 }), "现在在这（颜色 = 球在谁手里）")}
-      {item(swatch({ borderStyle: "dashed" }), "还没到 / 跳过")}
-      {item(swatch({ borderColor: ui.tone("warning"), backgroundColor: tint(ui.tone("warning"), 0.1) }), "岔路：常规路线外多走的一步")}
-      {item(swatch({ borderColor: c.accent, borderStyle: "dashed" }), "↻ 打回")}
-      {item(swatch({ backgroundColor: c.surface2, borderStyle: "dashed" }), "开始追踪前（时间是推的）")}
+    <View style={{ gap: 6 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 14 }}>
+        {item(<Dot kind="ok" />, "走过")}
+        {item(swatch({ borderColor: ui.tone("accent"), borderWidth: 2 }), "现在在这（颜色 = 球在谁手里）")}
+        {item(swatch({ borderStyle: "dashed" }), "还没到 / 跳过")}
+        {item(swatch({ borderColor: ui.tone("warning"), backgroundColor: tint(ui.tone("warning"), 0.1) }), "岔路：常规路线外多走的一步")}
+        {item(swatch({ borderColor: c.accent, borderStyle: "dashed" }), "↻ 打回")}
+        {item(swatch({ backgroundColor: c.surface2, borderStyle: "dashed" }), "开始追踪前（时间是推的）")}
+      </View>
+      {note ? <Text style={ui.styles.small}>{note}</Text> : null}
     </View>
   );
 }
