@@ -434,7 +434,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`），或者 `$.ask` 的 `CheckFailed`（答案打回用完仍不过）没有被 flow 接住，`stop.reason` 是 `<step>：核对 N 轮还不过：<第一条问题>`，`value` 为 null；`failed`：抛错；`timeout`：超出运行总时限 |
 | `value` | any | `done` / `stopped` 时 flow 给出的结果 |
 | `summary` | string \| null | 给人看的一句话结论，来自 flow 的 `summarize(value, { outcome })`（`value` 就是本行的 `value`）。只在 `done` / `stopped` 时调用；flow 没声明 `summarize`、结局是 `failed` / `timeout`、它抛错（这时前面有一条 `log` warn 说原因）或返回的不是非空字符串时为 null。超过 200 字符（按 Unicode 码点算）截断并加 `…`。它出错不影响结局。运行时写的每条 `run.end` 都有这个字段；之前写的文件没有，读者按 null 处理 |
-| `stop` | `{ reason: string, phase: string \| null }` \| null | 仅 `stopped` |
+| `stop` | `{ reason, phase, kind, step }` \| null | 仅 `stopped`。`reason` 是给人看的一句话，**读者不要靠它的措辞认原因，认 `kind`**：`flow`：流程自己调了 `$.stop`（`step` 为 null）；`check`：`$.ask` 的答案打回用完仍不过，没被流程接住（`step` 是被问的 step 名，`reason` 是「`<step>`：核对 N 轮还不过：…」）；`unknown`：一个撤不回的 `$.step` 开始过、不知道做没做，又没有 `probe` 能查出来（`step` 是那一步的名字，`value` 是 `{ step, unknown: true }`；用 `orch.mjs settle` 了结）。`kind`、`step` 是后加的（2026-10-31），旧文件没有，读者按 null 处理、退回认 `reason` |
 | `error` | `{ name, message }` \| null | 仅 `failed` / `timeout` |
 | `durationMs` | number | |
 | `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是这次运行用过的 agent 数（从日志拿来的答案不算：那是前面某次运行起的 agent，这次没花钱）。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 每一轮算它的 `LastUsage`，一个调用的各轮加起来；CLI 在一条命令里自己重试的那几轮只算最后一轮；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
@@ -521,7 +521,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`wake` 事件、`run.start.notify`（2026-10-31，缺省分别是没有这种事件、null）；`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`run.start.lineage`、`run.start.redo`、`call.start.reused`、`call.start.type: "step"` 及它的 `once` / `key`（2026-10-31，缺省分别是取 `runId`、null、null、没有这种调用）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`wake` 事件、`run.start.notify`、`run.end.stop.kind` / `stop.step`（2026-10-31，缺省分别是没有这种事件、null、没有这两个字段）；journal 的 `voided` 状态和 `scope`（2026-10-31，旧日志没有）；`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）、`call.start.continues` / `revises`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1、null、null）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`run.start.lineage`、`run.start.redo`、`call.start.reused`、`call.start.type: "step"` 及它的 `once` / `key`（2026-10-31，缺省分别是取 `runId`、null、null、没有这种调用）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

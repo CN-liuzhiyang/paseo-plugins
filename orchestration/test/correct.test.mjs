@@ -201,6 +201,7 @@ test("the corrections run out: CheckFailed, and a run that does not catch it sto
   assert.equal(result.outcome, "stopped");
   assert.equal(result.ok, true);
   assert.equal(result.stop.reason, "patch：核对 3 轮还不过：/messages/0 needs a {code} placeholder");
+  assert.deepEqual([result.stop.kind, result.stop.step], ["check", "patch"], "a reader acts on the kind, not on the words of the reason");
   assert.equal(result.stop.phase, "write");
   assert.equal(result.error, null);
   assert.equal(executor.sends.length, 2, "fixes defaults to two");

@@ -470,8 +470,21 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(
           event,
           outcome === "stopped" ? isObject(event.stop) && isString(event.stop.reason) && isNullableString(event.stop.phase) : event.stop === null,
-          "stop must be { reason, phase } when stopped and null otherwise",
+          "stop must be { reason, phase, kind, step } when stopped and null otherwise",
         );
+        // `kind` was added after files were written: strict wants it, and a reader of older files takes it as absent.
+        if (outcome === "stopped" && isObject(event.stop)) {
+          const { kind, step } = event.stop;
+          if (!("kind" in event.stop) && !("step" in event.stop)) {
+            if (strict) bad(event, "stop.kind is missing");
+          } else {
+            need(
+              event,
+              ["flow", "check", "unknown"].includes(kind) && (kind === "flow" ? step === null : isString(step) && step !== ""),
+              "stop.kind is flow (step null), check or unknown (step the name of the step)",
+            );
+          }
+        }
         need(
           event,
           outcome === "failed" || outcome === "timeout" ? isError(event.error) : event.error === null,

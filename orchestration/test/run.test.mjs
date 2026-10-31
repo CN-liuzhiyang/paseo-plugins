@@ -207,7 +207,7 @@ test("$.phase / $.do / $.log / $.stop: stop inside a phase ends it cleanly and n
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one" });
+  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one", kind: "flow", step: null });
   assert.deepEqual(result.value, { partial: true });
   const events = eventsOf(result);
   assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "wake", "run.end"]);
@@ -242,7 +242,7 @@ test("$.stop cannot be swallowed: caught and returned, the run is still stopped"
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "first reason", phase: "one" });
+  assert.deepEqual(result.stop, { reason: "first reason", phase: "one", kind: "flow", step: null });
   assert.deepEqual(result.value, { partial: 1 });
   const events = eventsOf(result);
   assert.deepEqual(events.find((e) => e.kind === "phase.end").ok, true);
@@ -1278,6 +1278,19 @@ test("the committed committee fixture conforms to the contract", async () => {
   assert.equal(events[0].flow.name, "committee");
   assert.equal(events[0].flow.summarize, undefined);
   assert.match(events.at(-1).summary, /^第 3 轮收敛（1 次调用失败）：/);
+});
+
+test("a run that stops says why in a word: the flow's own $.stop is kind flow, with no step", async () => {
+  const result = await run(flow({ name: "stop-kind", description: "d", phases: [], inputs: {}, grants: [], run: (_, $) => $.stop("because", { n: 1 }) }), { executor: fakeExecutor() });
+  assert.deepEqual(result.stop, { reason: "because", phase: null, kind: "flow", step: null });
+  assert.deepEqual(checkEvents(readEvents(result.events), { strict: true, complete: true }), []);
+  const old = readEvents(result.events);
+  delete old.at(-1).stop.kind;
+  delete old.at(-1).stop.step;
+  assert.deepEqual(checkEvents(old, { complete: true }), [], "a file written before the kind was added still reads");
+  assert.notDeepEqual(checkEvents(old, { strict: true, complete: true }), [], "and strict asks for it");
+  old.at(-1).stop = { reason: "x", phase: null, kind: "unknown", step: null };
+  assert.notDeepEqual(checkEvents(old, { complete: true }), [], "unknown is for a step, which is named");
 });
 
 test("nothing is left in the log directory but runs/, and the locks of lines whose runs have a call still going", async () => {

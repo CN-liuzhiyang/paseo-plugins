@@ -86,13 +86,20 @@ export class GrantError extends Error {
   }
 }
 
+/**
+ * A run's own end. `kind` says why in a word a reader can act on without reading `reason`: "flow" (the flow's own $.stop), "check" (an
+ * answer that never passed its check; `step` is the step asked) or "unknown" (a step that cannot be taken back, whose outcome is not
+ * known; `step` is that step).
+ */
 class StopSignal extends Error {
-  constructor(reason, value, phase) {
+  constructor(reason, value, phase, kind = "flow", step = null) {
     super(`flow stopped: ${reason}`);
     this.name = "StopSignal";
     this.reason = reason;
     this.value = value;
     this.phase = phase;
+    this.kind = kind;
+    this.step = step;
   }
 }
 
@@ -209,7 +216,7 @@ function checkKeys(where, object, allowed) {
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
- *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null } | null,
+ *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null, kind: "flow" | "check" | "unknown", step: string | null } | null,
  *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
@@ -1134,8 +1141,8 @@ async function runClaimed(target, options, taken) {
   };
 
   // The stop is recorded now, the first one wins (see $.stop).
-  const stopNow = (reason, value = null) => {
-    const signal = new StopSignal(reason, value, currentPhase());
+  const stopNow = (reason, value = null, kind = "flow", step = null) => {
+    const signal = new StopSignal(reason, value, currentPhase(), kind, step);
     if (!ending) {
       stopped = signal;
       ending = true;
@@ -1313,6 +1320,8 @@ async function runClaimed(target, options, taken) {
           return stopNow(
             `「${title}」可能已经做了、也可能没做（${entry === null ? "日志里有读不懂的行，它可能就在其中" : "它开始过，没有留下结果"}）：去外面查一下，用 orch.mjs settle ${runId} ${name} --done '<值的 JSON>' 或 --not-done 了结，再接着跑`,
             { step: name, unknown: true },
+            "unknown",
+            name,
           );
         }
       }
@@ -1679,12 +1688,12 @@ async function runClaimed(target, options, taken) {
     if (thrown instanceof StopSignal) {
       outcome = "stopped";
       value = thrown.value;
-      stop = { reason: thrown.reason, phase: thrown.phase };
+      stop = { reason: thrown.reason, phase: thrown.phase, kind: thrown.kind, step: thrown.step };
     } else if (thrown instanceof CheckFailed) {
       // Not a failure of the run: the flow did not catch an answer that never came right, and a run stopped here can be carried on.
       outcome = "stopped";
       value = null;
-      stop = { reason: thrown.reason, phase: thrown.phase };
+      stop = { reason: thrown.reason, phase: thrown.phase, kind: "check", step: thrown.step };
     } else {
       outcome = thrown instanceof RunTimeout ? "timeout" : "failed";
       value = null;
@@ -1700,7 +1709,7 @@ async function runClaimed(target, options, taken) {
   if (stopped) {
     outcome = "stopped";
     value = stopped.value;
-    stop = { reason: stopped.reason, phase: stopped.phase };
+    stop = { reason: stopped.reason, phase: stopped.phase, kind: stopped.kind, step: stopped.step };
     error = null;
   }
 
