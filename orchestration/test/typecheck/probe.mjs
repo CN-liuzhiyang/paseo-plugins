@@ -1,6 +1,6 @@
 // Each @ts-expect-error below is a mistake the editor must catch; tsc fails
 // if any of them stops being an error.
-import { flow, define, text, choice, list, group, flag } from "../../runtime/flow.mjs";
+import { flow, define, text, choice, list, group, flag, pointer } from "../../runtime/flow.mjs";
 
 const analyze = define({
   name: "analyze",
@@ -40,6 +40,14 @@ export default flow({
     if (answer.confidence === "certain") return null;
     // @ts-expect-error mode is gone
     await $.ask(analyze, { question }, { role: "planner", mode: "auto" });
+    await $.ask(analyze, { question }, { check: (a) => (a.confidence === "low" ? [{ at: pointer("items", 0, "target"), say: "name the file" }] : null), fixes: 1 });
+    await $.ask(analyze, { question }, { check: async (a) => (a.items.length > 0 ? undefined : "no items") });
+    // @ts-expect-error a check reads the step's answer, so a misspelled field is caught
+    await $.ask(analyze, { question }, { check: (a) => a.diagnosys });
+    // @ts-expect-error a problem is { at, say }
+    await $.ask(analyze, { question }, { check: () => [{ where: "/a", say: "x" }] });
+    // @ts-expect-error fixes is a number
+    await $.ask(analyze, { question }, { fixes: "2" });
     // @ts-expect-error phase id not declared
     await $.phase("debate", async () => null);
     // @ts-expect-error inputs are the declared ones

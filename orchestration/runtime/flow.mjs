@@ -22,6 +22,7 @@ import { loadRoster } from "./roster.mjs";
 import { FENCES } from "./fences.mjs";
 
 export { define, text, flag, count, choice, list, group } from "./step.mjs";
+export { pointer, CheckFailed } from "./answer.mjs";
 
 const FLOW = Symbol.for("paseo-orchestration.flow");
 

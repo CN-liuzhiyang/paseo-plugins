@@ -63,13 +63,45 @@ export interface Phase<Id extends string = string> {
 /** Grants beyond the defaults. gate:allow does not exist on purpose. */
 export type Grant = "gate:deny";
 
-export interface AskOptions {
+/** One thing wrong with an answer: where (a JSON pointer, "" for the whole answer) and what, written for the model that gave it. */
+export interface Problem {
+  at: string;
+  say: string;
+}
+
+/** What a `check` returns: the problems found. Nothing, null or an empty list is a pass; a string is one problem with the whole answer. */
+export type Problems = readonly Problem[] | string | null | undefined | void;
+
+/** "/edits/4/old" from `pointer("edits", 4, "old")`; a "/" or "~" in a key is escaped. */
+export function pointer(...segments: (string | number)[]): string;
+
+/** What `$.ask` throws when the answer still does not pass after the corrections it was allowed. `rounds` counts the answers given, the first included. */
+export class CheckFailed extends Error {
+  readonly step: string;
+  readonly problems: readonly Problem[];
+  /** The answer as it stood after the last correction (null when none could be read). */
+  readonly value: unknown;
+  readonly rounds: number;
+  /** The line a person reads where the run stopped. */
+  readonly reason: string;
+}
+
+/** The answer is sent back to the agent that gave it, with only these problems, when it does not pass (CONVENTIONS.md "R6"). */
+export interface AskOptions<Out = unknown> {
   role?: string;
   provider?: string;
   thinking?: string;
   title?: string;
   cwd?: string;
   timeout?: Duration;
+  /**
+   * Looks at an answer that fits the schema and returns what is wrong with it. The agent is asked, in the same session, to redo
+   * only those places; the merged answer is looked at again. Still wrong after `fixes` rounds: `$.ask` throws `CheckFailed`
+   * (a run that lets it through ends as stopped). A throw is a bug in the check and fails the call.
+   */
+  check?: (answer: Out, info: { round: number }) => Problems | Promise<Problems>;
+  /** How many times the answer may be sent back: 0 to 5, default 2. 0 leaves a reply that does not fit the schema to the CLI's own retries. */
+  fixes?: number;
   /**
    * "after": archive the call's agent once it has handed in its answer (not when the call failed). What it was given and what it
    * handed back are in the run's events, so the agent is not a place anyone needs to open. Absent: it is left for a person to archive.
@@ -179,7 +211,7 @@ export interface ResumePoint<N extends string = string> {
 }
 
 export interface Dollar<PhaseId extends string> {
-  ask<Out, In>(step: Step<Out, In>, input: In, options?: AskOptions): Promise<Out>;
+  ask<Out, In>(step: Step<Out, In>, input: In, options?: AskOptions<Out>): Promise<Out>;
   do<T>(name: string, fn: () => T | Promise<T>, options?: { title?: string }): Promise<T>;
   gate(request: GateRequest): Promise<GateDecision>;
   phase<T>(id: PhaseId, fn: () => T | Promise<T>): Promise<T>;

@@ -19,7 +19,9 @@ import os from "node:os";
 import path from "node:path";
 import { format } from "node:util";
 import { loadFlow, describeFlow, scanSource, DEFAULT_GRANTS } from "./flow.mjs";
-import { isStep, validate, assertBuilderSchema } from "./step.mjs";
+import { isStep, validate } from "./step.mjs";
+import { CheckFailed, applyFix, extractJson, fixPrompt, normalizeProblems, planFix, problemsOf, schemaFailure, stripUndeclared } from "./answer.mjs";
+import { unknownOption } from "./paseo-cli.mjs";
 import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog, eventsFile } from "./events.mjs";
@@ -55,8 +57,15 @@ export const SUMMARY_LIMIT = 200;
 /** How long the runner waits for a closing gate to finish denying its card before it moves on. */
 const GATE_CLOSE_WAIT_MS = 15_000;
 
+/** How many times a call may send an agent back what is wrong with its answer (`$.ask`'s `fixes`), the CLI's own retry count. */
+const DEFAULT_FIXES = 2;
+const MAX_FIXES = 5;
+
 const COST_NOTE =
-  "per agent, LastUsage: the last turn only (a structured call is one turn). Codex reports CostUsd 0, so totalUsd counts Claude only";
+  "per agent turn, LastUsage, added up over the rounds of a call (a turn the CLI retried inside one command counts only its last). Codex reports CostUsd 0, so totalUsd counts Claude only";
+
+const sumOrNull = (a, b) => (a === null ? b : b === null ? a : a + b);
+const addCost = (a, b) => (a === null ? b : b === null ? a : { usd: sumOrNull(a.usd, b.usd), inputTokens: sumOrNull(a.inputTokens, b.inputTokens), outputTokens: sumOrNull(a.outputTokens, b.outputTokens) });
 
 /** The input, the flow's source text, or its grants are wrong. Nothing ran and nothing was spent. */
 export class RunRefused extends Error {
@@ -162,16 +171,6 @@ function cutStrings(node, limit) {
 }
 
 const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-
-/** Whether a step's schema is made of the builders, so `validate` understands all of it. */
-function builderSchema(step) {
-  try {
-    assertBuilderSchema(step.schema, step.name);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 function checkKeys(where, object, allowed) {
   const unknown = Object.keys(object ?? {}).filter((key) => !allowed.includes(key));
@@ -547,10 +546,10 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     }
   };
 
-  const endCall = (record, { ok, output, error, agentId, cost }) => {
+  const endCall = (record, { ok, output, error, agentId, cost, rounds }) => {
     // Already closed when the run ended with this call in flight.
     if (!open.delete(record.callId)) return;
-    if (agentId) spent.set(agentId, cost);
+    if (agentId) spent.set(agentId, addCost(spent.get(agentId) ?? null, cost));
     log.emit("call.end", {
       callId: record.callId,
       ok,
@@ -559,7 +558,116 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       error: error ? errorOf(error) : null,
       agentId,
       cost,
+      ...(rounds === undefined ? {} : { rounds }),
     });
+  };
+
+  // Set once Paseo's CLI turns out not to know --max-retries (or send's --output-schema): from then on this run asks the
+  // way it did before answers could be corrected in place -- the CLI retries a reply that does not fit by itself, and what
+  // a check finds wrong cannot be sent back.
+  let oldCli = false;
+
+  // An ask's answers, round by round, until they pass or the corrections are used up. Round 1 is the CLI's `run`; each
+  // later round is a `send` into the same agent that carries only the places that were wrong and a schema for only those
+  // (answer.mjs). `state` is filled in as it goes, so a call that fails still has its rounds, cost and last answer to record.
+  const converse = async (record, state, { step, check, fixes, timeout, phase, first }) => {
+    const timeoutMs = parseDuration(timeout);
+    const targeted = () => !oldCli && typeof executor.send === "function" && fixes > 0;
+    let roundCost = null;
+    // A turn's reply as the value it holds: what the CLI handed over, or, when it refused the reply as not fitting
+    // the schema, the JSON read out of what the agent wrote. The turn's cost is taken whichever way it went.
+    const read = async (turn) => {
+      let began = true;
+      try {
+        return { value: await turn(), text: null, cliErrors: [] };
+      } catch (error) {
+        began = unknownOption(error) === null;
+        const refused = schemaFailure(error);
+        if (!refused) throw error;
+        return { value: extractJson(refused.text), text: refused.text, cliErrors: refused.errors };
+      } finally {
+        if (began) {
+          const found = await settleAgent(record);
+          state.agentId = found.agentId;
+          roundCost = found.cost;
+          state.cost = addCost(state.cost, found.cost);
+        }
+      }
+    };
+    // What an agent added beyond the schema is not worth a round.
+    const tidy = (schema, value, what) => {
+      if (value === undefined) return undefined;
+      const { value: kept, dropped } = stripUndeclared(schema, value);
+      if (dropped.length > 0) log.emit("log", { level: "info", message: `${record.callId}: ${what} had fields the schema does not declare; dropped: ${dropped.join(", ")}` });
+      return kept;
+    };
+    const mismatch = (found) =>
+      Object.assign(new Error(`the answer does not fit the step's schema: ${found.problems.map((p) => `${p.at || "(root)"} ${p.say}`).join("; ")}`), { name: "OutputMismatch" });
+    const failed = (found) => new CheckFailed({ step: step.name, problems: found.problems, value: state.value, rounds: state.rounds, phase });
+    const whenOpen = (kind, fields) => {
+      if (open.has(record.callId)) log.emit(kind, fields);
+    };
+
+    let reply = await read(() => first(targeted() ? 0 : undefined));
+    let value = tidy(step.schema, reply.value, "the answer");
+    let cliErrors = reply.cliErrors;
+    for (;;) {
+      state.value = value ?? null;
+      let problems = value === undefined ? [{ at: "", say: "no JSON could be read from the reply" }] : problemsOf(step.schema, value);
+      // Keywords problemsOf does not know are the CLI's to judge; what it found stands.
+      if (problems.length === 0 && value !== undefined) problems = cliErrors;
+      cliErrors = [];
+      let kind = "schema";
+      if (problems.length === 0 && check) {
+        kind = "check";
+        problems = normalizeProblems(await check(structuredClone(value), { round: state.rounds }));
+      }
+      if (problems.length === 0) return;
+      const found = { kind, problems, unread: value === undefined };
+      const unsendable = () => (kind === "check" ? failed(found) : mismatch(found));
+
+      if (!targeted()) throw unsendable();
+      if (!state.agentId) {
+        caveat(`answer: the agent of ${record.callId} could not be found, so what was wrong with its answer could not be sent back to it`, record.callId);
+        throw unsendable();
+      }
+      if (state.rounds > fixes) throw failed(found);
+      if (ending) throw new RunEnded();
+      const left = timeoutMs - (Date.now() - record.startedAt);
+      if (left < 1_000) throw Object.assign(new Error(`the call's ${timeout} ran out before the answer could be corrected`), { name: "CallTimeout" });
+
+      const plan = planFix(step.schema, value, problems);
+      for (const move of plan.moves) {
+        log.emit("log", { level: "warn", message: `${record.callId}: a problem pointed at ${move.from}, which is not a place in the answer; asked for ${move.to || "the whole answer"} instead` });
+      }
+      const round = state.rounds + 1;
+      const prompt = log.scrub(fixPrompt(plan, { unread: found.unread }));
+      announceAgent(record, state.agentId);
+      whenOpen("call.fix", { callId: record.callId, round, problems: plan.problems, prompt, schema: plan.schema });
+      const sentAt = Date.now();
+      try {
+        reply = await read(() =>
+          executor.send({
+            agentId: state.agentId,
+            prompt,
+            schema: plan.schema,
+            timeout: `${Math.ceil(left / 1_000)}s`,
+            file: path.join(runDir, "prompts", `${record.callId}.r${round}.txt`),
+          }),
+        );
+      } catch (error) {
+        // Nothing was sent: the CLI refused the option before it began.
+        if (!["--output-schema", "--max-retries"].includes(unknownOption(error))) throw error;
+        oldCli = true;
+        caveat("answer: this Paseo CLI's `send` does not take --output-schema, so what is wrong with an answer cannot be sent back to its agent; a reply that does not fit is not corrected, and a check that fails ends the call", record.callId);
+        throw unsendable();
+      }
+      state.rounds = round;
+      const given = tidy(plan.schema, reply.value, `the reply of round ${round}`);
+      const fits = given !== undefined && problemsOf(plan.schema, given).length === 0;
+      whenOpen("call.fixed", { callId: record.callId, round, answer: reply.value ?? reply.text ?? null, ok: fits, cost: roundCost, durationMs: Date.now() - sentAt });
+      value = applyFix(value, plan, given);
+    }
   };
 
   const role = (name) => {
@@ -606,10 +714,13 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       if (Object.hasOwn(callOptions ?? {}, "mode")) {
         throw new TypeError(`$.ask: mode is gone. The step declares effects ("${step.effects}"), and runtime/fences.mjs picks the mode`);
       }
-      checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive"]);
+      checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive", "check", "fixes"]);
       if (callOptions.archive !== undefined && callOptions.archive !== "after") {
         throw new TypeError(`$.ask(${step.name}): archive can only be "after" (archive the agent once the call has handed in its answer), not ${JSON.stringify(callOptions.archive)}`);
       }
+      const { check, fixes = DEFAULT_FIXES } = callOptions;
+      if (check !== undefined && typeof check !== "function") throw new TypeError(`$.ask(${step.name}): check must be a function (answer, { round }) returning the problems found, as [{ at, say }]`);
+      if (!Number.isInteger(fixes) || fixes < 0 || fixes > MAX_FIXES) throw new TypeError(`$.ask(${step.name}): fixes is how many times the answer may be sent back to be corrected, 0 to ${MAX_FIXES} (default ${DEFAULT_FIXES})`);
       const bound = bindRole(roster, callOptions);
       const fence = fenceFor(bound.provider, step.effects);
       const prompt = composePrompt(bound, step.for(stepInput));
@@ -646,36 +757,47 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
       probeAgent(record);
 
-      let output = null;
+      const askRequest = {
+        provider: bound.provider,
+        thinking: bound.thinking,
+        mode: fence.mode,
+        title,
+        labels: { ...record.labels, "orch-step": step.name },
+        prompt,
+        schema: step.schema,
+        timeout,
+        cwd: callCwd,
+      };
+      // `retries` 0 hands a reply that does not fit back to the runner instead of the CLI asking again; an older CLI
+      // that does not know the option is asked the old way, once and for the rest of the run.
+      const first = (retries) =>
+        startIn(callCwd, used, workspace, async (inWorkspace) => {
+          try {
+            return await executor.ask({ ...askRequest, workspace: inWorkspace, maxRetries: retries });
+          } catch (error) {
+            if (retries === undefined || unknownOption(error) !== "--max-retries") throw error;
+            oldCli = true;
+            caveat(
+              "answer: this Paseo CLI does not take --max-retries, so it retries a reply that does not fit by itself, and what is wrong with an answer cannot be sent back to its agent (a check that fails ends the call)",
+              record.callId,
+            );
+            return executor.ask({ ...askRequest, workspace: inWorkspace });
+          }
+        });
+
+      const state = { rounds: 1, cost: null, agentId: null, value: null };
+      record.state = state;
       let failure = null;
       try {
-        output = await startIn(callCwd, used, workspace, (inWorkspace) =>
-          executor.ask({
-            provider: bound.provider,
-            thinking: bound.thinking,
-            mode: fence.mode,
-            title,
-            labels: { ...record.labels, "orch-step": step.name },
-            prompt,
-            schema: step.schema,
-            timeout,
-            cwd: callCwd,
-            workspace: inWorkspace,
-          }),
-        );
-        // Paseo enforces the schema; this catches what reaches the flow anyway
-        // (an empty stdout parses to null). The answer stays in call.end.
-        const problems = builderSchema(step) ? validate(step.schema, output, step.name) : isPlainObject(output) ? [] : [`${step.name}: not an object`];
-        if (problems.length > 0) failure = Object.assign(new Error(`the answer does not fit the step's schema: ${problems.join("; ")}`), { name: "OutputMismatch" });
+        await converse(record, state, { step, check, fixes, timeout, phase: currentPhase(), first });
       } catch (error) {
         failure = error;
       }
-      const settled = await settleAgent(record);
-      endCall(record, { ok: !failure, output: safe(output), error: failure, ...settled });
+      endCall(record, { ok: !failure, output: safe(state.value), error: failure, agentId: state.agentId, cost: state.cost, rounds: state.rounds });
       if (failure) throw failure;
       // Only a call that came out well, and only when the flow asked for it: a call that failed keeps its agent to be looked into.
-      if (callOptions.archive === "after") await archiveAfter(record, settled.agentId);
-      return output;
+      if (callOptions.archive === "after") await archiveAfter(record, state.agentId);
+      return state.value;
     },
 
     /** The flow's own deterministic action: read, run a CLI, write. Returns fn's value. */
@@ -959,6 +1081,11 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       outcome = "stopped";
       value = thrown.value;
       stop = { reason: thrown.reason, phase: thrown.phase };
+    } else if (thrown instanceof CheckFailed) {
+      // Not a failure of the run: the flow did not catch an answer that never came right, and a run stopped here can be carried on.
+      outcome = "stopped";
+      value = null;
+      stop = { reason: thrown.reason, phase: thrown.phase };
     } else {
       outcome = thrown instanceof RunTimeout ? "timeout" : "failed";
       value = null;
@@ -999,11 +1126,15 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   while (open.size > 0) {
     const record = open.values().next().value;
     unfinished += 1;
+    const settled = await settleAgent(record);
+    // An ask in a later round has the earlier rounds' cost already; the turn in flight is counted as it stands.
     endCall(record, {
       ok: false,
       output: null,
       error: { name: "RunEnded", message: `the run ended (${outcome}) before this call finished` },
-      ...(await settleAgent(record)),
+      agentId: settled.agentId,
+      cost: addCost(record.state?.cost ?? null, settled.cost),
+      rounds: record.state?.rounds,
     });
   }
   if (unfinished > 0) {

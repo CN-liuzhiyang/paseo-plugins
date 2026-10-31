@@ -187,6 +187,8 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
   const agents = new Map(); // callId -> agentId from call.agent
   const endedOk = new Set(); // calls whose call.end said ok
   const archived = new Set(); // calls that have a call.archive
+  const fixRound = new Map(); // callId -> round of its latest call.fix
+  const fixedRound = new Map(); // callId -> round of its latest call.fixed
   const caveatTexts = new Set();
   let runEnd = null;
 
@@ -314,6 +316,9 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         if (agents.has(event.callId) && event.agentId !== null) {
           need(event, event.agentId === agents.get(event.callId), "agentId differs from the call's call.agent");
         }
+        if (start.type === "ask") {
+          added(event, "rounds", Number.isInteger(event.rounds) && event.rounds >= Math.max(1, fixedRound.get(event.callId) ?? 0), "rounds is not an integer of at least 1, and at least the last round that call.fixed answered");
+        }
         need(
           event,
           event.cost === null ||
@@ -324,6 +329,43 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           const output = event.output;
           need(event, isObject(output) && GATE_FIELDS.every((key) => key in output), `gate output lacks ${GATE_FIELDS.filter((k) => !(k in (output ?? {}))).join(", ")}`);
           need(event, GATE_OUTCOMES.includes(output?.outcome), `gate outcome "${output?.outcome}" is unknown`);
+        }
+        break;
+      }
+      case "call.fix":
+      case "call.fixed": {
+        const start = calls.get(event.callId);
+        if (!start) {
+          bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
+          break;
+        }
+        const fixing = event.kind === "call.fix";
+        need(event, start.type === "ask", `${event.kind} for a call that is not an ask`);
+        need(event, !ended.has(event.callId), `${event.kind} after the call's call.end`);
+        need(event, Number.isInteger(event.round) && event.round >= 2, "round is not an integer of at least 2 (round 1 is the first answer)");
+        const before = fixRound.get(event.callId) ?? 1;
+        if (fixing) {
+          need(event, event.round > before, "round does not come after the call's earlier call.fix");
+          need(event, (fixedRound.get(event.callId) ?? 1) === before, "call.fix while the call's earlier call.fix has no call.fixed");
+          fixRound.set(event.callId, event.round);
+          need(
+            event,
+            Array.isArray(event.problems) && event.problems.length > 0 && event.problems.every((p) => isObject(p) && isString(p.at) && isString(p.say)),
+            "problems is not a non-empty [{ at, say }]",
+          );
+          need(event, isString(event.prompt) && event.prompt.length > 0, "prompt is missing");
+          need(event, isObject(event.schema), "schema is not an object");
+        } else {
+          need(event, event.round === before && (fixedRound.get(event.callId) ?? 1) < before, "call.fixed is not the answer to the call's latest call.fix");
+          fixedRound.set(event.callId, event.round);
+          need(event, "answer" in event, "answer is missing");
+          need(event, typeof event.ok === "boolean", "ok is not a boolean");
+          need(event, typeof event.durationMs === "number" && event.durationMs >= 0, "durationMs is not a number");
+          need(
+            event,
+            event.cost === null || (isObject(event.cost) && isNullableNumber(event.cost.usd) && isNullableNumber(event.cost.inputTokens) && isNullableNumber(event.cost.outputTokens)),
+            "cost is not { usd, inputTokens, outputTokens } | null",
+          );
         }
         break;
       }
