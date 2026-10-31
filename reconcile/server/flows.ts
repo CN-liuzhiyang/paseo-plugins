@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { LauncherConfig, Policy } from "./config";
+import { settleShort } from "../shared/graph";
 import type { FlowEnd, FlowRec, FlowResult, FlowState, ResumeOffer } from "../shared/model";
 import type { RunProbe } from "./runs";
 import { localParts } from "./time";
@@ -149,6 +150,7 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
           why,
           // What it said about being carried on, for a run that did not come out whole (a finished one has none to give, and the runtime writes it as nothing).
           ...(outcome !== "done" && probe.resume ? { resume: probe.resume } : {}),
+          ...(outcome === "stopped" && end.settle ? { settle: end.settle } : {}),
         },
       });
     }
@@ -195,8 +197,10 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
  * as is every other outcome. Returns the sentence, cleaned for a line; null for any run that is not such a stop. A value
  * too large to be kept (`valueDropped`) is not there to be read: that stop reads as finished.
  */
-export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value">): string | null {
+export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value" | "settle">): string | null {
   if (end.outcome !== "stopped") return null;
+  // A stop at a step that may or may not have been done is one too, whatever the flow's value says: nothing has come of it until a person says.
+  if (end.settle) return settleShort(end.settle);
   const value = end.value;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const why = cleanText((value as Record<string, unknown>).why, 300);
@@ -243,7 +247,7 @@ export function carryOnOf(rec: Pick<FlowRec, "runId" | "ended" | "resume">, fres
 const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
 /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
-export const noResult = (end: Pick<FlowEnd, "outcome" | "value">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
+export const noResult = (end: Pick<FlowEnd, "outcome" | "value" | "settle">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
 /**
  * What a rule is told of a run. `fresh`: the word of the run a refused carrying on was to carry on, as it stands now (see `carryOnOf`);

@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
+import { HOME_SCREEN, RUN_SCREEN, settleView, type RunView } from "../shared/graph";
 import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
 import { FLOW_VALUE_BYTES, type ResumeOffer } from "../shared/model";
 import { inputHashOf } from "./flows";
@@ -82,7 +82,7 @@ export function resolveRunsDir(env: NodeJS.ProcessEnv = process.env, home: strin
 
 interface CallRec {
   id: string;
-  type: "ask" | "do" | "gate";
+  type: "ask" | "do" | "gate" | "step";
   title: string;
   phase: string | null;
   startedAt: number;
@@ -97,6 +97,10 @@ interface CallRec {
   archived: boolean;
   /** The call of this run whose agent this one carries on (`$.again`: call.start's `continues`): the same agent, the conversation going on. Null for a call that made its agent. */
   continues: string | null;
+  /** The call was not made: its result was taken from the journal of an earlier run on the same line (call.start's `reused`). It spent nothing now, and changed nothing now. */
+  reused: boolean;
+  /** A `step` that cannot be taken back (call.start's `once`). */
+  once: boolean;
   end: { at: number; ok: boolean; error: RunError | null; usd: number; outcome: string | null } | null;
 }
 
@@ -113,6 +117,10 @@ interface RunRec {
   resumeOf: string | null;
   /** The fingerprint of the point it was started from (run.start's `resumePrint`), for a run that carries on another. */
   resumePrint: string | null;
+  /** The line of runs it belongs to (run.start's `lineage`: the id of the first run of the line, which a run that carries one on shares); its own id for a run that carries none on, and for a file from before the runtime wrote it. */
+  lineage: string;
+  /** The step the run was asked to do again although the journal had it (run.start's `redo`), when it was. */
+  redo: string | null;
   /** The last word of the flow on how it could be carried on (its `resume` events): null when it has said nothing, or took it back. The run.end's own is `end.resume`. */
   resume: ResumeOffer | null;
   phaseState: Map<string, "run" | "ok" | "bad">;
@@ -123,7 +131,7 @@ interface RunRec {
   /** Calls that began after as many were kept as are (MAX_CALLS): their cost is missing from the sum. */
   skipped: number;
   /** `totalUsd` is the run.end's own sum of what the run cost (cost.totalUsd), null when the line did not give one or was not read. */
-  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null; resume?: ResumeOffer | null } | null;
+  end: { at: number; outcome: string; summary: string | null; stop: string | null; error: RunError | null; value: unknown; valueDropped: boolean; totalUsd: number | null; resume?: ResumeOffer | null; settle?: Settle | null } | null;
 }
 
 /** An error as the runtime reports it, cleaned: the whole message, and its first line for the plain sentence. */
@@ -185,6 +193,29 @@ function continuesOf(value: unknown, runId: string): string | null {
   return link && link.runId === runId && callId && callId.length <= 128 ? callId : null;
 }
 
+/**
+ * A stop that is a step which cannot be taken back and may or may not have been done: the run does not do it again on a guess, it stops and says,
+ * in its reason, how a person tells it (`orch.mjs settle <runId> <step> --done '<json>' | --not-done`, EVENTS.md "日志"). `step` is the name the
+ * command takes, where it reads as one a person can type; `title` is what the step is called for people, where the reason has it.
+ */
+export interface Settle {
+  step: string | null;
+  title: string | null;
+}
+
+const SETTLE_COMMAND = /orch\.mjs settle\s+\S+\s+(\S+)/u;
+const SETTLE_TITLE = /^「(.{1,80}?)」可能已经做了/u;
+/** A step name as the shell reads it as one word: nothing that quotes, expands or joins. */
+const STEP_NAME = /^[^\s'"`$&|;<>()\\*?{}[\]!#~]{1,80}$/u;
+
+/** From a run.end (or a runner's printed result): the settle it stopped at, or null for any other end. The reason is read whole, before it is cut for a line. */
+export function settleOf(outcome: unknown, reason: unknown): Settle | null {
+  const text = str(reason);
+  if (outcome !== "stopped" || text === null || !text.includes("orch.mjs settle")) return null;
+  const step = SETTLE_COMMAND.exec(text)?.[1];
+  return { step: step && STEP_NAME.test(step) ? step : null, title: cleanText(SETTLE_TITLE.exec(text)?.[1], 40) };
+}
+
 /** The item a run was started for, from `run.start.affair`; null for any other run. Not trusted: the file can be edited by anyone. */
 export function caseOfStart(start: Record<string, unknown>, affair: RunsDeps["affair"]): { caseId: string; stage: string | null } | null {
   const link = obj(obj(start.affair)?.link);
@@ -220,7 +251,7 @@ function fold(run: RunRec, e: Record<string, unknown>) {
       return;
     case "call.start": {
       const id = str(e.callId);
-      const type = e.type === "ask" || e.type === "do" || e.type === "gate" ? e.type : null;
+      const type = e.type === "ask" || e.type === "do" || e.type === "gate" || e.type === "step" ? e.type : null;
       if (!id || !type || id.length > 128) return;
       if (!run.calls.has(id) && run.calls.size >= MAX_CALLS) {
         run.skipped += 1;
@@ -240,6 +271,8 @@ function fold(run: RunRec, e: Record<string, unknown>) {
         archive: type === "ask" && e.archive === "after",
         archived: false,
         continues: type === "ask" ? continuesOf(e.continues, run.runId) : null,
+        reused: obj(e.reused) !== null && type !== "do",
+        once: type === "step" && e.once === true,
         end: null,
       });
       return;
@@ -266,7 +299,8 @@ function fold(run: RunRec, e: Record<string, unknown>) {
         at: Number.isFinite(at) ? at : call.startedAt,
         ok: e.ok === true,
         error: errorOf(e.error),
-        usd: typeof cost?.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0 ? cost.usd : 0,
+        // What a call taken from the journal cost was paid when it was made, in the run that made it.
+        usd: !call.reused && typeof cost?.usd === "number" && Number.isFinite(cost.usd) && cost.usd >= 0 ? cost.usd : 0,
         outcome: call.type === "gate" ? cleanText(output?.outcome, 40) : null,
       };
       return;
@@ -281,7 +315,7 @@ function fold(run: RunRec, e: Record<string, unknown>) {
       const value = e.value === undefined ? null : e.value;
       const kept = valueWithin(value);
       const total = obj(e.cost)?.totalUsd;
-      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null, resume: offerOf(e.resume) };
+      run.end = { at: Number.isFinite(at) ? at : run.lastAt, outcome: cleanText(e.outcome, 40) ?? "failed", summary: cleanText(e.summary, 200), stop: cleanText(stop?.reason, 120), error: errorOf(e.error), value: kept.value, valueDropped: kept.dropped, totalUsd: typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null, resume: offerOf(e.resume), settle: settleOf(e.outcome, stop?.reason) };
     }
   }
 }
@@ -362,10 +396,14 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
   const step = currentAt >= 0 ? { index: currentAt + 1, total: run.phases.length, title: run.phases[currentAt]!.title } : null;
 
   const done = calls.filter((c) => c.end);
-  // What already changed something outside: an agent allowed to write, a script's own action, a gate that let something through.
+  // What already changed something outside: an agent allowed to write, a script's own action (a step is one too; one that cannot be taken back may have
+  // taken effect although it failed), a gate that let something through. A call taken from the journal changed nothing in this run: it was done in the
+  // run that made it, and is not told again.
   const sideEffects = done
-    .filter((c) => (c.type === "ask" && c.effects === "workspace") || (c.type === "do" && c.end!.ok) || (c.type === "gate" && c.end!.outcome === "allowed"))
+    .filter((c) => !c.reused)
+    .filter((c) => (c.type === "ask" && c.effects === "workspace") || (c.type === "do" && c.end!.ok) || (c.type === "step" && (c.end!.ok || c.once)) || (c.type === "gate" && c.end!.outcome === "allowed"))
     .map((c) => c.title.slice(0, 80));
+  const reused = calls.filter((c) => c.reused).length;
 
   const end = run.end;
   // How it said it could be carried on: the run.end's word when it has ended, else the last it said while it ran (a run that was cut off).
@@ -395,6 +433,10 @@ function viewOf(run: RunRec, claim: ClaimRead | null, deps: RunsDeps, probe: Pro
     resumeOf: run.resumeOf,
     resumePrint: run.resumePrint,
     resume: offer ? { line: offer.from, spends: offer.spends } : null,
+    lineage: run.lineage,
+    ...(run.redo ? { redo: run.redo } : {}),
+    ...(reused > 0 ? { reused } : {}),
+    ...(end?.settle ? { settle: settleView(run.runId, end.settle) } : {}),
   };
 }
 
@@ -502,6 +544,8 @@ export function createRunReader(deps: RunsDeps): RunReader {
       holder: { pid: e.pid, hostname: e.hostname },
       resumeOf: typeof e.resumeOf === "string" && RUN_ID_SHAPE.test(e.resumeOf) ? e.resumeOf : null,
       resumePrint: typeof e.resumePrint === "string" && /^[0-9a-f]{16}$/.test(e.resumePrint) ? e.resumePrint : null,
+      lineage: typeof e.lineage === "string" && RUN_ID_SHAPE.test(e.lineage) ? e.lineage : file.replace(/\.jsonl$/, ""),
+      redo: cleanText(e.redo, 80),
       resume: null,
       phaseState: new Map(),
       calls: new Map(),
@@ -763,7 +807,7 @@ export function probeFromRunnerOutput(text: string, mtimeMs: number): RunProbe |
     const cost = obj(result.cost);
     const total = cost?.totalUsd;
     const usd = typeof total === "number" && Number.isFinite(total) && total >= 0 ? total : null;
-    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd, resume: offerOf(result.resume) };
+    end = { at, outcome, summary: cleanText(result.summary, 200), stop: cleanText(obj(result.stop)?.reason, 120), error: errorOf(result.error), value: kept.value, valueDropped: kept.dropped, totalUsd: usd, resume: offerOf(result.resume), settle: settleOf(result.outcome, obj(result.stop)?.reason) };
     // No `cost` at all is a run in which no agent was asked anything: nothing was spent.
     costUsd = usd ?? 0;
     costKnown = usd !== null || cost === null;

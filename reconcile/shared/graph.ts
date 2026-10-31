@@ -303,7 +303,40 @@ export interface RunView {
   carriedOn?: { by: string; line: string; spends: "nothing" | "maybe" } | null;
   /** For the newest round of a request that has had more than one: how many rounds, and what they cost together (the ones that have ended). */
   ledger?: { rounds: number; costUsd: number };
+  /**
+   * The line of runs it belongs to (run.start's `lineage`): the first run's id, shared by the runs that carry it on; its own id for a run that carries
+   * none on, and for a file from before the runtime wrote it. What a line shares is the runtime's journal, where the work already done is kept; what
+   * the page counts as one request (`request`, `round`) is the person's, and can be wider (starting over is the same request on a new line).
+   */
+  lineage?: string;
+  /** The step it was asked to do again although the journal had it (run.start's `redo`), when it was. */
+  redo?: string;
+  /** How many of its calls were not made but taken from the journal of an earlier run on the line: they spent nothing now and changed nothing now. Absent: none. */
+  reused?: number;
+  /** Set when the run stopped at a step it cannot take back and does not know whether it was done: a person says (the runtime's `orch.mjs settle`) before it goes on. */
+  settle?: SettleView;
 }
+
+/** What a person has to do about a step that may or may not have been done: what it is called, and the commands that tell the system which it was. */
+export interface SettleView {
+  title: string | null;
+  commands: string[];
+}
+
+/** The top bar's first words for a run stopped at such a step. */
+export const SETTLE_KICKER = "要你：确认那一步做没做";
+
+/** From the runtime's word on a stop that it can't tell whether a step was done (`step` as the command takes it, null where it can't be typed as one). */
+export const settleView = (runId: string, settle: { step: string | null; title: string | null }): SettleView => ({
+  title: settle.title,
+  commands: settle.step ? [`orch.mjs settle ${runId} ${settle.step} --not-done`, `orch.mjs settle ${runId} ${settle.step} --done '<值的 JSON>'`] : [],
+});
+
+/** The short sentence: what it is, and that nobody knows. */
+export const settleShort = (settle: Pick<SettleView, "title">): string => (settle.title ? `「${settle.title}」可能已经做了，也可能没做` : "有一步可能已经做了，也可能没做");
+
+/** The whole reason: the short sentence and what to do about it (the commands themselves are lines of their own). */
+export const settleWhole = (settle: SettleView): string => `${settleShort(settle)}。去外面看一眼它做了没有，${settle.commands.length > 0 ? "再用下面的命令告诉系统" : "再用 orch.mjs settle 告诉系统（命令在运行记录的停止原因里）"}，然后接着跑`;
 
 export interface GraphView {
   case: string;

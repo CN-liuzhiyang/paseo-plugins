@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
-import { HOME_SCREEN, RUN_SCREEN, type RunView } from "../shared/graph";
+import { HOME_SCREEN, RUN_SCREEN, settleView, settleWhole, type RunView } from "../shared/graph";
 import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type ResumeOffer, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
 import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, passesOf, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
@@ -955,7 +955,9 @@ export function createEngine(deps: EngineDeps) {
     const inTrouble = (rec.ended !== undefined && noResult(rec.ended)) || (outcome === null && situation === "slow");
     // Only for the newest round of its request: an earlier one is history (the request is the person's to set aside, not each round of it).
     const point = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? carryOnPoint(rec) : null;
-    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(point ? (["resume"] as const) : []), ...(outcome !== null ? (["retry"] as const) : []), "mine", "fold"] : [];
+    // A run stopped at a step it cannot take back and does not know was done is not started over from the start: that would do the step again, on a new line of runs, where nothing of it is kept.
+    const settle = rec.ended?.settle ? settleView(rec.runId, rec.ended.settle) : null;
+    const actions: NonNullable<RunView["actions"]> = !rec.dismissed && inTrouble && here && latest && !rec.selfRetry ? [...(point ? (["resume"] as const) : []), ...(outcome !== null && !settle ? (["retry"] as const) : []), "mine", "fold"] : [];
     const rounds = latest ? roundsOf(rec) : [];
     // "From the start" costs what the request cost when it last ran from the start, not what a carrying on cost.
     const fromStart = [...rounds].reverse().find((r) => !r.resume && r.ended);
@@ -987,18 +989,19 @@ export function createEngine(deps: EngineDeps) {
       situation,
       endedAt: rec.ended ? (rec.ended.completedAt ?? rec.ended.at) : base.endedAt,
       request: flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key),
-      outcome: rec.ended ? (unfinished !== null ? `没查成：${unfinished}` : (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome)))) : base.outcome,
+      outcome: rec.ended ? (unfinished !== null ? (settle ? unfinished : `没查成：${unfinished}`) : (rec.ended.summary ?? (outcome === "done" ? "完成了" : (rec.ended.why ?? base.outcome)))) : base.outcome,
       costUsd: rec.ended?.costUsd ?? base.costUsd,
       own: true,
       round: rec.round,
-      why: unfinished ?? rec.ended?.why ?? null,
+      why: settle ? settleWhole(settle) : (unfinished ?? rec.ended?.why ?? null),
+      ...(settle ? { settle } : {}),
       // The words for a person: what the run's own file says in plain words, else the reason it ended with without the runtime's error name in front ("OutputMismatch：…").
       shortWhy: rec.ended && (unfinished ?? base.error?.plain ?? rec.ended.why) ? reasonShort(rec.ended.summary, unfinished ?? base.error?.plain ?? rec.ended.why!.replace(/^[A-Z][A-Za-z0-9]+：/u, "")) : null,
       ...(rec.dismissed ? { dismissed: rec.dismissed.how } : {}),
       ...(suspects.has(rec.runId) && situation !== "done" ? { maybeAsleep: true } : {}),
       ...(drifted.has(rec.runId) ? { inputDrifted: true } : {}),
       ...(unwanted(rec) ? { unwanted: true } : {}),
-      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry ? { round: rec.round + 1, estimateUsd: rec.resume ? estimateOf(fromStart) : estimateOf(rec) } : null,
+      retry: rec.ended && noResult(rec.ended) && latest && !rec.selfRetry && !settle ? { round: rec.round + 1, estimateUsd: rec.resume ? estimateOf(fromStart) : estimateOf(rec) } : null,
       ...(rec.selfRetry ? { selfRetry: true } : {}),
       ...(rec.title ? { title: rec.title } : {}),
       actions: actions,
@@ -1043,6 +1046,7 @@ export function createEngine(deps: EngineDeps) {
     if (state.flowKeys?.[flowKeyOf(rec.caseId, rec.name, rec.flow, rec.key)]?.runId !== runId) return { ok: false, detail: "已经有更新的一轮了" };
     if (!rec.ended || !noResult(rec.ended)) return { ok: false, detail: rec.ended ? "已经有结果了" : "还没停" };
     if (rec.selfRetry) return { ok: false, detail: "系统会自己重试" };
+    if (rec.ended.settle) return { ok: false, detail: "那一步可能已经做了，从头重跑会再做一遍；先确认它做没做（命令在原因全文里），再接着跑" };
     if (deps.mode !== "live" || !deps.flows) return { ok: false, detail: deps.mode !== "live" ? "演练中，不起流程" : "这里没配起流程的命令" };
     const blocked = limitWhy(recs(), [], config.policy.flows, { caseId: rec.caseId, maxUsd: rec.maxUsd, flow: rec.flow, ...(rec.title ? { title: rec.title } : {}), byPerson: true }, nowMs, tz);
     if (blocked) return { ok: false, detail: blockedText(blocked) };

@@ -125,7 +125,7 @@ function Ways({ run, onDone, withLine = false }: { run: RunView; onDone: Done; w
   };
   const resume = actions.includes("resume");
   const retry = actions.includes("retry");
-  const whole = [run.why ? cutText(run.why, 600) : "", ledgerText(run.ledger), retry ? retryCost(run) : "", run.costUsd > 0 ? `已花 $${run.costUsd.toFixed(2)}` : ""].filter(Boolean);
+  const whole = [run.why ? cutText(run.why, 600) : "", ...(run.settle?.commands ?? []), ledgerText(run.ledger), retry ? retryCost(run) : "", run.costUsd > 0 ? `已花 $${run.costUsd.toFixed(2)}` : ""].filter(Boolean);
   return (
     <View style={{ gap: 8 }}>
       {withLine ? (

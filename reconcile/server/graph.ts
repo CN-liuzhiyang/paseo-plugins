@@ -7,6 +7,7 @@ import {
   normalizeStages,
   plainMd,
   routeOf,
+  SETTLE_KICKER,
   stripOf,
   SITUATION,
   troubleLine,
@@ -512,7 +513,7 @@ export function createGraph(deps: GraphDeps) {
       case "slow":
       case "notstarted":
       case "unchecked":
-        kicker = lastRun?.actions?.includes("resume") ? "要你：处理好后点「接着跑」" : lastRun?.actions?.includes("retry") ? "要你：从头重跑，或你自己来" : "要你：看一眼";
+        kicker = lastRun?.settle ? SETTLE_KICKER : lastRun?.actions?.includes("resume") ? "要你：处理好后点「接着跑」" : lastRun?.actions?.includes("retry") ? "要你：从头重跑，或你自己来" : "要你：看一眼";
         line = lastRun ? (situation === "slow" ? `${named(lastRun)}${lastRun.maybeAsleep ? "没动静了，可能是电脑睡了一会儿" : `已经 ${durationText(lastRun.quiet?.ms ?? 0)}没动静`}` : troubleLine(lastRun)) : "";
         // What may already have been changed outside is the one thing worth saying up here; the cost and the rest are behind "原因全文".
         sub = lastRun && lastRun.sideEffects.length > 0 ? `可能已经改了一部分：${lastRun.sideEffects.join("、")}` : "";
@@ -558,13 +559,15 @@ export function createGraph(deps: GraphDeps) {
     const flowLines = f.runs.map((r) => {
       const unread = r.unreadLines > 0 ? `记录里有 ${r.unreadLines} 行太长、没读${r.endedAt ? "，花费可能少算了" : "，看不出它后来怎么样"}` : "";
       const from = r.carriedOn ? clip(`${r.carriedOn.line.replace(/[。.]+$/u, "")}${r.carriedOn.by === "cli" ? "（从命令行接着跑的，已记进来）" : ""}`, 160) : "";
-      if (!r.endedAt) return { ms: Date.parse(r.startedAt), line: r.carriedOn ? `接着跑了${named(r)}${r.round ? `（第 ${r.round + 1} 次）` : ""}` : `起了${named(r)}`, detail: [from, unread].filter(Boolean).join("；") || (null as string | null) };
+      // What a run that carries on did not do again: the work of the line before it that was kept (the journal), and the step it was asked to do over.
+      const kept = [r.redo ? `从「${clip(r.redo, 40)}」起重做` : "", r.reused ? `沿用了前面做过的 ${r.reused} 项，没重做` : ""].filter(Boolean).join("，");
+      if (!r.endedAt) return { ms: Date.parse(r.startedAt), line: r.carriedOn ? `接着跑了${named(r)}${r.round ? `（第 ${r.round + 1} 次）` : ""}` : `起了${named(r)}`, detail: [from, kept, unread].filter(Boolean).join("；") || (null as string | null) };
       const spent = [durationText(Date.parse(r.endedAt) - Date.parse(r.startedAt)), r.costUsd > 0 ? `$${r.costUsd.toFixed(2)}` : ""].filter(Boolean).join("，");
       const why = r.situation === "done" && !r.dismissed ? "" : (r.shortWhy ?? "");
       return {
         ms: Date.parse(r.endedAt),
         line: `${r.carriedOn ? "接着跑：" : ""}${r.title ?? r.flow}${endWord(r)}${why ? `：${why}` : ""}（${spent}）`,
-        detail: [from, r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r), unread].filter(Boolean).join(" ") || null,
+        detail: [from, kept, r.title && r.situation !== "done" ? "" : r.error ? clip(r.error.plain, 160) : r.why ? clip(r.why, 160) : r.situation === "done" && r.outcome ? clip(r.outcome, 160) : "", nextLook(r), unread].filter(Boolean).join(" ") || null,
       };
     });
     const history: HistoryLine[] = [

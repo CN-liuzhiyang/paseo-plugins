@@ -326,6 +326,8 @@ export interface FlowEnd {
   why: string | null;
   /** How the run said it could be carried on, if it did (the last word of the flow at the moment it stopped); absent: it did not, or it came to a result. */
   resume?: ResumeOffer;
+  /** Set when the run stopped at a step that cannot be taken back and that nobody knows was done (the runtime's `orch.mjs settle`): a run that did not come to a result, until a person says. */
+  settle?: { step: string | null; title: string | null };
 }
 
 /** A round that carries on an earlier one (instead of running the request again from the start). */
