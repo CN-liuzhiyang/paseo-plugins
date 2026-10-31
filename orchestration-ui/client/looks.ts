@@ -63,6 +63,7 @@ export const KIND_LOOK: Record<CallType, { label: string; tone: Tone; name: stri
   ask: { label: "AI", tone: "accent", name: "agent 调用" },
   do: { label: "脚本", tone: "neutral", name: "脚本动作" },
   gate: { label: "人闸", tone: "warning", name: "人闸" },
+  step: { label: "步骤", tone: "neutral", name: "只做一次的步骤" },
 };
 
 export const GATE_TONE: Record<string, Tone> = {

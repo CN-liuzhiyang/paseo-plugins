@@ -3,6 +3,7 @@ import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
 import { formatDuration, RUN_STATUS_LABEL } from "../shared/format";
 import { buildGraph, headline, hero, inputLabel, type Hero } from "../shared/graph";
+import { wakeLine } from "../shared/wake";
 import { caveatsOf, hasUncountedCodex, ms, runStatus, type RunState, type RunStatus } from "../shared/run";
 import { useNow, useRun, type RunSnapshot } from "./data";
 import { AffairLine } from "./affair";
@@ -140,6 +141,7 @@ export function RunDetail({
               <EventsView events={snap.events} run={run} now={now} onSelect={select} />
             )}
           </View>
+          {run.wake ? <Text style={ui.styles.small}>{wakeLine(run.wake)}</Text> : null}
           <Text style={ui.styles.small}>
             {!snap.polling ? "流程已结束，不再刷新。" : status === "lost" ? "每 5 秒看一次有没有新事件。" : "正在跟踪新事件，自动刷新。"}
           </Text>

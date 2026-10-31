@@ -67,11 +67,15 @@ export interface RunWorkspace {
   cwd: string | null;
 }
 
+/** Why a run stopped: the flow said so, an answer never passed its check, or a step that cannot be taken back left no result. */
+export type StopKind = "flow" | "check" | "unknown";
+
 export interface RunEnd {
   at: string;
   outcome: Outcome;
   value: unknown;
-  stop: { reason: string; phase: string | null } | null;
+  /** `kind` and `step` are absent in older files: null, and the reader falls back to the reason. */
+  stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null } | null;
   error: ErrorInfo | null;
   durationMs: number | null;
   cost: { totalUsd: number | null; agentCount: number | null; partial: string | null } | null;
@@ -113,9 +117,45 @@ export interface CallEnd {
   error: ErrorInfo | null;
   agentId: string | null;
   cost: Cost | null;
+  /** How many times the agent answered; 1 is right the first time. Absent in older files. */
+  rounds: number;
 }
 
-export type CallType = "ask" | "do" | "gate";
+export type CallType = "ask" | "do" | "gate" | "step";
+
+/** A call another call points at: this run's, or an earlier one's. */
+export interface CallRef {
+  runId: string;
+  /** Null when the record was not written by a call (a probe, a hand-made settle). */
+  callId: string | null;
+}
+
+/** One place in an answer that was sent back to the agent. `at` is a JSON pointer; "" is the whole answer. */
+export interface FixProblem {
+  at: string;
+  say: string;
+}
+
+/** One round of sending the problems of an answer back to the same agent (`call.fix`, then `call.fixed`). */
+export interface Fix {
+  round: number;
+  at: string;
+  problems: FixProblem[];
+  prompt: string | null;
+  schema: unknown;
+  /** Null until the agent hands the round back. */
+  fixed: { at: string; answer: unknown; ok: boolean; cost: Cost | null; durationMs: number | null } | null;
+}
+
+/** What `wake` says about telling someone the run is over. */
+export interface Wake {
+  to: string | null;
+  via: "explicit" | "caller" | "steward" | null;
+  ok: boolean | null;
+  error: string | null;
+  why: string | null;
+  started: boolean;
+}
 
 export interface CallState {
   callId: string;
@@ -139,6 +179,16 @@ export interface CallState {
   /** From call.archive: what became of the archive the flow asked for once the call had handed in (ok: done; else the CLI's code, which the plugin that started the run takes over). */
   archive: { ok: boolean; code: string | null; message: string | null } | null;
   caveats: string[];
+  /** The rounds of sending problems back to the agent, in order. */
+  fixes: Fix[];
+  /** `$.again` asked the same agent again, carrying on its conversation. */
+  continues: CallRef | null;
+  /** `$.again` asked a new agent to redo the answer of this call. */
+  revises: CallRef | null;
+  /** The result was taken from an earlier run, nothing was done this time. */
+  reused: CallRef | null;
+  /** `step` only: it cannot be taken back, so it is not done again on a guess. */
+  once: boolean;
 }
 
 export interface PhaseState {
@@ -196,6 +246,8 @@ export interface RunState {
   logs: LogEntry[];
   /** Workspaces the run works in, one per directory, in the order they were named. */
   workspaces: RunWorkspace[];
+  /** Who was told the run is over, and whether it got there; written just before run.end. */
+  wake: Wake | null;
   end: RunEnd | null;
   /** Lines that broke the contract. Shown to the reader, never fatal. */
   problems: string[];
@@ -222,6 +274,7 @@ export function createRun(): RunState {
     caveats: [],
     logs: [],
     workspaces: [],
+    wake: null,
     end: null,
     problems: [],
     unknownKinds: {},
@@ -244,6 +297,13 @@ function num(value: unknown): number | null {
 function errorOf(value: unknown): ErrorInfo | null {
   if (!isObj(value)) return null;
   return { name: str(value.name) ?? "Error", message: str(value.message) ?? "" };
+}
+function stopKindOf(value: unknown): StopKind | null {
+  return value === "flow" || value === "check" || value === "unknown" ? value : null;
+}
+function refOf(value: unknown): CallRef | null {
+  if (!isObj(value) || str(value.runId) === null) return null;
+  return { runId: value.runId as string, callId: str(value.callId) };
 }
 function costOf(value: unknown): Cost | null {
   if (!isObj(value)) return null;
@@ -318,6 +378,11 @@ function callFor(run: RunState, callId: string): CallState {
       agentId: null,
       archive: null,
       caveats: [],
+      fixes: [],
+      continues: null,
+      revises: null,
+      reused: null,
+      once: false,
     };
     run.calls.set(callId, call);
     run.callOrder.push(callId);
@@ -433,11 +498,15 @@ export function applyEvent(run: RunState, raw: unknown): void {
       if (run.calls.get(callId)?.startedAt) problem(run, `调用 ${callId} 开始了两次`);
       const call = callFor(run, callId);
       const type = str(raw.type);
-      call.type = type === "ask" || type === "do" || type === "gate" ? type : null;
+      call.type = type === "ask" || type === "do" || type === "gate" || type === "step" ? type : null;
       if (call.type === null) problem(run, `调用 ${callId} 的类型「${type ?? ""}」不认识`);
       call.name = str(raw.name) ?? callId;
       call.title = str(raw.title) ?? call.name;
       call.startedAt = ts;
+      call.continues = refOf(raw.continues);
+      call.revises = refOf(raw.revises);
+      call.reused = refOf(raw.reused);
+      call.once = raw.once === true;
       const phaseId = str(raw.phase);
       call.phase = phaseId;
       if (phaseId !== null) {
@@ -509,8 +578,33 @@ export function applyEvent(run: RunState, raw: unknown): void {
         error: errorOf(raw.error),
         agentId: str(raw.agentId),
         cost: costOf(raw.cost),
+        rounds: Math.max(1, num(raw.rounds) ?? 1),
       };
       call.agentId ??= call.end.agentId;
+      return;
+    }
+    case "call.fix": {
+      const callId = str(raw.callId);
+      const round = num(raw.round);
+      if (callId === null || round === null || !run.calls.has(callId)) {
+        problem(run, `第 ${seq ?? "?"} 条 call.fix 没有对得上的调用或轮次`);
+        return;
+      }
+      const problems = Array.isArray(raw.problems)
+        ? raw.problems.flatMap((item): FixProblem[] => (isObj(item) ? [{ at: str(item.at) ?? "", say: str(item.say) ?? "" }] : []))
+        : [];
+      callFor(run, callId).fixes.push({ round, at: ts, problems, prompt: str(raw.prompt), schema: raw.schema ?? null, fixed: null });
+      return;
+    }
+    case "call.fixed": {
+      const callId = str(raw.callId);
+      const round = num(raw.round);
+      const fix = callId === null ? undefined : run.calls.get(callId)?.fixes.find((item) => item.round === round);
+      if (!fix) {
+        problem(run, `第 ${seq ?? "?"} 条 call.fixed 没有对得上的 call.fix`);
+        return;
+      }
+      fix.fixed = { at: ts, answer: raw.answer ?? null, ok: raw.ok === true, cost: costOf(raw.cost), durationMs: num(raw.durationMs) };
       return;
     }
     case "call.archive": {
@@ -548,6 +642,21 @@ export function applyEvent(run: RunState, raw: unknown): void {
       if (!run.workspaces.some((known) => known.workspaceId === workspaceId)) run.workspaces.push({ workspaceId, cwd: str(raw.cwd) });
       return;
     }
+    case "wake": {
+      const via = str(raw.via);
+      run.wake = {
+        to: str(raw.to),
+        via: via === "explicit" || via === "caller" || via === "steward" ? via : null,
+        ok: typeof raw.ok === "boolean" ? raw.ok : null,
+        error: str(raw.error),
+        why: str(raw.why),
+        started: raw.started === true,
+      };
+      return;
+    }
+    case "resume":
+      // Where the run could be carried on from; the flow list and the card do not use it.
+      return;
     case "run.end": {
       if (run.end) problem(run, "run.end 出现了两次，以后一次为准");
       const outcome = str(raw.outcome);
@@ -555,7 +664,9 @@ export function applyEvent(run: RunState, raw: unknown): void {
       if (!known.includes(outcome as Outcome)) {
         problem(run, `run.end 的结局「${outcome ?? ""}」不认识，按失败显示`);
       }
-      const stop = isObj(raw.stop) ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase) } : null;
+      const stop = isObj(raw.stop)
+        ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step) }
+        : null;
       const cost = isObj(raw.cost)
         ? { totalUsd: num(raw.cost.totalUsd), agentCount: num(raw.cost.agentCount), partial: str(raw.cost.partial) }
         : null;

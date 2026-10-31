@@ -7,6 +7,7 @@ import { cardOf } from "../shared/card";
 import { formatBrief, formatUsd } from "../shared/format";
 import { runStatus } from "../shared/run";
 import { compactStages, stageRows, type StageRow, type Talk } from "../shared/stages";
+import { stewardRow } from "../shared/wake";
 import { affairTarget, openPluginScreenOf, type Affair } from "../shared/affair";
 import { follow } from "./affair";
 import { useNow, useRun } from "./data";
@@ -155,6 +156,8 @@ function Opened({ runId, workspaceId, actions, onBack }: { runId: string; worksp
   const took = card.durationMs ?? (Number.isFinite(started) ? (card.status === "running" || card.status === "starting" ? now : lastAt) - started : null);
   const meta = [took === null || !Number.isFinite(took) ? null : formatBrief(took), card.costUsd === null ? null : formatUsd(card.costUsd)].filter(Boolean).join(" · ");
   const stopped = group === "stopped";
+  const steward = stewardRow(run.wake);
+  const openAgent = card.remote ? undefined : ui.navigation?.openAgent;
   return (
     <View style={{ gap: 12 }}>
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
@@ -175,6 +178,12 @@ function Opened({ runId, workspaceId, actions, onBack }: { runId: string; worksp
           <StageLine key={row.key} row={row} remote={card.remote} />
         ))}
       </View>
+      {steward ? (
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={[ui.styles.small, { flex: 1, minWidth: 0 }]}>{steward.text}</Text>
+          {openAgent ? <Button small label="对话" onPress={() => openAgent({ agentId: steward.agentId })} /> : null}
+        </View>
+      ) : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         <Button small label="看完整的图" onPress={() => actions.openFull(workspaceId, runId, card.focus)} />
         {stopped && openAffair ? <Button small label="事项页" onPress={openAffair} /> : null}

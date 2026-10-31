@@ -4,6 +4,7 @@
 // `now` it is handed.
 
 import type { RunCard } from "./card";
+import { fixingText } from "./fixes";
 import { formatBrief, formatUsd } from "./format";
 import type { Tone } from "./graph";
 import type { RunSummary } from "./rpc";
@@ -86,13 +87,19 @@ function join(left: string, right: string | null, max: number): string {
   return `${clip(left, Math.max(2, max - [...right].length - 3))} · ${right}`;
 }
 
+/** A run in progress: the answer being sent back, else the phase it is in and for how long. */
+function runningSentence(card: RunCard, now: number, max: number): string {
+  if (card.fixing) return join(card.fixing.title, fixingText(card.fixing), max);
+  return clip([stageOf(card) ?? "运行中", sinceNow(card.startedAt, now)].filter(Boolean).join(" · "), max);
+}
+
 /** The sentence after the flow's name on the conversation's card. */
 export function cardSentence(card: RunCard, now: number): string {
   switch (groupOf(card)) {
     case "waiting":
       return clip(`等你批准：${clip(card.gate!.title, 12)}`, CARD_SENTENCE_MAX);
     case "running":
-      return clip([stageOf(card) ?? "运行中", sinceNow(card.startedAt, now)].filter(Boolean).join(" · "), CARD_SENTENCE_MAX);
+      return runningSentence(card, now, CARD_SENTENCE_MAX);
     case "done":
       return join(card.title, cost(card), CARD_SENTENCE_MAX);
     case "stopped":
@@ -108,7 +115,7 @@ export function rowSentence(card: RunCard, now: number): string {
       return join(card.gate!.title, waited === null ? null : `等了 ${waited}`, ROW_SENTENCE_MAX);
     }
     case "running":
-      return clip([stageOf(card) ?? "运行中", sinceNow(card.startedAt, now)].filter(Boolean).join(" · "), ROW_SENTENCE_MAX);
+      return runningSentence(card, now, ROW_SENTENCE_MAX);
     case "done":
       return join(card.title, cost(card), ROW_SENTENCE_MAX);
     case "stopped":

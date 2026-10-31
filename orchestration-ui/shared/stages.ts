@@ -1,6 +1,7 @@
 // A run as the flow bar lists it when opened: one row per phase the flow declares, with the
 // conversations that phase held. The full picture (nodes, time, evidence) stays in the 流程 tab.
 
+import { fixingOf, fixingText, fixRounds, REUSED, stoppedStep } from "./fixes";
 import { callTitle, graphVisits, nodeState, visitState, type VisitState } from "./graph";
 import { gateVerdict, type CallState, type RunState, type RunStatus } from "./run";
 
@@ -20,7 +21,7 @@ export interface StageRow {
   key: string;
   title: string;
   state: StageState;
-  /** What a person did at this step, when there was one: "你批了". */
+  /** What a person did at this step, or what happened to its answers: "你批了", "改过 1 轮". */
   note: string | null;
   talks: Talk[];
 }
@@ -35,7 +36,7 @@ const GATE_NOTE: Record<string, string> = {
   error: "出错了",
 };
 
-function noteOf(calls: readonly CallState[], status: RunStatus): string | null {
+function gateNote(calls: readonly CallState[], status: RunStatus): string | null {
   const gate = calls.filter((call) => call.type === "gate").at(-1);
   if (!gate) return null;
   if (nodeState(gate, status) === "waiting") return "等你批准";
@@ -43,8 +44,28 @@ function noteOf(calls: readonly CallState[], status: RunStatus): string | null {
   return outcome ? (GATE_NOTE[outcome] ?? outcome) : null;
 }
 
+/** What happened to the answers of these calls: being sent back now, sent back before, or taken from an earlier run. */
+function fixNote(calls: readonly CallState[], status: RunStatus): string | null {
+  const live = status === "running" || status === "starting";
+  const fixing = live ? calls.map(fixingOf).find((one) => one !== null) : undefined;
+  if (fixing) return fixingText(fixing);
+  const rounds = calls.reduce((sum, call) => sum + fixRounds(call), 0);
+  if (rounds > 0) return `改过 ${rounds} 轮`;
+  return calls.length > 0 && calls.every((call) => call.reused) ? REUSED : null;
+}
+
+function noteOf(calls: readonly CallState[], status: RunStatus): string | null {
+  return [gateNote(calls, status), fixNote(calls, status)].filter(Boolean).join(" · ") || null;
+}
+
 function talksOf(run: RunState, calls: readonly CallState[], status: RunStatus): Talk[] {
-  const talking = calls.filter((call) => (call.type === "ask" || call.type === "gate") && call.agentId !== null);
+  // `$.again` carries on the same agent's conversation: one button for it, not one per question.
+  const seen = new Set<string>();
+  const talking = calls.filter((call) => {
+    if (!(call.type === "ask" || call.type === "gate") || call.agentId === null || seen.has(call.agentId)) return false;
+    seen.add(call.agentId);
+    return true;
+  });
   return talking.map((call) => ({
     callId: call.callId,
     agentId: call.agentId!,
@@ -53,7 +74,17 @@ function talksOf(run: RunState, calls: readonly CallState[], status: RunStatus):
   }));
 }
 
+/** A step that cannot be taken back has no call of its own when the run stops on it: the stop says which. */
+function unknownStepRow(run: RunState): StageRow[] {
+  const step = stoppedStep(run);
+  return step?.kind === "unknown" ? [{ key: `@stop:${step.label}`, title: step.label, state: "failed", note: "不知道做没做", talks: [] }] : [];
+}
+
 export function stageRows(run: RunState, status: RunStatus): StageRow[] {
+  return [...phaseRows(run, status), ...unknownStepRow(run)];
+}
+
+function phaseRows(run: RunState, status: RunStatus): StageRow[] {
   const live = status === "running" || status === "starting";
   if (run.phaseOrder.length === 0) {
     // A flow that declares no phases: the calls are the steps.
