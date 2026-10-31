@@ -1,6 +1,7 @@
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
 import { Pressable, Text, View, type ScrollView as NativeScrollView } from "react-native";
+import { callMarks, fixingOf, fixingText, REUSED } from "../shared/fixes";
 import { formatShort } from "../shared/format";
 import {
   callTitle,
@@ -306,6 +307,9 @@ function WaveView({ wave }: { wave: Wave }) {
 function statusLine(call: CallState, status: RunStatus, clock: number): string {
   const state = nodeState(call, status);
   const look = NODE_LOOK[state];
+  if (call.reused) return `↺ ${REUSED}`;
+  const fixing = state === "running" ? fixingOf(call) : null;
+  if (fixing) return `${look.mark} ${fixingText(fixing)}`;
   const started = Date.parse(call.startedAt ?? "");
   const took = call.end?.durationMs ?? (Number.isNaN(started) ? null : clock - started);
   if (state === "ok") return `${look.mark} ${formatShort(took)}`;
@@ -320,6 +324,7 @@ function Frame({
   selected,
   strong,
   open = false,
+  muted = false,
   label,
   onPress,
   children,
@@ -329,6 +334,8 @@ function Frame({
   strong: boolean;
   /** Still going: outlined dashed, the same "not finished" as the ending and the timeline. */
   open?: boolean;
+  /** Nothing was done this time: drawn faded, the way the timeline fades what has not ended. */
+  muted?: boolean;
   label: string;
   onPress(): void;
   children: ReactNode;
@@ -350,8 +357,8 @@ function Frame({
         paddingHorizontal: 9,
         paddingVertical: 7,
         gap: 3,
-        backgroundColor: strong && tone ? ui.tint(tone, 0.1) : c.surface0,
-        opacity: pressed ? 0.8 : 1,
+        backgroundColor: strong && tone ? ui.tint(tone, 0.1) : muted ? c.surface1 : c.surface0,
+        opacity: pressed ? 0.8 : muted ? 0.6 : 1,
       })}
     >
       {children}
@@ -359,11 +366,11 @@ function Frame({
   );
 }
 
-function Kind({ label, tone }: { label: string; tone: Tone }) {
+function Kind({ label, tone, size = 10 }: { label: string; tone: Tone; size?: number }) {
   const ui = useUi();
   return (
     <View style={{ backgroundColor: ui.tint(tone, 0.16), borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
-      <Text style={{ color: tone === "neutral" ? ui.theme.colors.foregroundMuted : ui.tone(tone), fontSize: 10, fontWeight: "800" }}>
+      <Text style={{ color: tone === "neutral" ? ui.theme.colors.foregroundMuted : ui.tone(tone), fontSize: size, fontWeight: "800" }}>
         {label}
       </Text>
     </View>
@@ -383,13 +390,15 @@ function CallNode({ call }: { call: CallState }) {
   const line = headline(call, status);
   const unfenced = call.ask?.fence ? !call.ask.fence.enforced : false;
   const tone: Tone | null = state === "ok" ? null : look.tone;
+  const marks = callMarks(call);
   return (
     <Frame
       tone={tone}
       selected={selected}
       strong={state === "waiting" || state === "error"}
       open={state === "running"}
-      label={`${kind.name} ${title}，${look.label}`}
+      muted={call.reused !== null}
+      label={`${kind.name} ${title}，${call.reused ? REUSED : look.label}`}
       onPress={() => onSelect(call.callId)}
     >
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 6 }}>
@@ -403,6 +412,13 @@ function CallNode({ call }: { call: CallState }) {
         <Text style={ui.styles.small} numberOfLines={1}>
           {who}
         </Text>
+      ) : null}
+      {marks.length > 0 ? (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 4 }}>
+          {marks.map((mark) => (
+            <Kind key={mark.label} label={mark.label} tone={mark.tone} size={11} />
+          ))}
+        </View>
       ) : null}
       <Text style={{ color: ui.tone(look.tone), fontSize: 12, fontWeight: "600" }}>{statusLine(call, status, clock)}</Text>
       {line ? (

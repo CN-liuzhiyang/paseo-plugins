@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fixingOf } from "./fixes";
 import { hero, inputLabel, phaseStrip, callTitle } from "./graph";
 import { costSoFar, openCalls, processGone, type ProcessCheck, type RunState, type RunStatus } from "./run";
 
@@ -33,6 +34,8 @@ export const runCardSchema = z.object({
   /** Why the figure is a lower bound; null when it is the whole cost. */
   costNote: z.string().nullable(),
   strip: z.array(z.object({ title: z.string(), state: stripState })).nullable(),
+  /** The answer being sent back to its agent right now. Absent on cards written before it existed. */
+  fixing: z.object({ title: z.string(), round: z.number(), count: z.number() }).nullable().optional(),
   /** The gate waiting for a person, if one is. */
   gate: z
     .object({
@@ -97,6 +100,7 @@ export function cardOf(
   }
   const live = status === "running" || status === "starting";
   const gateCall = live ? openCalls(run).find((call) => call.type === "gate") : undefined;
+  const fixingCall = live ? openCalls(run).find((call) => fixingOf(call) !== null) : undefined;
   return {
     runId,
     flow: start.flow.name,
@@ -112,6 +116,7 @@ export function cardOf(
     costUsd,
     costNote,
     strip: run.phaseOrder.length > 0 ? phaseStrip(run, status) : null,
+    fixing: fixingCall ? { title: callTitle(run, fixingCall), ...fixingOf(fixingCall)! } : null,
     gate: gateCall
       ? {
           callId: gateCall.callId,

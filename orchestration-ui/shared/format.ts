@@ -114,6 +114,7 @@ export const CALL_TYPE_LABEL: Record<string, string> = {
   ask: "agent",
   do: "动作",
   gate: "人闸",
+  step: "步骤",
 };
 
 export const GATE_OUTCOME_LABEL: Record<string, string> = {

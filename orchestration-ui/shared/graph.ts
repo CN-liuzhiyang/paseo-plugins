@@ -5,6 +5,7 @@
 // Pure and derived from shared/run.ts only, so the daemon (list rows) and the app (detail view)
 // say the same thing. Nothing here decides whether a run is running or lost; that is runStatus.
 
+import { fixingOf, fixingText, stopLine } from "./fixes";
 import { formatDuration, formatUsd, GATE_OUTCOME_LABEL, activity } from "./format";
 import {
   callStatus,
@@ -239,6 +240,12 @@ function callT1(call: CallState): number | null {
   return call.end ? ms(call.end.at) : null;
 }
 
+/** A step runs its calls inside it: they began after it did and were over before it was. */
+function holds(step: CallState, call: CallState): boolean {
+  if (step.type !== "step" || step.startedAt === null || call.startedAt === null || step.startedAt > call.startedAt) return false;
+  return step.end === null || (call.end !== null && call.end.at <= step.end.at);
+}
+
 /**
  * Phase visits and the calls outside them, in the order they began. A call outside every phase
  * joins the unframed run of scripts before it when both are `do`; anything else starts its own.
@@ -275,7 +282,9 @@ export function graphVisits(run: RunState): GraphVisit[] {
     }
     const call = entry.call;
     const last = out.at(-1);
-    if (last?.loose && call.type === "do" && last.calls.every((other) => other.type === "do")) last.calls.push(call);
+    const holder = out.findLast((visit) => visit.loose && visit.calls.some((other) => holds(other, call)));
+    if (holder) holder.calls.push(call);
+    else if (last?.loose && call.type === "do" && last.calls.every((other) => other.type === "do")) last.calls.push(call);
     else out.push({ key: `@l${call.callId}`, phase: null, title: "阶段之外", round: 1, t0: callT0(call, base), t1: null, ok: null, loose: true, calls: [call] });
   }
   for (const visit of out) {
@@ -318,10 +327,17 @@ export function waves<T>(items: readonly T[], t0: (item: T) => number, t1: (item
   return out;
 }
 
-/** A box's calls in waves; two or more single scripts in a row become one "N 个脚本步骤" node. */
+/**
+ * A box's calls in waves; two or more single scripts in a row become one "N 个脚本步骤" node. A step runs
+ * its calls inside it, so it overlaps them in time, but they are not side by side with it: it goes first.
+ */
 export function stageWaves(visit: GraphVisit, clock: number): Wave[] {
   const out: Wave[] = [];
-  for (const wave of waves(visit.calls, (call) => callT0(call, visit.t0), (call) => callT1(call) ?? clock)) {
+  const found = waves(visit.calls, (call) => callT0(call, visit.t0), (call) => callT1(call) ?? clock);
+  for (const wave of found.flatMap((group) => {
+    const steps = group.filter((call) => call.type === "step");
+    return steps.length === 0 || steps.length === group.length ? [group] : [steps, group.filter((call) => call.type !== "step")];
+  })) {
     const last = out.at(-1);
     if (wave.length === 1 && wave[0]!.type === "do" && last) {
       if (last.kind === "group") {
@@ -396,6 +412,9 @@ const END_LOOK: Record<RunStatus, { label: string; tone: Tone }> = {
   lost: { label: "失联", tone: "warning" },
 };
 
+const UNKNOWN_END: { label: string; tone: Tone } = { label: "不知道做没做", tone: "danger" };
+const CHECK_END: { label: string; tone: Tone } = { label: "核对没过", tone: "warning" };
+
 export function buildGraph(run: RunState, status: RunStatus, now: number): Graph {
   const clock = runClock(run, status, now);
   const visits = graphVisits(run);
@@ -419,7 +438,8 @@ export function buildGraph(run: RunState, status: RunStatus, now: number): Graph
   for (const phase of run.start?.flow.phases ?? []) {
     if (!entered.has(phase.id)) pieces.push({ kind: "ghost", phase, text: live ? "还没到" : "没有进入" });
   }
-  const end = END_LOOK[status];
+  const kind = run.end?.stop?.kind;
+  const end = status === "stopped" && stopLine(run) ? (kind === "unknown" ? UNKNOWN_END : CHECK_END) : END_LOOK[status];
   pieces.push({ kind: "end", key: END, label: end.label, tone: end.tone, dashed: live });
 
   const groups = new Map<string, CallState[]>();
@@ -504,10 +524,11 @@ export function hero(
       };
     }
     const doing = open.length > 0 ? `正在${quoted(run, open)}` : (activity(run, status, now, { proc, staleMs }) ?? "运行中");
+    const fixing = open.map(fixingOf).find((one) => one !== null);
     return {
       tone: "accent",
       kicker: "运行中",
-      title: doing,
+      title: fixing ? `${doing}：${fixingText(fixing)}` : doing,
       subtitle: started === null ? null : `已运行 ${formatDuration(now - started)}`,
       action: agentAction(open.find((call) => call.agentId), "打开这个 agent"),
       select: open[0]?.callId ?? START,
@@ -550,6 +571,12 @@ export function hero(
     };
   }
   if (status === "stopped") {
+    const line = stopLine(run);
+    if (line) {
+      // Not a stop the flow chose: a step that may or may not have happened is for a person to settle.
+      const unknown = end?.stop?.kind === "unknown";
+      return { tone: unknown ? "danger" : "warning", kicker: "停下", title: line, subtitle: null, action: null, select: END, needsYou: unknown };
+    }
     const reason = end?.stop?.reason || null;
     const where = end?.stop?.phase ? `在「${phaseTitle(run, end.stop.phase)}」` : "在阶段之外";
     return {

@@ -11,6 +11,7 @@ import {
   formatUsd,
   GATE_OUTCOME_LABEL,
 } from "../shared/format";
+import { callMarks, pathLabel, returnedFor, REUSED, stopLine } from "../shared/fixes";
 import { callTitle, headline, nodeState, shortModel, START, END, visitState, type Graph, type GraphVisit } from "../shared/graph";
 import {
   caveatsOf,
@@ -21,6 +22,7 @@ import {
   ms,
   phaseTitle,
   type CallState,
+  type Fix,
   processGone,
   type ProcessCheck,
   type RunState,
@@ -277,6 +279,10 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
   }
   const cost = end.cost;
   const raw = [...events].reverse().find((event) => (event as { kind?: unknown } | null)?.kind === "run.end");
+  const rawWake = [...events].reverse().find((event) => (event as { kind?: unknown } | null)?.kind === "wake");
+  // A stop the flow did not choose (an answer that never passed, a step with no record of whether it happened).
+  const line = stopLine(run);
+  const unknown = end.stop?.kind === "unknown";
   return (
     <View style={{ gap: 16 }}>
       <Head title={`结局：${OUTCOME_WORD[end.outcome]}`}>
@@ -296,7 +302,20 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
           </Box>
         </Sec>
       ) : null}
-      {end.outcome === "stopped" ? (
+      {end.outcome === "stopped" && line ? (
+        <Sec label={unknown ? "要你确认" : "核对没过"}>
+          <Box tone={unknown ? "danger" : "warning"}>
+            <Text style={ui.styles.text} selectable>
+              {line}
+            </Text>
+          </Box>
+          <Text style={ui.styles.small}>
+            {unknown
+              ? "这一步开始过，没有留下结果，不知道有没有做成。去外面看一下，再告诉运行时做了没有，然后接着跑。"
+              : "答案打回去改了几轮，还是没通过核对，流程没有接住，就停下了。"}
+          </Text>
+        </Sec>
+      ) : end.outcome === "stopped" ? (
         <Sec label={end.stop?.phase ? `在「${phaseTitle(run, end.stop.phase)}」停下` : "在阶段之外停下"}>
           <Box tone="warning">
             <Text style={ui.styles.text} selectable>
@@ -315,7 +334,7 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
           </Box>
         </Sec>
       ) : null}
-      {end.value != null ? (
+      {end.value != null && !line ? (
         <Sec label={end.outcome === "stopped" ? "停下时给出的结果" : "flow 返回的结果"}>
           <Box>
             <Value value={end.value} />
@@ -325,6 +344,16 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
       {cost?.partial ? <Text style={ui.styles.small}>成本说明：{cost.partial}</Text> : null}
       {hasUncountedCodex(run) && !cost?.partial?.includes("Codex") ? (
         <Text style={ui.styles.small}>Codex agent 的成本读出来是 0，没有计入。</Text>
+      ) : null}
+      {line && end.stop?.reason ? (
+        <Fold label="停下的原文（证据）">
+          <Block text={end.stop.reason} />
+        </Fold>
+      ) : null}
+      {rawWake ? (
+        <Fold label="wake 原文">
+          <Json value={rawWake} />
+        </Fold>
       ) : null}
       {raw ? (
         <Fold label="run.end 原文">
@@ -350,6 +379,10 @@ function CallLink({ call, run, status, onSelect }: { call: CallState; run: RunSt
       <View style={[ui.styles.row, { gap: 6 }]}>
         <Text style={{ color: ui.tone(NODE_LOOK[state].tone), fontSize: 12, fontWeight: "700" }}>{NODE_LOOK[state].mark}</Text>
         <Text style={[ui.styles.strong, { flexShrink: 1 }]}>{callTitle(run, call)}</Text>
+        {callMarks(call).map((mark) => (
+          <Pill key={mark.label} tone={mark.tone} label={mark.label} />
+        ))}
+        {call.reused ? <Pill tone="neutral" label={REUSED} /> : null}
       </View>
       {line ? <Text style={ui.styles.muted}>{line}</Text> : null}
     </Pressable>
@@ -431,7 +464,11 @@ function CallDrawer({ run, status, graph, call, onSelect }: DrawerProps & { call
     <View style={{ gap: 16 }}>
       <Head title={callTitle(run, call)}>
         <Pill tone={pill.tone} label={pill.label} />
-        <Meta text={[kind?.name ?? "未知类型", where, formatDuration(took)].join(" · ")} />
+        {callMarks(call).map((mark) => (
+          <Pill key={mark.label} tone={mark.tone} label={mark.label} />
+        ))}
+        {call.reused ? <Pill tone="neutral" label={REUSED} /> : null}
+        <Meta text={[kind?.name ?? "未知类型", where, call.reused ? "" : formatDuration(took)].filter(Boolean).join(" · ")} />
         {/* Up here, so opening the agent never means scrolling past its output. */}
         {call.type === "ask" && call.agentId && !remote && ui.navigation?.openAgent ? (
           <LinkButton icon="ExternalLink" label="在 Paseo 中打开" onPress={() => ui.navigation!.openAgent({ agentId: call.agentId! })} />
@@ -442,14 +479,54 @@ function CallDrawer({ run, status, graph, call, onSelect }: DrawerProps & { call
           {line}
         </Text>
       ) : null}
+      {call.reused ? (
+        <Text style={ui.styles.muted}>这次没有重新做，用的是上一段跑出来的结果。</Text>
+      ) : null}
       {call.type === "gate" ? (
         <GateBody call={call} state={state} remote={remote} />
       ) : call.type === "ask" ? (
-        <AskBody call={call} state={state} status={status} took={took} remote={remote} onSelect={onSelect} />
+        <AskBody run={run} call={call} state={state} status={status} took={took} remote={remote} onSelect={onSelect} />
       ) : (
         <DoBody call={call} state={state} status={status} />
       )}
     </View>
+  );
+}
+
+/** One round of sending an answer back: what was wrong, in a person's words, and what came back for each. */
+function FixRound({ fix }: { fix: Fix }) {
+  const ui = useUi();
+  const state: { tone: Tone; label: string } = !fix.fixed ? { tone: "accent", label: "在改" } : fix.fixed.ok ? { tone: "success", label: "改好了" } : { tone: "warning", label: "还不过" };
+  const back = fix.problems.map((_, index) => returnedFor(fix, index));
+  // A reply that does not say which problem it answers is shown as it came.
+  const asIs = fix.fixed !== null && fix.fixed.answer != null && back.some((one) => one === undefined);
+  return (
+    <Box>
+      <View style={[ui.styles.row, { gap: 6 }]}>
+        <Text style={ui.styles.strong}>{`第 ${fix.round} 轮 · 改 ${fix.problems.length} 处`}</Text>
+        <Pill tone={state.tone} label={state.label} />
+      </View>
+      {fix.problems.map((problem, index) => (
+        <View key={index} style={{ gap: 2 }}>
+          <Text style={ui.styles.text} selectable>
+            <Text style={{ fontWeight: "700" }}>{pathLabel(problem.at)}</Text>
+            {`：${problem.say}`}
+          </Text>
+          {back[index] ? (
+            <View style={{ paddingLeft: 12, gap: 2 }}>
+              <Text style={ui.styles.small}>交回</Text>
+              <Value value={back[index]!.value} />
+            </View>
+          ) : null}
+        </View>
+      ))}
+      {asIs ? (
+        <View style={{ gap: 2 }}>
+          <Text style={ui.styles.small}>交回的原样</Text>
+          <Value value={fix.fixed!.answer} />
+        </View>
+      ) : null}
+    </Box>
   );
 }
 
@@ -466,6 +543,7 @@ function Interrupted({ status, agent }: { status: RunStatus; agent: boolean }) {
 }
 
 function AskBody({
+  run,
   call,
   state,
   status,
@@ -473,6 +551,7 @@ function AskBody({
   remote,
   onSelect,
 }: {
+  run: RunState;
   call: CallState;
   state: ReturnType<typeof nodeState>;
   status: RunStatus;
@@ -485,13 +564,30 @@ function AskBody({
   const cost = call.end?.cost;
   const enforced = ask.fence?.enforced === true;
   const effects = ask.effects === null ? "影响范围未声明" : (EFFECTS_LABEL[ask.effects] ?? ask.effects);
+  const before = call.continues ?? call.revises;
+  const beforeCall = before?.callId ? run.calls.get(before.callId) : undefined;
   return (
     <>
+      {before ? (
+        <Pressable accessibilityRole="button" disabled={!beforeCall} onPress={() => beforeCall && onSelect(beforeCall.callId)}>
+          <Text style={ui.styles.muted}>
+            {call.continues ? "接着上一次问的同一个 agent，它记得前面说过的话" : "换了一个 agent 重做上一版"}
+            {beforeCall ? <Text style={{ color: ui.theme.colors.accent }}>{`：${callTitle(run, beforeCall)} ›`}</Text> : null}
+          </Text>
+        </Pressable>
+      ) : null}
       {call.end?.ok ? (
         <Sec label="结论">
           <Box>
             <Value value={call.end.output} schema={ask.schema} />
           </Box>
+        </Sec>
+      ) : null}
+      {call.fixes.length > 0 ? (
+        <Sec label={`改了 ${call.fixes.length} 轮`}>
+          {call.fixes.map((fix) => (
+            <FixRound key={fix.round} fix={fix} />
+          ))}
         </Sec>
       ) : null}
       {call.end && !call.end.ok ? (
@@ -568,6 +664,12 @@ function AskBody({
             <Json value={call.end.output} />
           </Fold>
         ) : null}
+        {call.fixes.map((fix) => (
+          <Fold key={`fix${fix.round}`} label={`第 ${fix.round} 轮发给 agent 的消息`}>
+            {fix.prompt ? <Block text={fix.prompt} /> : null}
+            <Json value={{ problems: fix.problems, schema: fix.schema }} />
+          </Fold>
+        ))}
         {ask.fence ? (
           <Fold label="栅栏说明" hint={ask.fence.mode ?? undefined}>
             <Block text={[`模式：${ask.fence.mode ?? "未知"}`, `机械强制：${enforced ? "是" : "否"}`, ask.fence.note].filter(Boolean).join("\n")} />
@@ -695,8 +797,14 @@ function DoBody({ call, state, status }: { call: CallState; state: ReturnType<ty
       ) : null}
       {state === "running" ? <Text style={ui.styles.muted}>正在执行。</Text> : null}
       {state === "interrupted" ? <Interrupted status={status} agent={false} /> : null}
-      <Kv rows={[call.name !== call.title ? ["动作名", call.name] : null]} />
-      <Text style={ui.styles.small}>脚本动作是 flow 自己的代码，不起 agent、不花 token。</Text>
+      <Kv rows={[call.name !== call.title ? [call.type === "step" ? "步骤名" : "动作名", call.name] : null]} />
+      <Text style={ui.styles.small}>
+        {call.type === "step"
+          ? call.once
+            ? "只做一次的步骤：做过就不再做；开始过却没留下结果的，由人确认做没做。"
+            : "步骤的结果记在日志里，接着跑时直接用，不重做。"
+          : "脚本动作是 flow 自己的代码，不起 agent、不花 token。"}
+      </Text>
     </>
   );
 }
