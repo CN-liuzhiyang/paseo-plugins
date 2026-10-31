@@ -37,7 +37,7 @@ runtime/
   roster.mjs     读 roles/，严格解析；角色绑定
   config.mjs     本机配置（~/.paseo-orchestration/config.json）
   smoke.mjs      升级后回归检查（经真实 Paseo）
-flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱）
+flows/       固化的编排流程（committee、advisor；gate-smoke 是人闸冒烟、resume-smoke 是接着跑冒烟，都不花钱；answer-smoke 是打回冒烟，几分钱）
 roles/       一个角色一个 .md：provider/model、thinking、常驻指令
 test/        单测（假执行层，不花钱）、fixture 生成、类型探针
 fixtures/    committee.jsonl：一次完整运行的事件样例
@@ -240,8 +240,8 @@ CLI 已经覆盖全部编排动作：
 `ls -g -a --label orch-run=... --label orch-call=...` 找回、`inspect` 收成本，写进这次调用的 `call.end`；
 `run.end.cost` 是它们的和。失败的调用也收——钱已经花了。
 
-`LastUsage` 只是最后一轮；一次结构化调用只发一个 prompt，应该就是一轮，所以按调用收是准的（推断，
-没有拿多轮 agent 对比过）。Codex agent 的 `CostUsd` 读出来是 0，
+`LastUsage` 只是最后一轮：一次结构化调用若被打回过（`$.ask` 的 `check`，CONVENTIONS.md），运行时每一轮交卷后
+各 `inspect` 一次再加起来；CLI 在一条命令里自己重试的几轮看不见。Codex agent 的 `CostUsd` 读出来是 0，
 所以 `totalUsd` 只含 Claude 系。
 
 ## 一个未决问题

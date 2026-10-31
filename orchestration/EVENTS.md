@@ -257,10 +257,11 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `callId` | string | |
 | `ok` | boolean | |
 | `durationMs` | number | |
-| `output` | any | `ask`：schema 形状的结构化结果（回答不合 schema 时调用记失败，`error.name` 为 `"OutputMismatch"`，`output` 是原样收到的回答）；`do`：返回值（可 JSON 化，过长的字符串会被截断并加 `"…(truncated N chars)"`）；`gate`：判定对象，见下 |
+| `output` | any | `ask`：schema 形状的结构化结果，即核对过、合并过的最终答案（没有可以打回的路时回答不合 schema，调用记失败，`error.name` 为 `"OutputMismatch"`；打回用完仍不过，`error.name` 为 `"CheckFailed"`；两种情况 `output` 都是最后手里那份答案）；`do`：返回值（可 JSON 化，过长的字符串会被截断并加 `"…(truncated N chars)"`）；`gate`：判定对象，见下 |
 | `error` | `{ name, message }` \| null | |
 | `agentId` | string \| null | 这次调用对应的 Paseo agent（`ask`、`gate` 有；`do` 为 null；查不到时为 null） |
-| `cost` | `{ usd: number \| null, inputTokens: number \| null, outputTokens: number \| null }` \| null | 该 agent 的 `LastUsage`。失败的调用照样有（钱已经花了）。Codex 的 `usd` 是 0，照实给 |
+| `cost` | `{ usd: number \| null, inputTokens: number \| null, outputTokens: number \| null }` \| null | 该 agent 的 `LastUsage`；`ask` 打回过的，是每一轮 `LastUsage` 之和（每一轮单独的在 `call.fixed.cost`）。失败的调用照样有（钱已经花了）。Codex 的 `usd` 是 0，照实给 |
+| `rounds` | number | 仅 `ask`：作答了几轮，1 是一次过；打回一次是 2。失败的调用也有（第一轮没交出答案算 1）。后加的字段（2026-10-31），旧文件没有，读者按 1 处理 |
 
 每个 `call.start` 都有且只有一条 `call.end`。运行结束时还没结束的调用（总超时，或 flow 抛错时没等它），
 在 `run.end` 之前补一条：`ok: false`，`error.name` 为 `"RunEnded"`，`agentId` 照常查。那个 agent
@@ -320,6 +321,31 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `"nobody (the run ended)"` | `error`（后加）：运行结束（总超时、`$.stop`、flow 抛错）时这个闸还在等人。运行器对卡片发 deny、停载体，不读任何回执和值，`reason` 写明运行以什么结束 |
 | `"nobody (the receipt and the answer record disagree)"` | `error`（后加）：`provider` 载体有回执，应答记录却不是 `allow`（缺失、出错或是拒绝），`reason` 写明记的是什么；或者反过来，记的是 `allow`、回执却没写出来（`reason` 是 `an allow was recorded but the receipt was not written`） |
 
+### `call.fix` 和 `call.fixed`
+
+`$.ask` 的答案不合 schema，或者 flow 给的 `check` 指出了问题时，运行时在**同一个 agent** 里只把出问题的几处发回去改（`paseo send`），最多 `fixes` 轮（缺省 2）。后加的事件（2026-10-31）。`call.fix` 在发出去**之前**写，让运行视图马上能显示"第 2 轮：在改 /edits/4"；`call.fixed` 在这一轮交回来之后写。
+
+| `call.fix` 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId` | string | 一定是 `ask` |
+| `round` | number | 这一轮的序号，从 2 起（第 1 轮是原来那次作答）；同一个调用里递增 |
+| `problems` | `{ at, say }[]` | 要改的地方：`at` 是 JSON 指针（`/edits/4/old`），`""` 是整份答案；`say` 是发给模型的一句话。非空 |
+| `prompt` | string | 发出去的消息全文。**不含 schema**：CLI 会把 `schema` 字段拼在它后面 |
+| `schema` | object | 这一轮的回答要符合的 schema：只含出问题的几处（`{ f1, f2, … }`，每个是原 schema 里那一处的子 schema），或者整份答案时就是 step 的 schema |
+
+| `call.fixed` 字段 | 类型 | 含义 |
+|---|---|---|
+| `callId`、`round` | | 同它的 `call.fix` |
+| `answer` | any | 这一轮交回来的原样：读出的 JSON（只含 `f1`…，整份时是整份答案）；读不出 JSON 时是 agent 写的原文（字符串）；都没有为 null |
+| `ok` | boolean | 交回来的是 JSON，而且合这一轮的 schema。不合的地方保持原样，下一轮再问 |
+| `cost` | 同 `call.end.cost` | 这一轮的 `LastUsage` |
+| `durationMs` | number | |
+
+- 每个 `call.fix` 之后最多一条 `call.fixed`；发送失败（agent 不在了、超时）时没有，错误在 `call.end` 里，那一轮的钱照样记进 `call.end.cost`。
+- 都在该调用的 `call.end` 之前；运行已经定了结局之后不再发（调用已经被补了 `RunEnded`）。
+- 一个 `ask` 调用里这几条和 `call.agent` 对应的是**同一个 agent**：打回不起新 agent。
+- 运行时没法打回的情况（Paseo CLI 太旧，没有 `send --output-schema` / `--max-retries`，或找不到这次调用的 agent）不写这两个事件，写一条 caveat：该 CLI 自己重试不合 schema 的回答，`check` 指出的问题发不回去，调用以 `CheckFailed` 结束。
+
 ### `call.archive`
 
 `$.ask` 带 `archive: "after"` 且这次调用成功（`call.end.ok` 为 true）时，运行时在交卷之后试着归档它的 agent（`paseo archive`，不加 `--force`），**不管成没成都写一条**。后加的事件（2026-10-29）。
@@ -357,13 +383,13 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
-| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`）；`failed`：抛错；`timeout`：超出运行总时限 |
+| `outcome` | `"done"` \| `"stopped"` \| `"failed"` \| `"timeout"` | `done`：flow 返回了；`stopped`：flow 调过 `$.stop`（以第一次为准；之后 flow 就算接住了它、返回了、或抛了别的错，结局也是 `stopped`），或者 `$.ask` 的 `CheckFailed`（答案打回用完仍不过）没有被 flow 接住，`stop.reason` 是 `<step>：核对 N 轮还不过：<第一条问题>`，`value` 为 null；`failed`：抛错；`timeout`：超出运行总时限 |
 | `value` | any | `done` / `stopped` 时 flow 给出的结果 |
 | `summary` | string \| null | 给人看的一句话结论，来自 flow 的 `summarize(value, { outcome })`（`value` 就是本行的 `value`）。只在 `done` / `stopped` 时调用；flow 没声明 `summarize`、结局是 `failed` / `timeout`、它抛错（这时前面有一条 `log` warn 说原因）或返回的不是非空字符串时为 null。超过 200 字符（按 Unicode 码点算）截断并加 `…`。它出错不影响结局。运行时写的每条 `run.end` 都有这个字段；之前写的文件没有，读者按 null 处理 |
 | `stop` | `{ reason: string, phase: string \| null }` \| null | 仅 `stopped` |
 | `error` | `{ name, message }` \| null | 仅 `failed` / `timeout` |
 | `durationMs` | number | |
-| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 只算最后一轮 `LastUsage`；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
+| `cost` | `{ totalUsd: number, agentCount: number, partial: string }` \| null | 各 `call.end.cost.usd` 之和；`agentCount` 是有 agent 的调用数。一个 agent 都没起时为 null。`partial` 是给人看的一句说明，讲 `totalUsd` 少算了什么（现在是：每个 agent 每一轮算它的 `LastUsage`，一个调用的各轮加起来；CLI 在一条命令里自己重试的那几轮只算最后一轮；Codex 报 `CostUsd` 0，所以只含 Claude 系）。原样显示即可，不要解析；内容可能变 |
 | `caveats` | string[] | 本次运行所有 caveat 的去重列表 |
 | `resume` | `{ flow, input, from, spends }` \| null | 这个运行没走到头时，flow 最后一次声明的续跑点（同上面 `resume` 事件）；没声明或收回了为 null。**`outcome` 是 `done` 时恒为 null**：完成了的运行没有可接的。后加的字段（2026-10-31），旧文件没有，读者按 null 处理 |
 
@@ -393,7 +419,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 
 - 加字段不升版本；读者必须忽略不认识的字段和不认识的 `kind`。
 - 后加的字段，旧文件里没有：读者按表里写的缺省处理。`checkEvents` 非 strict 时放过缺失、strict 时要求有。
-  目前后加的：`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
+  目前后加的：`call.fix` / `call.fixed` 事件、`call.end.rounds`（`ask`）（2026-10-31，缺省分别是没有这种事件、没有这种事件、1）；`resume` 事件、`run.end.resume`、`run.start.resumeOf`、`run.start.resumePrint`（2026-10-31，缺省分别是没有这种事件、null、null、null）；`call.start.archive`（`ask`）和 `call.archive` 事件（2026-10-29，缺省分别是 null、没有这种事件）、`call.start.headline`（`ask`）、`run.end.summary`、`run.start.affair`（2026-10-23），缺省都是 null；`run.start.affair.key` 和 `workspace` 事件（2026-10-27），缺省分别是没有这个键、没有这种事件。人闸的 `call.start.carrier`
   等 6 个字段、`call.start.bytesSha256` 和判定对象的 `answeredVia`（2026-10-21）`checkEvents` 不检查，读者按 null 处理。
 - 给 `by` 加取值不升版本：它是给人看的一句话，读者对不认识的值原样显示。
 - 改字段含义、删字段才升 `v`。

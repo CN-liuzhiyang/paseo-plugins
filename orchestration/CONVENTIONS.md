@@ -78,7 +78,7 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive? })` | 一次 agent 调用，返回 schema 形状的结果。**不接受 `mode`**（见 R8）。回答到手后再按 schema 查一遍，不合就抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败，每次试都写一条 `call.archive` 事件（成没成、CLI 的代码）。事项 workspace 里的 agent（后台的）CLI 归档不了，交给起这次运行的插件归档（reconcile 读 `call.archive` 做）。缺省不归档：像 dev-task 那样事后还有人要接着翻、接着聊的会话，由 flow 自己决定 | `call.start`（带 `archive`）/`call.agent`/`call.end`/`call.archive`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive?, check?, fixes? })` | 一次 agent 调用，返回 schema 形状的、核对过的结果。**不接受 `mode`**（见 R8）。回答到手后先按 schema 查（多出来的字段直接删，不算错），再跑 `check`；有问题就在**同一个 agent** 里只把出问题的几处发回去改，见下「核对和针对性打回」；没有路可以发回去时（CLI 太旧、执行层不会 `send`）schema 不合还是抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败，每次试都写一条 `call.archive` 事件（成没成、CLI 的代码）。事项 workspace 里的 agent（后台的）CLI 归档不了，交给起这次运行的插件归档（reconcile 读 `call.archive` 做）。缺省不归档：像 dev-task 那样事后还有人要接着翻、接着聊的会话，由 flow 自己决定 | `call.start`（带 `archive`）/`call.agent`/`call.fix`/`call.fixed`/`call.end`（带 `rounds`）/`call.archive`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath?, input? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。`input: { label, secret?, pattern?, hint? }`：批准的同时带一个值（验证码），见下「批准并附一个值」。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
@@ -99,6 +99,34 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 
 **什么该用 `$.do`**：会进界面、会失败、值得在事后看到的脚本动作——跑校验器、落盘、调外部 CLI。
 算一个字符串、拼一个 prompt 不用包。包了的动作，出错时事件里有它，界面上能看出停在哪一步。
+
+### 核对和针对性打回：`$.ask` 的 `check` 和 `fixes`
+
+答案的格式脚本核得出来（提交说明的占位、补丁命中数、文件在不在），就写成 `check`，不要写第二个 step 去"改写"：
+
+```js
+import { pointer } from "paseo-orchestration/runtime/flow.mjs";
+
+const patch = await $.ask(patchStep, input, {
+  role: "worker",
+  check: (a) => a.messages.flatMap((m, i) => (m.text.includes("{code}") ? [] : [{ at: pointer("messages", i, "text"), say: "要有且只有一个 {code} 占位" }])),
+});
+```
+
+- `check(answer, { round })` 同步异步都行，返回问题清单 `[{ at, say }]`；空清单、`null`、`undefined` 都算过，返回一个字符串等于 `{ at: "", say }`。
+  `at` 是 JSON 指针（`pointer("edits", 4, "old")` 拼，处理 `/` 和 `~`），`""` 是整份答案；`say` 写给模型看，说哪里不对、要什么样。
+  拿到的是答案的拷贝，改它不影响运行时手里那份。`check` 抛错是它自己的 bug：这次调用失败，不算一轮。
+- 运行时只把这几处发回**同一个 agent**：一条消息（几处问题、各自的现值、一句"其余不变、不要重复"）加一个只含这几处的 schema
+  （`{ f1, f2, … }`，每个是原 schema 里那一处的子 schema，`description` 跟着走），交回来的按指针合并回去，再核一遍。流程拿到的永远是完整的、核过的答案。
+  schema 不合走同一条路，所以"多一个字段"不再整份重来：schema 没声明的字段直接删掉，记一条 `log`。
+- 一次最多 8 处；问题在整份答案上（`at` 为 `""`），或超过 8 处，就让它整份重交（仍是同一个会话，仍只发问题清单）。
+  一处在另一处里面，合成外面那一处。指到答案里没有的地方，退到最近的存在的上级（记一条 `log` warn）。要增删数组元素，`at` 就得指到整个数组。
+- `fixes`（缺省 2，0 到 5）：最多打回几轮。用完仍不过，`$.ask` 抛 `CheckFailed`（`problems`、`value`、`rounds`、`reason`）：flow 可以接住自己处理；
+  没接住，运行以 **`stopped`** 结束（不是 `failed`），`stop.reason` 是"`<step>`：核对 3 轮还不过：<第一条问题>"。整个调用共用 step 的 `timeout`。
+- `fixes: 0`：不打回，schema 不合时仍交给 CLI 自己重试，`check` 不过立刻 `CheckFailed`。
+- 事件里每轮有 `call.fix`（发出去之前）和 `call.fixed`，`call.end.rounds` 是作答的轮数，`call.end.cost` 是各轮之和（EVENTS.md）。
+- 要 fork CLI 的 `send --output-schema --max-retries`。Paseo CLI 太旧时（第一次见到 `unknown option '--max-retries'`）整次运行退回老办法：
+  CLI 自己重试，打回发不出去，`check` 不过就是 `CheckFailed`（`rounds` 为 1），记一条 caveat，不让运行失败。
 
 ### 接着跑：`$.resumeWith` 和 `orch.mjs resume`
 
@@ -261,6 +289,10 @@ in that output schema"（`public-docs/hub/workflows.md:120`）。让模型自由
 
 agent 调用会花钱，可能有副作用。失败了要不要再来一次，是脚本作者的显式决定，
 不是运行时替你做的。
+
+一个例外，边界说清楚：**答案的格式不对**（不合 schema，或 `check` 指出了问题）时，运行时在同一个 agent 里只把出问题的几处
+发回去改，最多 `fixes` 轮（缺省 2，和 CLI 原来自己的重试一样多）。这是同一次调用的一部分，不是重来一次：轮数和每一轮的钱都记在这次调用的
+事件里，用完仍不过就以 `stopped` 停下，由脚本或负责的人决定（见「核对和针对性打回」）。`fixes: 0` 关掉。
 
 并行多个 agent 用 `$.all`：它等全部结束、失败的只是结果里的一项（见上）。钱已经花了，
 不要让一个失败吃掉另一个已经拿到的结果。失败的调用在事件里照样有 `agentId` 和 `cost`——
@@ -458,7 +490,7 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 | 带 `--output-schema` 时 stdout 是**结构化结果**，不含 agentId | 拿不到 agent 句柄。运行时给每次调用打 `orch-run=<runId>` 和 `orch-call=<callId>` 两个 label，调用结束后 `ls -g -a --label ... --label ...` 找回（多个 `--label` 是"且"，`cli/src/commands/agent/ls.ts`），再 inspect 收成本。2026-09-24 实测拿到了 |
 | `ls` 默认**只列当前目录**的 agent | 找自己起的 agent 必须加 `-g`，否则 cwd 不同就查不到（已归档的还要加 `-a`） |
 | `ls --json` 是**小写** `id/name`，`inspect --json` 是**大写** `Id/Name` | 同一个字段两种写法；只有 `runtime/executor.mjs` 碰这两个命令 |
-| `inspect` 的 `LastUsage` 是**最后一轮**，不是累计 | 一次结构化调用只发一个 prompt，按调用收应该是准的（推断）；多轮对话会低估 |
+| `inspect` 的 `LastUsage` 是**最后一轮**，不是累计（2026-10-31 实测：同一个 agent 先后两轮，第一轮 $0.0121，接着问的第二轮 $0.0131，各报各的，后一轮覆盖前一轮） | 运行时每轮交卷后 `inspect` 一次，一个调用的各轮加起来。CLI 在一条命令里自己重试的那几轮看不见，只算最后一轮（所以老 CLI 退回的路上是少算的） |
 | Codex agent 的 `LastUsage.CostUsd` 是 **0**，token 数照常有（2026-09-23，gpt-6-astra，27k 输入） | `call.end.cost.usd` 照实给 0，`run.end.cost.totalUsd` 只含 Claude 系。要算 Codex 得按 token 自己折 |
 | Claude 的 `LastUsage.InputTokens` 只数未缓存的输入（2026-09-24：一次 haiku 调用 `inputTokens: 10`，`usd: 0.075`） | 成本看 `usd`，不要按 token 数估 Claude 的钱 |
 | 在 Paseo agent 里起的子 agent，cwd **一律是调用方 workspace 的目录**：`--cwd` 被忽略，子进程 cwd 也不管用（2026-09-23 实测：gate 探针指定了临时目录，agent 仍落在调用方的项目目录） | prompt 里一律给绝对路径。`$.ask` 的 `cwd` 是脚本**要求**的目录，不一定是 agent 实际所在的目录；`effects: "workspace"` 的"工作目录"因此也是调用方的。传 `--workspace` 也不能换目录：agent 的 cwd 是 **workspace 的目录**，`--cwd` 照样被忽略（2026-10-27 实测）。要换目录得换 workspace |
