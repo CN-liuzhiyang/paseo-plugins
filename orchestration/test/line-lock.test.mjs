@@ -7,14 +7,14 @@
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runFlow, RunRefused } from "../runtime/run.mjs";
 import { flow } from "../runtime/flow.mjs";
 import { Journal } from "../runtime/journal.mjs";
-import { LineBusy, lineLockFile, takeLine } from "../runtime/line-lock.mjs";
+import { LineBusy, lineIo, lineLockFile, takeLine } from "../runtime/line-lock.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { settleRun, SettleRefused } from "../runtime/orch.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
@@ -184,4 +184,71 @@ test("a run refused before it starts does not keep the line", async () => {
   await assert.rejects(() => carry(make(() => 1), logDir, "r-line", { redo: "nothing-by-that-name" }), RunRefused);
   assert.equal(existsSync(lineLockFile(logDir, "r-line")), false);
   assert.equal((await carry(make(() => 1), logDir, "r-line")).outcome, "done");
+});
+
+const failing = (code, times) => {
+  let left = times;
+  return (file) => {
+    if (left-- > 0) throw Object.assign(new Error(`${code}: fake failure of open, '${file}'`), { code });
+    return openSync(file, "wx");
+  };
+};
+
+test("a lock the file system will not give for a moment is waited for, and when it stays so the line is reported as held, not the system's error", async () => {
+  const dir = await tempDir("orch-line-");
+  const real = lineIo.open;
+  try {
+    for (const code of ["EPERM", "EACCES", "EBUSY"]) {
+      lineIo.open = failing(code, 2);
+      const taken = takeLine({ dir, lineage: "slow", runId: "r1" });
+      assert.equal(JSON.parse(readFileSync(lineLockFile(dir, "slow"), "utf8")).runId, "r1", `${code} twice, then it is taken`);
+      taken.release();
+    }
+    lineIo.open = failing("EPERM", Infinity);
+    assert.throws(
+      () => takeLine({ dir, lineage: "slow", runId: "r2" }),
+      (error) => error instanceof LineBusy && error.holder === null && /EPERM/.test(error.message),
+    );
+    assert.equal(existsSync(lineLockFile(dir, "slow")), false, "nothing was made");
+    // Another error is still the system's own.
+    lineIo.open = failing("EMFILE", 1);
+    assert.throws(() => takeLine({ dir, lineage: "slow", runId: "r3" }), { code: "EMFILE" });
+  } finally {
+    lineIo.open = real;
+  }
+});
+
+test("a lock that could not be written is not left to look like one being written", async () => {
+  const dir = await tempDir("orch-line-");
+  const real = lineIo.write;
+  try {
+    lineIo.write = () => {
+      throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    };
+    assert.throws(() => takeLine({ dir, lineage: "full", runId: "r1" }), { code: "ENOSPC" });
+    assert.equal(existsSync(lineLockFile(dir, "full")), false);
+  } finally {
+    lineIo.write = real;
+  }
+  takeLine({ dir, lineage: "full", runId: "r2" }).release();
+});
+
+test("a lock that cannot be read is a lock being written for a few seconds, and after that one left by a process that died making it", async () => {
+  const dir = await tempDir("orch-line-");
+  const old = new Date(Date.now() - 60_000);
+  for (const [lineage, text] of [["empty", ""], ["torn", '{"pid":'], ["scrap", "not json at all"]]) {
+    const file = lineLockFile(dir, lineage);
+    mkdirSync(path.dirname(file), { recursive: true }); // a release takes the empty directory away
+    writeFileSync(file, text);
+    assert.throws(() => takeLine({ dir, lineage, runId: "r1" }), LineBusy, `${lineage}: just made`);
+    utimesSync(file, old, old);
+    const taken = takeLine({ dir, lineage, runId: "r2" });
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).runId, "r2", `${lineage}: old enough, taken`);
+    taken.release();
+  }
+  // A lock that reads, of a holder that may be alive, is never old enough.
+  const live = takeLine({ dir, lineage: "alive", runId: "r3" });
+  utimesSync(lineLockFile(dir, "alive"), old, old);
+  assert.throws(() => takeLine({ dir, lineage: "alive", runId: "r4" }), LineBusy);
+  live.release();
 });
