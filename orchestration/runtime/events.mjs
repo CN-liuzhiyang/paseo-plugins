@@ -227,6 +227,8 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         }
         added(event, "resumeOf", isNullableString(event.resumeOf), "resumeOf is not string | null");
         added(event, "resumePrint", event.resumePrint === null || (typeof event.resumePrint === "string" && PRINT_SHAPE.test(event.resumePrint) && event.resumeOf !== null), "resumePrint is not null, or the fingerprint of the point a run that carries on another started from");
+        added(event, "lineage", isString(event.lineage) && event.lineage !== "" && (event.resumeOf !== null || event.lineage === runId), "lineage is not the id of the first run of the line this run belongs to (its own id when it carries nothing on)");
+        added(event, "redo", isNullableString(event.redo) && (event.redo === null || event.resumeOf !== null), "redo is not null, or the name of a step of the line of runs that a run which carries one on does again");
         break;
       }
       case "phase.start":
@@ -250,10 +252,19 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           break;
         }
         calls.set(event.callId, event);
-        need(event, ["ask", "do", "gate"].includes(event.type), `type "${event.type}" is not ask | do | gate`);
+        need(event, ["ask", "do", "gate", "step"].includes(event.type), `type "${event.type}" is not ask | do | gate | step`);
         need(event, isString(event.name) && isString(event.title), "name / title are not strings");
         need(event, event.phase === null || phases.has(event.phase), `phase ${JSON.stringify(event.phase)} is not null or declared`);
         if (event.type === "gate") need(event, event.name === "gate", 'a gate call is named "gate"');
+        if (event.type !== "do") {
+          // Taken from the journal rather than done: what it was taken from. callId is null for a record that no call of the journal's run made (a probe or `settle` wrote it).
+          const reused = event.reused;
+          added(event, "reused", reused === null || (isObject(reused) && isString(reused.runId) && (isString(reused.callId) || reused.callId === null)), "reused is not null | { runId, callId }");
+        }
+        if (event.type === "step") {
+          need(event, typeof event.once === "boolean", "once is not a boolean");
+          need(event, isString(event.key) && /^[0-9a-f]{16}$/.test(event.key), "key is not the 16 hex digits of the fingerprint of the step's key");
+        }
         if (event.type === "ask") {
           need(event, isNullableString(event.role), "role is not string | null");
           need(event, isString(event.provider), "provider is not a string");
@@ -298,7 +309,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
           break;
         }
-        need(event, start.type !== "do", "a do call has no agent");
+        need(event, start.type !== "do" && start.type !== "step", `a ${start.type} call has no agent`);
         need(event, !ended.has(event.callId), "call.agent after the call's call.end");
         need(event, !agents.has(event.callId), "second call.agent for this call");
         need(event, isString(event.agentId) && event.agentId.length > 0, "agentId is not a string");
@@ -320,7 +331,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
         need(event, event.error === null || isError(event.error), "error is not { name, message } | null");
         need(event, event.ok ? event.error === null : event.error !== null, "ok and error disagree");
         need(event, isNullableString(event.agentId), "agentId is not string | null");
-        if (start.type === "do") need(event, event.agentId === null, "a do call has no agent");
+        if (start.type === "do" || start.type === "step") need(event, event.agentId === null, `a ${start.type} call has no agent`);
         if (agents.has(event.callId) && event.agentId !== null) {
           need(event, event.agentId === agents.get(event.callId), "agentId differs from the call's call.agent");
         }

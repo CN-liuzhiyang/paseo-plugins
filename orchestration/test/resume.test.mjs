@@ -545,31 +545,45 @@ test("resume: the carried-on run's gate card goes where the first one's did, and
   const workspaces = [];
   const affair = { label: "冒烟事项", key: "smoke-item" };
   const first = fakeExecutor({ workspaces });
-  const part1 = await go(path.join(ROOT, "flows", "resume-smoke.mjs"), { logDir: dir, runId: "smoke-1", affair, executor: first, input: { stage: "start", gateTimeout: "1m" } });
+  const part1 = await go(path.join(ROOT, "flows", "resume-smoke.mjs"), { logDir: dir, runId: "smoke-1", affair, executor: first, input: { gateTimeout: "1s" } });
   assert.equal(part1.outcome, "stopped");
   assert.equal(part1.value.part, 1);
   assert.match(part1.summary, /第 1 段停下/);
   assert.equal(part1.resume.flow, "resume-smoke");
-  assert.deepEqual(part1.resume.input, { stage: "finish", gateTimeout: "1m" });
+  assert.deepEqual(part1.resume.input, { gateTimeout: "1s" }, "the same input: it is carried on by running it again");
   assert.equal(part1.resume.spends, "nothing");
-  // Part two is refused its approval: it stops, and says how to go on in its turn.
-  const denying = fakeExecutor({ workspaces, carrier: "deny" });
-  const part2 = await resume(dir, "smoke-1", [], { executor: denying });
+  assert.equal(first.requests.length, 1);
+  // Part two's card is not answered in time: it stops, and says how to go on in its turn. Part one's card is not put again.
+  const waiting = fakeExecutor({ workspaces, carrier: "hang" });
+  const part2 = await resume(dir, "smoke-1", [], { executor: waiting });
   assert.equal(part2.outcome, "stopped");
   assert.equal(part2.value.part, 2);
-  assert.equal(denying.requests[0].workspace, first.requests[0].workspace, "the card is in the workspace of the affair, as the first one was");
+  assert.equal(part2.value.decision, "expired");
+  assert.equal(waiting.requests.length, 1, "one card: the second part's");
+  assert.equal(waiting.requests[0].workspace, first.requests[0].workspace, "the card is in the workspace of the affair, as the first one was");
   assert.ok(first.requests[0].workspace);
   assert.equal(eventsOf(part2)[0].resumeOf, "smoke-1");
-  assert.deepEqual(part2.resume.input, { stage: "finish", gateTimeout: "1m" });
+  assert.equal(eventsOf(part2)[0].lineage, "smoke-1");
+  assert.deepEqual(part2.resume.input, { gateTimeout: "1s" });
   // The first stop was carried on once, however the second part went.
   await assert.rejects(resume(dir, "smoke-1"), /already carried on, as run .*: it ended as stopped; if it stopped, carry on that run \(/);
   const approving = fakeExecutor({ workspaces });
   const part3 = await resume(dir, part2.runId, [], { executor: approving });
   assert.equal(part3.outcome, "done");
   assert.match(part3.summary, /冒烟完成/);
+  assert.equal(approving.requests.length, 1, "the second card again (nobody answered it); the first was answered, and is not asked");
   assert.equal(approving.requests[0].workspace, first.requests[0].workspace);
   assert.equal(eventsOf(part3)[0].resumeOf, part2.runId);
   assert.equal(workspaces.length, 1, "one workspace for the whole affair");
+
+  // A no is the person's answer: the stop says so and offers nothing to carry on (starting again is a new run).
+  const other = await tmp("smoke-denied");
+  await go(path.join(ROOT, "flows", "resume-smoke.mjs"), { logDir: other, runId: "smoke-2", executor: fakeExecutor(), input: { gateTimeout: "1s" } });
+  const refused = await resume(other, "smoke-2", [], { executor: fakeExecutor({ carrier: "deny" }) });
+  assert.equal(refused.outcome, "stopped");
+  assert.equal(refused.value.decision, "denied");
+  assert.equal(refused.resume, null);
+  await assert.rejects(resume(other, refused.runId), /did not say how it could be carried on/);
 });
 
 // --- The command line ----------------------------------------------------------------------------
@@ -608,6 +622,7 @@ test("parseResumeArgs: the flags of a run that are not a flow's input; a value t
 test("the shipped resume-smoke: two parts, a card each, said in one line", async () => {
   const smoke = (await import("../flows/resume-smoke.mjs")).default;
   assert.equal(smoke.name, "resume-smoke");
+  assert.equal(smoke.resume, "auto");
   assert.deepEqual(smoke.grants, ["gate:deny"]);
   assert.equal(smoke.summarize({ part: 2, decision: "allowed" }, { outcome: "done" }), "冒烟完成：第 2 段批准");
   assert.equal(smoke.summarize({ part: 1, decision: "denied" }, { outcome: "stopped" }), "第 1 段停下：人闸不批");

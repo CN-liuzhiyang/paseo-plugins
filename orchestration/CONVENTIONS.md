@@ -78,16 +78,17 @@ JSON 文件，用 `--input @args.json` 传，文件本身就是那份可复用�
 
 | 原语 | 做什么 | 事件 |
 |---|---|---|
-| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive?, check?, fixes? })` | 一次 agent 调用，返回 schema 形状的、核对过的结果。**不接受 `mode`**（见 R8）。回答到手后先按 schema 查（多出来的字段直接删，不算错），再跑 `check`；有问题就在**同一个 agent** 里只把出问题的几处发回去改，见下「核对和针对性打回」；没有路可以发回去时（CLI 太旧、执行层不会 `send`）schema 不合还是抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败，每次试都写一条 `call.archive` 事件（成没成、CLI 的代码）。事项 workspace 里的 agent（后台的）CLI 归档不了，交给起这次运行的插件归档（reconcile 读 `call.archive` 做）。缺省不归档：事后还有人要接着翻、接着聊的会话，由 flow 自己决定 | `call.start`（带 `archive`）/`call.agent`/`call.fix`/`call.fixed`/`call.end`（带 `rounds`）/`call.archive`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
+| `$.ask(step, input, { role?, provider?, thinking?, title?, cwd?, timeout?, archive?, check?, fixes?, reuse? })` | 一次 agent 调用，返回 schema 形状的、核对过的结果。**不接受 `mode`**（见 R8）。回答到手后先按 schema 查（多出来的字段直接删，不算错），再跑 `check`；有问题就在**同一个 agent** 里只把出问题的几处发回去改，见下「核对和针对性打回」；没有路可以发回去时（CLI 太旧、执行层不会 `send`）schema 不合还是抛 `OutputMismatch`（回答照样记在事件里）。`title` 是这一次调用的标题，优先于 step 的 `title`。`archive: "after"`：调用交卷（没失败）以后运行时把这个 agent 归档（`paseo archive <id>`，不加 `--force`）；提示词全文和交回的结果本来就在事件里，agent 本身不是需要人去翻的地方。失败、超时的调用不归档（留着查）；找不到 agent、还在跑被拒、归档报错只记一条 `caveat`，不让运行失败，每次试都写一条 `call.archive` 事件（成没成、CLI 的代码）。事项 workspace 里的 agent（后台的）CLI 归档不了，交给起这次运行的插件归档（reconcile 读 `call.archive` 做）。缺省不归档：事后还有人要接着翻、接着聊的会话，由 flow 自己决定。`reuse` 见「做过的事不重做」 | `call.start`（带 `archive`）/`call.agent`/`call.fix`/`call.fixed`/`call.end`（带 `rounds`）/`call.archive`，`type: "ask"`；`call.agent` 是后台按标签找到 agent 时发的 |
 | `$.again(prev, text, { fresh?, check?, fixes?, archive?, title?, timeout?, role?, provider?, thinking?, cwd? })`、`$.again(prev, step, input, …)` | 接着问 `prev`（`$.ask` / `$.again` 返回的那个对象，原样传）的那个 agent，返回新的整份答案。`role` / `provider` / `thinking` / `cwd` 只在 `fresh: true` 时能给。见下「接着问：`$.again`」 | `call.start`（带 `continues` 或 `revises`）/`call.agent`（接着问的一开始就发）/…/`call.end`，`type: "ask"` |
 | `$.do(name, fn, { title? })` | 脚本自己的确定性动作：读文件、跑 CLI、写文件。返回 `fn` 的值。`title` 给人看，不给就用 `name` | `type: "do"`；输出里超过 2000 字的字符串被截断，返回给脚本的是原值 |
 | `$.gate({ title, content, name?, summary?, brief?, evidence?, timeout?, holdPath?, input? })` | 人闸，返回判定对象（看 `approved`），只有闸本身坏了才抛错。`title` 写成决定句；`holdPath` 是回执路径，不给就放在 `$.ctx.runDir/gate/` 下。`input: { label, secret?, pattern?, hint? }`：批准的同时带一个值（验证码），见下「批准并附一个值」。要 `gate:deny` grant；会动用人闸的 flow 在载体不可用时开跑前就被拒 | `type: "gate"` |
+| `$.step(name, fn, { key?, still?, once?, probe?, before?, title? })` | 流程里**做一次**的一步：同一条线（一个运行和接着它跑的那些）里，`name`、`key`（它依赖的东西，任何 JSON）都没变，就拿上次的值，不再执行 `fn`。`fn` 的返回值是 JSON（最多 1 MB）。`once: true` 是不能撤回的事（提交、发出去）：先写"开始了"再做，开始了没有结果就**不凭猜测再做一遍**。`name` 在一个运行里只用一次。见下「做过的事不重做：`$.step` 和日志」 | `call.start`/`call.end`，`type: "step"`（带 `once`、`key`、`reused`） |
 | `$.phase(id, fn)` | 阶段作用域。`fn` 里发起的调用自动带上 `phase`（AsyncLocalStorage，并发的阶段互不串）。`id` 必须在 `phases` 里声明过；同一阶段可以反复进入 | `phase.start`/`phase.end` |
 | `$.all(tasks)` | 并发，等全部结束。**永不因为某个任务失败而 reject**，返回 `[{ ok: true, value } \| { ok: false, error }]`，和 `tasks` 一一对应。任务可以是 promise 或返回 promise 的函数 | 无（并发看调用的时间重叠） |
 | `$.stop(reason, value)` | flow 主动停下，`value` 是部分结果。调用的那一刻运行器就记下这次停止（第一次为准），之后任何新的调用、阶段都抛 `RunEnded`。它也会抛出以便中断当前代码，但**接住它没有用**：结局照样是 `stopped`，接住之后想接着花钱会被拦下。`$.all` 里某个任务调了它，其他任务里已经在跑的调用照常结束，新的起不来 | `run.end.outcome = "stopped"` |
-| `$.resumeWith({ flow, input, from, spends })` | 说这个运行如果没走到头，**从哪里接着、用什么接着**：另一个流程（可以是自己）的名字、它的输入、一句话给人看、会不会调模型。四个字段都必填。随时调，**最后一次为准**，`null` 收回。当下就校验（流程按名字找得到、输入合它的 `inputs`、`from` 合规），不合格只写一条 `log` warn 和一条 `caveat`、不记下，**不让运行失败**。结局是 `done` 时不记（完成了的运行没有可接的）。见下「接着跑」 | `resume`；结局时 `run.end.resume` |
+| `$.resumeWith({ flow, input, from, spends })` | 说这个运行如果没走到头，**从哪里接着、用什么接着**：另一个流程（可以是自己）的名字、它的输入、一句话给人看、会不会调模型。四个字段都必填；`resume: "auto"` 的流程只给与"用同样的输入再跑一遍"不同的那几个（`input`、`from`、`spends`）。随时调，**最后一次为准**，`null` 收回。当下就校验（流程按名字找得到、输入合它的 `inputs`、`from` 合规），不合格只写一条 `log` warn 和一条 `caveat`、不记下，**不让运行失败**。结局是 `done` 时不记（完成了的运行没有可接的）。见下「接着跑」 | `resume`；结局时 `run.end.resume` |
 | `$.log.info/warn/error(...)` | 给人看的一行，参数按 `util.format` 拼 | `log` |
-| `$.ctx` | 只读：`runId`、`caller`、`cwd`、`host`、`runDir`、`events`（事件文件路径）、`role(name)`（解析角色，没有就抛错） | — |
+| `$.ctx` | 只读：`runId`、`caller`、`cwd`、`host`、`runDir`、`events`（事件文件路径）、`lineage`（这条线第一个运行的 id）、`lineDir`（`<logDir>/runs/<lineage>/`，线上每个运行看到同一个目录）、`resumed`（这个运行是不是接着别的运行）、`role(name)`（解析角色，没有就抛错） | — |
 
 `return value` 就是 `outcome: "done"`。抛错是 `failed`，超过 `--timeout` 是 `timeout`；这两种运行器都照样
 写 `run.end`、收成本、带 caveats。结局一定下来（flow 返回、抛错、超时，或第一次 `$.stop`），flow 里还在跑的
@@ -152,6 +153,45 @@ for (let v = 2; ; v += 1) {
 - 一个 agent 现在可以对应多个调用：`call.end.cost` 记各自那几轮，`run.end.cost.agentCount` 数的是 agent。读事件的人按 `call.start.continues` 把它们串起来（EVENTS.md）。
 - 现成的最小例子：`flows/again-smoke.mjs`（一个 fast 角色，几分钱，不过人闸）。
 
+### 做过的事不重做：`$.step` 和日志
+
+接着跑（下一节）要能不重做前面做完的事，前提是流程把"一件事"圈出来，运行时才知道哪些能沿用。圈法只有一种：`$.step`。
+
+```js
+export default flow({
+  name: "build-and-publish",
+  resume: "auto",                       // 停下以后，用同样的输入再跑一遍就是接着跑
+  async run(input, $) {
+    const built = await $.step("build", () => compile(input.dir), { key: input.dir });
+    const plan = await $.ask(planStep, { built }, { role: "worker" });     // 同样的问题，沿用上次的答案
+    const commit = await $.step("commit", (given) => submit(given.input), {
+      once: true,                       // 提交撤不回
+      before: async () => {                         // 授权它的那张卡，在它被写成"开始了"之前问
+        const given = await $.gate({ title: "提交", content: diff, input: { label: "验证码" } });
+        if (!given.approved) $.stop("提交没批");
+        return given;
+      },
+      probe: () => lookUpRevision(input.dir),  // 开始了没有结果时，去外面查：{ done: true, value } 或 { done: false }
+    });
+    return await $.step("backfill", () => backfill(commit.revision), { once: true });
+  },
+});
+```
+
+- **谁沿用**：同一条线（`run.start.lineage`，一个运行和接着它跑的那些）里，`$.step` 按名字和 `key` 的指纹，`$.ask` / `$.again` 按提示词、schema、角色的指纹，`$.gate` 按标题和内容的指纹。
+  依据变了就重做、重问。`$.do` 不记，每次都做——有副作用的、不能重做的事不要放在 `$.do` 里再指望接着跑。
+- **`$.ask` 默认沿用**（`effects: "none"` 的）。会改文件的 agent（`effects: "workspace"`）答案说明不了文件现在的样子，默认重问；流程能核对文件还在，就给 `reuse: (answer) => 文件还对`。
+- **人答过的卡不再问第二遍**：批了、不批都算，内容指纹要一样。过期、出错的，和带 `input` 的卡（验证码）每次重新问；值本身哪里都不记。
+- **授权不可逆步骤的卡放进它的 `before`**，不要放在它前面的流程里，更不要放进一个包着它的普通 `$.step`。带 `input`（验证码）的卡每次都重新问，所以放在外面的话，
+  "提交已经做完、回填还没做"的线接着跑时，包着提交的那一步要重新执行，卡也就再发一遍，要人再给一个验证码，而提交其实早已完成。`before` 只在这一步还要做的时候跑：
+  这一步是 `done`，接着跑时 `before` 不跑、不发卡，直接去做回填。`before` 在步骤被写成"开始了"**之前**跑，它的结果不进日志，交给 `fn` 作参数。
+- **步骤的值是 JSON**：取回来的和这次运行拿到的一样（`Date` 变成字符串，`undefined` 的字段没有）。超过 1 MB 或写不成 JSON 的，步骤失败（要大的东西写文件、返回路径）。带这次运行的秘密值的，这一次照常拿到，只是不记：非 `once` 的步骤接着跑时重做；`once` 的记成"做完了，没有值"，接着跑时当状态不明。
+- **开始了没有结果的 `once`**（进程死在中间、抛了错、值没记下）：`probe` 返回 `{ done: true, value }` 就当做完了，`{ done: false }` 就再做一遍；没写 `probe` 或抛错，运行**停下**（`$.stop`），`stop.reason` 写着怎么了结：
+  去外面看一眼，`orch.mjs settle <runId> <步骤> --done '<值的 JSON>'` 或 `--not-done`，再接着跑。
+- **要重做某一步**：`orch.mjs resume <runId> --redo <步骤>`——这一步和它之后能撤回的（普通步骤、`$.ask`）都当没有；`once` 的和人答过的卡不动。`orch.mjs steps <runId>` 看这条线上记了什么。
+- 一个 `$.step` 里面的 `$.ask`、`$.gate` 也进日志，名字带着这一步的名字，所以被沿用的步骤不会把后面的名字挤歪。步骤被沿用时，里面的代码一行都不跑。
+- 日志是 `<logDir>/runs/<lineage>/journal.jsonl`，格式和读者怎么读见 [EVENTS.md](EVENTS.md)「日志」。
+
 ### 接着跑：`$.resumeWith` 和 `orch.mjs resume`
 
 一个流程停下（`$.stop`）、失败、超时、或进程被杀（机器重启）之后，人或调用方常常不想从头来：前面花的钱、做过的事（编译、写好的方案）还在。
@@ -170,6 +210,9 @@ await $.resumeWith(null);                       // 收回：这次停下以后�
 - **每个里程碑更新一次。** `from` 说的是那一刻的实情："编译过了"之后，把 `from` 从"从编译接着"改成"从核对接着"。忘了更新，按钮旁的话会比实情保守。
   流程知道哪种停下**不该**接着跑（方案被拒、要重写），就在停之前 `$.resumeWith(null)`，或根本不声明。没声明就没有「接着跑」，调用方退回"从头重跑"，是安全的一侧。
 - **接着跑的流程自己也要声明**：第一步就 `$.resumeWith`（常常就是它自己加同样的输入），否则它自己断在半路（机器重启）就没法再接。
+  声明 `resume: "auto"` 的流程不用：运行一开始运行时就替它记"用同样的输入再跑一遍"，`from` 由运行时按日志写一句（"前面 N 步沿用……"，日志每多一条重写一次）。
+  它前面做过的事靠 `$.step` 和日志沿用（上一节），**不能撤回的事必须放在 `once` 的 `$.step` 里**，这是 `auto` 对流程的唯一要求。想说得更具体，
+  `$.resumeWith({ from, spends })` 只给要改的几项；`$.resumeWith(null)` 收回（被拒了的方案不该接着跑）。
 - **`flow` 是名字，不是路径。** 一份事件文件谁都能改，不能让它指向盘上任意一个脚本：声明时不合格被拒，`orch resume` 读回来时再查一遍。
   `input` 也一样：读回来以后照那个流程的 `inputs` 再校验一遍，运行器照常在花钱之前拒绝。
 - **不放秘密。** `input` 照样过事件的脱敏：已经知道的秘密值（带值的人闸批准的验证码）放进去，这次声明会被拒；声明之后才成为秘密的，结束时整个续跑点被丢掉。
@@ -187,7 +230,8 @@ await $.resumeWith(null);                       // 收回：这次停下以后�
 **调用方把续跑点给人看过的，用 `--expect <指纹>` 交回来**（指纹 = 流程名和输入的 `pointPrint`）：运行时开跑前再读一次，点变了就拒，免得给人看的是 A、起来的是 B。
 细节和读者怎么做：[EVENTS.md](EVENTS.md)「接着跑」。
 
-`flows/resume-smoke.mjs` 是不花钱的演示（两段，各一张人闸卡）：`orch run resume-smoke --stage start …` 停下，`orch resume <runId>` 接着，再接一次被拒。
+`flows/resume-smoke.mjs` 是不花钱的演示（`resume: "auto"`，两段，各一张人闸卡）：`orch run resume-smoke --gate-timeout 30m …` 停在第 1 段，`orch resume <runId>` 接着：
+第 1 段做过的（记下开始时间的步骤）不再做、第 1 张卡不再问，起第 2 张卡；批了就完成，过期了还能再接，不批则停下不再提供接着跑；同一次停下再接一次被拒。
 
 ### 能在花费前发现的错，都在花费前报
 

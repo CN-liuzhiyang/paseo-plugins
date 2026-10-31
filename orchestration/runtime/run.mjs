@@ -29,9 +29,10 @@ import { affairProblems } from "./affair.mjs";
 import { affairKey, ensureWorkspace, normalizeDir, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { checkResumePoint } from "./resume.mjs";
-import { pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.mjs";
+import { FROM_LIMIT, pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.mjs";
 import { paseoExecutor, sentTitle } from "./executor.mjs";
-import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, INPUT_REDACTED } from "./gate.mjs";
+import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, contentDigest, INPUT_REDACTED } from "./gate.mjs";
+import { Journal, JournalError, MAX_VALUE_BYTES, fingerprint, known, shortPrint } from "./journal.mjs";
 import { logDir as configuredLogDir, resolveHost } from "./config.mjs";
 
 /** The call timeout for a step that declares none. R7 says declare one. */
@@ -189,12 +190,15 @@ function checkKeys(where, object, allowed) {
  * already has events, is refused and nothing is spent. `affair` is what the run
  * is for, recorded as run.start.affair (affair.mjs); the agents and gate cards of
  * the runs for one affair share a Paseo workspace per directory (workspaces.mjs). `resumeOf` is the run this one
- * carries on (resume.mjs, `orch.mjs resume`), recorded as run.start.resumeOf.
+ * carries on (resume.mjs, `orch.mjs resume`), recorded as run.start.resumeOf. `lineage` is the first run of the line of runs
+ * this one belongs to (its own id when it is the first): the line shares one journal (journal.mjs), so what a run did is not
+ * done again by the runs that carry it on. `redo` names a step of that journal to do again (and what came after it).
  *
  * @param {string | object} target a flow module path, or a flow() value
  * @param {{ input?: object, timeout?: string | null, executor?: object, roster?: object, logDir?: string,
  *           cwd?: string, host?: string | null, caller?: string | null, gatePollMs?: number,
  *           agentProbeDelays?: number[], runId?: string, affair?: object | null, resumeOf?: string | null, resumePrint?: string | null,
+ *           lineage?: string, redo?: string | null,
  *           workspaceLock?: { waitMs?: number, staleMs?: number, pollMs?: number },
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
@@ -203,7 +207,7 @@ function checkKeys(where, object, allowed) {
  *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
-  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "resumePrint", "taken", "workspaceLock"]);
+  checkKeys("runFlow", options, ["input", "timeout", "executor", "roster", "logDir", "cwd", "host", "caller", "gatePollMs", "agentProbeDelays", "runId", "affair", "resumeOf", "resumePrint", "lineage", "redo", "taken", "workspaceLock"]);
 
   // --- The id, before anything slow ---------------------------------------
   // A caller that must hold the id sooner (orch.mjs, while it reads the flow's
@@ -269,6 +273,23 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   }
   const resumePrint = options.resumePrint ?? null;
   if (resumePrint !== null && !(resumeOf !== null && PRINT_SHAPE.test(resumePrint))) throw new RunRefused("resumePrint is a fingerprint of the point a run that carries on another started from");
+  const lineage = options.lineage ?? runId;
+  if (options.lineage !== undefined) {
+    const problem = runIdProblem(lineage);
+    if (problem) throw new RunRefused(`lineage: ${problem}`);
+  }
+  const redo = options.redo ?? null;
+  if (redo !== null && (typeof redo !== "string" || redo.trim() === "" || resumeOf === null)) {
+    throw new RunRefused("redo names a step of the line of runs this run carries on, so it needs a step name and resumeOf");
+  }
+  // Read once: the journal is what a run of this line did before this one, and nothing else writes it while this one works.
+  let journal;
+  try {
+    journal = new Journal({ dir, lineage, redo });
+  } catch (error) {
+    if (error instanceof JournalError) throw new RunRefused(error.message);
+    throw error;
+  }
   let loaded;
   try {
     loaded = await loadFlow(target);
@@ -387,6 +408,25 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   // before the last one has been looked into.
   let resumePoint = null;
   let resumeChain = Promise.resolve();
+  // A flow that runs again with the same input to be carried on (`resume: "auto"`): its point is made by the runner, and `from`
+  // is worded at the end, when it is known how far the run got. `fromAuto` is set while the point held is one whose `from` is that.
+  const auto = f.resume === "auto";
+  let fromAuto = false;
+  // The call a run came to grief in, for that wording.
+  let lastBad = null;
+
+  // The enclosing `$.step`: what is asked inside a step is named by it, so that a step taken from the journal (whose inside does not run)
+  // does not move the names of what comes after it.
+  const stepScope = new AsyncLocalStorage();
+  const stepNames = new Set();
+  const counters = new Map();
+  const nextId = (kind, name = null) => {
+    const scope = stepScope.getStore();
+    const head = kind === "gate" ? `gate${scope ? `:${scope}` : ""}` : `${kind}:${scope ? `${scope}/` : ""}${name}`;
+    const n = (counters.get(head) ?? 0) + 1;
+    counters.set(head, n);
+    return `${head}#${n}`;
+  };
 
   // The affair's workspace, per directory, found or made the first time a call
   // needs it (a run that never calls an agent makes none). Resolves to the
@@ -546,10 +586,12 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     }
   };
 
-  const endCall = (record, { ok, output, error, agentId, cost, rounds }) => {
+  const endCall = (record, { ok, output, error, agentId, cost, rounds, reused = false }) => {
     // Already closed when the run ended with this call in flight.
     if (!open.delete(record.callId)) return;
-    if (agentId) spent.set(agentId, addCost(spent.get(agentId) ?? null, cost));
+    if (!ok) lastBad = record.title ?? null;
+    // An answer taken from the journal names the agent that gave it, but this run did not use that agent: nothing was spent.
+    if (agentId && !reused) spent.set(agentId, addCost(spent.get(agentId) ?? null, cost));
     log.emit("call.end", {
       callId: record.callId,
       ok,
@@ -682,11 +724,15 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     try {
       if (point === null) {
         resumePoint = null;
+        fromAuto = false;
         log.emit("resume", { cleared: true });
         return;
       }
+      // A flow that is carried on by running again with its own input needs to say only what is different from that.
+      const wording = auto && isPlainObject(point) && point.from === undefined;
+      const given = auto && isPlainObject(point) ? { ...point, flow: point.flow ?? f.name, input: point.input ?? input, from: point.from ?? wordFrom(), spends: point.spends ?? "maybe" } : point;
       // The input as the events will hold it: JSON, and with whatever the run keeps secret already taken out.
-      const plain = isPlainObject(point) ? { ...point, input: jsonSafe(point.input) } : point;
+      const plain = isPlainObject(given) ? { ...given, input: jsonSafe(given.input) } : given;
       const problems = pointProblems(plain);
       if (problems.length === 0 && JSON.stringify(log.scrub(plain)) !== JSON.stringify(plain)) {
         problems.push("the input holds a value this run keeps secret, which would be written as <已用> and the run could not be started from it; leave such values out of a resume input");
@@ -698,6 +744,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         return;
       }
       resumePoint = pointOf(plain);
+      fromAuto = wording;
       log.emit("resume", resumePoint);
     } catch (error) {
       log.emit("log", { level: "warn", message: `$.resumeWith: not recorded, ${describeThrown(error)}` });
@@ -735,6 +782,46 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     return null;
   };
 
+  // The journal entry for an ask or an again that is still good, or null. A record made for another prompt is not one: that is asked
+  // again, and said. An agent that may have changed files (`effects: "workspace"`) is not taken from its record unless the flow looks at
+  // the files itself (`reuse`), because an answer says nothing of what is on the disk now.
+  const recordedAnswer = async (id, print, kind, step, reuse) => {
+    const entry = journal.get(id);
+    if (!entry || !known(entry) || entry.kind !== kind || entry.state !== "done" || !isPlainObject(entry.value)) return null;
+    if (entry.keyPrint !== print) {
+      log.emit("log", { level: "warn", message: `${id}: the journal has an answer from ${entry.runId}, but not to what is asked now, so it is asked again` });
+      return null;
+    }
+    if (step.effects !== "none" && typeof reuse !== "function") return null;
+    if (typeof reuse === "function" && !(await reuse(structuredClone(entry.value)))) return null;
+    return entry;
+  };
+
+  // Whether `value` can go in the journal as it is, and if not why not. A value the run keeps secret must not be written to a file the
+  // run's scrub does not reach.
+  const unkeepable = (value) => {
+    const text = JSON.stringify(value);
+    if (Buffer.byteLength(text) > MAX_VALUE_BYTES) return "it is bigger than 1 MB";
+    if (JSON.stringify(log.scrub(value)) !== text) return "it holds something this run keeps secret";
+    return null;
+  };
+
+  // What an ask, an again or a card came to, written down so that a run that carries this one on does not do it again. Never fails the
+  // call: an answer that was paid for is not thrown away because the disk said no; the place is just done again.
+  const remember = (fields, callId) => {
+    try {
+      const why = unkeepable(fields.value);
+      if (why) {
+        log.emit("log", { level: "info", message: `${fields.id}: not kept in the journal, ${why}; a run that carries this one on does it again` });
+        return;
+      }
+      journal.append({ ...fields, runId, callId });
+      rewordFrom();
+    } catch (error) {
+      log.emit("log", { level: "warn", message: `${fields.id}: could not be written to the journal (${describeThrown(error)}); a run that carries this one on does it again` });
+    }
+  };
+
   // One agent call: `$.ask`, and `$.again`, which says whose agent it asks again (`continues`) or whose answer a new
   // agent improves on (`revises`).
   const askCall = async (step, stepInput, callOptions, again = null) => {
@@ -742,13 +829,16 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     if (Object.hasOwn(callOptions ?? {}, "mode")) {
       throw new TypeError(`$.ask: mode is gone. The step declares effects ("${step.effects}"), and runtime/fences.mjs picks the mode`);
     }
-    checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive", "check", "fixes"]);
+    checkKeys(`$.ask(${step.name})`, callOptions, ["role", "provider", "thinking", "title", "cwd", "timeout", "archive", "check", "fixes", "reuse"]);
     if (callOptions.archive !== undefined && callOptions.archive !== "after") {
       throw new TypeError(`$.ask(${step.name}): archive can only be "after" (archive the agent once the call has handed in its answer), not ${JSON.stringify(callOptions.archive)}`);
     }
-    const { check, fixes = DEFAULT_FIXES } = callOptions;
+    const { check, fixes = DEFAULT_FIXES, reuse } = callOptions;
     if (check !== undefined && typeof check !== "function") throw new TypeError(`$.ask(${step.name}): check must be a function (answer, { round }) returning the problems found, as [{ at, say }]`);
+    if (reuse !== undefined && typeof reuse !== "function") throw new TypeError(`$.ask(${step.name}): reuse must be a function (answer) returning whether the answer of an earlier run still holds`);
     if (!Number.isInteger(fixes) || fixes < 0 || fixes > MAX_FIXES) throw new TypeError(`$.ask(${step.name}): fixes is how many times the answer may be sent back to be corrected, 0 to ${MAX_FIXES} (default ${DEFAULT_FIXES})`);
+    // Named before anything is awaited: the order a flow asks in is what the names follow.
+    const journalId = again ? again.journalId : nextId("ask", step.name);
     const bound = bindRole(roster, callOptions);
     const fence = fenceFor(bound.provider, step.effects);
     const continues = again?.continues ?? null;
@@ -759,20 +849,23 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       );
     }
     const prompt = promptOf(bound, step, stepInput, again);
+    const print = again ? again.print : fingerprint({ prompt, schema: step.fingerprint, provider: bound.provider, thinking: bound.thinking, effects: step.effects });
     const timeout = callOptions.timeout ?? step.timeout ?? DEFAULT_CALL_TIMEOUT;
     parseDuration(timeout);
     // The call's own title, then the step's, then its name: one value for
     // the events and for the agent on Paseo.
     const title = sentTitle(callOptions.title ?? step.title ?? `[${step.name}]`);
     const callCwd = callOptions.cwd ?? cwd;
+    const recorded = again ? (again.reused ?? null) : await recordedAnswer(journalId, print, "ask", step, reuse);
     // Before the call exists: a wait for another run's workspace is not part of this call's time.
     // Without an affair nothing is awaited here, so such a run goes through exactly the steps it always did.
-    // (An agent asked again is where it was.)
-    const used = affair && !continues ? workspaceFor(callCwd) : null;
+    // (An agent asked again is where it was, and an answer taken from the journal starts no agent.)
+    const used = affair && !continues && !recorded ? workspaceFor(callCwd) : null;
     const workspace = used ? await used : null;
 
     const record = startCall();
-    log.emit("call.start", {
+    record.title = title;
+    const startEvent = {
       callId: record.callId,
       type: "ask",
       name: step.name,
@@ -788,10 +881,41 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       schema: step.schema,
       schemaFingerprint: step.fingerprint,
       timeout,
-      archive: callOptions.archive ?? null,
       continues: ref(continues),
       revises: ref(again?.revises ?? null),
-    });
+    };
+    // Registered under the object the flow gets, so that `$.again` finds the agent and the call it came from.
+    const answered = (value, agentId, askedBy) => {
+      if (!isPlainObject(value)) return;
+      const { role, provider, thinking, cwd: at } = callOptions;
+      answers.set(value, {
+        callId: record.callId,
+        journalId,
+        step,
+        stepInput,
+        agentId,
+        who: { role, provider, thinking },
+        cwd: at,
+        fenceMode: fence.mode,
+        check,
+        fixes: callOptions.fixes,
+        archive: askedBy,
+        text: JSON.stringify(value, null, 2),
+        file: null,
+      });
+    };
+
+    if (recorded) {
+      // Nothing is asked and nothing is archived: the agent that gave this answer is still the one `$.again` asks.
+      log.emit("call.start", { ...startEvent, archive: null, reused: reusedRef(recorded) });
+      if (recorded.agentId) announceAgent(record, recorded.agentId);
+      const value = structuredClone(recorded.value);
+      endCall(record, { ok: true, output: safe(value), error: null, agentId: recorded.agentId ?? null, cost: null, rounds: recorded.rounds ?? 1, reused: true });
+      answered(value, recorded.agentId ?? null, callOptions.archive);
+      return value;
+    }
+
+    log.emit("call.start", { ...startEvent, archive: callOptions.archive ?? null, reused: null });
     if (!fence.enforced) caveat(`effects "${step.effects}" on ${bound.provider.split("/")[0]} is not enforced: ${fence.note}`, record.callId);
     // An agent asked again is known from the start; a new one is looked for by its labels while the call runs.
     if (continues) announceAgent(record, continues.agentId);
@@ -848,21 +972,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     endCall(record, { ok: !failure, output: safe(state.value), error: failure, agentId: state.agentId, cost: state.cost, rounds: state.rounds });
     if (failure) throw failure;
     if (isPlainObject(state.value)) {
-      const { role, provider, thinking, cwd: at } = callOptions;
-      answers.set(state.value, {
-        callId: record.callId,
-        step,
-        stepInput,
-        agentId: state.agentId,
-        who: { role, provider, thinking },
-        cwd: at,
-        fenceMode: fence.mode,
-        check,
-        fixes: callOptions.fixes,
-        archive: callOptions.archive,
-        text: JSON.stringify(state.value, null, 2),
-        file: null,
-      });
+      answered(state.value, state.agentId, callOptions.archive);
+      remember({ id: journalId, kind: again ? "again" : "ask", state: "done", keyPrint: print, value: state.value, agentId: state.agentId, rounds: state.rounds, mode: again ? (continues ? "continues" : "revises") : null }, record.callId);
     }
     // Only a call that came out well, and only when the flow asked for it: a call that failed keeps its agent to be looked into.
     if (callOptions.archive === "after") await archiveAfter(record, state.agentId);
@@ -870,8 +981,10 @@ async function runClaimed(target, options, { runId, dir, claim }) {
   };
 
   // The prompt as sent. A new agent gets the role's instructions and the step's prompt; one asked again has had them.
-  // `again.text` is what the flow said about the previous version, which is in a file for whoever reads it.
+  // `again.text` is what the flow said about the previous version, which is in a file for whoever reads it. (An answer taken from the
+  // journal sends nothing: the prompt shown is what would have been, without writing a file for it.)
   const promptOf = (bound, step, stepInput, again) => {
+    if (again?.reused) return again.text === undefined ? step.for(stepInput) : again.text;
     if (again?.continues) {
       return again.text === undefined ? step.for(stepInput) : `${again.text}\n\nYour previous version is saved in ${again.file}. Reply with the complete revised answer.`;
     }
@@ -881,6 +994,71 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     }
     if (again?.handover) return composePrompt(bound, `${body}\n\nThe answer the previous agent gave to ${again.revises.step.name} is saved in ${again.file}.`);
     return composePrompt(bound, body);
+  };
+
+  // A step of the journal that is taken as it was done: the reference a call that took it says it took it from.
+  const reusedRef = (entry) => ({ runId: entry.runId, callId: entry.callId ?? null });
+
+  // The flow's own words on how this run could be carried on, made when the run ends, from how far the journal got.
+  const wordFrom = () => {
+    const done = journal.count("step") + journal.count("ask") + journal.count("again");
+    const approved = journal.count("gate", (e) => e.value?.outcome === "allowed");
+    const kept = done + approved === 0 ? "，没有可沿用的" : `，前面${done}步${approved > 0 ? `和${approved}次批准` : ""}沿用`;
+    const room = FROM_LIMIT - [...`从「」接着${kept}`].length;
+    const where = lastBad === null ? null : [...lastBad].length <= room ? lastBad : `${[...lastBad].slice(0, Math.max(1, room - 1)).join("")}…`;
+    return where === null ? `再跑一遍${kept}` : `从「${where}」接着${kept}`;
+  };
+
+  // A point whose line is the runner's is worded again when the journal has grown, so that even a run that is cut off (no run.end) has said
+  // how far it got in its last `resume` event.
+  const rewordFrom = () => {
+    if (!auto || !fromAuto || resumePoint === null) return;
+    const from = wordFrom();
+    if (from === resumePoint.from) return;
+    resumePoint = { ...resumePoint, from };
+    log.emit("resume", resumePoint);
+  };
+
+  // What the journal says of a step that cannot be undone, when it does not say it was done: it began, or failed, or its record cannot be
+  // read -- the step may have taken effect or not. A probe looks outside; it never decides by guessing.
+  const lookOutside = async (probe, name) => {
+    if (probe === undefined) return null;
+    try {
+      const found = await probe();
+      if (isPlainObject(found) && found.done === false) return { done: false };
+      if (isPlainObject(found) && found.done === true) {
+        const text = found.value === undefined ? undefined : JSON.stringify(found.value);
+        return { done: true, value: text === undefined ? undefined : JSON.parse(text) };
+      }
+      log.emit("log", { level: "warn", message: `step "${name}": its probe returned neither { done: true, value } nor { done: false }, so the step is not known to be done or not` });
+    } catch (error) {
+      log.emit("log", { level: "warn", message: `step "${name}": its probe failed (${describeThrown(error)}), so the step is not known to be done or not` });
+    }
+    return null;
+  };
+
+  // The value a step handed back, as the journal keeps it: JSON, the same on the run that made it and on the runs that take it from the journal.
+  const stepValue = (name, raw) => {
+    let text;
+    try {
+      text = raw === undefined ? undefined : JSON.stringify(raw);
+    } catch (error) {
+      throw new TypeError(`$.step("${name}"): the value cannot be written as JSON (${error.message}); a step's value is JSON, so that what a later run takes from the journal is what this one got`);
+    }
+    if (text !== undefined && Buffer.byteLength(text) > MAX_VALUE_BYTES) {
+      throw new TypeError(`$.step("${name}"): the value is bigger than 1 MB; write it to a file and return the path`);
+    }
+    return { text, value: text === undefined ? undefined : JSON.parse(text) };
+  };
+
+  // The stop is recorded now, the first one wins (see $.stop).
+  const stopNow = (reason, value = null) => {
+    const signal = new StopSignal(reason, value, currentPhase());
+    if (!ending) {
+      stopped = signal;
+      ending = true;
+    }
+    throw signal;
   };
 
   // --- Primitives -------------------------------------------------------
@@ -926,16 +1104,161 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       const archive = options.archive === undefined ? rec.archive : (options.archive ?? undefined);
       if (archive !== undefined) callOptions.archive = archive;
 
+      // Named before anything is awaited. What this asks is fingerprinted with the answer it follows, and with the agent that gave it, whose
+      // conversation it goes on with: if either is not what the journal's was given, the journal's does not answer this.
+      const journalId = nextId("again", rec.journalId);
+      const print = fingerprint({
+        prev: fingerprint(rec.text),
+        agent: fresh ? null : (rec.agentId ?? null),
+        text: stepForm ? null : text,
+        step: step.fingerprint,
+        input: stepForm ? step.for(stepInput) : null,
+        fresh,
+        who: fresh ? { role: callOptions.role, provider: callOptions.provider, thinking: callOptions.thinking, cwd: callOptions.cwd } : null,
+      });
+      const reused = await recordedAnswer(journalId, print, "again", step, undefined);
+      if (reused) {
+        const asked = { reused, journalId, print, continues: reused.mode === "continues" ? rec : null, revises: reused.mode === "revises" ? rec : null, ...(stepForm ? {} : { text }) };
+        return askCall(step, stepInput, callOptions, asked);
+      }
+
       let why = null;
       if (!fresh) {
         why = await cannotContinue(rec);
         if (why) caveat(`again: the agent of ${rec.callId} ${why}, so a new agent is asked and given the previous version`, null);
       }
       if (fresh || why) {
-        const again = { continues: null, revises: rec, file: versionFile(rec), ...(stepForm ? { handover: true } : { text }) };
+        const again = { journalId, print, continues: null, revises: rec, file: versionFile(rec), ...(stepForm ? { handover: true } : { text }) };
         return askCall(step, stepInput, callOptions, again);
       }
-      return askCall(step, stepInput, callOptions, { continues: rec, revises: null, ...(stepForm ? {} : { text, file: versionFile(rec) }) });
+      return askCall(step, stepInput, callOptions, { journalId, print, continues: rec, revises: null, ...(stepForm ? {} : { text, file: versionFile(rec) }) });
+    },
+
+    /**
+     * A step of the flow that is done once for the line of runs it belongs to: a run that carries this one on takes its value from the
+     * journal instead of doing it again, as long as its `key` is the same (and `still`, which looks at what the value stands for, agrees).
+     * `once: true` is for what cannot be taken back: the step writes that it began before it acts (after `before`, which is where a
+     * card that authorises it goes, since that is not part of the act), and a run that finds only that line does not do it again on its
+     * own: `probe` looks outside to see, and without one the run stops for a person to say (`orch.mjs settle`).
+     */
+    async step(name, fn, options = {}) {
+      if (typeof name !== "string" || name.trim() === "") throw new TypeError("$.step needs a name");
+      if (typeof fn !== "function") throw new TypeError(`$.step("${name}") needs a function`);
+      checkKeys(`$.step("${name}")`, options ?? {}, ["key", "still", "once", "probe", "before", "title"]);
+      const { key = null, still, once = false, probe, before, title = name } = options ?? {};
+      if (typeof once !== "boolean") throw new TypeError(`$.step("${name}"): once is true or false`);
+      if (still !== undefined && typeof still !== "function") throw new TypeError(`$.step("${name}"): still must be a function (value) returning whether the value of the earlier run still holds`);
+      for (const [option, value] of [["probe", probe], ["before", before]]) {
+        if (value === undefined) continue;
+        if (typeof value !== "function") throw new TypeError(`$.step("${name}"): ${option} must be a function`);
+        if (!once) throw new TypeError(`$.step("${name}"): ${option} is for a step that cannot be taken back (once: true)`);
+      }
+      if (typeof title !== "string" || title.trim() === "") throw new TypeError(`$.step("${name}"): title must be a non-empty string`);
+      if (stepNames.has(name)) {
+        throw new TypeError(`$.step("${name}"): this run already has a step by that name, and the name is what the journal knows it by; give each round of a loop its own ("${name}-2")`);
+      }
+      stepNames.add(name);
+      if (ending) throw new RunEnded();
+
+      const id = `step:${name}`;
+      const print = fingerprint(key);
+      const entry = journal.get(id);
+      const mine = entry && known(entry) && entry.kind === "step" ? entry : null;
+      const asValue = (e) => (e.undefined === true ? undefined : structuredClone(e.value));
+      // What the journal makes of this place: take the value (`taken`), do the step (`run`), or, for one that cannot be taken back, not know.
+      let verdict = "run";
+      let taken = null;
+      if (!once) {
+        if (mine?.state === "done") {
+          if (mine.keyPrint !== print) log.emit("log", { level: "info", message: `step "${name}": the journal has it from ${mine.runId}, for another key, so it is done again` });
+          else if (still && !(await still(asValue(mine)))) log.emit("log", { level: "info", message: `step "${name}": its value from ${mine.runId} no longer holds (still said so), so it is done again` });
+          else [verdict, taken] = ["taken", mine];
+        }
+      } else if (entry !== null) {
+        const settled = mine?.state === "settled";
+        if (mine && (mine.state === "done" || (settled && mine.done === true)) && mine.dropped !== true) {
+          // A step that cannot be taken back is done once whatever its key says now; the step's own word that its record does not show it took
+          // effect (a refusal that left nothing behind) is what lets it be done again.
+          if (still && !(await still(asValue(mine)))) log.emit("log", { level: "info", message: `step "${name}": its record from ${mine.runId} says it did not take effect (still said so), so it is done again` });
+          else {
+            if (mine.keyPrint !== print && mine.keyPrint !== null) log.emit("log", { level: "info", message: `step "${name}": its key is not the one it was done with in ${mine.runId}; it cannot be taken back, so it is not done again` });
+            [verdict, taken] = ["taken", mine];
+          }
+        } else if (settled && mine.done === false) {
+          verdict = "run";
+        } else {
+          verdict = "unknown";
+        }
+      }
+      if (verdict === "unknown") {
+        const found = await lookOutside(probe, name);
+        const from = { runId: entry.runId ?? runId, callId: entry.callId ?? null };
+        if (found?.done === true) {
+          taken = journal.append({ id, kind: "step", state: "settled", done: true, once: true, keyPrint: print, ...(found.value === undefined ? { undefined: true } : { value: found.value }), by: "probe", ...from }, { sync: true });
+          verdict = "taken";
+        } else if (found?.done === false) {
+          journal.append({ id, kind: "step", state: "settled", done: false, once: true, keyPrint: print, by: "probe", ...from }, { sync: true });
+          verdict = "run";
+        } else {
+          lastBad = title;
+          return stopNow(
+            `「${title}」可能已经做了、也可能没做（它开始过，没有留下结果）：去外面查一下，用 orch.mjs settle ${runId} ${name} --done '<值的 JSON>' 或 --not-done 了结，再接着跑`,
+            { step: name, unknown: true },
+          );
+        }
+      }
+
+      const record = startCall();
+      record.title = title;
+      log.emit("call.start", { callId: record.callId, type: "step", name, title, phase: currentPhase(), once, key: shortPrint(print), reused: taken ? reusedRef(taken) : null });
+      if (taken) {
+        const value = asValue(taken);
+        endCall(record, { ok: true, output: safe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
+        return value;
+      }
+      let began = false;
+      try {
+        const raw = await stepScope.run(name, async () => {
+          const given = before ? await before() : undefined;
+          if (once) {
+            // Written and on the disk before the act: from here, whatever happens, a run that finds this line knows the step may have taken effect.
+            journal.append({ id, kind: "step", state: "begun", once: true, keyPrint: print, runId, callId: record.callId }, { sync: true });
+            began = true;
+          }
+          return fn(given);
+        });
+        let kept;
+        try {
+          kept = stepValue(name, raw);
+        } catch (error) {
+          // The act is done and its value cannot be kept: said so in the journal, so that a later run does not take the step for undone.
+          if (began) journal.append({ id, kind: "step", state: "done", once: true, keyPrint: print, dropped: true, runId, callId: record.callId }, { sync: true });
+          throw error;
+        }
+        const secret = kept.text !== undefined && JSON.stringify(log.scrub(kept.value)) !== kept.text;
+        const fields = { id, kind: "step", state: "done", once, keyPrint: print, runId, callId: record.callId };
+        try {
+          if (secret && !once) log.emit("log", { level: "info", message: `step "${name}": its value holds something this run keeps secret, so it is not kept in the journal and a run that carries this one on does the step again` });
+          else {
+            journal.append({ ...fields, ...(secret ? { dropped: true } : kept.value === undefined ? { undefined: true } : { value: kept.value }) }, { sync: once });
+            rewordFrom();
+          }
+        } catch (error) {
+          log.emit("log", { level: "warn", message: `step "${name}": could not be written to the journal (${describeThrown(error)}); ${once ? "a run that carries this one on will not know it was done" : "a run that carries this one on does it again"}` });
+        }
+        endCall(record, { ok: true, output: safe(kept.value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
+        return kept.value;
+      } catch (error) {
+        if (began) {
+          try {
+            journal.append({ id, kind: "step", state: "failed", once: true, keyPrint: print, error: log.scrub(errorOf(error)), runId, callId: record.callId }, { sync: true });
+          } catch {
+            // The `begun` line is there: the step is read as one that may have been done, which is what a failure leaves.
+          }
+        }
+        endCall(record, { ok: false, output: null, error, agentId: null, cost: null });
+        throw error;
+      }
     },
 
     /** The flow's own deterministic action: read, run a CLI, write. Returns fn's value. */
@@ -946,6 +1269,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       const { title = name } = doOptions ?? {};
       if (typeof title !== "string" || title.trim() === "") throw new TypeError(`$.do("${name}"): title must be a non-empty string`);
       const record = startCall();
+      record.title = title;
       log.emit("call.start", { callId: record.callId, type: "do", name, title, phase: currentPhase() });
       try {
         const value = await fn();
@@ -985,23 +1309,32 @@ async function runClaimed(target, options, { runId, dir, claim }) {
       if (input && carrier !== "provider") {
         throw new TypeError(`$.gate: a gate that asks for a value needs the orch-gate provider as its carrier, but role "${GATE_ROLE}" is ${bound.provider}`);
       }
+      // One line: it heads the provider's three-line prompt, and a line break in it could pass for a pointer.
+      const oneLineTitle = sentTitle(title.replace(/\s+/g, " ").trim());
+      // A card a person answered in an earlier run of this line is not put to them again when it is the same card (same title, same
+      // content): their word stands, so that the flow goes the way it went. Expired or broken cards, and a card that asks for a value
+      // (which is kept nowhere), are asked afresh. Named before anything is awaited, like the asks.
+      const gateId = nextId("gate");
+      const print = fingerprint({ title: oneLineTitle, digest: contentDigest(content) });
+      const earlier = input === null ? journal.get(gateId) : null;
+      const taken = earlier && known(earlier) && earlier.kind === "gate" && earlier.state === "done" && earlier.keyPrint === print && ["allowed", "denied"].includes(earlier.value?.outcome) ? earlier : null;
+
       // The provider's card needs nothing of its directory (its prompt gives absolute paths), so it goes
       // with the run's own agents. A model carrier writes the receipt itself and stays where it was.
       // Resolved before the receipt path is looked at and claimed, not between the two: the wait would
       // let a parallel gate with the same path through the look. (No affair: nothing is awaited.)
-      const used = affair && carrier === "provider" ? workspaceFor(cwd) : null;
+      const used = affair && carrier === "provider" && !taken ? workspaceFor(cwd) : null;
       const workspace = used ? await used : null;
 
       // Two gates on one receipt path would remove each other's receipt (each starts by clearing its own).
       if (request.holdPath !== undefined && gateHolds.has(path.resolve(request.holdPath))) {
         throw new TypeError(`$.gate: holdPath ${request.holdPath} is already another gate's in this run`);
       }
-      // One line: it heads the provider's three-line prompt, and a line break in it could pass for a pointer.
-      const oneLineTitle = sentTitle(title.replace(/\s+/g, " ").trim());
 
       const record = startCall();
+      record.title = oneLineTitle;
       const holdPath = request.holdPath ?? path.join(runDir, "gate", `${record.callId}.receipt.txt`);
-      gateHolds.add(path.resolve(holdPath));
+      if (!taken) gateHolds.add(path.resolve(holdPath));
       const prepared = prepareGate({
         carrier,
         holdPath,
@@ -1038,7 +1371,14 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         receipt: prepared.receipt,
         requestPath: prepared.requestPath,
         ...(input ? { input } : {}),
+        reused: taken ? reusedRef(taken) : null,
       });
+      if (taken) {
+        // Nothing is asked: the card was answered before, and what the person said is what the flow gets, with the answer's own time and words.
+        const decision = structuredClone(taken.value);
+        endCall(record, { ok: true, output: decision, error: null, agentId: null, cost: null });
+        return decision;
+      }
       if (input) {
         caveat(
           "gate input: the value is typed into a Paseo card, so Paseo's own record of that answer may hold it. " +
@@ -1099,8 +1439,9 @@ async function runClaimed(target, options, { runId, dir, claim }) {
         // The flow gets the value; the record gets a stand-in when it is a secret, and from here on
         // nothing the run writes may carry it (EventLog scrubs it wherever it turns up).
         if (typeof decision.input === "string" && input?.secret) log.addSecret(decision.input);
-        const recorded = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
-        endCall(record, { ok: true, output: recorded, error: null, ...(await settleAgent(record)) });
+        const shown = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
+        endCall(record, { ok: true, output: shown, error: null, ...(await settleAgent(record)) });
+        if (input === null && ["allowed", "denied"].includes(decision.outcome)) remember({ id: gateId, kind: "gate", state: "done", keyPrint: print, value: decision }, record.callId);
         return decision;
       } finally {
         openGates.delete(entry);
@@ -1156,12 +1497,7 @@ async function runClaimed(target, options, { runId, dir, claim }) {
      */
     stop(reason, value = null) {
       if (typeof reason !== "string" || reason.trim() === "") throw new TypeError("$.stop needs a reason");
-      const signal = new StopSignal(reason, value, currentPhase());
-      if (!ending) {
-        stopped = signal;
-        ending = true;
-      }
-      throw signal;
+      return stopNow(reason, value);
     },
 
     /**
@@ -1191,20 +1527,21 @@ async function runClaimed(target, options, { runId, dir, claim }) {
      * there. `role(name)` resolves a role or throws -- a flow that takes a
      * role as input checks it here, before its first spend.
      */
-    ctx: Object.freeze({ runId, caller, cwd, host, runDir, events: log.file, role }),
+    ctx: Object.freeze({ runId, caller, cwd, host, runDir, events: log.file, role, lineage, lineDir: path.join(dir, "runs", lineage), resumed: resumeOf !== null }),
   });
 
   // --- Run and settle -----------------------------------------------------
   const startedAt = Date.now();
   // pid and hostname let a reader on the same machine ask whether the run is
   // still alive instead of guessing from the time of the last event.
-  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint });
+  log.emit("run.start", { flow: describeFlow(f), source, input, caller, cwd, host, pid: process.pid, hostname: os.hostname(), affair, resumeOf, resumePrint, lineage, redo });
 
   let outcome;
   let value = null;
   let stop = null;
   let error = null;
   let timer = null;
+  if (auto) resumeChain = resumeChain.then(() => declareResume({}));
   const running = Promise.resolve().then(() => f.run(input, $));
   // Past a timeout the flow keeps going in the background; its eventual
   // failure has nowhere to go and must not crash the process.
@@ -1282,6 +1619,8 @@ async function runClaimed(target, options, { runId, dir, claim }) {
     for (let i = 0; i < depth; i += 1) log.emit("phase.end", { phase: id, ok: false });
   }
   openPhases.clear();
+
+  if (outcome !== "done") rewordFrom();
 
   const cost =
     spent.size > 0

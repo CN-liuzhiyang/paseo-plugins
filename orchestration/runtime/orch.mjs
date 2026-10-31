@@ -4,16 +4,23 @@
 //                                        [--host ssh://user@box --cwd /path/on/box]
 //                                        [--run-id <id>] [--affair <json | @file>]
 //   node runtime/orch.mjs resume <runId> [--run-id <id>] [--affair <json | @file>] [--timeout 2h]
-//                                        [--host ssh://user@box --cwd /path/on/box] [--expect <print>]
+//                                        [--host ssh://user@box --cwd /path/on/box] [--expect <print>] [--redo <step>]
+//   node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done
+//   node runtime/orch.mjs steps <runId>
 //   node runtime/orch.mjs check <flow.mjs | name>
 //   node runtime/orch.mjs list
 //
 // `resume` carries on a run that stopped, failed, timed out or was cut off, from the resume point its flow declared
 // (`$.resumeWith`, CONVENTIONS.md "接着跑"): it starts the flow that point names, with its input, as a new run whose
 // run.start says `resumeOf: <runId>`. The affair, the directory and the host are the earlier run's unless given again.
-// One stop is carried on once (resume.mjs). `--expect <print>` is for a caller that showed a person the point (its flow and input are the
+// One stop is carried on once (resume.mjs). What the earlier runs of the line did is in their journal (journal.mjs) and is not done again;
+// `--redo <step>` does that step, and what came after it that can be taken back, again. `--expect <print>` is for a caller that showed a person the point (its flow and input are the
 // ones `resume-point.mjs` `pointPrint` fingerprints): if the point the run left says another now, nothing is started. It prints what `run`
 // prints and exits the same way.
+//
+// `steps` prints what the journal of a run's line holds, one entry per place in the flow. `settle` says how a step that cannot be taken back
+// (`once`) ended when it began and left no word of how: that it was done (with the value it would have returned) or that it was not. Only
+// such a step can be settled, and only once the run that began it is no longer working.
 //
 // `list` prints the flows that exist -- the shipped ones and those in `flowsDirs` -- as JSON: name,
 // description, phases, inputs, where the file is, and why a file that is not a usable flow is not
@@ -50,14 +57,19 @@ import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
 import { resolveFlowFile, resolveTarget } from "./resolve.mjs";
 import { listFlows } from "./catalog.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
-import { claimResumption, readResumePoint, ResumeRefused } from "./resume.mjs";
+import { claimResumption, lineageOf, readResumePoint, ResumeRefused } from "./resume.mjs";
+import { Journal, JournalError, known } from "./journal.mjs";
+import { eventsFile, readEvents } from "./events.mjs";
+import { readRunState } from "./state.mjs";
 import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
 
 const USAGE = [
   "Usage:",
   "  node runtime/orch.mjs run <flow.mjs | name> [--input <json | @file>] [--<input-name> value ...] [--timeout 2h] [--host <host> --cwd <dir>]",
   "                                              [--run-id <id>] [--affair <json | @file>]",
-  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>] [--expect <print>]",
+  "  node runtime/orch.mjs resume <runId> [--timeout 2h] [--run-id <id>] [--affair <json | @file>] [--host <host> --cwd <dir>] [--expect <print>] [--redo <step>]",
+  "  node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done",
+  "  node runtime/orch.mjs steps <runId>",
   "  node runtime/orch.mjs check <flow.mjs | name>",
   "  node runtime/orch.mjs list",
 ].join("\n");
@@ -207,7 +219,7 @@ async function run(name, argv) {
  * What follows `resume <runId>`: the flags of a run that do not belong to a flow's input. Exported for the tests; throws UsageError.
  */
 export async function parseResumeArgs(argv) {
-  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, expect: { type: "string" } };
+  const all = { timeout: { type: "string" }, host: { type: "string" }, cwd: { type: "string" }, "run-id": { type: "string" }, affair: { type: "string" }, expect: { type: "string" }, redo: { type: "string" } };
   // As for a run: a value-taking flag takes the next argument whatever it starts with.
   const joined = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -224,7 +236,7 @@ export async function parseResumeArgs(argv) {
     parsed = parseArgs({ args: joined, options: all, allowPositionals: false, strict: true });
   } catch (error) {
     throw new UsageError(`${error.message}
-The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd, --expect`);
+The input is the one the earlier run's flow declared, not a flag: resume takes --timeout, --run-id, --affair, --host, --cwd, --expect, --redo`);
   }
   const given = {};
   if (parsed.values["run-id"] !== undefined) given.runId = parsed.values["run-id"];
@@ -232,6 +244,10 @@ The input is the one the earlier run's flow declared, not a flag: resume takes -
   if (parsed.values.expect !== undefined) {
     if (!PRINT_SHAPE.test(parsed.values.expect)) throw new UsageError("--expect is the 16 hex digits of the fingerprint of the point a caller showed (pointPrint)");
     given.expect = parsed.values.expect;
+  }
+  if (parsed.values.redo !== undefined) {
+    if (parsed.values.redo.trim() === "") throw new UsageError("--redo is the name of a step of the run's journal (orch.mjs steps <runId> lists them)");
+    given.redo = parsed.values.redo;
   }
   return { timeout: parsed.values.timeout ?? null, host: parsed.values.host ?? null, cwd: parsed.values.cwd ?? null, ...given };
 }
@@ -250,7 +266,7 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
   const requested = peekRunId(argv);
   const taken = takeRunId({ runId: requested, logDir });
   try {
-    const { timeout, host, cwd, runId, affair, expect } = await parseResumeArgs(argv);
+    const { timeout, host, cwd, runId, affair, expect, redo } = await parseResumeArgs(argv);
     if (runId !== undefined && runId !== taken.runId) throw new UsageError(`--run-id is ambiguous: ${JSON.stringify(taken.runId)} was claimed, the flags say ${JSON.stringify(runId)}`);
     const { start, point } = readResumePoint({ dir: logDir, runId: previous });
     const target = resolveFlowFile(point.flow);
@@ -261,6 +277,17 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
       throw new ResumeRefused(
         `the resume point of run ${previous} is not the one that was shown: it now names flow "${point.flow}" (${JSON.stringify(point.from)}) with a flow or input other than the one expected. Look at the run again before carrying it on`,
       );
+    }
+    // The run is one of a line that shares a journal. A step to do again is looked for before the stop is taken: a name that is not there
+    // must not use up the once a stop is carried on.
+    const lineage = lineageOf(start, previous);
+    if (redo !== undefined) {
+      try {
+        new Journal({ dir: logDir, lineage, redo });
+      } catch (error) {
+        if (error instanceof JournalError) throw new ResumeRefused(error.message);
+        throw error;
+      }
     }
     claimResumption({ dir: logDir, runId: previous, by: taken.runId });
     // From here the id is named in a .resumed file, so somebody does look it up -- the next caller, to see whether this start came to
@@ -276,6 +303,8 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
       logDir,
       resumeOf: previous,
       resumePrint: print,
+      lineage,
+      ...(redo !== undefined ? { redo } : {}),
       taken,
       affair: affair !== undefined ? affair : earlier.affair,
       ...((cwd ?? earlier.cwd) ? { cwd: cwd ?? earlier.cwd } : {}),
@@ -285,6 +314,101 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
     settleRefusal(taken, error);
     throw error;
   }
+}
+
+/** The journal of the line a run belongs to, found through the run's own run.start. */
+function journalOf(dir, runId) {
+  let start;
+  try {
+    start = readEvents(eventsFile(dir, runId))[0];
+  } catch (error) {
+    throw new UsageError(`run ${runId} has no events to read in ${dir} (${error.code ?? error.message}); the log directory is ORCH_LOG_DIR, then config.json's logDir`);
+  }
+  if (start?.kind !== "run.start") throw new UsageError(`the events of run ${runId} do not begin with run.start`);
+  return new Journal({ dir, lineage: lineageOf(start, runId) });
+}
+
+/** What a journal holds, for a person: one row per place in the flow, in the order they were last written. */
+export function listSteps(runId, { logDir = configuredLogDir() } = {}) {
+  const journal = journalOf(logDir, runId);
+  const brief = (e) => ({
+    id: e.id,
+    kind: e.kind,
+    state: e.state,
+    once: e.once === true,
+    ...(e.state === "settled" ? { done: e.done, by: e.by } : {}),
+    key: typeof e.keyPrint === "string" ? e.keyPrint.slice(0, 16) : null,
+    runId: e.runId ?? null,
+    callId: e.callId ?? null,
+    at: e.at ?? null,
+  });
+  return { lineage: journal.lineage, entries: journal.steps().map(brief) };
+}
+
+/** The step could not be settled. Nothing was written. */
+export class SettleRefused extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "SettleRefused";
+  }
+}
+
+/**
+ * Say how a step that cannot be taken back ended, when its run left no word of it: `--done <json>` (it took effect; the JSON is the
+ * value it would have returned) or `--not-done`. A later run of the line takes the one or does the other. Refused for a step that is
+ * not in that state, and while the run that began it may still be working.
+ */
+export function settleRun(runId, argv, { logDir = configuredLogDir() } = {}) {
+  let parsed;
+  try {
+    parsed = parseArgs({ args: argv, options: { done: { type: "string" }, "not-done": { type: "boolean" } }, allowPositionals: true, strict: true });
+  } catch (error) {
+    throw new UsageError(error.message);
+  }
+  const [step, ...extra] = parsed.positionals;
+  if (!step || extra.length > 0) throw new UsageError("settle takes the run id, the step's name, and --done <json> or --not-done");
+  const { done: doneText, "not-done": notDone } = parsed.values;
+  if ((doneText === undefined) === (notDone !== true)) throw new UsageError("say either --done <json> or --not-done");
+  let value;
+  if (doneText !== undefined) {
+    try {
+      value = JSON.parse(doneText);
+    } catch (error) {
+      throw new UsageError(`--done is the step's value as JSON (${error.message})`);
+    }
+  }
+  const journal = journalOf(logDir, runId);
+  const id = `step:${step}`;
+  const entry = journal.get(id);
+  if (!entry) throw new SettleRefused(`there is no step "${step}" in the journal of this line of runs (orch.mjs steps ${runId} lists them)`);
+  const undecided = !known(entry) || (entry.once === true && (entry.state === "begun" || entry.state === "failed" || (entry.state === "done" && entry.dropped === true)));
+  if (!undecided) {
+    throw new SettleRefused(
+      `step "${step}" is ${entry.state}${entry.state === "settled" ? (entry.done ? " as done" : " as not done") : ""}, not a step that may or may not have been done; only such a step is settled`,
+    );
+  }
+  if (typeof entry.runId === "string") {
+    const state = readRunState({ dir: logDir, runId: entry.runId });
+    if (!(state.state === "ended" || (state.state === "lost" && state.processAlive === false))) {
+      throw new SettleRefused(`run ${entry.runId}, which began step "${step}", is not known to be over (${state.state}); settle it once that run has ended or its process is gone`);
+    }
+  }
+  const settled = journal.append(
+    {
+      id,
+      kind: "step",
+      state: "settled",
+      done: doneText !== undefined,
+      once: true,
+      keyPrint: typeof entry.keyPrint === "string" ? entry.keyPrint : null,
+      ...(doneText !== undefined ? (value === undefined ? { undefined: true } : { value }) : {}),
+      by: "cli",
+      runId: typeof entry.runId === "string" ? entry.runId : runId,
+      callId: entry.callId ?? null,
+    },
+    { sync: true },
+  );
+  return { ok: true, lineage: journal.lineage, step, settled: settled.done ? "done" : "not-done", id };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -301,7 +425,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   }
 
-  if (!["run", "check", "resume"].includes(command) || !target) {
+  if (!["run", "check", "resume", "settle", "steps"].includes(command) || !target) {
     console.error(USAGE);
     process.exit(2);
   }
@@ -312,6 +436,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       const result = await checkFlow(resolveTarget(target));
       print(result);
       process.exit(result.ok ? 0 : 2);
+    }
+    if (command === "steps") {
+      if (rest.length > 0) throw new UsageError(`steps takes only the run id, got ${rest.join(" ")}`);
+      print(listSteps(target));
+      process.exit(0);
+    }
+    if (command === "settle") {
+      print(settleRun(target, rest));
+      process.exit(0);
     }
     const result = command === "resume" ? await resumeRun(target, rest) : await run(target, rest);
     print(result);

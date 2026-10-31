@@ -18,12 +18,13 @@ runtime/
   flow.d.mts     写 flow 用的类型
   step.mjs       step 定义、schema 构造器、输入校验
   run.mjs        运行器：$ 原语、事件、成本、caveats、收尾
-  orch.mjs       命令行：run / resume / check / list
+  orch.mjs       命令行：run / resume / settle / steps / check / list
   fences.mjs     栅栏表：effects -> 各 provider 的 mode
   events.mjs     事件写入、读取、契约校验
   claim.mjs      运行 id 的占位文件：原子占位、心跳、被拒的原因
   resume.mjs     接着跑：读上一段留下的续跑点、检查它、一次停下只被接一次（`<runId>.resumed` 占位）；`orch.mjs resume` 用它
   resume-point.mjs  续跑点 `{ flow, input, from, spends }` 的形状和校验（运行器、契约检查、`resume` 共用）
+  journal.mjs    一条"线"（一个运行加上接着它跑的那些）做过的事：`$.step` 的值、`$.ask`/`$.again` 的答案、人答过的卡；追加的 `runs/<线>/journal.jsonl`
   liveness.mjs   活着的判断本身：表（classify）、pid 只证明死亡（pidFact）、活着但安静多久算"可能卡住"（staleAfterMs）；
                  没有 import 的单文件，装在别处的插件带一份拷贝（npm run sync:liveness）
   state.mjs      一次运行处在什么状态（读占位和事件文件）：调用方判断活没活着、能不能重起，只用它
@@ -140,7 +141,9 @@ node runtime/orch.mjs run triage --run-id item-123-1   --affair '{"label":"事�
 在 [CONVENTIONS.md](CONVENTIONS.md)「接着跑」，事件在 [EVENTS.md](EVENTS.md)。
 
 ```bash
-node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>]
+node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>] [--redo <步骤>]
+node runtime/orch.mjs steps <runId>                                  # 这条线的日志里记了什么
+node runtime/orch.mjs settle <runId> <步骤> --done '<值的 JSON>' | --not-done   # 了结一个"可能做了也可能没做"的步骤
 ```
 
 - 起的是声明里的流程和输入，是一次**新的运行**，`run.start.resumeOf` 是上一段的 runId。上一段的事项（`affair`）、
@@ -154,7 +157,10 @@ node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新
 - **没有 `run.end` 的运行**（进程被杀、机器重启）只有在确知进程已经没了时才接：占位过期**并且**同一台机器上 pid 不在。
   占位只是过期（机器睡着了、进程被挂起）、或者在别的机器上，一律拒绝：两个进程同时动一个工作目录，比多花一次钱糟。
 - 清日志时 `.resumed` 和 `.claim`、`.jsonl` 一样要成对处理：删掉它就等于把"这次停下已经被接过"忘了。
-- 要试一遍不花钱的：`flows/resume-smoke.mjs`（两段，各一张人闸卡，第一段停下并声明第二段）。
+- **前面做过的不重做。** 流程用 `$.step` 把一件事圈出来，`$.ask`、`$.gate` 本来就是可沿用的：同一条线上的运行共用一份日志，接着跑的运行从日志里拿
+  值、答案、人答过的卡，而不是再做、再花钱、再问人。不能撤回的步骤（`once`）开始前先落盘，开始了没有结果就不凭猜测再做一遍，停下等人用 `settle` 了结。
+  声明 `resume: "auto"` 的流程，"接着跑"就是用同样的输入再跑一遍。规范见 [CONVENTIONS.md](CONVENTIONS.md)「做过的事不重做」。
+- 要试一遍不花钱的：`flows/resume-smoke.mjs`（`resume: "auto"`，两段，各一张人闸卡：第一段停下，接着跑时第一段的步骤和卡沿用，起第二张卡）。
 
 ## 数据不在这里
 

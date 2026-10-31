@@ -63,9 +63,9 @@ function fail(name, message) {
  */
 export function flow(definition) {
   if (!definition || typeof definition !== "object") throw new TypeError("flow() needs a definition object");
-  const { name, description, phases, inputs, grants, run, summarize } = definition;
+  const { name, description, phases, inputs, grants, run, summarize, resume } = definition;
 
-  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize"].includes(key));
+  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize", "resume"].includes(key));
   if (unknown.length > 0) fail(name, `unknown key ${unknown.join(", ")}`);
   if (typeof name !== "string" || !ID.test(name)) fail(name, `name must match ${ID}`);
   if (typeof description !== "string" || description.trim() === "") fail(name, "description is required");
@@ -110,6 +110,9 @@ export function flow(definition) {
   if (summarize !== undefined && typeof summarize !== "function") {
     fail(name, "summarize must be a function (value, { outcome }) => string");
   }
+  // "auto" is the flow's promise that everything it cannot take back is in a `once` step (CONVENTIONS.md): only then is running
+  // it again, with the same input, a way to carry it on.
+  if (resume !== undefined && resume !== "auto") fail(name, 'resume is "auto" or left out');
 
   return Object.freeze({
     [FLOW]: true,
@@ -120,6 +123,7 @@ export function flow(definition) {
     grants: Object.freeze([...grants]),
     run,
     summarize: summarize ?? null,
+    resume: resume ?? null,
   });
 }
 

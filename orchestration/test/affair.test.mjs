@@ -52,7 +52,8 @@ test("run id: the caller's id names the files, and the claim says who holds it",
   const done = await result;
   assert.equal(done.runId, "release-24.attempt_1");
   assert.equal(done.events, eventsFile(dir, "release-24.attempt_1"));
-  assert.deepEqual(await names(dir), ["release-24.attempt_1.claim", "release-24.attempt_1.jsonl"]);
+  // (The directory is the run's journal: what it asked is kept there for a run that carries it on.)
+  assert.deepEqual(await names(dir), ["release-24.attempt_1", "release-24.attempt_1.claim", "release-24.attempt_1.jsonl"]);
 
   const events = readEvents(done.events);
   assert.deepEqual(checkEvents(events, { strict: true, complete: true }), []);
@@ -69,7 +70,7 @@ test("run id: the caller's id names the files, and the claim says who holds it",
 test("run id: a generated id still takes a claim, and the claim is not touched after the run", async () => {
   const dir = await tmp("generated");
   const done = await advise(dir).result;
-  assert.deepEqual(await names(dir), [`${done.runId}.claim`, `${done.runId}.jsonl`]);
+  assert.deepEqual(await names(dir), [done.runId, `${done.runId}.claim`, `${done.runId}.jsonl`]);
 });
 
 test("run id: a malformed id is refused, and nothing is created for it", async () => {

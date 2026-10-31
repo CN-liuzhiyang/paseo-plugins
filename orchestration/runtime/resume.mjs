@@ -33,6 +33,9 @@ export class ResumeRefused extends Error {
   }
 }
 
+/** The line of runs a run belongs to: the first run of it, which `run.start.lineage` says (a run written before there were lines is its own). */
+export const lineageOf = (start, runId) => (typeof start?.lineage === "string" && start.lineage !== "" ? start.lineage : runId);
+
 /** `<logDir>/runs/<runId>.resumed`, then `.resumed.2`, `.resumed.3` ... */
 export const resumedFile = (dir, runId, attempt = 1) => path.join(dir, "runs", attempt === 1 ? `${runId}.resumed` : `${runId}.resumed.${attempt}`);
 

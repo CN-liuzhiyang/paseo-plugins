@@ -107,6 +107,11 @@ export interface AskOptions<Out = unknown> {
    * handed back are in the run's events, so the agent is not a place anyone needs to open. Absent: it is left for a person to archive.
    */
   archive?: "after";
+  /**
+   * In a run that carries another on, the answer the earlier run got to the same question is taken from the journal instead of asking
+   * again. For a step with `effects: "workspace"` that happens only if this says the files are still as the answer left them.
+   */
+  reuse?: (answer: Out) => boolean | Promise<boolean>;
   /** Gone: the step's `effects` choose the mode, through runtime/fences.mjs. */
   mode?: never;
 }
@@ -126,6 +131,23 @@ export interface AgainOptions<Out = unknown> {
   fixes?: number;
   /** Default: the previous call's. `null` turns it off. */
   archive?: "after" | null;
+}
+
+/** What a step's `probe` finds out about a step that may or may not have been done. */
+export type ProbeResult<T> = { done: true; value: T } | { done: false };
+
+export interface StepOptions<T, B = undefined> {
+  /** What the step depends on: anything JSON. A run that carries this one on takes the step from the journal only if the key is the same. */
+  key?: unknown;
+  /** Looks at the value of an earlier run; false does the step again (a copy someone changed, a result that did not take effect). */
+  still?: (value: T) => boolean | Promise<boolean>;
+  /** The step cannot be taken back: it is written as begun before it acts, and never done again on a guess. */
+  once?: boolean;
+  /** With `once`: looks outside to see whether a step that began and left no word was done. Without one the run stops for a person (`orch.mjs settle`). */
+  probe?: () => ProbeResult<T> | Promise<ProbeResult<T>>;
+  /** With `once`: what authorises the step (a card), run before it is written as begun and handed to `fn`. It is not kept. */
+  before?: () => B | Promise<B>;
+  title?: string;
 }
 
 export interface GateEvidence {
@@ -205,6 +227,12 @@ export interface RunContext {
   readonly runDir: string;
   /** This run's events file. */
   readonly events: string;
+  /** The first run of the line of runs this one belongs to (its own id when it carries nothing on): the line shares a journal. */
+  readonly lineage: string;
+  /** `<logDir>/runs/<lineage>/`: where the line's files may go, the same in every run of it. */
+  readonly lineDir: string;
+  /** Whether this run carries another on. */
+  readonly resumed: boolean;
   /** Resolve a role, or throw if there is none by that name. */
   role(name: string): { role: string | null; provider: string; thinking: string | null };
 }
@@ -236,6 +264,12 @@ export interface Dollar<PhaseId extends string> {
    */
   again<Out>(prev: Out, text: string, options?: AgainOptions<Out>): Promise<Out>;
   again<Out, In>(prev: unknown, step: Step<Out, In>, input: In, options?: AgainOptions<Out>): Promise<Out>;
+  /**
+   * A step done once for the line of runs: a run that carries this one on takes its value from the journal. The value is JSON (what comes
+   * back is what a later run gets too), at most 1 MB. A step's name is its identity and is used once per run. Inside, `$.ask`, `$.gate` and
+   * more steps work as anywhere; when the step is taken from the journal none of them runs.
+   */
+  step<T, B = undefined>(name: string, fn: (before: B) => T | Promise<T>, options?: StepOptions<T, B>): Promise<T>;
   do<T>(name: string, fn: () => T | Promise<T>, options?: { title?: string }): Promise<T>;
   gate(request: GateRequest): Promise<GateDecision>;
   phase<T>(id: PhaseId, fn: () => T | Promise<T>): Promise<T>;
@@ -246,6 +280,8 @@ export interface Dollar<PhaseId extends string> {
    * does not fit is a warning and a caveat, not a failed run, and the one before it stands. A run that comes to done records none.
    */
   resumeWith<const N extends string>(point: ResumePoint<N> | null): Promise<void>;
+  /** In a flow with `resume: "auto"`: only what differs from running this flow again with the same input (another flow is the whole point above). */
+  resumeWith(point: { input?: object; from?: string; spends?: "nothing" | "maybe" }): Promise<void>;
   readonly log: {
     info(...args: unknown[]): void;
     warn(...args: unknown[]): void;
@@ -262,6 +298,7 @@ export interface Flow<I extends Fields, R> {
   readonly grants: readonly Grant[];
   run(input: Shape<I>, $: Dollar<string>): Promise<R>;
   readonly summarize: Summarize | null;
+  readonly resume: "auto" | null;
 }
 
 /**
@@ -278,6 +315,11 @@ export function flow<I extends Fields, const P extends readonly Phase[], R>(defi
   grants: readonly Grant[];
   run(input: Shape<I>, $: Dollar<P[number]["id"]>): Promise<R>;
   summarize?: Summarize;
+  /**
+   * "auto": a run that does not come to its end is carried on by running this flow again with the same input; what the earlier runs did is
+   * taken from the journal. The flow promises that everything it cannot take back is in a `once` step.
+   */
+  resume?: "auto";
 }): Flow<I, R>;
 
 export function isFlow(value: unknown): value is Flow<Fields, unknown>;
