@@ -183,8 +183,8 @@ export default flow({
 });
 ```
 
-- **谁沿用**：同一条线（`run.start.lineage`，一个运行和接着它跑的那些）里，`$.step` 按名字和 `key` 的指纹，`$.ask` / `$.again` 按提示词、schema、角色的指纹，`$.gate` 按标题和内容的指纹。
-  依据变了就重做、重问。`$.do` 不记，每次都做——有副作用的、不能重做的事不要放在 `$.do` 里再指望接着跑。
+- **谁沿用**：同一条线（`run.start.lineage`，一个运行和接着它跑的那些）里，`$.step` 按名字和 `key` 的指纹，`$.ask` / `$.again` 按提示词、schema、角色、问的目录和主机的指纹（`$.again` 还有它接着的那份答案和那个问题），`$.gate` 按标题和内容的指纹。
+  依据变了就重做、重问。沿用的答案还要通过**这一次**的 `check`，不通过就作废、重新问。`$.do` 不记，每次都做——有副作用的、不能重做的事不要放在 `$.do` 里再指望接着跑。
 - **`$.ask` 默认沿用**（`effects: "none"` 的）。会改文件的 agent（`effects: "workspace"`）答案说明不了文件现在的样子，默认重问；流程能核对文件还在，就给 `reuse: (answer) => 文件还对`。
 - **人答过的卡不再问第二遍**：批了、不批都算，内容指纹要一样。过期、出错的，和带 `input` 的卡（验证码）每次重新问；值本身哪里都不记。
 - **授权不可逆步骤的卡放进它的 `before`**，不要放在它前面的流程里，更不要放进一个包着它的普通 `$.step`。带 `input`（验证码）的卡每次都重新问，所以放在外面的话，
@@ -197,6 +197,12 @@ export default flow({
   去外面看一眼，`orch.mjs settle <runId> <步骤> --done '<值的 JSON>'` 或 `--not-done`，再接着跑。
 - **要重做某一步**：`orch.mjs resume <runId> --redo <步骤>`——这一步和它之后能撤回的（普通步骤、`$.ask`）都当没有；`once` 的和人答过的卡不动。`orch.mjs steps <runId>` 看这条线上记了什么。
 - 一个 `$.step` 里面的 `$.ask`、`$.gate` 也进日志，名字带着这一步的名字，所以被沿用的步骤不会把后面的名字挤歪。步骤被沿用时，里面的代码一行都不跑。
+- **同一条线同一时刻只有一个运行在写**：运行开始时取这条线的锁（`<logDir>/lines/<lineage>.lock`），取不到就被拒绝；超时或别的分支 `$.stop` 之后，还在动作里的撤不回的步骤会让锁留到它返回，所以 `run.end` 之后马上接着跑可能被拒，过一会儿再试（EVENTS.md「同一条线只有一个运行在写」）。
+- **`$.step` 和 `$.again` 一起用的限制**：`$.step` 把值规范成 JSON，交回来的是一份拷贝；`$.again(prev, …)` 只认 `$.ask` / `$.again` 交回的**那个对象**（它靠对象找到 agent 和上一问）。
+  所以 `const plan = await $.step("plan", () => $.ask(...)); await $.again(plan, "改")` 会失败。可行的写法：
+  - 把追问也放进同一个步骤：`$.step("plan", async () => { const a = await $.ask(step, input, opts); return $.again(a, "改"); })`——步骤的值是最后那版答案；
+  - 或者不要把 `$.ask` 包进 `$.step`：`$.ask` / `$.again` 自己就按指纹沿用，不需要 `$.step` 再包一层。
+  从日志里取回来的步骤值同样是拷贝，没有 agent 的来历。
 - 日志是 `<logDir>/runs/<lineage>/journal.jsonl`，格式和读者怎么读见 [EVENTS.md](EVENTS.md)「日志」。
 
 ### 接着跑：`$.resumeWith` 和 `orch.mjs resume`

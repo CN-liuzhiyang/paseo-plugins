@@ -800,6 +800,12 @@ async function runClaimed(target, options, taken) {
   // What each answer an ask handed back was, by the object itself: `$.again` finds the agent and the call it came from
   // through the very object the flow got, so a copy or a part of it (a trimmed plan) is not one it knows.
   const answers = new WeakMap();
+  // The objects `$.step` handed back: copies of JSON, which no answer's agent is behind.
+  const stepResults = new WeakSet();
+  const fromStep = (value) => {
+    if (value !== null && typeof value === "object") stepResults.add(value);
+    return value;
+  };
   const ref = (rec) => (rec ? { runId, callId: rec.callId } : null);
 
   // The previous version in a file, for the agent that is to improve on it: one that was asked in a session the daemon
@@ -1154,7 +1160,14 @@ async function runClaimed(target, options, taken) {
      */
     async again(prev, ...args) {
       const rec = answers.get(prev);
-      if (!rec) throw new TypeError("$.again: pass the object $.ask or $.again returned, as it is -- not a copy of it or a part of it");
+      if (!rec) {
+        throw new TypeError(
+          stepResults.has(prev)
+            ? "$.again: this object came out of $.step, which hands back a JSON copy of what its function returned, so it is not the object $.ask gave. " +
+                'Ask and ask again inside the one step ($.step("plan", async () => { const a = await $.ask(...); return $.again(a, "...") })), or do not wrap the $.ask in a step'
+            : "$.again: pass the object $.ask or $.again returned, as it is -- not a copy of it or a part of it",
+        );
+      }
       const stepForm = isStep(args[0]);
       const [step, stepInput, text, options = {}] = stepForm ? [args[0], args[1], undefined, args[2]] : [rec.step, rec.stepInput, args[0], args[1]];
       if (!stepForm && (typeof text !== "string" || text.trim() === "")) throw new TypeError("$.again(prev, text): text is what to say to the agent; to ask another step, $.again(prev, step, input)");
@@ -1310,7 +1323,7 @@ async function runClaimed(target, options, taken) {
       if (taken) {
         const value = probed ? structuredClone(probed.value) : asValue(taken);
         endCall(record, { ok: true, output: safe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
-        return value;
+        return fromStep(value);
       }
       let began = false;
       try {
@@ -1345,7 +1358,7 @@ async function runClaimed(target, options, taken) {
           log.emit("log", { level: "warn", message: `step "${name}": could not be written to the journal (${describeThrown(error)}); ${once ? "a run that carries this one on will not know it was done" : "a run that carries this one on does it again"}` });
         }
         endCall(record, { ok: true, output: safe(kept.value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
-        return kept.value;
+        return fromStep(kept.value);
       } catch (error) {
         if (began) {
           try {
