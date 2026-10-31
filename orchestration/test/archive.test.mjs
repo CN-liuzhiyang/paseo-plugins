@@ -6,9 +6,6 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { runFlow } from "../runtime/run.mjs";
 import { flow, define, text } from "../runtime/flow.mjs";
 import { readEvents, checkEvents } from "../runtime/events.mjs";
@@ -16,6 +13,7 @@ import { paseoExecutor } from "../runtime/executor.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import itemGlance from "../flows/item-glance.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 before(async () => {
@@ -30,7 +28,7 @@ const asking = (options) =>
 
 const AFFAIR = { label: "Matter D1", key: "matter-d1" };
 const run = async (target, executor, options = {}) => {
-  const logDir = await mkdtemp(path.join(os.tmpdir(), "orch-archive-"));
+  const logDir = await tempDir("orch-archive-");
   return runFlow(target, { roster, logDir, cwd: "C:/work", caller: null, agentProbeDelays: [5], executor, ...options });
 };
 const archiveCaveats = (result) => result.caveats.filter((c) => c.startsWith("archive:"));

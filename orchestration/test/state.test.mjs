@@ -4,7 +4,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -16,10 +15,11 @@ import { eventsFile } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { classify, readRunState, RUN_STATES, START_GRACE_MS } from "../runtime/state.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TABLE = JSON.parse(readFileSync(path.join(HERE, "..", "fixtures", "run-state-cases.json"), "utf8"));
-const tmp = () => mkdtemp(path.join(os.tmpdir(), "orch-state-"));
+const tmp = () => tempDir("orch-state-");
 
 test("the table: every row of fixtures/run-state-cases.json", () => {
   assert.ok(TABLE.cases.length >= 30);

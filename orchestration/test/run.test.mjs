@@ -5,7 +5,7 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -24,6 +24,7 @@ import committee from "../flows/committee.mjs";
 import advisor from "../flows/advisor.mjs";
 import gateSmoke from "../flows/gate-smoke.mjs";
 import { fakeExecutor, committeeAnswers, carryAs } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 let roster;
@@ -32,7 +33,7 @@ let logDir;
 before(async () => {
   // Shipped roles only: a private rolesDirs entry must not change what these test.
   roster = await loadRoster([ROLES_DIR]);
-  logDir = await mkdtemp(path.join(os.tmpdir(), "orch-test-"));
+  logDir = await tempDir("orch-test-");
 });
 
 const run = (target, options) =>
@@ -172,7 +173,7 @@ test("advisor: one ask, the answer is the value", async () => {
 });
 
 test("input is checked before run.start: a refused run leaves no events file", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-refused-"));
+  const dir = await tempDir("orch-refused-");
   await assert.rejects(
     runFlow(advisor, { roster, logDir: dir, executor: fakeExecutor(), input: { question: "q" } }),
     (error) => error instanceof RunRefused && /input\.role: missing/.test(error.message),
@@ -625,7 +626,7 @@ test("requestApproval: a model carrier whose timeline cannot be read is not coun
 
 /** A gate prepared for requestApproval, in a fresh directory. */
 async function prepared(carrier, extra = {}) {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-"));
+  const dir = await tempDir("orch-gate-");
   return prepareGate({
     carrier,
     holdPath: path.join(dir, "gate", "c1.receipt.txt"),
@@ -1125,7 +1126,7 @@ test("scanSource: undeclared phases and a gate without its grant, before any spe
 });
 
 test("a flow file with an undeclared phase is refused before run.start", async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "orch-flowfile-"));
+  const dir = await tempDir("orch-flowfile-");
   const file = path.join(dir, "typo.mjs");
   const runtime = path.join(HERE, "..", "runtime", "flow.mjs").replace(/\\/g, "/");
   await writeFile(

@@ -5,15 +5,13 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import { runFlow } from "../runtime/run.mjs";
 import { checkFlow } from "../runtime/flow.mjs";
 import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import itemGlance, { ROLE } from "../flows/item-glance.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 let logDir;
@@ -21,7 +19,7 @@ let logDir;
 before(async () => {
   // Shipped roles only: a private rolesDirs entry must not change what these test.
   roster = await loadRoster([ROLES_DIR]);
-  logDir = await mkdtemp(path.join(os.tmpdir(), "orch-glance-"));
+  logDir = await tempDir("orch-glance-");
 });
 
 const INPUT = {

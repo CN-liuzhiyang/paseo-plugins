@@ -7,9 +7,8 @@
 
 import { test, before } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, writeFile, mkdir } from "node:fs/promises";
+import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { runFlow } from "../runtime/run.mjs";
 import { flow, define, text } from "../runtime/flow.mjs";
@@ -18,6 +17,7 @@ import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
 import { affairKey, workspaceTitle, workspacesDir } from "../runtime/workspaces.mjs";
 import { parseAffair } from "../runtime/affair.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 let roster;
 before(async () => {
@@ -61,7 +61,7 @@ const gating = flow({
 const AFFAIR = { label: "Release 2.4 · blocked", link: { plugin: "tracker", screen: "case", params: { id: "24" } } };
 
 async function freshLogDir() {
-  return mkdtemp(path.join(os.tmpdir(), "orch-ws-"));
+  return tempDir("orch-ws-");
 }
 
 const run = (target, { logDir, ...options }) =>

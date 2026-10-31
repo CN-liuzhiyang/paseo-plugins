@@ -8,7 +8,7 @@ import { test, before } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -25,11 +25,12 @@ import { parseConfig } from "../runtime/config.mjs";
 import { resolveFlowFile, resolveTarget, isFlowName, FLOWS_DIR, FlowLookupError } from "../runtime/resolve.mjs";
 import { parseRunArgs } from "../runtime/orch.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const run = promisify(execFile);
 let roster;
-const tmp = (name) => mkdtemp(path.join(os.tmpdir(), `orch-${name}-`));
+const tmp = (name) => tempDir(`orch-${name}-`);
 
 before(async () => {
   roster = await loadRoster([ROLES_DIR]);

@@ -6,18 +6,17 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
-import { mkdtemp } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { listFlows } from "../runtime/catalog.mjs";
 import { FLOWS_DIR } from "../runtime/resolve.mjs";
+import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const exec = promisify(execFile);
-const tmp = () => mkdtemp(path.join(os.tmpdir(), "orch-catalog-"));
+const tmp = () => tempDir("orch-catalog-");
 
 const FLOW_MODULE = JSON.stringify(pathToFileURL(path.join(HERE, "..", "runtime", "flow.mjs")).href);
 
