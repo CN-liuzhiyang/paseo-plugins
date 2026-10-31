@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import type { LauncherConfig, Policy } from "./config";
-import { settleShort } from "../shared/graph";
+import { CHECK_FAILED_WORDS, settleShort } from "../shared/graph";
 import type { FlowEnd, FlowRec, FlowResult, FlowState, ResumeOffer } from "../shared/model";
 import type { RunProbe } from "./runs";
 import { localParts } from "./time";
@@ -197,16 +197,20 @@ export function actFor(rec: FlowRec, probe: RunProbe, suspectSince: number | nul
  * as is every other outcome. Returns the sentence, cleaned for a line; null for any run that is not such a stop. A value
  * too large to be kept (`valueDropped`) is not there to be read: that stop reads as finished.
  */
-export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value" | "settle">): string | null {
+export function unfinishedWhy(end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why">>): string | null {
   if (end.outcome !== "stopped") return null;
   // A stop at a step that may or may not have been done is one too, whatever the flow's value says: nothing has come of it until a person says.
   if (end.settle) return settleShort(end.settle);
   const value = end.value;
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const why = cleanText((value as Record<string, unknown>).why, 300);
+  const why = value && typeof value === "object" && !Array.isArray(value) ? cleanText((value as Record<string, unknown>).why, 300) : null;
   // Only marks ("。", "...") is no sentence: it says nothing, so it is not a reason to call the run unfinished.
-  return why !== null && /[\p{L}\p{N}]/u.test(why) ? why : null;
+  if (why !== null && /[\p{L}\p{N}]/u.test(why)) return why;
+  // An answer that never came right, and the flow did not catch it: the runtime stops the run there (value null), in a line of its own shape.
+  return CHECK_STOP.test(end.why ?? "") ? CHECK_FAILED_WORDS : null;
 }
+
+/** The line the runtime stops a run with when an agent's answer still did not pass after the corrections it was allowed (EVENTS.md `run.end`): `<step>：核对 N 轮还不过：<the first problem>`. */
+const CHECK_STOP = /^[^：]{1,80}：核对 \d+ 轮还不过：/u;
 
 /** What a place that may draw Markdown or tags (a message) draws from a character: a link, a tag, code, a mention, emphasis, a table, a heading. */
 const DRAWN: Record<string, string> = { "[": "［", "]": "］", "<": "＜", ">": "＞", "`": "｀", "@": "＠", "*": "＊", "_": "＿", "~": "～", "|": "｜", "#": "＃" };
@@ -247,7 +251,7 @@ export function carryOnOf(rec: Pick<FlowRec, "runId" | "ended" | "resume">, fres
 const RETRYABLE = new Set<string>(["failed", "timeout", "lost", "not-started", "refused"]);
 
 /** A run that ended with nothing to go on: broken, or a stop that says it did not get done what it was for (`unfinishedWhy`). */
-export const noResult = (end: Pick<FlowEnd, "outcome" | "value" | "settle">): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
+export const noResult = (end: Pick<FlowEnd, "outcome" | "value"> & Partial<Pick<FlowEnd, "settle" | "why">>): boolean => RETRYABLE.has(end.outcome) || unfinishedWhy(end) !== null;
 
 /**
  * What a rule is told of a run. `fresh`: the word of the run a refused carrying on was to carry on, as it stands now (see `carryOnOf`);

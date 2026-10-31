@@ -338,6 +338,8 @@ run: [{ flow: "triage", key: "first", input: { /* 纯 JSON，≤ 16 KB */ }, lab
 - **`$.again` 的归档**：`$.again` 接着问同一个 agent，是另一次调用（`call.start.continues` 指向前一次），agent 带的 `orch-call` 标签还是最先起它的那次。`archives()` 按 agent 归并，
   只看这个 agent 最后一次调用（要求归档、没归档、成功、有 agent 才算），报的 callId 沿 `continues` 换成最先那次的，所以对得上标签；同一个 agent 不会归档两遍。
 - 运行时的 `CheckFailed`（回答打回核对几轮还不过）、`NoAnswer`（打回时 agent 没回话）在页面上写成人话，原词留在「原因全文」后面。
+  流程没接住 `CheckFailed` 时，运行时让这一轮 `stopped`、`value` 是 `null`、`stop.reason` 是 `<步骤>：核对 N 轮还不过：<第一条问题>`：控制器认这个形状，当作「停了」（和 `value.why` 一样没有结果），
+  页面写「agent 的回答核对了几轮还不过」，那一整行放在「原因全文」里，给「从头重跑」（再问一遍 agent，没有什么会被做两遍）。`value.why` 有一句话时，以流程自己的那句为准。
 
 **起之前先记、起得准、起不两遍**：
 1. 判断出要起，先把「意图」（`flow.intent`，带 runId 和输入）写进日志，再起进程（`flow.spawned`），所以进程崩在中间，重启后知道自己要过这个。

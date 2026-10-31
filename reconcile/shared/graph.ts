@@ -323,6 +323,9 @@ export interface SettleView {
   commands: string[];
 }
 
+/** What an answer that never came right is called: the runtime's `CheckFailed`, and the stop it makes when the flow does not catch it. */
+export const CHECK_FAILED_WORDS = "agent 的回答核对了几轮还不过";
+
 /** The top bar's first words for a run stopped at such a step. */
 export const SETTLE_KICKER = "要你：确认那一步做没做";
 

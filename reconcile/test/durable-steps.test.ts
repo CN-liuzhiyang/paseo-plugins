@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { endedMessage, unfinishedWhy } from "../server/flows";
 import { probeFromRunnerOutput, settleOf } from "../server/runs";
-import { SETTLE_KICKER, settleShort, settleView, settleWhole } from "../shared/graph";
+import { CHECK_FAILED_WORDS, SETTLE_KICKER, settleShort, settleView, settleWhole } from "../shared/graph";
 import type { FlowEnd } from "../shared/model";
 import { probeOf } from "./helpers";
 import { advance, asks, first, flowsOf, idFor, req, withFlows } from "./flows-kit";
@@ -218,3 +218,43 @@ test("a run that carried on says, behind a tap, what it did not do again; a spen
     { runs: () => [runView("done", { runId: id, reused: 3, redo: "发布到服务器", lineage: id, startedAt: "2026-10-13T09:30:00+08:00", endedAt: "2026-10-13T09:40:00+08:00", costUsd: 0.1 })] },
   );
 });
+
+// ---- an answer that never came right ----------------------------------------------------------------------------
+
+// A flow that does not catch the runtime's CheckFailed (an agent's answer that still did not pass after the corrections it was allowed) is stopped
+// by the runtime with value null and a line of a shape of its own. Nothing came of it, so it is told as 停了, not as a finished run.
+
+const NEVER = "analyze：核对 3 轮还不过：verdict 不能为空";
+const CHECK_STOP = (resume: typeof OFFER | null = null) =>
+  probeOf({ state: "ended", costUsd: 0.6, resume, end: { at: 0, outcome: "stopped", summary: null, stop: NEVER, error: null, value: null, valueDropped: false, totalUsd: null } });
+
+test("a stop for an answer that never came right is a run that did not come to a result: told as 停了, in plain words; another stop with no why is still a finished one", () => {
+  const end = (over: Partial<FlowEnd> = {}): Pick<FlowEnd, "outcome" | "value" | "why"> => ({ outcome: "stopped", value: null, why: NEVER, ...over });
+  assert.equal(unfinishedWhy(end()), CHECK_FAILED_WORDS);
+  assert.equal(unfinishedWhy(end({ value: { why: "要处理的事" } })), "要处理的事", "a sentence of the flow's own wins");
+  for (const why of ["没有需要做的", "", null, "核对 3 轮还不过：x", "analyze: 核对 3 轮还不过: x", `${"x".repeat(100)}：核对 3 轮还不过：y`]) assert.equal(unfinishedWhy({ outcome: "stopped", value: null, why }), null, String(why));
+  for (const outcome of ["done", "failed", "timeout"] as const) assert.equal(unfinishedWhy(end({ outcome })), null, outcome);
+  const told = endedMessage({ label: "初查", caseId: "gcp-demo:7" }, { at: "2026-10-13T02:00:00.000Z", outcome: "stopped", summary: null, costUsd: 0.6, value: null, valueDropped: false, why: NEVER });
+  assert.deepEqual([told.title, told.status], ["初查停了", "failed"]);
+  assert.match(told.text, /^#7 初查停了：agent 的回答核对了几轮还不过。/);
+  assert.doesNotMatch(told.text, /verdict|analyze/, "the flow's own words are on the page");
+});
+
+test("on the page it is 停了 with the sentence, the runtime's line behind the tap, and starting over as the way out (nothing was done that a second try would repeat)", () =>
+  withFlows(async (w) => {
+    const id = idFor(1, "k1");
+    asks(w, 1, [req("k1")]);
+    await first(w);
+    w.flows.probes.set(id, CHECK_STOP());
+    await advance(w, 10);
+    const v = w.engine.graph("gcp-demo:1")!;
+    const run = v.runs[0]!;
+    assert.equal(run.situation, "unchecked");
+    assert.equal(v.hero.line, `triage-flow停了：${CHECK_FAILED_WORDS}`);
+    assert.doesNotMatch(JSON.stringify([v.hero, v.history.filter((h) => !h.inner).map((h) => h.line)]), /verdict|analyze/, "the flow's own words are behind a tap");
+    assert.equal(run.why, NEVER, "the whole reason: which step, which problem");
+    assert.deepEqual(run.actions, ["retry", "mine", "fold"]);
+    assert.match(v.hero.kicker, /从头重跑/);
+    assert.equal(run.settle, undefined);
+    assert.equal(w.engine.retryFlow(id, "owner").ok, true, "a second try asks the agent again: nothing to repeat");
+  }));

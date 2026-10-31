@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { CommandSourceConfig, Config, Person } from "./config";
-import { HOME_SCREEN, RUN_SCREEN, settleView, settleWhole, type RunView } from "../shared/graph";
+import { CHECK_FAILED_WORDS, HOME_SCREEN, RUN_SCREEN, settleView, settleWhole, type RunView } from "../shared/graph";
 import { answeredWhere, DESK_SOURCE, type Action, type Annotation, type Assessment, type Card, type Commitment, type FlowEnd, type FlowRec, type FlowResult, type Item, type ResumeOffer, type Observation, type ObserveRequest, type SourceHealth } from "../shared/model";
 import { DESK_NOTES_MAX, DESK_OPEN_MAX, deskItem, deskNo, isDeskKey, nextDeskKey, passesOf, sameWords } from "./desk";
 import { conclude, live, requestVersion, wanted, type Concluded } from "./observe";
@@ -993,7 +993,8 @@ export function createEngine(deps: EngineDeps) {
       costUsd: rec.ended?.costUsd ?? base.costUsd,
       own: true,
       round: rec.round,
-      why: settle ? settleWhole(settle) : (unfinished ?? rec.ended?.why ?? null),
+      // A stop for an answer that never came right keeps the runtime's whole line (which problem it was) behind the tap; the sentence is `shortWhy`.
+      why: settle ? settleWhole(settle) : unfinished === CHECK_FAILED_WORDS ? (rec.ended?.why ?? unfinished) : (unfinished ?? rec.ended?.why ?? null),
       ...(settle ? { settle } : {}),
       // The words for a person: what the run's own file says in plain words, else the reason it ended with without the runtime's error name in front ("OutputMismatch：…").
       shortWhy: rec.ended && (unfinished ?? base.error?.plain ?? rec.ended.why) ? reasonShort(rec.ended.summary, unfinished ?? base.error?.plain ?? rec.ended.why!.replace(/^[A-Z][A-Za-z0-9]+：/u, "")) : null,

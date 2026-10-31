@@ -1,7 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { HOME_SCREEN, RUN_SCREEN, settleView, type RunView } from "../shared/graph";
+import { CHECK_FAILED_WORDS, HOME_SCREEN, RUN_SCREEN, settleView, type RunView } from "../shared/graph";
 import { classify, parseDuration, pidFact, STALE_BASE_MS, staleAfterMs, type Probe, type RunState } from "../shared/liveness.mjs";
 import { FLOW_VALUE_BYTES, type ResumeOffer } from "../shared/model";
 import { inputHashOf } from "./flows";
@@ -325,7 +325,7 @@ function fold(run: RunRec, e: Record<string, unknown>) {
 /** What an error name from the runtime means to a person. The raw one stays beside it. */
 const PLAIN: Record<string, string> = {
   OutputMismatch: "agent 的回答不合约定的格式，这一步没拿到结果",
-  CheckFailed: "agent 的回答核对了几轮还不过，这一步没拿到结果",
+  CheckFailed: `${CHECK_FAILED_WORDS}，这一步没拿到结果`,
   NoAnswer: "让 agent 改回答的时候，它没回话，这一步没拿到结果",
   RunTimeout: "超过了这次流程的总时限",
   PaseoCliError: "调用 Paseo 失败了（起 agent 或读它的状态时出错）",
