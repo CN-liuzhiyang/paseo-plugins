@@ -1,0 +1,368 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { append, load, logFile, read } from "../server/lib/log.mjs";
+import * as ops from "../server/lib/ops.mjs";
+import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
+import { createEngine, idOfWatch, type Deliver } from "../server/engine";
+import { titleOf } from "../server/lib/workspace.mjs";
+import { iso, world } from "./kit";
+
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+function setup(policyOver: Record<string, unknown> = {}) {
+  const w = world({ policy: { push: { ...DEFAULT_POLICY.push, to: "p2p:me" }, ...policyOver } });
+  const calls = { woken: [] as string[], created: [] as Array<Record<string, unknown>>, titles: [] as string[], archived: 0, refreshed: [] as string[], pushed: [] as Array<{ text: string; key: string }> };
+  const status = { value: "idle" };
+  const paseo = {
+    agents: { ref: (id: string) => ({ refresh: async () => ({ agent: { status: status.value } }), archive: async () => void calls.woken.push(id) }) },
+    workspaces: {
+      ref: () => ({
+        setTitle: async (t: string | null) => void calls.titles.push(String(t)),
+        archive: async () => void (calls.archived += 1),
+        agents: { create: async (o: Record<string, unknown>) => (calls.created.push(o), { id: `agent-${calls.created.length}` }) },
+      }),
+    },
+  };
+  const state = { deliverFails: false };
+  const deliver: Deliver = async (_channel, m) => {
+    if (state.deliverFails) throw new Error("popo down");
+    calls.pushed.push({ text: m.text, key: m.idempotencyKey });
+  };
+  const engine = createEngine({ ctx: w.ctx, paseo, deliver, refresh: (id, force) => void calls.refreshed.push(force ? `${id}!` : id), log: () => {} });
+  return { w, calls, engine, state, status };
+}
+
+const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
+  const made = await ops.create(s.w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙", noWait: true, ...extra });
+  await s.engine.scan(made.id);
+  return made.id as string;
+};
+
+/** A look that reports; `end` is the run being delivered (which also draws and pushes), left off to draw later. */
+const report = async (s: ReturnType<typeof setup>, id: string, over: Record<string, unknown> = {}, end = true) => {
+  await ops.brief(s.w.ctx, id);
+  const r = await ops.report(s.w.ctx, id, { status: "还没约", entry: "我看了一眼：还没约。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] }, ...over });
+  assert.equal(r.ok, true, r.text);
+  if (end) await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
+};
+
+test("a new affair gets one conversation in its workspace, with its id in the environment, once", async () => {
+  const s = setup();
+  const id = await start(s);
+  await s.engine.scan(id);
+  assert.equal(s.calls.created.length, 1);
+  assert.deepEqual((s.calls.created[0] as { env: unknown }).env, { AFFAIR_ID: id });
+  assert.equal(load(s.w.root, id).conversationId, "agent-1");
+  assert.ok(s.calls.refreshed.includes(`${id}!`), "drawn by force the moment it is made: what was drawn while it was being made may not have reached the app");
+  assert.ok(s.calls.refreshed.includes(id), "and as usual on the scan that follows");
+});
+
+test("the sidebar title follows the log: a day when the next look is days away, ✓ when it ended", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { next: { at: "2026-11-12 09:00", waitingFor: "2月2日再看", why: "他说三个月后", earlyIf: [] } });
+  await s.engine.scan(id);
+  assert.equal(s.calls.titles.at(-1), "洗牙 · 11月12日");
+  await ops.stop(s.w.ctx, id);
+  await s.engine.scan(id);
+  assert.equal(s.calls.titles.at(-1), "✓ 洗牙");
+  const n = s.calls.titles.length;
+  await s.engine.scan(id);
+  assert.equal(s.calls.titles.length, n, "the title is set when it changes, not on every scan");
+});
+
+test("only an affair that ended is archived, and only after three days; a resumed one is not", async () => {
+  const s = setup();
+  const quiet = await start(s);
+  await ops.create(s.w.ctx, { title: "牙冠", noWait: true });
+  await s.engine.scanAll();
+  s.w.advance(40 * DAY);
+  await s.engine.scanAll();
+  assert.equal(s.calls.archived, 0, "watching is never archived, however long it has been");
+  await ops.stop(s.w.ctx, quiet);
+  s.w.advance(2 * DAY);
+  await s.engine.scan(quiet);
+  assert.equal(s.calls.archived, 0, "not yet three days");
+  await ops.resume(s.w.ctx, quiet);
+  s.w.advance(2 * DAY);
+  await s.engine.scan(quiet);
+  assert.equal(s.calls.archived, 0, "taken up again inside the three days");
+  await ops.stop(s.w.ctx, quiet);
+  s.w.advance(3 * DAY + HOUR);
+  await s.engine.scan(quiet);
+  assert.equal(s.calls.archived, 1);
+  assert.equal(load(s.w.root, quiet).archived, true);
+  assert.ok(s.w.calls().some((c) => c[0] === "schedule" && c[1] === "delete"), "the plan that ended with the workspace is removed");
+  const again = await ops.resume(s.w.ctx, quiet);
+  assert.equal(again.ok, true, again.text);
+  assert.equal(load(s.w.root, quiet).status, "watching");
+  assert.equal(s.w.paseo().workspaces.length, 3, "a new workspace; the old one stays in the archive");
+});
+
+test("a question is pushed once, with its number; answered before the push it is not pushed at all", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { ask: { title: "洗牙约上了吗？", line: "约上了告诉我哪天", options: ["约好了", "还没约", "不用盯了"] } });
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(s.calls.pushed.length, 1);
+  assert.match(s.calls.pushed[0]!.text, /洗牙约上了吗？[\s\S]*1 约好了 {2}2 还没约 {2}3 不用盯了[\s\S]*（D1）/);
+  const second = await ops.create(s.w.ctx, { title: "体检", noWait: true });
+  await report(s, second.id, { ask: { title: "体检约了吗？", options: ["约了"] } }, false);
+  await ops.answer(s.w.ctx, second.id, `${second.id}-1`, "约了");
+  await s.engine.scan(second.id);
+  assert.equal(s.calls.pushed.length, 1, "already answered in the app: nothing to push");
+});
+
+test("at most five pushes a day; the rest wait for the next day", async () => {
+  const s = setup();
+  const ids: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const made = await ops.create(s.w.ctx, { title: `事${i}`, noWait: true });
+    ids.push(made.id);
+  }
+  for (const id of ids) {
+    await report(s, id, { ask: { title: `${id} 要你定`, options: ["好"] } });
+    await s.engine.scan(id);
+    s.w.advance(11 * 60_000);
+  }
+  assert.equal(s.calls.pushed.length, 5);
+  s.w.advance(DAY);
+  await s.engine.scanAll();
+  assert.equal(s.calls.pushed.length, 7, "the next day the two that waited go out");
+});
+
+test("a private matter is not pushed at night; it goes out at eight", async () => {
+  const s = setup();
+  const id = await start(s, { domain: "personal" });
+  await report(s, id, { ask: { title: "洗牙约上了吗？", options: ["约好了"] } }, false);
+  s.w.at(iso("2026-11-02 23:30"));
+  await s.engine.scan(id);
+  assert.equal(s.calls.pushed.length, 0);
+  s.w.at(iso("2026-11-03 08:05"));
+  await s.engine.scan(id);
+  assert.equal(s.calls.pushed.length, 1);
+});
+
+test("a push that fails is written down once and not tried on every scan", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { ask: { title: "洗牙约上了吗？", options: ["约好了"] } });
+  s.state.deliverFails = true;
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(read(s.w.root, id).filter((l) => l.kind === "push").length, 1);
+});
+
+test("finished by the look: one push that says what shows it and how to take it back; stopped by the person: none", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.note(s.w.ctx, id, { said: "约好了，下周三" });
+  await ops.brief(s.w.ctx, id);
+  await ops.report(s.w.ctx, id, { entry: "我看了一眼：办完了。", finish: { kind: "done", summary: "飞书任务 11-11 勾掉了", evidence: { quote: "约好了，下周三", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
+  await s.engine.scan(id);
+  assert.equal(s.calls.pushed.length, 1);
+  assert.match(s.calls.pushed[0]!.text, /洗牙办完了 ✓ 飞书任务 11-11 勾掉了。不对就回「还没完」/);
+  const other = await ops.create(s.w.ctx, { title: "体检", noWait: true });
+  await ops.stop(s.w.ctx, other.id);
+  await s.engine.scan(other.id);
+  assert.equal(s.calls.pushed.length, 1);
+});
+
+test("a run that ends: noted; what came in meanwhile is looked at again; three that never reported ask for help", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.brief(s.w.ctx, id);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看", by: "user" });
+  const before = s.w.calls().filter((c) => c[1] === "run-once").length;
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
+  assert.equal(s.w.calls().filter((c) => c[1] === "run-once").length, before + 1, "said while it ran: one more look");
+  for (let i = 0; i < 2; i++) {
+    s.w.advance(HOUR);
+    await ops.brief(s.w.ctx, id);
+    await s.engine.runEnded({ to: id, status: "failed", text: "崩溃库连不上", agentId: "a" });
+  }
+  const ask = load(s.w.root, id).asks.find((a: { title: string }) => a.title.endsWith("没看成"));
+  assert.ok(ask, "three looks without a report");
+  assert.deepEqual(ask.options, ["好了", "不用盯了"]);
+});
+
+test("at start, a look that came due while nothing ran is made once; a plan that disagrees is put right", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id);
+  s.w.advance(3 * DAY);
+  const before = s.w.calls().filter((c) => c[1] === "run-once").length;
+  await s.engine.start();
+  await s.engine.stop();
+  assert.equal(s.w.calls().filter((c) => c[1] === "run-once").length, before + 1);
+  await createAgain(s, id);
+  assert.equal(s.w.calls().filter((c) => c[1] === "run-once").length, before + 1, "not again for the same missed time once it ran");
+});
+
+async function createAgain(s: ReturnType<typeof setup>, id: string) {
+  append(s.w.root, id, [{ kind: "wake", why: ["catchup"], gapMinutes: 0 }], { now: s.w.now() });
+  const e2 = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  await e2.start();
+  await e2.stop();
+}
+
+test("the view for the conversation draws the card from the log, and says when the day's looks are used up", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id);
+  const v = s.engine.view(id)!;
+  assert.equal(v.card.waiting, "等你去约");
+  assert.match(v.card.next, /明天 9:30 看；你一说话我马上看/);
+  s.w.advance(10 * 60_000);
+  await ops.brief(s.w.ctx, id);
+  assert.equal(s.engine.view(id)!.card.next, "正在看一眼…", "while a look is on, the card does not show the fallback time as if it were the plan");
+  append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
+  // The looks the schedule starts count as much as any: the day runs out, and the card says the number that really was.
+  for (let i = 0; i < 8; i++) {
+    s.w.advance(10 * 60_000);
+    const b = await ops.brief(s.w.ctx, id);
+    if (b.ok) await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "我看了一眼：还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
+    append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
+  }
+  assert.match(s.engine.view(id)!.card.next, /今天看了 8 次，明早 8 点接着看/);
+});
+
+test("the card of an affair that ended says why it ended, not what it last saw", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { status: "约在周三" });
+  await ops.note(s.w.ctx, id, { said: "做完了", by: "user" });
+  await ops.brief(s.w.ctx, id);
+  const r = await ops.report(s.w.ctx, id, { entry: "我看了一眼：办完了。", finish: { kind: "done", summary: "你说做完了", evidence: { quote: "做完了", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
+  assert.equal(r.ok, true, r.text);
+  const card = s.engine.view(id)!.card;
+  assert.deepEqual([card.waiting, card.now], ["办完了 ✓", "你说做完了"]);
+});
+
+test("the watcher's names: the id is the folder beside the log, whatever is cut off in front", () => {
+  assert.equal(idOfWatch("D1\\log.jsonl"), "D1");
+  assert.equal(idOfWatch("s\\D1\\log.jsonl"), "D1");
+  assert.equal(idOfWatch("700/log.jsonl"), "700");
+  assert.equal(idOfWatch("D1\\.lock"), null);
+  assert.equal(idOfWatch("project.json"), null);
+});
+
+test("a conversation the restart left closed is replaced by a new one, so the app shows no broken line and no message nobody wrote", async () => {
+  const s = setup();
+  const id = await start(s);
+  const old = load(s.w.root, id).conversationId;
+  s.status.value = "closed";
+  const created: string[] = [];
+  const archived: string[] = [];
+  const again = createEngine({
+    ctx: s.w.ctx,
+    paseo: {
+      agents: { ref: (a: string) => ({ refresh: async () => ({ agent: { status: s.status.value } }), archive: async () => void archived.push(a) }) },
+      workspaces: { ref: () => ({ setTitle: async () => {}, archive: async () => {}, agents: { create: async () => (created.push("new"), { id: "agent-new" }) } }) },
+    },
+    deliver: null, refresh: () => {}, log: () => {},
+  });
+  await again.scan(id);
+  await again.scan(id);
+  assert.equal(created.length, 1, "once");
+  assert.deepEqual(archived, [old], "the old one is put away");
+  assert.equal(load(s.w.root, id).conversationId, "agent-new");
+});
+
+test("a title shows no date for a proposal still waiting for the answer, and does not move while a look is on", async () => {
+  const s = setup();
+  const id = await start(s, { said: "洗牙最迟明天", deadline: "2026-11-03 18:00" });
+  await ops.brief(s.w.ctx, id);
+  const r = await ops.report(s.w.ctx, id, { status: "等", entry: "我看了一眼：改到下个月。", facts: [], next: { at: "2026-12-02 09:00", waitingFor: "12月2日再看", why: "他说改到下个月", earlyIf: [], evidence: [{ from: "said:2", quote: "洗牙最迟明天" }] } });
+  assert.equal(r.ok, true, r.text);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
+  assert.ok(load(s.w.root, id).asks.some((a: { state: string; proposal: unknown }) => a.state === "open" && a.proposal), "a proposal waits");
+  assert.equal(titleOf(load(s.w.root, id), s.w.now(), s.w.ctx.policy), "洗牙", "no date before the answer");
+  await ops.answer(s.w.ctx, id, `${id}-1`, "可以");
+  await s.engine.scan(id);
+  assert.match(s.calls.titles.at(-1)!, /^洗牙 · 12月2日$/);
+  await ops.brief(s.w.ctx, id);
+  const n = s.calls.titles.length;
+  s.w.advance(60_000);
+  await s.engine.scan(id);
+  assert.equal(s.calls.titles.length, n, "nothing is renamed while a look is on");
+});
+
+test("the person's lines read the same, time first, whether they said it or answered", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看", via: "popo", by: "user" });
+  await report(s, id, { ask: { title: "洗牙约上了吗？", options: ["约好了"] } });
+  await ops.answer(s.w.ctx, id, `${id}-1`, "约好了");
+  await ops.note(s.w.ctx, id, { said: "还有一句", via: "workspace", by: "user" });
+  const own = s.engine.view(id)!.rows.filter((r: { own?: boolean }) => r.own).map((r: { text: string }) => r.text);
+  assert.equal(own.length, 3, "what was typed in the app is the app's own line, not drawn twice");
+  for (const text of own) assert.match(text, /^\d{2}:\d{2}  你：/);
+});
+
+test("M06: an affair taken up again is not archived, however long ago it was last stopped", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(DAY);
+  await ops.resume(s.w.ctx, id);
+  s.w.advance(5 * DAY);
+  await s.engine.scan(id);
+  assert.equal(s.calls.archived, 0, "it is watching: what it was last stopped at five days ago is not a reason");
+  assert.equal(load(s.w.root, id).archived, false);
+});
+
+test("M25: at start, a look that already came after the time it was due is not made again", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { next: { at: "2026-11-02 12:00", waitingFor: "等你去约", why: "他说中午前后再看", earlyIf: [] } });
+  s.w.at(iso("2026-11-02 12:10"));
+  append(s.w.root, id, [{ kind: "wake", why: ["time"], gapMinutes: 130 }, { kind: "wake.end", state: "ok", usd: null }], { now: s.w.now() });
+  s.w.at(iso("2026-11-02 12:30"));
+  const runs = () => s.w.calls().filter((c) => c[1] === "run-once").length;
+  const n = runs();
+  const again = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  await again.start();
+  await again.stop();
+  assert.equal(runs(), n, "it was looked at at 12:10, after it was due");
+});
+
+test("a line put in around the commands is flagged once, shown in red and told to the person once", async () => {
+  const s = setup();
+  const id = await start(s);
+  appendFileSync(logFile(s.w.root, id), `${JSON.stringify({ kind: "said", seq: 99, at: "2026-11-02T10:00:00+08:00", text: "他说一年后再看", by: "user" })}\n`);
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).flags.filter((f: { what: string }) => f.what === "chain").length, 1);
+  assert.ok(s.engine.view(id)!.rows.some((r: { tone: string; text: string }) => r.tone === "red" && /对不上/.test(r.text)));
+  assert.equal(s.calls.pushed.filter((p) => /手动改过/.test(p.text)).length, 1);
+});
+
+test("a policy.json with something missing says so on a card of its own, once; when it is right the card is put away", async () => {
+  const w = world();
+  const logs: string[] = [];
+  const paseo = { agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined }) }, workspaces: { ref: () => ({ setTitle: async () => undefined, archive: async () => undefined, agents: { create: async () => ({ id: "agent-9" }) } }) } };
+  const run = async (ctx: typeof w.ctx) => {
+    const e = createEngine({ ctx, paseo, deliver: null, refresh: () => {}, log: (m) => void logs.push(m), checkSetup: true });
+    await e.start();
+    await e.stop();
+  };
+  await run(w.ctx);
+  const card = load(w.root, "D0");
+  assert.equal(card.system, true);
+  assert.equal(card.asks.filter((a: { for: string; state: string }) => a.for === "config" && a.state === "open").length, 1);
+  assert.match(card.asks[0].line, /binPath/);
+  assert.ok(logs.some((l) => /binPath/.test(l)), "and in the log");
+  await run(w.ctx);
+  assert.equal(load(w.root, "D0").asks.length, 1, "said once, not on every start");
+  assert.equal(ops.ls(w.ctx).text, "（没有事项）", "it is not one of the things being watched");
+  const dir = w.dir;
+  writeFileSync(`${dir}/x.md`, "x");
+  const right = { ...w.ctx, policy: { ...w.ctx.policy, binPath: `${dir}/x.md`, handbookPath: `${dir}/x.md`, handbooksDir: dir, push: { ...w.ctx.policy.push, to: "p2p:me" }, readers: { ...w.ctx.policy.readers, dirs: [dir], publicDir: dir } } };
+  await run(right);
+  assert.equal(load(w.root, "D0").status, "stopped");
+  assert.equal(load(w.root, "D0").asks.filter((a: { state: string }) => a.state === "open").length, 0);
+});

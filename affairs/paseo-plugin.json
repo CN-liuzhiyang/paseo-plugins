@@ -1,0 +1,8 @@
+{
+  "id": "affairs",
+  "description": "事项：替你盯着一件事，到时候看一眼，要你定的才找你。每件事在侧边栏「事项」里有自己的工作区",
+  "requirements": {
+    "paseo": ">=0.11.0"
+  },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
