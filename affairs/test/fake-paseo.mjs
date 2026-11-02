@@ -1,0 +1,69 @@
+// A stand-in for the paseo CLI: keeps projects, workspaces and schedules in a JSON file and appends every call to a
+// log, so a test can read what the code asked Paseo to do. Prints what the real CLI prints with --json.
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+
+const stateFile = process.env.FAKE_PASEO_STATE;
+const callsFile = process.env.FAKE_PASEO_CALLS;
+const args = process.argv.slice(2);
+appendFileSync(callsFile, `${JSON.stringify(args)}\n`);
+const db = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, "utf8")) : { projects: [], workspaces: [], schedules: [], n: 0 };
+const save = () => writeFileSync(stateFile, JSON.stringify(db));
+const flag = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+const out = (value) => console.log(JSON.stringify(value));
+const die = (message) => {
+  console.error(`Error: ${message}`);
+  process.exit(1);
+};
+const [group, action, first] = args;
+const next = (prefix) => `${prefix}_${++db.n}`;
+
+if (process.env.FAKE_PASEO_FAIL && args.join(" ").includes(process.env.FAKE_PASEO_FAIL)) die("fake failure");
+
+if (group === "project" && action === "ls") out(db.projects);
+else if (group === "project" && action === "create") {
+  const p = { projectId: next("prj"), name: "root", kind: "non_git", path: first };
+  db.projects.push(p);
+  save();
+  out(p);
+} else if (group === "project" && action === "rename") {
+  db.projects.find((p) => p.projectId === first).name = args[3];
+  save();
+  out({ projectId: first, name: args[3] });
+} else if (group === "workspace" && action === "create") {
+  const w = { workspaceId: next("wks"), project: flag("--project"), name: flag("--title"), cwd: flag("--path"), isolation: "local", background: false };
+  db.workspaces.push(w);
+  save();
+  out(w);
+} else if (group === "workspace" && action === "rename") {
+  db.workspaces.find((w) => w.workspaceId === first).name = args[3];
+  save();
+  out({ workspaceId: first, name: args[3] });
+} else if (group === "workspace" && action === "archive") {
+  const w = db.workspaces.find((x) => x.workspaceId === first);
+  w.archived = true;
+  for (const s of db.schedules) if (s.workspace === first) s.status = "completed";
+  save();
+  out({ workspaceId: first, archived: true });
+} else if (group === "schedule" && action === "create") {
+  const s = { id: next("sch"), name: flag("--name"), prompt: first, cadence: { type: "cron", expression: flag("--cron"), timezone: flag("--timezone") }, provider: flag("--provider"), thinking: flag("--thinking"), mode: flag("--mode"), workspace: flag("--workspace"), delivery: flag("--deliver"), status: "active", runs: 0 };
+  db.schedules.push(s);
+  save();
+  out({ id: s.id, name: s.name, status: s.status });
+} else if (group === "schedule" && action === "ls") out(db.schedules);
+else if (group === "schedule" && action === "channels") out(JSON.parse(process.env.FAKE_PASEO_CHANNELS ?? "[]"));
+else if (group === "schedule") {
+  const s = db.schedules.find((x) => x.id === first);
+  if (!s) die(`Schedule not found: ${first}`);
+  if (action === "update") {
+    if (flag("--cron")) s.cadence = { type: "cron", expression: flag("--cron"), timezone: flag("--timezone") ?? s.cadence.timezone };
+  } else if (action === "pause") s.status = "paused";
+  else if (action === "resume") s.status = "active";
+  else if (action === "delete") db.schedules = db.schedules.filter((x) => x.id !== first);
+  else if (action === "run-once") {
+    if (s.running) die("already running");
+    s.runs += 1;
+  }
+  save();
+  out(s);
+} else if (group === "agent" && action === "inspect") out({ id: first, labels: JSON.parse(process.env.FAKE_PASEO_LABELS ?? "{}") });
+else die(`unknown: ${args.join(" ")}`);
