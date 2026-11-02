@@ -4,7 +4,7 @@ import { localParts, zoned } from "./time";
 // Hot or cold. A hot item is judged every reconcile and shown; a cold one is left alone -- not
 // judged, not shown, not read again -- until something that matters about it changes. Hot is
 // any of: an open commitment, watched, changed by a person lately, a date field near today, a
-// linked flag key changed lately. Everything else is an old item nobody is working on.
+// linked flag key changed lately, something its rule still asks to have watched. Everything else is an old item nobody is working on.
 
 export interface HeatPolicy {
   recentDays: number;
@@ -28,6 +28,8 @@ export interface HeatInputs {
   flowing?: boolean;
   /** It is a matter a person told the controller to follow (source desk) and it has not ended: hot until it does, whatever else is or is not the case. */
   standing?: boolean;
+  /** Its rule still asks to have something watched for it (an observing source): what is read is judged when it comes, and the rule says when it is done. */
+  observing?: boolean;
 }
 
 const DAY = 86_400_000;
@@ -46,6 +48,7 @@ export function heatOf(item: Pick<Item, "fields" | "lastHumanAt">, inputs: HeatI
   if (inputs.watched) reasons.push("在关注列表里");
   if (inputs.flowing) reasons.push("有流程在跑");
   if (inputs.standing) reasons.push("你交代的事，结束前一直盯着");
+  if (inputs.observing) reasons.push("还在观察外面的数据");
   if (inputs.quiet) return reasons;
   if (item.lastHumanAt && nowMs - Date.parse(item.lastHumanAt) <= policy.recentDays * DAY) reasons.push(`${item.lastHumanAt.slice(5, 10)} 有人改过`);
   const today = zoned(localParts(nowMs, tz).date, "12:00", tz);

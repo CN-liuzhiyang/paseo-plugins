@@ -1223,7 +1223,7 @@ export function createEngine(deps: EngineDeps) {
       .filter((n) => n.field.startsWith("woken."))
       .sort((a, b) => a.at.localeCompare(b.at))
       .pop();
-    return heatOf(item, { nowMs, tz, policy: config.policy.hot, open: openCase(item.key), watched: configWatched(item.key), quiet: quietTitle(item.title), flagChangedAt: changedAt, woken: woken ? { at: woken.at, reason: woken.value } : null, flowing: hasOpenFlow(item.key, nowMs), standing: item.source === DESK_SOURCE && !deskOver(item.key, nowMs) });
+    return heatOf(item, { nowMs, tz, policy: config.policy.hot, open: openCase(item.key), watched: configWatched(item.key), quiet: quietTitle(item.title), flagChangedAt: changedAt, woken: woken ? { at: woken.at, reason: woken.value } : null, flowing: hasOpenFlow(item.key, nowMs), standing: item.source === DESK_SOURCE && !deskOver(item.key, nowMs), observing: (state.observing?.[item.key]?.requests.length ?? 0) > 0 });
   }
 
   /** Per listed row: a full read for what is hot, about to be or new, a look at its history for what someone may have touched. */

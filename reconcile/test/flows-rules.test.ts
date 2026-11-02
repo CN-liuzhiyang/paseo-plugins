@@ -122,6 +122,16 @@ test("an item with a run going is hot, however cold it would be: its result is j
   assert.deepEqual(heatOf(cold, { ...inputs, flowing: true, quiet: true }), ["有流程在跑"], "a container or standing item too: a run it started is its own reason");
 });
 
+test("an item its rule still asks to have watched is hot, however cold it would be: what is read for it is judged when it comes", () => {
+  const policy = { recentDays: 14, dateWindowDays: 14, dateFields: ["Release"] };
+  const cold = { fields: {}, lastHumanAt: null };
+  const inputs = { nowMs: Date.parse("2026-11-13T10:00:00+08:00"), tz: "Asia/Shanghai", policy, open: false, watched: false, flagChangedAt: null };
+  assert.deepEqual(heatOf(cold, inputs), []);
+  assert.deepEqual(heatOf(cold, { ...inputs, observing: true }), ["还在观察外面的数据"]);
+  assert.deepEqual(heatOf(cold, { ...inputs, observing: true, quiet: true }), ["还在观察外面的数据"], "a container too: what its rule asks for is its own reason");
+  assert.deepEqual(heatOf(cold, { ...inputs, observing: false }), []);
+});
+
 // ---- what the journal makes of it -------------------------------------------------------------------------
 
 const rec = (over: Partial<FlowRec> = {}): FlowRec => ({

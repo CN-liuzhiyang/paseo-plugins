@@ -87,6 +87,19 @@ const put = (w: World, id: number, fields: Record<string, string>) => {
 const headline = (w: World, id: number) => w.store.state.assessments[`gcp-demo:${id}`]?.headline;
 const health = (w: World) => w.store.state.sources["watch-demo"]?.health;
 
+test("an item whose rule still asks to have something watched stays hot past its dates; one that asks for nothing goes cold", () =>
+  withWatch(async (w) => {
+    put(w, 1, { Watch: "10:00", WatchTo: "10:30" });
+    put(w, 2, {});
+    await w.run("2026-10-13 10:05", 5);
+    // Release 10-14 and the last change by a person 10-12: both out of their 14 days by 10-29.
+    await w.run("2026-11-05 10:00", 360);
+    const hot = (id: number) => w.engine.status().cases.find((c) => c.caseId === `gcp-demo:${id}`)?.hot ?? null;
+    assert.deepEqual(hot(1), ["还在观察外面的数据"], "hot, and judged: its rule still asks");
+    assert.equal(hot(2), null, "cold: not judged, not shown");
+    assert.ok(w.store.state.observing?.["gcp-demo:1"]?.requests.length, "still asked for");
+  }));
+
 test("the command runs only while something is watched: through the window every few minutes, at its end, and at each reread; then not at all", () =>
   withWatch(async (w, _plan, calls) => {
     put(w, 1, { Watch: "10:00", WatchTo: "10:30" });
