@@ -17,6 +17,12 @@ export const panelRpc = defineRpc({
   output: z.object({ panel: panelSchema.nullable() }),
 });
 
+export const materialRpc = defineRpc({
+  name: "affairs.material",
+  input: z.object({ workspaceId: z.string(), name: z.string() }),
+  output: z.object({ ok: z.boolean(), text: z.string(), truncated: z.boolean() }),
+});
+
 export const answerRpc = defineRpc({
   name: "affairs.answer",
   input: z.object({ affairId: z.string(), askId: z.string(), text: z.string() }),

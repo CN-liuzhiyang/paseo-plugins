@@ -3,7 +3,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { createEngine, type PaseoLike } from "../server/engine";
-import { rotationReason, chatPrompt, noticeFor } from "../server/lib/chat.mjs";
+import { rotationReason, chatPrompt, noticeFor, chatCreateOptions } from "../server/lib/chat.mjs";
+import { roleOf } from "../server/lib/schedule.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
 import { counts } from "../server/lib/limits.mjs";
 import * as ops from "../server/lib/ops.mjs";
@@ -48,7 +49,7 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
       }),
     },
   } as unknown as PaseoLike;
-  const send = (chat: string, event: Event) => handlers.get(chat)!({ agentId: chat, event });
+  const send = (chat: string, event: Event, timestamp?: string) => handlers.get(chat)!({ agentId: chat, event, ...(timestamp ? { timestamp } : {}) });
   return { paseo, made, archived, drawn, handlers, send };
 }
 
@@ -68,7 +69,10 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
 const lines = (s: ReturnType<typeof setup>, chat = "chat-1") => s.p.drawn.filter((d) => d.chat === chat);
 const textOf = (d: { item: any }) => d.item.data.text as string;
 const userMessage = (text: string, messageId = `m-${Math.random()}`) => ({ type: "timeline", item: { type: "user_message", text, messageId } });
-const turnDone = (tokens: number, usd = 0.02) => ({ type: "turn_completed", usage: { contextWindowUsedTokens: tokens, totalCostUsd: usd } });
+/** `totalCost` is what the session has cost in all so far, as Paseo reports it. */
+const turnDone = (tokens: number, totalCost = 0.02) => ({ type: "turn_completed", usage: { contextWindowUsedTokens: tokens, totalCostUsd: totalCost } });
+const T1 = "2026-11-03T10:00:00.000Z";
+const at = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
 
 // ---- keeping the chat -------------------------------------------------------------------------------------
 
@@ -203,8 +207,8 @@ test("what he types in the chat is his word in the log, once, and calls for no l
   const s = setup();
   const id = await start(s);
   const before = read(s.w.root, id).length;
-  s.p.send("chat-1", userMessage("靠复制拿它的分支是啥意思呀？", "m1"));
-  s.p.send("chat-1", userMessage("靠复制拿它的分支是啥意思呀？", "m1"));
+  s.p.send("chat-1", userMessage("靠复制拿它的分支是啥意思呀？", "m1"), T1);
+  s.p.send("chat-1", userMessage("靠复制拿它的分支是啥意思呀？", "m1"), T1);
   s.p.send("chat-1", { type: "timeline", item: { type: "plugin", id: "row-x", kind: "affair-line", data: { text: "我自己画的" } } });
   s.p.send("chat-1", { type: "timeline", item: { type: "tool_call", name: "agent_message", callId: "k1", detail: { text: "别的会话说的话" } } });
   await settle();
@@ -219,29 +223,71 @@ test("what he types in the chat is his word in the log, once, and calls for no l
   assert.ok(!shown.some((r: { text: string }) => r.text.includes("靠复制拿")), "and it is not drawn back at him: it is already on his screen");
 });
 
-test("what was typed while nobody listened (the plugin was restarted) is read from the end of the chat, and not counted twice", async () => {
-  let tail: Array<{ item: unknown }> = [];
+test("after a restart Paseo numbers the messages again: the same words at the same time are not heard twice; what was typed while nobody listened is", async () => {
+  let tail: Array<{ item: unknown; timestamp?: string }> = [];
   const s = setup({}, { tail: () => tail });
   const id = await start(s);
-  s.p.send("chat-1", userMessage("第一句", "m1"));
+  s.p.send("chat-1", userMessage("第一句", "before-restart-1"), T1);
+  s.p.send("chat-1", userMessage("第一句", "before-restart-1"), T1);
   await settle();
-  tail = [{ item: { type: "user_message", text: "第一句", messageId: "m1" } }, { item: { type: "user_message", text: "第二句，插件没在听", messageId: "m2" } }];
-  const again = createEngine({ ctx: s.w.ctx, paseo: s.p.paseo, deliver: null, log: () => {} });
-  await again.scan(id);
-  await settle();
+  // the way a restart really looks (M0's saved timelines): other numbers, the same words, the time off by under a second
+  tail = [
+    { item: { type: "user_message", text: "第一句", messageId: "597c89ef-after-restart" }, timestamp: at(T1, 800) },
+    { item: { type: "user_message", text: "第二句，插件没在听", messageId: "a1b2c3d4-after-restart" }, timestamp: at(T1, 60_000) },
+  ];
+  const restarts: Array<{ stop(): Promise<void> }> = [];
+  for (let i = 0; i < 2; i++) {
+    const again = createEngine({ ctx: s.w.ctx, paseo: s.p.paseo, deliver: null, log: () => {} });
+    await again.scan(id);
+    await settle();
+    restarts.push(again);
+  }
   const said = read(s.w.root, id).filter((l: { kind: string; via?: string }) => l.kind === "said" && l.via === "chat-session").map((l: { text: string }) => l.text);
-  assert.deepEqual(said, ["第一句", "第二句，插件没在听"]);
-  await again.stop();
+  assert.deepEqual(said, ["第一句", "第二句，插件没在听"], "each once, through two restarts");
+  // the same words again, much later, are a new message
+  s.p.send("chat-1", userMessage("第一句", "fresh"), at(T1, 10 * 60_000));
+  await settle();
+  assert.equal(read(s.w.root, id).filter((l: { kind: string; text?: string }) => l.kind === "said" && l.text === "第一句").length, 2);
+  for (const e of restarts) await e.stop();
 });
 
-test("a finished turn writes how long the chat is and what the turn cost; the day's money counts it", async () => {
+test("the cost the session reports is its total so far: each turn counts only the step up, so four turns come to the last total; a session that began again counts whole", async () => {
+  const s = setup();
+  const id = await start(s);
+  const spent = () => read(s.w.root, id).filter((l: { kind: string }) => l.kind === "chat.turn").reduce((n: number, l: { usd: number }) => n + l.usd, 0);
+  // what a real Haiku chat printed (M2 review): 0.0069, 0.0075, 0.0081, 0.0088
+  for (const total of [0.0069126, 0.0075348, 0.0081247, 0.0087722]) s.p.send("chat-1", turnDone(61_000, total));
+  assert.ok(Math.abs(spent() - 0.0087722) < 1e-9, `the four turns come to the last total, not ${spent()}`);
+  assert.ok(Math.abs(counts(s.w.root, s.w.now(), s.w.ctx.policy).total.usd - 0.0087722) < 1e-9, "and so does the day's money");
+  // the plugin was down for a turn: the next step is bigger, nothing is lost or counted twice
+  s.p.send("chat-1", turnDone(62_000, 0.0100));
+  assert.ok(Math.abs(spent() - 0.01) < 1e-9);
+  // a new chat counts from nothing
+  s.p.send("chat-1", turnDone(170_000, 0.02));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  s.p.send("chat-2", turnDone(60_000, 0.003));
+  assert.ok(Math.abs(spent() - (0.02 + 0.003)) < 1e-9, `${spent()}`);
+});
+
+test("a provider that reports no usage, or whose chat cannot be refreshed, does not break the chat: nothing is written, the chat stays", async () => {
+  const s = setup({}, { status: () => { throw new Error("no such thing"); } });
+  const id = await start(s).catch((e) => e);
+  assert.ok(typeof id === "string" || id instanceof Error);
+  const t = setup();
+  const tid = await start(t);
+  t.p.send("chat-1", { type: "turn_completed" });
+  assert.equal(read(t.w.root, tid).filter((l: { kind: string }) => l.kind === "chat.turn").length, 0);
+  assert.equal(load(t.w.root, tid).chatId, "chat-1");
+});
+
+test("a finished turn writes how long the chat is and what it cost; the day's money counts it", async () => {
   const s = setup();
   const id = await start(s);
   s.p.send("chat-1", turnDone(61_000, 0.05));
   const t = load(s.w.root, id).chatTurn;
-  assert.deepEqual([t.tokens, t.usd], [61_000, 0.05]);
-  const day = counts(s.w.root, s.w.now(), s.w.ctx.policy).total.usd;
-  assert.ok(day >= 0.05);
+  assert.deepEqual([t.tokens, t.usd, t.usdTotal], [61_000, 0.05, 0.05]);
+  assert.ok(counts(s.w.root, s.w.now(), s.w.ctx.policy).total.usd >= 0.05);
 });
 
 // ---- what is drawn into the chat -------------------------------------------------------------------------------
@@ -377,4 +423,33 @@ test("the prompt a chat is made with lets it know its affair and where the handb
   assert.match(text, new RegExp(`事项 ${id}`));
   assert.match(text, /note .*--mine/);
   assert.match(text, /别抄密码/, "pictures: only the points, as words, and nothing secret");
+});
+
+// ---- which model the chat runs on ----------------------------------------------------------------------------
+
+test("the chat's model: by default the look's, policy.chat.role names another for all chats, a role's own chat entry wins; a role that brings its own env leaves the Claude cache setting out", () => {
+  const w = world();
+  const s = { id: "D1", title: "洗牙", roleName: "", workspaceId: "ws" };
+  const policy = (over: Record<string, unknown>, roles: Record<string, unknown> = {}) => ({
+    ...w.ctx,
+    policy: { ...DEFAULT_POLICY, ...over, chat: { ...DEFAULT_POLICY.chat, ...((over.chat as object) ?? {}) }, roles: { ...DEFAULT_POLICY.roles, ...roles } },
+  });
+  const look = DEFAULT_POLICY.roles.glance;
+  // by default: exactly what it was before the chat had a role of its own
+  const base = chatCreateOptions(policy({}) as never, s as never);
+  assert.equal(base.config.provider, look.provider);
+  assert.equal(base.config.thinkingOptionId, look.thinking);
+  assert.equal(base.config.modeId, look.mode);
+  assert.equal(base.env.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
+  // every chat on another role
+  const other = { provider: "claude/claude-sonnet-5-5", thinking: "medium", mode: "bypassPermissions" };
+  const named = chatCreateOptions(policy({ chat: { role: "talk" } }, { talk: other }) as never, s as never);
+  assert.deepEqual([named.config.provider, named.config.thinkingOptionId], [other.provider, "medium"]);
+  // one role's chat entry; a provider with no Claude cache setting says its own env
+  const own = chatCreateOptions(policy({}, { glance: { ...look, chat: { provider: "pi/some-model", env: { SOME: "1" } } } }) as never, s as never);
+  assert.equal(own.config.provider, "pi/some-model");
+  assert.equal(own.env.CLAUDE_CODE_PROMPT_CACHE_TTL, undefined);
+  assert.deepEqual([own.env.SOME, own.env.AFFAIR_ID], ["1", "D1"]);
+  // the looks are not touched by any of it
+  assert.equal(roleOf(policy({ chat: { role: "talk" } }, { talk: other }).policy, undefined).provider, look.provider);
 });

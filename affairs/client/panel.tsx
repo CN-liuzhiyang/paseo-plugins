@@ -3,7 +3,7 @@ import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import type { PanelData } from "../shared/panel";
-import { answerRpc, panelRpc } from "../shared/rpc";
+import { answerRpc, materialRpc, panelRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 
 // The 进展 panel beside an affair's chat: now / sources / materials. It only draws what the plugin sends and asks again
@@ -15,6 +15,8 @@ export function Panel({ theme, workspaceId }: PluginWorkspacePanelProps) {
   const c = theme.colors;
   const load = useRpc(panelRpc);
   const answer = useRpc(answerRpc);
+  const material = useRpc(materialRpc);
+  const [open, setOpen] = useState<{ name: string; text: string; truncated: boolean } | null>(null);
   const [panel, setPanel] = useState<PanelData | null | undefined>(undefined);
   const [showRecent, setShowRecent] = useState(false);
   const [showFacts, setShowFacts] = useState(false);
@@ -80,6 +82,7 @@ export function Panel({ theme, workspaceId }: PluginWorkspacePanelProps) {
       <Pieces text={panel.waiting.text} parts={panel.waiting.parts} color={c.accent} style={{ ...body, fontWeight: "600" }} />
       {panel.now.text ? <Pieces text={panel.now.text} parts={panel.now.parts} color={c.accent} style={{ ...body, marginTop: 2 }} /> : null}
       {panel.next.text ? <Text style={{ ...muted, marginTop: 6 }}>下次　{panel.next.text}</Text> : null}
+      {panel.spent ? <Text style={{ ...muted, marginTop: 2 }}>{panel.spent}</Text> : null}
       {last ? (
         <>
           <Text style={{ ...muted, marginTop: 6 }}>最近　{last.text}</Text>
@@ -108,11 +111,25 @@ export function Panel({ theme, workspaceId }: PluginWorkspacePanelProps) {
       {heading("资料")}
       {panel.materials.items.length === 0 ? <Text style={muted}>还没有</Text> : null}
       {panel.materials.items.map((m, i) => (
-        <View key={i} style={{ flexDirection: "row", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
-          <Text style={{ ...body, flex: 1 }}>📄 {m.name}</Text>
-          <Text style={muted}>
-            {m.who} · {m.at}
-          </Text>
+        <View key={i} style={{ marginBottom: 6 }}>
+          <Pressable
+            testID={`material-${m.name}`}
+            onPress={() => (open?.name === m.name ? setOpen(null) : void material({ workspaceId, name: m.name }).then((r) => setOpen({ name: m.name, text: r.text, truncated: r.truncated })))}
+            style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}
+          >
+            <Text style={{ ...body, flex: 1, color: c.accent }}>{m.name}</Text>
+            <Text style={muted}>
+              {m.who} · {m.at}
+            </Text>
+          </Pressable>
+          {open?.name === m.name ? (
+            <View style={{ backgroundColor: c.surface1, borderColor: c.border, borderWidth: 1, borderRadius: 8, padding: 10, marginTop: 4 }}>
+              <Text selectable style={{ ...muted, color: c.foreground }}>
+                {open.text}
+                {open.truncated ? "\n…（只显示前面一部分）" : ""}
+              </Text>
+            </View>
+          ) : null}
         </View>
       ))}
       {panel.materials.more ? <Text style={muted}>还有 {panel.materials.more} 个</Text> : null}

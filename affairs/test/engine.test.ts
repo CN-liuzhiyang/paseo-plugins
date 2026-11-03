@@ -237,7 +237,7 @@ test("the panel is drawn from the log, and says when the day's looks are used up
   const ws = load(s.w.root, id).workspaceId;
   const p = s.engine.panel(ws)!;
   assert.equal(p.waiting.text, "等你去约");
-  assert.match(p.next.text, /明天 9:30 看；你一说话我马上看/);
+  assert.match(p.next.text, /^明天 9:30 看$/);
   s.w.advance(10 * 60_000);
   await ops.brief(s.w.ctx, id);
   assert.equal(s.engine.panel(ws)!.next.text, "正在看一眼…", "while a look is on, the panel does not show the fallback time as if it were the plan");

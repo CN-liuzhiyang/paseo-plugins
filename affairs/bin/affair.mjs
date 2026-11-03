@@ -10,7 +10,7 @@ import { defaultRoot, loadPolicy } from "../server/lib/policy.mjs";
 
 const USAGE = `affair <命令> ...
   new --title T [--goal G] [--said S] [--link kind:ref] [--domain personal|family] [--deadline "YYYY-MM-DD HH:mm"] [--no-wait]
-  find <词>                    note <编号|名字> --said S [--deadline T]    answer <问题编号> --said S
+  find <词>                    note <编号|名字> --said S [--deadline T]    answer <问题编号> --said S（对话的会话用 --said-seq N）
   （对话的会话）note <编号> --mine --said S [--said-seq N]   report <编号> --from chat --file F.json   brief <编号> --chat   history <编号> [--q 词] [--pick N] [--max 字数]
   stop <编号|名字>             pause <编号|名字> --until "YYYY-MM-DD HH:mm" [--said-seq N]  resume <编号|名字>   undo <编号|名字>
   show <编号|名字> [--log]     ls    stats    doctor（逐项自检）
@@ -63,7 +63,7 @@ async function main() {
       result = await ops.note(ctx, need(arg, "编号"), { said: said(), deadline: flags.deadline, via: flags.via, mine: flags.mine, saidSeq: flags["said-seq"] });
       break;
     case "answer":
-      result = await ops.answer(ctx, need(arg, "问题编号").replace(/-\d+$/, ""), arg, said(), flags.via);
+      result = await ops.answer(ctx, need(arg, "问题编号").replace(/-\d+$/, ""), arg, saidIfAny(), flags.via, { saidSeq: flags["said-seq"] ?? "" });
       break;
     case "stop":
       result = await ops.stop(ctx, ops.resolve(ctx, need(arg, "编号")).s?.id ?? need(null, "存在的编号"), { evidence: saidIfAny() });

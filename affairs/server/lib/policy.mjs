@@ -69,6 +69,9 @@ export const DEFAULT_POLICY = {
   // The chat session of an affair. It is kept as long as it is cheap to keep: warm (spoken to within the cache's lifetime) it is
   // never replaced; cold and long, or very long, or left over the night, it is replaced by a new one that reads the brief.
   chat: {
+    // The name of a role in `roles` that every chat runs on (empty: the role of the affair's looks). A role may also have a
+    // `chat` of its own: { provider, thinking, mode, env }.
+    role: "",
     // Cache lifetime asked for the chat session (the env of its session): its turns come minutes to an hour apart.
     cacheTtl: "1h",
     // Not spoken to for this long, and the context this long (tokens): replaced.

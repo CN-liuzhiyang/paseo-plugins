@@ -198,7 +198,7 @@ export function fold(lines) {
         break;
       case "chat.turn":
         // One turn of the chat finished: when, how long the session's context is now, what it cost (the real figures from the turn).
-        if (l.agentId === s.chatId) s.chatTurn = { at: l.at, tokens: Number(l.tokens) || 0, usd: Number(l.usd) || 0 };
+        if (l.agentId === s.chatId) s.chatTurn = { at: l.at, tokens: Number(l.tokens) || 0, usd: Number(l.usd) || 0, usdTotal: Number(l.usdTotal) || 0 };
         break;
       case "note":
         // What the chat session wrote down for itself (a conclusion, a decision): its own words, never taken for his.

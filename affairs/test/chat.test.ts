@@ -47,6 +47,10 @@ async function chatReads(w: W, id: string) {
 }
 
 /** What he said in the chat, put in the log by the plugin. */
+async function noted(c: ReturnType<typeof chatOf>, id: string) {
+  return (await ops.note(c, id, { said: "他说约好了", mine: true })).seq as number;
+}
+
 async function heard(w: W, id: string, text: string) {
   const r = await ops.hear(w.ctx, id, text);
   assert.equal(r.ok, true, r.text);
@@ -256,21 +260,53 @@ test("it can finish an affair from the chat, with his words behind it; not with 
 
 // ---- answers and pauses the chat makes for him -------------------------------
 
-test("answer from the chat: his choice, or words of his since the question; never words he did not say", async () => {
+test("answer from the chat: only with a line of his made after the question, which is then the answer word for word; never a choice it names itself", async () => {
   const w = world();
   const id = await started(w);
   await looked(w, id, { ask: { title: "洗牙约上了吗？", options: ["约好了", "还没约", "不用盯了"] } });
   const q = load(w.root, id).asks[0];
   const c = chatOf(w, id);
-  assert.match((await ops.answer(c, id, q.id, "约好了，下周三")).text, /不是他说的/, "he has not said it");
-  await heard(w, id, "约好了，下周三下午两点");
-  const ok = await ops.answer(c, id, q.id, "约好了，下周三");
+  // the way the review found: the choice's own words, said by the chat session, he has said nothing
+  for (const text of ["约好了", "不用盯了", "还没约"]) assert.match((await ops.answer(c, id, q.id, text)).text, /--said-seq/, text);
+  assert.equal(load(w.root, id).asks[0].state, "open", "nothing was answered");
+  assert.equal(load(w.root, id).status, "watching", "and nothing was stopped in his name");
+  assert.match((await ops.answer(c, id, q.id, "", "chat", { saidSeq: "" })).text, /--said-seq/, "no line pointed to");
+  // a line of his from before the question, a line that is not his, one taken back: none is an answer
+  const early = load(w.root, id).said[0].seq;
+  assert.match((await ops.answer(c, id, q.id, "", "chat", { saidSeq: early })).text, /不是他在问题出现以后说的话/);
+  const other = (await ops.hear(w.ctx, id, "约好了，别的会话说的", { fromAgent: true, messageId: "call:1" })).seq;
+  assert.match((await ops.answer(c, id, q.id, "", "chat", { saidSeq: other })).text, /不是他在问题出现以后说的话/, "another session's words are not his");
+  assert.match((await ops.answer(c, id, q.id, "", "chat", { saidSeq: await noted(c, id) })).text, /不是他在问题出现以后说的话/, "nor its own note");
+  const taken = await heard(w, id, "约好了，下周三下午两点");
+  ops.undo(w.ctx, id);
+  assert.match((await ops.answer(c, id, q.id, "", "chat", { saidSeq: taken })).text, /不是他在问题出现以后说的话/, "taken back");
+  // his own line, after the question: that is the answer
+  const said = await heard(w, id, "约好了，下周三下午两点");
+  const ok = await ops.answer(c, id, q.id, "", "chat", { saidSeq: said });
   assert.equal(ok.ok, true, ok.text);
-  assert.equal(load(w.root, id).asks[0].state, "answered");
-  // a choice of the question's own counts without his words
+  const asked = load(w.root, id).asks[0];
+  assert.deepEqual([asked.state, asked.answer], ["answered", "约好了，下周三下午两点"], "his words, not the chat's");
+  // a human's way is as it was
   await looked(w, id, { ask: { title: "要不要提醒？", options: ["要", "不要"] } });
-  const q2 = load(w.root, id).asks.find((a: { state: string }) => a.state === "open");
-  assert.equal((await ops.answer(c, id, q2.id, "要")).ok, true);
+  const q2 = load(w.root, id).asks.find((x: { state: string }) => x.state === "open");
+  assert.equal((await ops.answer(w.ctx, id, q2.id, "要")).ok, true);
+});
+
+test("the chat cannot approve its own proposal: a far time it asks for becomes a question, and answering it needs his word", async () => {
+  const w = world();
+  const id = await started(w);
+  await looked(w, id);
+  const c = chatOf(w, id);
+  await chatReads(w, id);
+  const r = await chatReport(w, id, { next: { at: "2027-03-01 09:30", waitingFor: "3月1日再看", why: "他说今天最好搞定", earlyIf: [], evidence: [{ from: "said:2", quote: "帮我盯一下洗牙，今天最好要搞定" }] } });
+  void r;
+  const q = load(w.root, id).asks.find((x: { state: string; proposal: unknown }) => x.state === "open" && x.proposal);
+  assert.ok(q, "a proposal waits for him");
+  assert.match((await ops.answer(c, id, q.id, "可以")).text, /--said-seq/);
+  assert.notEqual(load(w.root, id).next?.at?.slice(0, 4), "2027", "the far time did not take effect");
+  const said = await heard(w, id, "可以");
+  assert.equal((await ops.answer(c, id, q.id, "", "chat", { saidSeq: said })).ok, true);
+  assert.equal(load(w.root, id).next.at.slice(0, 7), "2027-03", "his word made it so");
 });
 
 test("pause from the chat: --said is refused; --said-seq must name a line of his; a time past the limit leans on it", async () => {
@@ -283,7 +319,11 @@ test("pause from the chat: --said is refused; --said-seq must name a line of his
   const mine = (await ops.note(c, id, { said: "他说三个月后再看", mine: true })).seq;
   assert.match((await ops.pause(c, id, "2026-12-20 09:30", "", { saidSeq: mine })).text, /不是他说的话/, "its own note is not his");
   assert.equal((await ops.pause(c, id, "2026-12-20 09:30")).ok, false, "past the limit, with nothing of his behind it");
-  const said = await heard(w, id, "这件事过年以后再看吧，二十号左右");
+  // a line of his that does not say the day does not back it, whatever else it says
+  const vague = await heard(w, id, "这件事过年以后再看吧，不着急");
+  assert.match((await ops.pause(c, id, "2026-11-20 09:30", "", { saidSeq: vague })).text, /没有说到 2026-11-20/);
+  assert.equal(load(w.root, id).next.at.slice(0, 10) === "2026-11-20", false);
+  const said = await heard(w, id, "这件事11月20号再看吧");
   const far = await ops.pause(c, id, "2026-11-20 09:30", "", { saidSeq: said });
   assert.equal(far.ok, true, far.text);
   assert.equal(load(w.root, id).next.source, "user", "his words backed it");
@@ -573,4 +613,60 @@ test("history: a chat that cannot be read is said so after what was found; none 
   assert.equal(none.ok, false);
   assert.equal(none.code, 2);
   assert.match(none.text, /读不到/);
+});
+
+// ---- the protections the review found untested ---------------------------------------------------------------------
+
+test("--said-seq on note and pause must be a line of his that stands: another session's words and a line he took back are refused", async () => {
+  const w = world();
+  const id = await started(w);
+  await looked(w, id);
+  const c = chatOf(w, id);
+  const other = (await ops.hear(w.ctx, id, "这件事11月20号再看吧，别的会话说的", { fromAgent: true, messageId: "call:7" })).seq as number;
+  const taken = await heard(w, id, "这件事11月20号再看吧，我说错了");
+  ops.undo(w.ctx, id);
+  for (const seq of [other, taken]) {
+    assert.match((await ops.note(c, id, { said: "他说11月20号再看", mine: true, saidSeq: seq })).text, /不是他说的话/, `note, line ${seq}`);
+    assert.match((await ops.pause(c, id, "2026-11-20 09:30", "", { saidSeq: seq })).text, /不是他说的话/, `pause, line ${seq}`);
+  }
+  assert.notEqual(load(w.root, id).next.at.slice(0, 10), "2026-11-20");
+  const real = await heard(w, id, "这件事11月20号再看吧");
+  assert.equal((await ops.note(c, id, { said: "他说11月20号再看", mine: true, saidSeq: real })).ok, true);
+  assert.equal((await ops.pause(c, id, "2026-11-20 09:30", "", { saidSeq: real })).ok, true);
+});
+
+test("the chat has to have read its brief before it hands anything in", async () => {
+  const w = world();
+  const id = await started(w);
+  // nothing has happened since it began, so only the rule itself stops it
+  const first = await chatReport(w, id, { status: "他问过复制" });
+  assert.equal(first.ok, false);
+  assert.match(first.text, /先看一遍/);
+  await looked(w, id);
+  const early = await chatReport(w, id, { status: "他问过复制" });
+  assert.equal(early.ok, false);
+  assert.match(early.text, /brief .*--chat/);
+  assert.notEqual(load(w.root, id).nowText, "他问过复制");
+  await chatReads(w, id);
+  assert.equal((await chatReport(w, id, { status: "他问过复制" })).ok, true);
+});
+
+test("the day a time falls on has to be in his words: dates, months and spans, and not a word that only says later", async () => {
+  const { mentionsDay } = await import("../server/lib/check.mjs");
+  const tz = "Asia/Shanghai";
+  const now = Date.parse("2026-11-03T10:00:00+08:00");
+  const at = (s: string) => Date.parse(`${s}:00+08:00`);
+  assert.equal(mentionsDay("11月20号再看", at("2026-11-20T09:30"), now, tz), true);
+  assert.equal(mentionsDay("十一月二十日吧", at("2026-11-20T09:30"), now, tz), true, "numbers written in characters are read too");
+  assert.equal(mentionsDay("2027-03-01", at("2027-03-01T09:30"), now, tz), true);
+  assert.equal(mentionsDay("3/1 之后", at("2027-03-01T09:30"), now, tz), true);
+  assert.equal(mentionsDay("三月再看", at("2027-03-01T09:30"), now, tz), true);
+  assert.equal(mentionsDay("下个月再看", at("2026-12-10T09:30"), now, tz), true);
+  assert.equal(mentionsDay("明年再看", at("2027-03-01T09:30"), now, tz), true);
+  assert.equal(mentionsDay("两周后看", at("2026-11-17T09:30"), now, tz), true);
+  assert.equal(mentionsDay("两周后看", at("2027-03-01T09:30"), now, tz), false);
+  assert.equal(mentionsDay("三个月后再看", at("2027-02-03T09:30"), now, tz), true);
+  assert.equal(mentionsDay("过年以后再看吧", at("2027-03-01T09:30"), now, tz), false);
+  assert.equal(mentionsDay("帮我盯一下洗牙，今天最好要搞定", at("2027-03-01T09:30"), now, tz), false);
+  assert.equal(mentionsDay("11月20号再看", at("2026-11-21T09:30"), now, tz), false, "another day");
 });

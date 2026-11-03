@@ -42,25 +42,36 @@ export function rotationReason(s, now, policy) {
 /** The words the chat session starts with. It is told what to run and what each thing is for; the rest is in the handbooks. */
 export function chatPrompt(ctx, s) {
   const cmd = ctx.command;
-  const handbooks = [ctx.policy.handbookPath, ctx.policy.handbooksDir ? path.join(ctx.policy.handbooksDir, "affair.md") : ""].filter((f) => f && existsSync(f));
+  // The public handbook only: the private ones are for the looks, who end every visit with a report, which is not what a chat does.
+  const handbooks = [ctx.policy.handbookPath].filter((f) => f && existsSync(f));
   return [
     `你是事项 ${s.id}「${s.title}」的对话：他在这里跟你聊这件事，你也能替他办。到点的「看一眼」是另外的小会话，不是你；它的结果会作为一行出现在这段对话里，但你看不到，要知道就跑 brief。`,
     `每次他开口，先跑：${cmd} brief ${s.id} --chat（上次读完以后新的事、没答的问题、记住的、引用怎么写）。读完再回他。没有新的它会只写一行。`,
     `命令只有这几个，别的不碰（不要改 schedule，不要直接改事项的文件，不要用 paseo 命令）：`,
     `- 得出一个结论、他做了一个决定，当场记一句（${"≤120 字"}，别攒到最后，这段对话随时会换新）：${cmd} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
     `- 状态、记住的、下次、问题、办完：${cmd} report ${s.id} --from chat --file <json>（每项都可以不写；改下次时间要过检查，只有他说过的才算数）`,
-    `- 他答了问题（点了按钮，或直接说了）：${cmd} answer <问题编号> --said "<他的原话或选项>"`,
+    `- 他用话答了问题：${cmd} answer <问题编号> --said-seq <他说的那一行的编号>（答案就是他那一行的原话；他点按钮的由界面记，你不用管；他没说就别答，直接问他）`,
     `- 他要改时间：${cmd} pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
     `- 他提到「上次」「之前说的」而 brief 里找不到：先 ${cmd} history ${s.id} --q <词> 查，查不到就问他，别猜`,
     `他在这里发的图只在这段对话里看得到，之后的「看一眼」看不到它。要让后面用上，把要点用 note --mine 记成文字（比如短信里的时间地点）；别抄密码、令牌、证件号。`,
     `回他的话说人话：不用「叫醒、校验、记录、计划、读数、会话」这些词；说「我看一眼」「记下了」。提到单号照原样写，要链接就用 brief 里「引用怎么写」那一节的写法，不要自己猜地址。`,
-    handbooks.length ? `手册（有空读，里面「你是这件事的对话」一节说得更细）：${handbooks.join("　")}` : "",
+    handbooks.length ? `手册（有空读，只看里面「你是这件事的对话」一节；别的节是给看一眼的）：${handbooks.join("　")}` : "",
   ].filter(Boolean).join("\n");
 }
 
 /** What a new chat session is made with: the same model as this affair's looks, a cache lifetime that suits turns far apart, no first message. */
+/**
+ * Which model the chat of this affair runs on. By default the one its looks run on. policy.chat.role names another role for
+ * every chat; a role may also carry a `chat` of its own ({ provider, thinking, mode, env }) that wins for the affairs of that role.
+ */
+export function chatRoleOf(policy, roleName) {
+  const look = roleOf(policy, roleName);
+  const named = policy.chat.role ? roleOf(policy, policy.chat.role) : look;
+  return { ...named, ...(look.chat ?? {}) };
+}
+
 export function chatCreateOptions(ctx, s) {
-  const role = roleOf(ctx.policy, s.roleName || undefined);
+  const role = chatRoleOf(ctx.policy, s.roleName || undefined);
   return {
     title: s.title,
     config: {
@@ -69,7 +80,8 @@ export function chatCreateOptions(ctx, s) {
       ...(role.mode ? { modeId: role.mode } : {}),
       systemPrompt: chatPrompt(ctx, s),
     },
-    env: { AFFAIR_ID: s.id, CLAUDE_CODE_PROMPT_CACHE_TTL: ctx.policy.chat.cacheTtl },
+    // The cache lifetime is a Claude Code setting; a role that runs another provider says its own env (or none) and leaves this out.
+    env: { AFFAIR_ID: s.id, ...(role.env ?? { CLAUDE_CODE_PROMPT_CACHE_TTL: ctx.policy.chat.cacheTtl }) },
     labels: { "affairs.chat": s.id, "affairs.affair": s.id },
   };
 }
@@ -78,6 +90,6 @@ export function chatCreateOptions(ctx, s) {
 export function noticeFor(why, title) {
   if (why === "first") return `开始盯「${title}」。我先去看一眼，有结果写在这里。`;
   if (why === "migrate") return "现在可以在这里直接跟我聊这件事了；右边的「进展」是最新的情况。";
-  if (why.startsWith("rotate")) return "接着聊。之前聊出来的要点我都记下了，右边的「进展」里能看到。";
+  if (why.startsWith("rotate")) return "接着聊。我记下的要点在右边的「进展」里，你说过的话都还在。";
   return "";
 }

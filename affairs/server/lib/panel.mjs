@@ -1,6 +1,7 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
+import { counts } from "./limits.mjs";
 import { cardOf, rowsOf, sentOf, stamp } from "./view.mjs";
 
 // What the "进展" panel beside an affair's conversation shows: three blocks (now, sources, materials), all drawn from the
@@ -11,6 +12,18 @@ export const SOURCES_SHOWN = 6;
 export const MATERIALS_SHOWN = 5;
 export const RECENT_ROWS = 10;
 const FACTS_SHOWN = 12;
+const MATERIAL_CHARS = 20_000;
+
+/** The text of one file in the affair's files/ folder, to show where it is listed; a name that is not a file there is refused. */
+export function materialText(root, id, name) {
+  const dir = path.resolve(root, id, "files");
+  const file = path.resolve(dir, String(name ?? ""));
+  if (path.dirname(file) !== dir || !existsSync(file) || !statSync(file).isFile()) return { ok: false, text: "没有这个文件。", truncated: false };
+  const raw = readFileSync(file);
+  if (raw.subarray(0, 4000).includes(0)) return { ok: false, text: `这个文件不是文字，在文件夹里打开：${file}`, truncated: false };
+  const text = raw.toString("utf8");
+  return { ok: true, text: text.slice(0, MATERIAL_CHARS), truncated: text.length > MATERIAL_CHARS };
+}
 
 /** How a link kind is named to a person. */
 const KIND_NAME = { gcp: "易协作", "feishu-task": "飞书任务", doc: "文档", svn: "提交" };
@@ -86,7 +99,9 @@ const withParts = (text, lc) => {
 /** The whole panel for one affair. */
 export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "" } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
-  const rows = rowsOf(state, now, policy);
+  // His words in the chat are on his screen already, but this is where he looks back at what happened.
+  const rows = rowsOf(state, now, policy, { withChat: true });
+  const spent = counts(root, now, policy).per[state.id]?.usd ?? 0;
   const asks = (state.asks ?? []).filter((a) => a.state === "open");
   return {
     id: state.id,
@@ -96,6 +111,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),
     next: withParts(card.next, lc),
+    spent: spent > 0 ? `今天花了 ${spent.toFixed(2)}` : "",
     recent: rows.slice(-RECENT_ROWS).map((r) => ({ key: r.key, ...withParts(r.text, lc), tone: r.tone === "red" ? "red" : "normal" })),
     facts: (state.facts ?? []).slice(0, FACTS_SHOWN).map((f) => withParts(String(f), lc)),
     sources: sourcesOf(state, now, policy, lc),

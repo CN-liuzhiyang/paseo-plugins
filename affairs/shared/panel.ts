@@ -17,6 +17,7 @@ export const panelSchema = z.object({
   waiting: text,
   now: text,
   next: text,
+  spent: z.string(),
   recent: z.array(text.extend({ key: z.string(), tone: z.enum(["normal", "red"]) })),
   facts: z.array(text),
   sources: z.object({ items: z.array(source), more: z.number() }),

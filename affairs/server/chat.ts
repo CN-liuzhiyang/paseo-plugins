@@ -39,7 +39,7 @@ export interface ChatHandle {
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
     subscribe(handler: (event: any) => void): Unsubscribe;
-    refetch(options?: Record<string, unknown>): Promise<{ entries?: Array<{ item: any }> }>;
+    refetch(options?: Record<string, unknown>): Promise<{ entries?: Array<{ item: any; timestamp?: string }> }>;
   };
 }
 export interface ChatPaseo {
@@ -116,25 +116,31 @@ export function createChats(deps: ChatDeps) {
     const e = event?.event;
     if (!e) return;
     try {
-      if (e.type === "timeline") hearItem(id, e.item);
+      if (e.type === "timeline") hearItem(id, e.item, asText(event.timestamp ?? e.timestamp));
       else if (e.type === "turn_completed" && e.usage) {
-        deps.write(id, [{ kind: "chat.turn", agentId: chatId, tokens: Number(e.usage.contextWindowUsedTokens) || 0, usd: Number(e.usage.totalCostUsd) || 0 }]);
+        // The session reports what it has cost in all, not what this turn cost: this turn's part is the step up from last time
+        // (a total that went down is a session that began again, and counts whole). Nothing is lost while the plugin was not listening: the step is bigger.
+        const total = Number(e.usage.totalCostUsd) || 0;
+        const before = deps.state(id).chatTurn;
+        const last = before ? Number(before.usdTotal) || 0 : 0;
+        const usd = total >= last ? total - last : total;
+        deps.write(id, [{ kind: "chat.turn", agentId: chatId, tokens: Number(e.usage.contextWindowUsedTokens) || 0, usd, usdTotal: total }]);
       }
     } catch (error) {
       log(`${id}: chat event failed: ${(error as Error).message}`);
     }
   }
 
-  function hearItem(id: string, item: any) {
+  function hearItem(id: string, item: any, at = "") {
     if (!item) return;
     if (item.type === "user_message") {
       const text = asText(item.text).trim();
-      if (text) void ops.hear(ctx, id, text, { messageId: asText(item.messageId) || asText(item.clientMessageId) }).catch((error: unknown) => log(`${id}: could not note what he typed: ${(error as Error).message}`));
+      if (text) void ops.hear(ctx, id, text, { messageId: asText(item.messageId) || asText(item.clientMessageId), at }).catch((error: unknown) => log(`${id}: could not note what he typed: ${(error as Error).message}`));
     } else if (item.type === "tool_call" && (item.name === "agent_message" || item.agentMessage)) {
       // Sent into the chat by another session: put down, but not as his word.
       const text = asText(item.agentMessage?.text ?? item.detail?.text).trim();
       const key = asText(item.callId);
-      if (text) void ops.hear(ctx, id, text, { messageId: key ? `call:${key}` : "", fromAgent: true }).catch((error: unknown) => log(`${id}: could not note a message sent in: ${(error as Error).message}`));
+      if (text) void ops.hear(ctx, id, text, { messageId: key ? `call:${key}` : "", at, fromAgent: true }).catch((error: unknown) => log(`${id}: could not note a message sent in: ${(error as Error).message}`));
     }
   }
 
@@ -153,7 +159,7 @@ export function createChats(deps: ChatDeps) {
     try {
       await sub.ready;
       const tail = await handle.timeline.refetch({ limit: 40 });
-      for (const entry of tail.entries ?? []) hearItem(id, entry.item);
+      for (const entry of tail.entries ?? []) hearItem(id, entry.item, asText((entry as { timestamp?: unknown }).timestamp));
     } catch (error) {
       log(`${id}: listening to the chat failed: ${(error as Error).message}`);
     }
@@ -189,10 +195,9 @@ export function createChats(deps: ChatDeps) {
       for (const r of fresh) {
         if (d.rows.get(r.key) === r.text) continue;
         d.rows.set(r.key, r.text);
-        // The answer to a question that was drawn takes the question's place.
-        const inPlace = r.ask && d.asks.has(r.ask);
-        const itemId = inPlace ? askId(r.ask!) : `row-${r.key}`;
-        if (inPlace) d.asks.delete(r.ask!);
+        // The answer to a question takes the question's place, drawn before or not (a card from before a reload is replaced too).
+        const itemId = r.ask ? askId(r.ask) : `row-${r.key}`;
+        if (r.ask) d.asks.delete(r.ask);
         await put(chatId, itemId, LINE_KIND, LINE_VERSION, { text: r.text, tone: r.tone === "red" ? "red" : "normal", detail: r.detail, ...(r.parts ? { parts: r.parts } : {}) });
       }
       for (const a of view.asks) {

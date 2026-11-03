@@ -6,7 +6,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { loadPolicy, defaultRoot } from "./server/lib/policy.mjs";
 import { makeCtx } from "./server/lib/ops.mjs";
 import { settingsDefinition } from "./shared/settings";
-import { answerRpc, listRpc, panelRpc } from "./shared/rpc";
+import { answerRpc, listRpc, materialRpc, panelRpc } from "./shared/rpc";
 import type { PanelData } from "./shared/panel";
 import { createEngine, type Deliver, type PaseoLike } from "./server/engine";
 
@@ -31,6 +31,7 @@ export default function contribute(server: PluginServerContext) {
 
   server.handle(listRpc, () => ({ items: engine?.affairs() ?? [] }));
   server.handle(panelRpc, ({ workspaceId }) => ({ panel: (engine?.panel(workspaceId) ?? null) as PanelData | null }));
+  server.handle(materialRpc, ({ workspaceId, name }) => engine?.material(workspaceId, name) ?? { ok: false, text: "事项还没准备好", truncated: false });
   server.handle(answerRpc, async ({ affairId, askId, text }) => {
     if (!engine) return { ok: false, text: "事项还没准备好" };
     await engine.answered(affairId, askId, text);

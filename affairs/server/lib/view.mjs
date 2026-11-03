@@ -43,7 +43,7 @@ export function cardOf(state, now, policy, { budget = "", trouble = "" } = {}) {
   else if (!over && budget) nextText = budget;
   else if (!over && next) {
     const when = speak(Date.parse(next.at), now, policy.tz);
-    nextText = next.remind ? `${when} ${next.remind}` : `${when} 看；你一说话我马上看`;
+    nextText = next.remind ? `${when} ${next.remind}` : `${when} 看`;
   }
   return {
     title: state.title,
@@ -56,7 +56,7 @@ export function cardOf(state, now, policy, { budget = "", trouble = "" } = {}) {
 }
 
 /** The lines under the card, oldest first. Each has a stable key so a line shown twice is one line. */
-export function rowsOf(state, now, policy) {
+export function rowsOf(state, now, policy, { withChat = false } = {}) {
   const { tz } = policy;
   const rows = [];
   const add = (key, at, text, tone = "normal", detail = "", extra = {}) => rows.push({ key, at, text, tone, detail, own: key[0] === "s" || key[0] === "a", ...extra });
@@ -70,7 +70,7 @@ export function rowsOf(state, now, policy) {
       // What he typed in the conversation is already on his screen; what he sent with it is drawn as his line too.
       const sent = state.said.find((s) => s.seq === l.seq)?.attachments ?? [];
       const summary = sent.length ? attachSummary(sent) : "";
-      if (l.via !== "workspace" && l.via !== "chat-session") add(`s${l.seq}`, l.at, `${time}  你：${l.text}${summary && !l.text.includes(summary) ? `（${summary}）` : ""}`);
+      if ((l.via !== "workspace" && l.via !== "chat-session") || (withChat && l.via === "chat-session")) add(`s${l.seq}`, l.at, `${time}  你：${l.text}${summary && !l.text.includes(summary) ? `（${summary}）` : ""}`);
       else if (summary) add(`s${l.seq}`, l.at, `${time}  你：${summary}`);
     } else if (l.kind === "note" && l.by === "chat" && typeof l.text === "string") {
       add(`m${l.seq}`, l.at, `${time}  我记下：${l.text}`);

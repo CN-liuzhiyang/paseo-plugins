@@ -31,6 +31,38 @@ export const secretIn = (text) => (typeof text === "string" && SECRETS.some((re)
 
 const normalize = (text) => String(text ?? "").replace(/[\s\p{P}\p{S}]/gu, "");
 
+const DIGITS = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10, 十一: 11, 十二: 12, 两: 2 };
+const asNumber = (s) => (/^\d+$/.test(s) ? Number(s) : DIGITS[s] ?? NaN);
+const NUM = "(\\d{1,2}|十二|十一|十|[一二三四五六七八九两])";
+
+/**
+ * Whether what he said names the day the time falls on: a date ("3月1日", "03-01", "3/1", "2027年3月1号"), a month
+ * ("三月", "下个月" when it is next month, "明年" when it is next year), or a span from now ("两周后", "10天后", "三个月后"
+ * within a day or a week of it). A time that is only "later" proves nothing about which day he meant.
+ */
+export function mentionsDay(text, at, now, tz) {
+  const t = String(text ?? "");
+  const d = localParts(at, tz);
+  const n = localParts(now, tz);
+  const monthDay = [...t.matchAll(new RegExp(`${NUM}\\s*月\\s*${NUM}\\s*[日号]?`, "g"))].some((m) => asNumber(m[1]) === d.mo && asNumber(m[2]) === d.d);
+  if (monthDay) return true;
+  if ([...t.matchAll(/(?<!\d)(\d{1,2})\s*[-/.]\s*(\d{1,2})(?!\d)/g)].some((m) => Number(m[1]) === d.mo && Number(m[2]) === d.d)) return true;
+  if ([...t.matchAll(/(\d{4})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})/g)].some((m) => Number(m[1]) === d.y && Number(m[2]) === d.mo && Number(m[3]) === d.d)) return true;
+  if ([...t.matchAll(new RegExp(`${NUM}\\s*月(?!\\s*${NUM}\\s*[日号])(?!份?\\s*底)`, "g"))].some((m) => asNumber(m[1]) === d.mo && !/个月/.test(m[0]))) return true;
+  if (/下个?月/.test(t) && (d.y * 12 + d.mo) - (n.y * 12 + n.mo) === 1) return true;
+  if (/明年/.test(t) && d.y === n.y + 1) return true;
+  const spans = [
+    [new RegExp(`${NUM}\\s*天后`), DAY, 1],
+    [new RegExp(`${NUM}\\s*(?:个)?(?:周|星期|礼拜)后`), 7 * DAY, 3],
+    [new RegExp(`${NUM}\\s*个月后`), 30 * DAY, 7],
+  ];
+  for (const [re, unit, slack] of spans) {
+    const m = re.exec(t);
+    if (m && Math.abs(at - (now + asNumber(m[1]) * unit)) <= slack * DAY) return true;
+  }
+  return false;
+}
+
 /** What the check needs to know, worked out from the log. */
 export function buildFacts(state, now, policy) {
   const { tz, check } = policy;

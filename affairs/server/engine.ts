@@ -8,7 +8,7 @@ import * as ops from "./lib/ops.mjs";
 import * as readers from "./lib/readers.mjs";
 import { localParts } from "./lib/time.mjs";
 import { linkOf, rowsOf, say } from "./lib/view.mjs";
-import { panelOf } from "./lib/panel.mjs";
+import { materialText, panelOf } from "./lib/panel.mjs";
 import { linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
@@ -98,8 +98,14 @@ export function createEngine(deps: EngineDeps) {
     const s = state(found.id);
     const now = ctx.now();
     const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy) : { ok: true };
-    const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? `这次没看成：${String(s.lastEnd.error ?? "没有说明").slice(0, 60)}` : "";
+    const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? "这次没看成，过一会儿会再试" : "";
     return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
+  }
+
+  /** A file in the panel's materials, read so it can be shown where it is listed. */
+  function material(workspaceId: string, name: string) {
+    const found = affairs().find((a) => a.workspaceId === workspaceId);
+    return found ? materialText(ctx.root, found.id, name) : { ok: false, text: "这里不是事项。", truncated: false };
   }
 
   /** What should reach the person on another channel, from the log alone. */
@@ -381,7 +387,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   return {
-    start, stop, scan, scanAll, view, panel, affairs, runEnded, readPass,
+    start, stop, scan, scanAll, view, panel, material, affairs, runEnded, readPass,
     /** Waits for the looks asked for after a delivery (tests). */
     settle: async () => {
       while (lookWork.size) await Promise.all([...lookWork]);

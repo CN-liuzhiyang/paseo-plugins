@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildFacts, checkReport, earliestOf, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
+import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { mayLook, tripped } from "./limits.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
@@ -321,6 +321,8 @@ async function waitForConversation(ctx, id) {
  * affair's own files/ and the line carries where. A line may be only that.
  */
 const NOTE_MAX = 120;
+/** The same words from the same chat within this long of each other are one message heard twice. */
+const HEAR_WINDOW_MS = 5000;
 
 /**
  * What the chat session writes down for itself as it goes (a conclusion, something he decided): one sentence in its own
@@ -355,7 +357,7 @@ function noteMine(ctx, ref, input) {
  * nothing a session had a hand in. It is no call for a look (the chat is already answering). The plugin's side only.
  * @returns {Promise<Result>}
  */
-export async function hear(ctx, ref, text, { messageId = "", fromAgent = false } = {}) {
+export async function hear(ctx, ref, text, { messageId = "", at = "", fromAgent = false } = {}) {
   if (ctx.by !== "human") return fail("他在对话里说的话只有插件从对话里记，会话不能代记。");
   const said = String(text ?? "");
   if (!said.trim()) return fail("没有话可记。");
@@ -363,10 +365,13 @@ export async function hear(ctx, ref, text, { messageId = "", fromAgent = false }
   if (secret) return secret;
   const r = resolve(ctx, ref, { closed: true });
   if (!r.s) return fail(r.text);
-  // The same message heard twice (the plugin was restarted and read the chat's end again) is one line.
-  if (messageId && r.s.lines.some((l) => l.kind === "said" && l.msg === messageId)) return { ok: true, text: "", seen: true };
+  // The same message heard twice (the plugin was restarted and read the chat's end again) is one line. A message's number
+  // changes when Paseo rebuilds the timeline after a restart; what stays is the words and the time it was sent.
+  const sent = Date.parse(at);
+  const heard = r.s.lines.some((l) => l.kind === "said" && l.text === said && (l.msg === messageId && messageId !== "" || (Number.isFinite(sent) && Number.isFinite(Date.parse(l.ts)) && Math.abs(Date.parse(l.ts) - sent) <= HEAR_WINDOW_MS)));
+  if (heard) return { ok: true, text: "", seen: true };
   // A message another session sent into the chat (not typed by him) is put down as what it is: not his word.
-  const [line] = write(ctx, r.s.id, [{ kind: "said", text: said, via: fromAgent ? "chat-agent" : "chat-session", by: fromAgent ? "look" : "user", ...(messageId ? { msg: messageId } : {}) }]);
+  const [line] = write(ctx, r.s.id, [{ kind: "said", text: said, via: fromAgent ? "chat-agent" : "chat-session", by: fromAgent ? "look" : "user", ...(messageId ? { msg: messageId } : {}), ...(Number.isFinite(sent) ? { ts: new Date(sent).toISOString() } : {}) }]);
   return { ok: true, text: "", seq: line.seq };
 }
 
@@ -418,23 +423,30 @@ export async function note(ctx, ref, input) {
 }
 
 /** @returns {Promise<Result>} */
-export async function answer(ctx, ref, qid, text, via = "chat") {
+export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** @type {string | number} */ ("") } = {}) {
   if (byLook(ctx)) return lookRefused("替他回答问题");
-  if (!String(text ?? "").trim()) return fail("没有答案可记：--said 后面要有内容。");
+  // The chat session never gives the answer in words of its own: what answers a question is the person's own press of a
+  // button (the plugin does that) or a line of his that the plugin recorded after the question came (--said-seq).
+  if (byChat(ctx)) {
+    if (String(text ?? "").trim()) return fail("对话里别用 --said 带他的答案：他点的按钮由插件记，他说的话已经记了，用 --said-seq 指给他说的那一行。");
+    if (saidSeq === "") return fail("要替他答，得指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没说就别答，直接问他。");
+  } else if (saidSeq !== "") return fail("--said-seq 只有对话的会话用；本人用 --said。");
+  if (!byChat(ctx) && !String(text ?? "").trim()) return fail("没有答案可记：--said 后面要有内容。");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
-  const secret = refuseSecret(text);
-  if (secret) return secret;
   const q = s.asks.find((a) => a.id === qid);
+  if (!byChat(ctx)) {
+    const secret = refuseSecret(text);
+    if (secret) return secret;
+  }
   if (!q) return fail(`没有这个问题：${qid}`);
   if (q.state !== "open") return { ok: true, text: say.answeredAlready(q.answer || "收起了") };
   if (byChat(ctx)) {
-    // The chat answers for him only with what he really said: one of the choices, or words of his since the question came.
-    const quote = normalize(text);
-    const since = s.said.filter((m) => !m.undone && m.by === "user" && m.seq > q.seq);
-    const his = q.options.some((o) => normalize(o) === quote) || since.some((m) => quote && normalize(m.text).includes(quote));
-    if (!his) return fail("替他答的话要是他点的选项，或者他在问题出现以后说过的原话；不是他说的，别替他答，直接问他。");
+    // His own line, said after the question came and not taken back: that line is the answer, word for word.
+    const from = s.said.find((m) => m.seq === Number(saidSeq) && !m.undone && m.by === "user" && m.via !== "chat-agent" && m.seq > q.seq);
+    if (!from) return fail(`--said-seq ${saidSeq} 不是他在问题出现以后说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的，也不能是问题之前的。`);
+    text = from.text;
   }
   write(ctx, s.id, [{ kind: "answered", id: qid, answer: text, via }]);
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
@@ -511,6 +523,8 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
     const n = Number(saidSeq);
     const from = s.said.find((m) => m.seq === n && !m.undone && m.by === "user");
     if (!from) return fail(`--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。`);
+    // He has to have said the day (or the month, or how long from now): any line of his would hold up any time otherwise.
+    if (at > now + policy.check.softDays * DAY && !mentionsDay(from.text, at, now, policy.tz)) return fail(`他那一行（#${from.seq}）里没有说到 ${localParts(at, policy.tz).date} 这个日子。这么远的时间要他说一个日期，或者在 report 里写成提议，让他点按钮。`);
     evidence.push({ quote: from.text, from: `said:${from.seq}` });
   } else if (String(said).trim()) {
     const [line] = write(ctx, s.id, [{ kind: "said", text: said.trim(), via: "chat", by: "user" }]);
@@ -761,7 +775,7 @@ async function briefChat(ctx, s) {
     `- 得出一个结论、他做了一个决定，当场记一句（≤${NOTE_MAX} 字，别攒到最后，换新随时会发生）：${ctx.command} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
     `- 要让后面看一眼用上他发给你的图：把要点（不抄密码、令牌、证件号）用 note --mine 记成文字；图本身只在这个对话里，看一眼拿不到。`,
     `- 状态、记住的（facts 新增、drop 删旧的）、下次、问题、办完：${ctx.command} report ${s.id} --from chat --file <json>（每项都可以不写）`,
-    `- 他在对话里答了问题：${ctx.command} answer <问题编号> --said "<他的原话或选项>"；改时间：pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
+    `- 他在对话里用话答了问题：${ctx.command} answer <问题编号> --said-seq <他说的那一行的编号>（答案就是他那一行的原话；他点按钮的由界面记，你不用管）；改时间：pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
     `- 他提到「上次」「之前说的」而这里找不到：先查（history），查不到就问他，别猜。`,
     "",
   ].join("\n");

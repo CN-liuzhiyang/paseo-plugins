@@ -1,7 +1,7 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginButtonIconProps, PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { useEffect } from "react";
-import { Text } from "react-native";
+import { View } from "react-native";
 import { listRpc } from "../shared/rpc";
 
 // The 进展 button on the header of each affair's workspace, and the first-time opening of the panel there. The client
@@ -38,7 +38,13 @@ export function installHeaders(client: PluginClientContext) {
       markOpened(workspaceId);
       client.openPanel(PANEL_ID, { workspaceId, location: "explorer" });
     }, [workspaceId]);
-    return <Text style={{ color, fontSize: size - 2 }}>▤</Text>;
+    // The same picture as the host's own right-panel button: a frame with its right part set off.
+    const w = size - 2;
+    return (
+      <View style={{ width: w, height: w * 0.85, borderWidth: 1.5, borderColor: color, borderRadius: 3 }}>
+        <View style={{ position: "absolute", top: 0, bottom: 0, right: w * 0.3, width: 1.5, backgroundColor: color }} />
+      </View>
+    );
   }
 
   function Feeder(_props: PluginSidebarItemProps) {
