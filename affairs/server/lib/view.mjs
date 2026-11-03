@@ -73,7 +73,7 @@ export function rowsOf(state, now, policy) {
   return rows;
 }
 
-export const linkOf = (url, policy) => (url && policy.popoLink ? `[在 Paseo 里看 ›](${url})` : "在 Paseo 的「事项」里看。");
+export const linkOf = (url, policy) => (url && policy.popoLink ? `在 Paseo 里看：${url}` : "在 Paseo 的「事项」里看。");
 
 export const say = {
   started: (title, link) => `好，开始盯「${title}」。${link}`,

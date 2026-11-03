@@ -45,7 +45,7 @@ export const inspect = (run, scheduleId) => json(run, ["schedule", "inspect", sc
  * Makes the schedule say what the log says: the next time, and paused once the affair is over. Returns what it changed.
  * A plan that is gone or ended is not made again here (the workspace it ran in may be archived): that is told, not fixed.
  */
-export async function sync(run, state, policy) {
+export async function sync(run, state, policy, now = Date.now) {
   if (!state.scheduleId) return { changed: [], problem: "还没有计划" };
   let plan;
   try {
@@ -66,7 +66,7 @@ export async function sync(run, state, policy) {
       changed.push("resumed");
     }
     const atMs = state.next ? Date.parse(state.next.at) : null;
-    if (atMs && atMs > Date.now() && plan.cadence?.expression !== cronOf(atMs, policy.tz)) {
+    if (atMs && atMs > now() && plan.cadence?.expression !== cronOf(atMs, policy.tz)) {
       await reschedule(run, state.scheduleId, atMs, policy.tz);
       changed.push("rescheduled");
     }

@@ -71,7 +71,9 @@ export function paseoUrl(ctx, s) {
   const home = ctx.paseoHome || path.join(process.env.USERPROFILE || process.env.HOME || "", ".paseo");
   const file = path.join(home, "server-id");
   if (!s.conversationId || !existsSync(file)) return "";
-  return `paseo://h/${readFileSync(file, "utf8").trim()}/agent/${s.conversationId}`;
+  const server = readFileSync(file, "utf8").trim();
+  // https, not paseo://: POPO renders it as a link and the web app opens the affair's own workspace (checked by hand 2026-11-03).
+  return s.workspaceId ? `https://app.paseo.sh/h/${server}/workspace/${s.workspaceId}` : `https://app.paseo.sh/h/${server}/agent/${s.conversationId}`;
 }
 
 const linkTextOf = (ctx, s) => linkOf(paseoUrl(ctx, s), ctx.policy);
@@ -397,7 +399,7 @@ export function undo(ctx, ref) {
 export async function syncPlan(ctx, id) {
   const s = state(ctx, id);
   try {
-    const result = await schedule.sync(ctx.run, s, ctx.policy);
+    const result = await schedule.sync(ctx.run, s, ctx.policy, ctx.now);
     if (result.problem) write(ctx, id, [{ kind: "flag", what: "schedule", detail: result.problem }]);
     else if (result.changed.length) write(ctx, id, [{ kind: "schedule.fix", changed: result.changed }]);
     return result;
