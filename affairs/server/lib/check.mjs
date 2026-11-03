@@ -89,14 +89,17 @@ export function nextWorkday(now, tz) {
   return ms;
 }
 
-function checkStructure(report, finishing) {
+function checkStructure(report, finishing, chat = false) {
   const out = [];
   const add = (field, text) => out.push({ field, text });
-  if (!finishing || report.status !== undefined) {
+  // The chat session hands in only what it has: every field may be left out.
+  if (chat ? report.status !== undefined : !finishing || report.status !== undefined) {
     if (typeof report.status !== "string" || !report.status.trim()) add("status", "status 要写现在的情况，一句话");
     else if ([...report.status].length > 40) add("status", "status 不超过 40 个字");
   }
-  if (typeof report.entry !== "string" || !report.entry.trim()) add("entry", "entry 要写这次看到了什么，一句话");
+  if (chat && report.entry === undefined) {
+    // nothing to say about a look: there was none
+  } else if (typeof report.entry !== "string" || !report.entry.trim()) add("entry", "entry 要写这次看到了什么，一句话");
   else if ([...report.entry].length > 200) add("entry", "entry 不超过 200 个字");
   if (report.facts !== undefined && (!Array.isArray(report.facts) || report.facts.length > 20 || report.facts.some((f) => typeof f !== "string" || f.length > 300))) add("facts", "facts 是字符串数组（≤20 条，每条 ≤300 字），整组替换");
   const watches = report.watches ?? [];
@@ -123,10 +126,10 @@ function checkStructure(report, finishing) {
  * verdict: pass | recorded (past the limit with a quote that checks out) | ask (too far past: ask the person) | appeal |
  * rejected (nothing taken, hand it in again) | fallback (third failure: the rest is taken, the next time is ours).
  */
-export function checkReport({ report, state, facts, policy, now, attempt, readerSources = {} }) {
+export function checkReport({ report, state, facts, policy, now, attempt, readerSources = {}, chat = false }) {
   const { check, tz } = policy;
   const finishing = Boolean(report.finish);
-  const problems = checkStructure(report, finishing);
+  const problems = checkStructure(report, finishing, chat);
   const hard = [];
   const add = (field, text) => hard.push({ field, text });
   const { limit, deadline } = upperLimit(facts, now, check);
@@ -146,7 +149,9 @@ export function checkReport({ report, state, facts, policy, now, attempt, reader
   }
 
   const n = report.next;
-  if (!n || typeof n !== "object") add("next", "缺 next：下次什么时候看、在等什么");
+  if (chat && n === undefined) {
+    // The chat session did not touch the time of the next look.
+  } else if (!n || typeof n !== "object") add("next", "缺 next：下次什么时候看、在等什么");
   else {
     atMs = parseLocal(n.at, tz);
     if (atMs === null || atMs <= now) add("next", "next.at 要写成 YYYY-MM-DD HH:mm，在现在之后");

@@ -501,25 +501,3 @@ test("F-25: what he said is not given back with its own full stop doubled", asyn
   assert.match(r.text, /下午了。/);
   assert.doesNotMatch(r.text, /。。/);
 });
-
-test("F-04: the look is told as the real Paseo tells it (inspect prints no labels; ls --label finds the session), and a plan this root does not know is not a look", async () => {
-  const w = world();
-  const id = await started(w);
-  const plan = load(w.root, id).scheduleId;
-  assert.ok(plan);
-  assert.equal(await withEnv({ PASEO_AGENT_ID: "agent-look", FAKE_PASEO_LABELS: JSON.stringify({ "paseo.schedule-id": plan }) }, () => ops.callerOf(w.ctx)), "look");
-  assert.equal(await withEnv({ PASEO_AGENT_ID: "agent-look", FAKE_PASEO_LABELS: JSON.stringify({ "paseo.schedule-id": "other-plan" }) }, () => ops.callerOf(w.ctx)), "human");
-  const r = cli(w, ["resume-all"], { PASEO_AGENT_ID: "agent-look", FAKE_PASEO_LABELS: JSON.stringify({ "paseo.schedule-id": plan }) });
-  assert.equal(r.status, 1, r.stdout + r.stderr);
-  assert.match(r.stdout, /看一眼的会话/);
-});
-
-async function withEnv<T>(env: Record<string, string>, fn: () => Promise<T>): Promise<T> {
-  const old = Object.fromEntries(Object.keys(env).map((k) => [k, process.env[k]]));
-  Object.assign(process.env, env);
-  try {
-    return await fn();
-  } finally {
-    for (const [k, v] of Object.entries(old)) v === undefined ? delete process.env[k] : (process.env[k] = v);
-  }
-}

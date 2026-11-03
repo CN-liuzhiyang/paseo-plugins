@@ -166,7 +166,7 @@ export function fold(lines) {
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
-    pending: [], flags: [], rejected: null, attempt: 0, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
+    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, notes: [], briefs: { look: 0, chat: 0 }, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
   };
   const undone = new Set(lines.filter((l) => l.kind === "undo").map((l) => l.target));
   for (const l of lines) {
@@ -188,10 +188,26 @@ export function fold(lines) {
       case "schedule":
         s.scheduleId = l.scheduleId;
         break;
+      case "chat":
+        // The chat session of this affair (the person talks to it); an earlier one stays in the list, for `history`.
+        if (l.agentId) {
+          s.chats.push({ agentId: String(l.agentId), at: l.at, seq: l.seq });
+          s.chatId = String(l.agentId);
+        }
+        break;
+      case "note":
+        // What the chat session wrote down for itself (a conclusion, a decision): its own words, never taken for his.
+        if (l.by === "chat" && typeof l.text === "string") s.notes.push({ seq: l.seq, at: l.at, text: l.text, said: Number.isInteger(l.said) ? l.said : null });
+        break;
+      case "brief":
+        // A session read the brief up to this line: what comes after is news to it.
+        if (Number.isInteger(l.seen)) s.briefs[l.for === "chat" ? "chat" : "look"] = l.seen;
+        break;
       case "said":
         s.said.push({ seq: l.seq, at: l.at, text: String(l.text ?? ""), via: l.via ?? "chat", by: l.by ?? "user", undone: undone.has(l.seq), attachments: attachmentsOf(l) });
         // What a look noted about its own view is not something he said: it does not call for another look.
-        if (!undone.has(l.seq) && (l.by ?? "user") === "user") s.pending.push(`said:${l.seq}`);
+        // (What he says in the chat is answered there: it does not call for a look.)
+        if (!undone.has(l.seq) && (l.by ?? "user") === "user" && (l.via ?? "chat") !== "chat-session") s.pending.push(`said:${l.seq}`);
         break;
       case "deadline":
         s.deadlines.push({ at: l.deadline, from: l.from, quote: l.quote, seq: l.seq });
@@ -224,6 +240,20 @@ export function fold(lines) {
         s.lastEnd = l;
         break;
       case "report":
+        if (l.from === "chat") {
+          // The chat session's report: it has its own count of tries, and it is not the end of a look.
+          if (l.verdict === "rejected") {
+            s.chatAttempt += 1;
+            s.chatRejected = l.data;
+          } else {
+            s.chatRejected = null;
+            s.chatAttempt = 0;
+            s.reports.push(l);
+            if (typeof l.status === "string") s.nowText = l.status;
+            if (Array.isArray(l.facts)) s.facts = l.facts.filter((f) => typeof f === "string");
+          }
+          break;
+        }
         if (l.verdict === "rejected") {
           s.attempt += 1;
           s.rejected = l.data;

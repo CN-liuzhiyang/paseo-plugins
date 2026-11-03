@@ -63,15 +63,17 @@ export function rowsOf(state, now, policy) {
   const lines = state.lines ?? [];
   for (const l of lines) {
     const time = stamp(l.at, now, tz);
-    if (l.kind === "report" && l.verdict !== "rejected" && l.entry) {
+    if (l.kind === "report" && l.verdict !== "rejected" && l.entry && l.from !== "chat") {
       const costs = l.detail ?? "";
       add(`r${l.seq}`, l.at, `${time}  ${l.entry}`, "normal", costs);
     } else if (l.kind === "said" && l.by === "user" && !state.said.find((s) => s.seq === l.seq)?.undone) {
       // What he typed in the conversation is already on his screen; what he sent with it is drawn as his line too.
       const sent = state.said.find((s) => s.seq === l.seq)?.attachments ?? [];
       const summary = sent.length ? attachSummary(sent) : "";
-      if (l.via !== "workspace") add(`s${l.seq}`, l.at, `${time}  你：${l.text}${summary && !l.text.includes(summary) ? `（${summary}）` : ""}`);
+      if (l.via !== "workspace" && l.via !== "chat-session") add(`s${l.seq}`, l.at, `${time}  你：${l.text}${summary && !l.text.includes(summary) ? `（${summary}）` : ""}`);
       else if (summary) add(`s${l.seq}`, l.at, `${time}  你：${summary}`);
+    } else if (l.kind === "note" && l.by === "chat" && typeof l.text === "string") {
+      add(`m${l.seq}`, l.at, `${time}  我记下：${l.text}`);
     } else if (l.kind === "answered") {
       add(`a${l.seq}`, l.at, `${time}  你：${l.answer}`);
     } else if (l.kind === "status" && l.status === "done") {

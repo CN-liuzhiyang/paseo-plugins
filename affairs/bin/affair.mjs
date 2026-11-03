@@ -11,7 +11,8 @@ import { defaultRoot, loadPolicy } from "../server/lib/policy.mjs";
 const USAGE = `affair <命令> ...
   new --title T [--goal G] [--said S] [--link kind:ref] [--domain personal|family] [--deadline "YYYY-MM-DD HH:mm"] [--no-wait]
   find <词>                    note <编号|名字> --said S [--deadline T]    answer <问题编号> --said S
-  stop <编号|名字>             pause <编号|名字> --until "YYYY-MM-DD HH:mm"  resume <编号|名字>   undo <编号|名字>
+  （对话的会话）note <编号> --mine --said S [--said-seq N]   report <编号> --from chat --file F.json   brief <编号> --chat   history <编号> [--q 词] [--pick N] [--max 字数]
+  stop <编号|名字>             pause <编号|名字> --until "YYYY-MM-DD HH:mm" [--said-seq N]  resume <编号|名字>   undo <编号|名字>
   show <编号|名字> [--log]     ls    stats    doctor（逐项自检）
   pause-all（回退用：停掉全部计划并记下）   resume-all（放开）
   brief <编号>                 report <编号> --file F.json | --stdin
@@ -21,7 +22,7 @@ const USAGE = `affair <命令> ...
 function parse(argv) {
   const flags = {};
   const rest = [];
-  const bool = new Set(["log", "json", "stdin", "no-wait", "force"]);
+  const bool = new Set(["log", "json", "stdin", "no-wait", "force", "mine", "chat"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -40,7 +41,7 @@ async function main() {
   const root = flags.root ?? defaultRoot();
   const ctx = makeCtx({ root: flags.root, paseoHome: flags["paseo-home"], policy: loadPolicy(root, flags.policy) });
   // Whose command this is comes from the session it runs in, never from what the caller says.
-  ctx.by = await ops.callerOf(ctx);
+  Object.assign(ctx, await ops.callerInfo(ctx));
   const need = (value, what) => {
     if (!value) throw Object.assign(new Error(`缺 ${what}\n${USAGE}`), { usage: true });
     return value;
@@ -59,7 +60,7 @@ async function main() {
       break;
     }
     case "note":
-      result = await ops.note(ctx, need(arg, "编号"), { said: said(), deadline: flags.deadline, via: flags.via });
+      result = await ops.note(ctx, need(arg, "编号"), { said: said(), deadline: flags.deadline, via: flags.via, mine: flags.mine, saidSeq: flags["said-seq"] });
       break;
     case "answer":
       result = await ops.answer(ctx, need(arg, "问题编号").replace(/-\d+$/, ""), arg, said(), flags.via);
@@ -68,7 +69,7 @@ async function main() {
       result = await ops.stop(ctx, ops.resolve(ctx, need(arg, "编号")).s?.id ?? need(null, "存在的编号"), { evidence: saidIfAny() });
       break;
     case "pause":
-      result = await ops.pause(ctx, need(arg, "编号"), need(flags.until, "--until"), saidIfAny());
+      result = await ops.pause(ctx, need(arg, "编号"), need(flags.until, "--until"), saidIfAny(), { saidSeq: flags["said-seq"] ?? "" });
       break;
     case "resume":
       result = await ops.resume(ctx, need(arg, "编号"));
@@ -95,7 +96,7 @@ async function main() {
       result = await ops.resumeAll(ctx);
       break;
     case "brief":
-      result = await ops.brief(ctx, need(arg, "编号"));
+      result = await ops.brief(ctx, need(arg, "编号"), { chat: flags.chat });
       break;
     case "report": {
       let data;
@@ -104,9 +105,12 @@ async function main() {
       } catch (error) {
         throw Object.assign(new Error(`交回的不是 JSON：${error.message}`), { usage: true });
       }
-      result = await ops.report(ctx, need(arg, "编号"), data);
+      result = await ops.report(ctx, need(arg, "编号"), data, { from: flags.from });
       break;
     }
+    case "history":
+      result = await ops.history(ctx, need(arg, "编号"), { q: flags.q, pick: flags.pick, max: flags.max });
+      break;
     case "read": {
       let args = {};
       try {
@@ -121,7 +125,7 @@ async function main() {
       throw Object.assign(new Error(USAGE), { usage: true });
   }
   process.stdout.write(`${flags.json ? JSON.stringify(result) : result.text}\n`);
-  process.exitCode = result.ok ? 0 : 1;
+  process.exitCode = result.ok ? 0 : result.code ?? 1;
 }
 
 main().catch((error) => {

@@ -72,12 +72,14 @@ else if (group === "schedule") {
   }
   save();
   out(s);
-} else if (group === "agent" && action === "inspect") {
-  // The real one: the fields of the session, none of them a label.
-  out({ Id: first, Name: "x", Status: "idle" });
+} else if (group === "logs") {
+  // `paseo logs <id>`: the text of a session, from a file the test put in FAKE_PASEO_LOGS (a folder, one <id>.txt each).
+  const file = `${process.env.FAKE_PASEO_LOGS ?? ""}/${action}.txt`;
+  if (!process.env.FAKE_PASEO_LOGS || !existsSync(file)) die(`Agent not found: ${action}`);
+  process.stdout.write(readFileSync(file, "utf8"));
 } else if (group === "ls") {
-  // `paseo ls -a --label k=v -q`: the short ids of the sessions carrying every label. Only the calling session is known here, with the labels
-  // the test gave it in FAKE_PASEO_LABELS.
+  // `paseo ls -a --label k=v -q`: the short ids of sessions carrying every label. Only the calling session is known here, with the
+  // labels the test gave it (the real `agent inspect` prints no labels, which is why the code asks this way).
   const labels = JSON.parse(process.env.FAKE_PASEO_LABELS ?? "{}");
   const pairs = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
   const mine = process.env.PASEO_AGENT_ID ?? "";

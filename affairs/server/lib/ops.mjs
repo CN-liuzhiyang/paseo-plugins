@@ -5,11 +5,13 @@ import { buildFacts, checkReport, earliestOf, plainText, secretIn, skeletonOf, v
 import { mayLook, tripped } from "./limits.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
-import { json, makeRun } from "./paseo.mjs";
+import { json, makeRun, whyOf } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
 import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
 import { attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
+import { clampMax, findTurns, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
+import { linkContext, usableTemplates } from "./links.mjs";
 import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
@@ -54,6 +56,8 @@ export function makeCtx(options = {}) {
     // Who is calling: "human" (the person's side: a conversation, the plugin) or "look" (a session the schedule started).
     // The command works it out from the session it runs in; there is no way to say it in words or in the environment.
     by: options.by ?? "human",
+    // For a chat session: the one affair it is the chat of (it can touch no other).
+    chatFor: options.chatFor ?? "",
   };
 }
 
@@ -96,27 +100,38 @@ export function writeProgress(ctx, s) {
  * or a plain terminal. A session that has an agent id but whose kind cannot be read counts as a look: when in doubt it is
  * the stricter side. (A look that cleared its own environment would look like a terminal; that cannot be told apart.)
  */
-export async function callerOf(ctx) {
+export async function callerInfo(ctx) {
   const agentId = process.env.PASEO_AGENT_ID;
-  if (!agentId) return "human";
-  // `paseo agent inspect` prints no labels; `paseo ls --label key=value` filters by them. So ask, for each plan this root
-  // knows, whether this session is among the ones carrying that plan's label.
+  if (!agentId) return { by: "human", chatFor: "" };
+  // `paseo agent inspect` does not print labels, but `paseo ls --label key=value` filters by them: ask whether this session is among
+  // the ones carrying a given label. An exact value is needed, so the candidates are the plans and affairs this root knows.
+  const has = async (pair) => {
+    const r = await ctx.run(["ls", "-a", "--label", pair, "-q"]);
+    if (r.exitCode !== 0) throw new Error(r.stderr || "ls failed");
+    return r.stdout.split(/\s+/).some((short) => short && agentId.startsWith(short));
+  };
   try {
-    const plans = [...new Set(listIds(ctx.root).map((id) => loadState(ctx.root, id).scheduleId).filter(Boolean))];
-    const found = await Promise.all(
-      plans.map(async (plan) => {
-        const r = await ctx.run(["ls", "-a", "--label", `paseo.schedule-id=${plan}`, "-q"]);
-        if (r.exitCode !== 0) throw new Error(r.stderr || "ls failed");
-        return r.stdout.split(/\s+/).some((short) => short && agentId.startsWith(short));
-      }),
-    );
-    return found.some(Boolean) ? "look" : "human";
+    const ids = listIds(ctx.root);
+    const plans = [...new Set(ids.map((id) => loadState(ctx.root, id).scheduleId).filter(Boolean))];
+    const looks = await Promise.all(plans.map((p) => has(`paseo.schedule-id=${p}`)));
+    if (looks.some(Boolean)) return { by: "look", chatFor: "" };
+    // The chat session of an affair is labelled by the plugin that made it; the label also says which affair it is the chat of.
+    const first = process.env.AFFAIR_ID && ids.includes(process.env.AFFAIR_ID) ? [process.env.AFFAIR_ID] : [];
+    const rest = ids.filter((id) => !first.includes(id)).slice(-60);
+    for (const group of [first, rest]) {
+      const hits = await Promise.all(group.map((id) => has(`affairs.chat=${id}`)));
+      const at = hits.findIndex(Boolean);
+      if (at >= 0) return { by: "chat", chatFor: group[at] };
+    }
+    return { by: "human", chatFor: "" };
   } catch {
-    return "look";
+    return { by: "look", chatFor: "" };
   }
 }
+export const callerOf = async (ctx) => (await callerInfo(ctx)).by;
 
 const byLook = (ctx) => ctx.by === "look";
+const byChat = (ctx) => ctx.by === "chat";
 /** Only what is really in this affair's files/ is handed to a look, whatever a line of the log says. */
 const sentIn = (ctx, id) => {
   const dir = path.resolve(ctx.root, id, "files");
@@ -124,6 +139,9 @@ const sentIn = (ctx, id) => {
 };
 /** @returns {Result} */
 const lookRefused = (what) => fail(`这是看一眼的会话，不能${what}，只有他本人在对话里说了算。看到了什么用 report 交回，想记下自己的观察用 note。`);
+
+/** @returns {Result} */
+const chatRefused = (what) => fail(`这是对话的会话，不能${what}。`);
 
 /** @returns {{ hits: any[], names: string[] }} */
 export function find(ctx, word, { closed = false } = {}) {
@@ -136,6 +154,14 @@ export function find(ctx, word, { closed = false } = {}) {
 /** An id or a name to the one affair meant, or the sentence that asks which. */
 /** @returns {{ s?: any, text?: string }} */
 export function resolve(ctx, ref, { closed = false } = {}) {
+  const got = resolveAny(ctx, ref, { closed });
+  // A chat session is the chat of one affair, and of no other.
+  if (got.s && byChat(ctx) && ctx.chatFor && got.s.id !== ctx.chatFor) return { text: `这个对话只管 ${ctx.chatFor} 这一件事，别的事项碰不了。` };
+  return got;
+}
+
+/** @returns {{ s?: any, text?: string }} */
+function resolveAny(ctx, ref, { closed = false } = {}) {
   if (/^(?:D\d+|\d{3,9})$/.test(ref) && existsSync(path.join(ctx.root, ref))) return { s: state(ctx, ref) };
   let { hits, names } = find(ctx, ref);
   if (hits.length === 0 && closed) hits = find(ctx, ref, { closed: true }).hits;
@@ -177,7 +203,8 @@ async function ringNow(ctx, s, why, { force = false } = {}) {
       // Still running after that: the reason stays in the log for the look that is on.
       if (/already running/i.test(error.message)) {
         write(ctx, s.id, [{ kind: "ring", why }, { kind: "flag", what: "look", detail: `${error.message}（试了 ${attempt + 1} 次，留给正在看的那次）` }]);
-        return { ok: true, queued: true, text: "" };
+        // `busy`: Paseo still counted the last look as running; the plugin asks again a little later.
+        return { ok: true, queued: true, busy: true, text: "" };
       }
       write(ctx, s.id, [{ kind: "flag", what: "look", detail: error.message }]);
       return { ok: false, text: "" };
@@ -213,6 +240,7 @@ function claudeMd(ctx, s) {
 /** @returns {Promise<Result>} */
 export async function create(ctx, input) {
   if (byLook(ctx)) return lookRefused("新建事项");
+  if (byChat(ctx)) return chatRefused("新建事项");
   const { title, goal = "", said = "", link = null, domain = "work", deadline = null, deadlineQuote = "", noWait = false } = input;
   const secret = refuseSecret(`${title} ${goal} ${said}`);
   if (secret) return secret;
@@ -291,8 +319,60 @@ async function waitForConversation(ctx, id) {
  * `input.attachments` (the person's side only, never the command) are pictures and files he sent: each is kept in this
  * affair's own files/ and the line carries where. A line may be only that.
  */
+const NOTE_MAX = 120;
+
+/**
+ * What the chat session writes down for itself as it goes (a conclusion, something he decided): one sentence in its own
+ * words, never taken for his. `input.saidSeq` may point at the line of his that it comes from; it has to be a real one.
+ * It does not call for a look, and it is no source for a time (the check knows only his own lines).
+ * @returns {Result}
+ */
+function noteMine(ctx, ref, input) {
+  const text = String(input.said ?? "").trim();
+  if (!text) return fail("没有话可记：--said 后面要有内容。");
+  if ([...text].length > NOTE_MAX) return fail(`一句话记不下：最多 ${NOTE_MAX} 个字，现在 ${[...text].length} 个。挑要紧的写。`);
+  const secret = refuseSecret(text);
+  if (secret) return secret;
+  if (!plainText(text, NOTE_MAX)) return fail("这句话里有内部用词（叫醒、校验、读数、会话、agent），换成人话。");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const { s } = r;
+  if (!isOpen(s)) return fail(`「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了，没有什么要记的。`);
+  let said = null;
+  if (input.saidSeq !== undefined && input.saidSeq !== "") {
+    said = Number(input.saidSeq);
+    const from = s.said.find((m) => m.seq === said && !m.undone && m.by === "user");
+    if (!from) return fail(`--said-seq ${input.saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号）。`);
+  }
+  const [line] = write(ctx, s.id, [{ kind: "note", by: "chat", text, ...(said !== null ? { said } : {}) }]);
+  writeProgress(ctx, state(ctx, s.id));
+  return { ok: true, text: "记下了。", seq: line.seq };
+}
+
+/**
+ * What he said in the chat, put in the log by the plugin from the chat's own timeline: his words as he wrote them,
+ * nothing a session had a hand in. It is no call for a look (the chat is already answering). The plugin's side only.
+ * @returns {Promise<Result>}
+ */
+export async function hear(ctx, ref, text) {
+  if (ctx.by !== "human") return fail("他在对话里说的话只有插件从对话里记，会话不能代记。");
+  const said = String(text ?? "");
+  if (!said.trim()) return fail("没有话可记。");
+  const secret = refuseSecret(said);
+  if (secret) return secret;
+  const r = resolve(ctx, ref, { closed: true });
+  if (!r.s) return fail(r.text);
+  const [line] = write(ctx, r.s.id, [{ kind: "said", text: said, via: "chat-session", by: "user" }]);
+  return { ok: true, text: "", seq: line.seq };
+}
+
 /** @returns {Promise<Result>} */
 export async function note(ctx, ref, input) {
+  if (byChat(ctx)) {
+    if (!input.mine) return chatRefused("以他的名义记话（他在对话里说的话已经记了）；记自己的结论用 note --mine");
+    return noteMine(ctx, ref, input);
+  }
+  if (input.mine) return fail("--mine 只有对话的会话用。");
   const text = String(input.said ?? "");
   const sending = Array.isArray(input.attachments) ? input.attachments : [];
   if (!text.trim() && sending.length === 0) return fail("没有话可记：--said 后面要有内容。");
@@ -345,6 +425,13 @@ export async function answer(ctx, ref, qid, text, via = "chat") {
   const q = s.asks.find((a) => a.id === qid);
   if (!q) return fail(`没有这个问题：${qid}`);
   if (q.state !== "open") return { ok: true, text: say.answeredAlready(q.answer || "收起了") };
+  if (byChat(ctx)) {
+    // The chat answers for him only with what he really said: one of the choices, or words of his since the question came.
+    const quote = normalize(text);
+    const since = s.said.filter((m) => !m.undone && m.by === "user" && m.seq > q.seq);
+    const his = q.options.some((o) => normalize(o) === quote) || since.some((m) => quote && normalize(m.text).includes(quote));
+    if (!his) return fail("替他答的话要是他点的选项，或者他在问题出现以后说过的原话；不是他说的，别替他答，直接问他。");
+  }
   write(ctx, s.id, [{ kind: "answered", id: qid, answer: text, via }]);
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
@@ -368,7 +455,7 @@ export async function answer(ctx, ref, qid, text, via = "chat") {
 export async function stop(ctx, id, { evidence = "", done = false } = {}) {
   if (byLook(ctx)) return lookRefused("替他说不用盯了");
   const s = state(ctx, id);
-  write(ctx, id, [{ kind: "status", status: done ? "done" : "stopped", evidence, by: "user" }]);
+  write(ctx, id, [{ kind: "status", status: done ? "done" : "stopped", evidence, by: byChat(ctx) ? "chat" : "user" }]);
   await syncPlan(ctx, id);
   return { ok: true, text: say.stopped(s.title) };
 }
@@ -402,8 +489,11 @@ export async function resume(ctx, ref) {
  * what back a time past the usual limit; without them it has to be within it.
  * @returns {Promise<Result>}
  */
-export async function pause(ctx, ref, until, said = "") {
+export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {string | number} */ ("") } = {}) {
   if (byLook(ctx)) return lookRefused("改下次看的时间");
+  // The chat session cannot put words in his mouth: what backs a far time is a line of his the plugin recorded (--said-seq).
+  if (byChat(ctx) && String(said).trim()) return fail("对话里别用 --said 带他的话：他说的话已经记了，用 --said-seq 指给他说的那一行。");
+  if (!byChat(ctx) && saidSeq !== "") return fail("--said-seq 只有对话的会话用；本人用 --said。");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   let { s } = r;
@@ -413,7 +503,12 @@ export async function pause(ctx, ref, until, said = "") {
   if (at === null || at <= now) return fail("--until 要写成 YYYY-MM-DD HH:mm，在现在之后");
   if (at > now + policy.check.hardDays * DAY) return fail("最远一年；更久的事先不盯，到时候重新交代。");
   const evidence = [];
-  if (String(said).trim()) {
+  if (byChat(ctx) && saidSeq !== "") {
+    const n = Number(saidSeq);
+    const from = s.said.find((m) => m.seq === n && !m.undone && m.by === "user");
+    if (!from) return fail(`--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。`);
+    evidence.push({ quote: from.text, from: `said:${from.seq}` });
+  } else if (String(said).trim()) {
     const [line] = write(ctx, s.id, [{ kind: "said", text: said.trim(), via: "chat", by: "user" }]);
     evidence.push({ quote: said.trim(), from: `said:${line.seq}` });
     s = state(ctx, s.id);
@@ -424,7 +519,7 @@ export async function pause(ctx, ref, until, said = "") {
   if (result.verdict === "rejected" || ((result.verdict === "ask" || result.verdict === "appeal") && !backed)) {
     return fail(`这个时间没放进去：${result.problems.map((p) => p.text).join("；") || result.detail}。要放得更远，带上他的原话（--said）。`);
   }
-  write(ctx, s.id, [{ kind: "next", next: isoLocal(at, policy.tz), waitingFor, why: "你说先放一放", earlyIf: [], verdict: backed ? "recorded" : result.verdict, source: "user", detail: evidence.length ? "他说的，原话在记录里" : "" }]);
+  write(ctx, s.id, [{ kind: "next", next: isoLocal(at, policy.tz), waitingFor, why: "你说先放一放", earlyIf: [], verdict: backed ? "recorded" : result.verdict, source: byChat(ctx) && evidence.length === 0 ? "chat" : "user", detail: evidence.length ? "他说的，原话在记录里" : "" }]);
   await syncPlan(ctx, s.id);
   return { ok: true, text: say.paused(s.title, speak(at, ctx.now(), ctx.policy.tz)) };
 }
@@ -456,10 +551,14 @@ export async function syncPlan(ctx, id) {
 }
 
 /** @returns {Promise<Result>} */
-export async function brief(ctx, ref) {
-  const r = resolve(ctx, ref);
+export async function brief(ctx, ref, { chat = false } = {}) {
+  const r = resolve(ctx, ref, { closed: chat });
   if (!r.s) return fail(r.text);
   const { s } = r;
+  // The chat session reads its own brief; the one a look reads would start a look that nobody is going to hand in.
+  if (chat && !byChat(ctx)) return fail("--chat 只有对话的会话用。");
+  if (!chat && byChat(ctx)) return fail(`对话里要看现在的情况用：${ctx.command} brief ${s.id} --chat`);
+  if (chat) return briefChat(ctx, s);
   if (!isOpen(s) || s.system) return fail("这件事已经办完或者不盯了，不用看。");
   const now = ctx.now();
   const tz = ctx.policy.tz;
@@ -578,6 +677,226 @@ export async function brief(ctx, ref) {
   return { ok: true, text };
 }
 
+/** One line of the log as the chat session reads it: what was said, by whom, with the number it can point to. */
+function lineForChat(l, now, tz) {
+  const time = stamp(l.at, now, tz);
+  if (l.kind === "said") return `- #${l.seq} ${time} ${l.by === "user" ? "他说" : "看一眼记的"}：「${l.text}」${l.via && l.via !== "chat-session" ? `（${l.via}）` : ""}`;
+  if (l.kind === "note" && l.by === "chat") return `- #${l.seq} ${time} 你记下：${l.text}`;
+  if (l.kind === "report" && l.verdict !== "rejected" && l.entry) return `- #${l.seq} ${time} ${l.from === "chat" ? "你交回" : "看一眼的结果"}：${l.entry}`;
+  if (l.kind === "answered") return `- #${l.seq} ${time} 他答了问题 ${l.id}：「${l.answer}」`;
+  if (l.kind === "asked") return `- #${l.seq} ${time} 问了他：${l.title}`;
+  if (l.kind === "status") return `- #${l.seq} ${time} ${l.status === "watching" ? "接着盯" : l.status === "done" ? "办完了" : "不盯了"}`;
+  return null;
+}
+
+/**
+ * What the chat session reads first each turn: where the affair stands, what happened since it last read this, what it
+ * wrote down before, how to write a reference and how to hand things in. Reading it is what lets it write at all.
+ * @returns {Promise<Result>}
+ */
+async function briefChat(ctx, s) {
+  const now = ctx.now();
+  const tz = ctx.policy.tz;
+  const cut = s.briefs.chat;
+  const news = [];
+  for (const l of s.lines) {
+    if (l.seq <= cut) continue;
+    if (l.kind === "said" && (l.by !== "user" || l.via === "chat-session" || s.said.find((m) => m.seq === l.seq)?.undone)) continue;
+    if (l.kind === "report" && l.from === "chat") continue;
+    if (l.kind === "answered" && l.via === "chat") continue;
+    if (l.kind === "note") continue;
+    const text = lineForChat(l, now, tz);
+    if (text) news.push(text);
+    else if (l.kind === "wake.end" && l.state === "failed") news.push(`- #${l.seq} ${stamp(l.at, now, tz)} 这次没看成：${String(l.error ?? "没有说明").slice(0, 80)}`);
+  }
+  const asks = s.asks.filter((a) => a.state === "open");
+  const notes = s.notes.slice(-10).map((n) => `- #${n.seq} ${stamp(n.at, now, tz)} ${n.text}${n.said !== null ? `（出自他说的 #${n.said}）` : ""}`);
+  const recent = s.lines.slice(-10).map((l) => lineForChat(l, now, tz)).filter(Boolean);
+  const current = process.env.PASEO_AGENT_ID || s.chatId || "";
+  const before = [...new Map(s.chats.filter((c) => c.agentId !== current).map((c) => [c.agentId, c])).values()];
+  const earliest = before[0] ? mdhm(before[0].at, tz).slice(0, 5) : "";
+  const templates = usableTemplates(ctx.policy.links);
+  const own = linkContext(ctx.policy, s.link).registered[0];
+  const mine = own && templates[own.kind] ? templates[own.kind].replace("{ref}", encodeURIComponent(own.ref)) : "";
+  const text = [
+    `# 事项 ${s.id}：${s.title}${isOpen(s) ? "" : `（已经${s.status === "done" ? "办完" : "不盯"}了；他要接着盯就跑 ${ctx.command} resume ${s.id}）`}`,
+    `目标：${s.goal || s.title}`,
+    `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next && isOpen(s) ? `　下次看：${localParts(Date.parse(s.next.at), tz).text}` : ""}${s.next?.remind ? `　约好要提醒他：${s.next.remind}` : ""}`,
+    "",
+    "## 上次读完以后新的",
+    ...(news.length ? news : ["- 没有新的"]),
+    "",
+    "## 没答的问题",
+    ...(asks.length ? asks.map((a) => `- ${a.id}：${a.title}（选项：${a.options.join("、") || "无"}）`) : ["- （没有）"]),
+    "",
+    "## 记住的",
+    ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
+    "",
+    "## 最近记下的（你用 note --mine 记的）",
+    ...(notes.length ? notes : ["- （还没有）"]),
+    "",
+    "## 最近 10 行经过（带编号，他说的话可以用编号指给命令）",
+    ...(recent.length ? recent : ["- （还没有）"]),
+    `更早的：${ctx.command} show ${s.id} --log`,
+    "",
+    "## 引用怎么写",
+    ...(Object.keys(templates).length
+      ? [
+          "回答里提到外部的单子、任务，写成 markdown 链接，地址照下面抄，别自己猜：",
+          ...(mine ? [`- 这件事自己的单子：[#${own.ref}](${mine})`] : []),
+          ...Object.entries(templates).map(([kind, template]) => `- ${kind}：[<号>](${template})`),
+        ]
+      : ["没有配地址：提到单号就照原样写，不要猜地址。"]),
+    "",
+    "## 以前的对话",
+    before.length
+      ? `${before.length} 段（最早 ${earliest}）。大部分情况不用查：结论在「记住的」和「最近记下的」里，他说过的话都在记录里（这里只带最近 10 行，更早的用 ${ctx.command} show ${s.id} --log）。\n只有你想不起之前聊过什么、上面又都没有时，才用 ${ctx.command} history ${s.id} --q <词> 找那一问一答，别去读整段旧对话。`
+      : "没有（这是这件事的第一段对话）。",
+    "",
+    "## 怎么记、怎么交",
+    `- 得出一个结论、他做了一个决定，当场记一句（≤${NOTE_MAX} 字，别攒到最后，换新随时会发生）：${ctx.command} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
+    `- 要让后面看一眼用上他发给你的图：把要点（不抄密码、令牌、证件号）用 note --mine 记成文字；图本身只在这个对话里，看一眼拿不到。`,
+    `- 状态、记住的（facts 新增、drop 删旧的）、下次、问题、办完：${ctx.command} report ${s.id} --from chat --file <json>（每项都可以不写）`,
+    `- 他在对话里答了问题：${ctx.command} answer <问题编号> --said "<他的原话或选项>"；改时间：pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
+    `- 他提到「上次」「之前说的」而这里找不到：先查（history），查不到就问他，别猜。`,
+    "",
+  ].join("\n");
+  write(ctx, s.id, [{ kind: "brief", for: "chat", seen: s.lastSeq }]);
+  return { ok: true, text };
+}
+
+const FACT_MAX = 20;
+
+/** The facts after a hand-in: the old ones without those it drops, then the new ones (one that is already there is not added twice). */
+export function mergeFacts(old, add = [], drop = []) {
+  const gone = new Set(drop.map(normalize));
+  const kept = old.filter((f) => !gone.has(normalize(f)));
+  for (const f of add) if (!kept.some((k) => normalize(k) === normalize(f))) kept.push(f);
+  return kept;
+}
+
+/**
+ * The chat session's hand-in: the same check as a look's, on the fields it has. No look has to be on; the facts are added
+ * to (and dropped from), not replaced; its own count of tries. If a look handed something in since it last read, once
+ * it is sent back to read again.
+ * @returns {Promise<Result>}
+ */
+async function reportFromChat(ctx, s, data) {
+  if (!isOpen(s)) return fail("这件事已经办完或者不盯了，不用再交。");
+  const policy = ctx.policy;
+  const now = ctx.now();
+  const cut = s.briefs.chat;
+  if (!cut) return fail(`先看一遍现在的情况：${ctx.command} brief ${s.id} --chat，再交。`);
+  const newer = s.lines.find((l) => l.kind === "report" && l.from !== "chat" && l.verdict !== "rejected" && l.seq > cut);
+  if (newer && !s.lines.some((l) => l.kind === "bounce" && l.for === "chat" && l.report === newer.seq)) {
+    write(ctx, s.id, [{ kind: "bounce", for: "chat", report: newer.seq }]);
+    return fail(`你读完以后，刚看过一眼（#${newer.seq}）。先跑 ${ctx.command} brief ${s.id} --chat 看新的，再交一次。`);
+  }
+  const merged = s.chatRejected ? { ...s.chatRejected, ...data } : { ...data };
+  const attempt = s.chatAttempt + 1;
+  const extra = [];
+  if (Array.isArray(merged.watches) ? merged.watches.length > 0 : merged.watches !== undefined) extra.push({ field: "watches", text: "读数只有看一眼能登记，对话里别写 watches" });
+  if (merged.drop !== undefined && (!Array.isArray(merged.drop) || merged.drop.some((d) => typeof d !== "string"))) extra.push({ field: "drop", text: "drop 是要删掉的记住的原句（字符串数组）" });
+  if (!["status", "entry", "facts", "drop", "next", "ask", "finish"].some((k) => merged[k] !== undefined)) extra.push({ field: "status", text: "没有要交的：status、facts、drop、next、ask、finish 至少写一项" });
+  const facts = buildFacts(s, now, policy);
+  const result = checkReport({ report: { ...merged, watches: undefined }, state: s, facts, policy, now, attempt, chat: true });
+  const nextFacts = mergeFacts(s.facts, Array.isArray(merged.facts) ? merged.facts : [], Array.isArray(merged.drop) ? merged.drop : []);
+  if (nextFacts.length > FACT_MAX) extra.push({ field: "facts", text: `记住的最多 ${FACT_MAX} 条，加上这些会有 ${nextFacts.length} 条；先用 drop 去掉几条旧的` });
+  const problems = [...result.problems, ...extra];
+  if (problems.length && result.verdict !== "fallback") {
+    write(ctx, s.id, [{ kind: "report", from: "chat", verdict: "rejected", attempt, data: merged, problems }]);
+    const left = policy.check.maxAttempts - attempt;
+    return { ok: false, text: [`有 ${problems.length} 处要改（还能交 ${left} 次）：`, ...problems.map((p) => `- ${p.text}`), `只重交这几处：${skeletonOf(problems.map((p) => p.field))}`].join("\n") };
+  }
+  const fell = result.verdict === "fallback";
+  const badFields = new Set(problems.map((p) => p.field));
+  // The third try that does not pass: what is fine is taken, what is not is left out (the time of the next look stays as it was).
+  const keepFacts = fell && badFields.has("facts") ? s.facts : nextFacts;
+  const finishing = merged.finish && !fell && !badFields.has("finish");
+  const entries = [{ kind: "report", from: "chat", verdict: result.verdict, attempt, status: fell && badFields.has("status") ? s.nowText : merged.status ?? s.nowText, entry: merged.entry ?? "", facts: keepFacts, changed: false, detail: result.detail }];
+  let planChanged = false;
+  if (finishing) {
+    entries.push({ kind: "status", status: merged.finish.kind === "done" ? "done" : "stopped", evidence: merged.finish.summary || merged.finish.evidence.quote, by: "chat" });
+    planChanged = true;
+  } else if (merged.next !== undefined && !fell) {
+    const n = merged.next;
+    const atMs = result.verdict === "ask" ? result.limitMs : result.atMs;
+    entries.push({ kind: "next", next: isoLocal(atMs, policy.tz), waitingFor: n.waitingFor, waitingOn: n.waitingOn ?? "", why: n.why, earlyIf: n.earlyIf, remind: n.remind ?? "", verdict: result.verdict, detail: result.detail, deadlineKey: result.deadlineKey, source: "chat" });
+    planChanged = true;
+  }
+  if (fell) entries.push({ kind: "flag", what: "fallback", detail: `对话交回的东西没全过：${result.detail}` });
+  if (merged.ask && !fell && !badFields.has("ask")) {
+    entries.push({ kind: "asked", id: `${s.id}-${s.asks.length + 1}`, title: merged.ask.title, line: merged.ask.line ?? "", options: merged.ask.options });
+  }
+  if (result.verdict === "ask" && merged.next && !fell) {
+    const id = `${s.id}-${s.asks.length + 1 + (merged.ask ? 1 : 0)}`;
+    const when = localParts(parseLocal(merged.next.at, policy.tz), policy.tz);
+    entries.push({
+      kind: "asked", id, title: `${s.title}：${when.mo}月${when.d}日再看，可以吗？`, line: `不点的话，${md(result.limitMs, policy.tz)} 先看一次。`,
+      options: ["可以", "两周后看"], proposal: { at: isoLocal(parseLocal(merged.next.at, policy.tz), policy.tz), waitingFor: merged.next.waitingFor, why: merged.next.why },
+    });
+  }
+  write(ctx, s.id, entries);
+  writeProgress(ctx, state(ctx, s.id));
+  if (planChanged) await syncPlan(ctx, s.id);
+  const after = state(ctx, s.id);
+  const when = after.next && isOpen(after) ? `下次 ${localParts(Date.parse(after.next.at), policy.tz).text.slice(5)} 看` : "";
+  const note2 = { recorded: "（比上限晚，理由已记下）", ask: "（比上限晚太多，先按上限，等他点头）", fallback: "（三次都没全过，没过的没记）" }[result.verdict] ?? "";
+  return { ok: true, text: finishing ? `收下了，这件事${merged.finish.kind === "done" ? "办完" : "不盯"}了。` : `收下了。${when}${note2}` };
+}
+
+const mdhm = (atIso, tz) => {
+  const p = localParts(Date.parse(atIso), tz);
+  return `${String(p.mo).padStart(2, "0")}-${String(p.d).padStart(2, "0")} ${String(p.h).padStart(2, "0")}:${String(p.mi).padStart(2, "0")}`;
+};
+
+/**
+ * Finds what was asked and answered in an earlier chat of an affair. The earlier chats are the ones the log registered
+ * (`chat` lines) other than the one asking; each is read with `paseo logs`. A soft fallback: it only searches his questions.
+ * Exit code 2 (code: 2) when none of them could be read.
+ * @returns {Promise<Result>}
+ */
+export async function history(ctx, ref, { q = "", pick = 1, max = 0 } = {}) {
+  if (byLook(ctx)) return lookRefused("翻以前的对话");
+  const r = resolve(ctx, ref, { closed: true });
+  if (!r.s) return fail(r.text);
+  const { s } = r;
+  const tz = ctx.policy.tz;
+  const current = process.env.PASEO_AGENT_ID || s.chatId || "";
+  const before = [...new Map(s.chats.filter((c) => c.agentId !== current).map((c) => [c.agentId, c])).values()];
+  if (before.length === 0) return fail(sayHistory.none());
+  const read = [];
+  const unreadable = [];
+  for (const c of before) {
+    const when = mdhm(c.at, tz);
+    try {
+      // --filter text: his words and its words only (a tool call is a line of its own in the plain output, and the answer after it would be taken for it).
+      const { stdout, stderr, exitCode } = await ctx.run(["logs", c.agentId, "--filter", "text"]);
+      if (exitCode !== 0) throw new Error(whyOf(stderr, stdout) || `退出码 ${exitCode}`);
+      read.push({ ...c, when, turns: parseLogs(stdout) });
+    } catch (error) {
+      unreadable.push({ agentId: c.agentId, when, why: error.message });
+    }
+  }
+  const tail = unreadable.length ? `\n${sayHistory.unreadable(unreadable)}` : "";
+  if (read.length === 0) return { ok: false, code: 2, text: sayHistory.unreadable(unreadable) };
+  const terms = String(q).split(/\s+/).filter(Boolean);
+  if (terms.length === 0) {
+    const rows = read.map((c, i) => `${i + 1}  ${c.when} 起  ${c.turns.length} 轮  第一句：${(c.turns[0]?.ask ?? "（没有）").slice(0, 40)}`);
+    return { ok: true, text: [`以前的对话 ${read.length} 段：`, ...rows, "用 --q <词> 找某一问一答。"].join("\n") + tail };
+  }
+  const hits = findTurns(read, terms);
+  if (hits.length === 0) return { ok: false, text: sayHistory.notFound(String(q).trim()) + tail };
+  const n = Math.min(Math.max(1, Math.round(Number(pick)) || 1), hits.length);
+  const hit = hits[n - 1];
+  const total = clampMax(max);
+  const one = oneTurn(hit.turn, total);
+  const others = hits.map((_, i) => i + 1).filter((i) => i !== n).slice(0, 3);
+  const more = others.length ? `\n还有 ${hits.length - 1} 处提到「${String(q).trim()}」：加 ${others.map((i) => `--pick ${i}`).join("、")} 看。` : "";
+  const text = [`以前的对话（${hit.chat.when} 起）：`, `他问：${one.ask}`, `你答：${one.reply}`, ...(one.left ? [`（超出字数上限，截掉了 ${one.left} 个字）`] : [])].join("\n") + more + tail;
+  return { ok: true, text };
+}
+
 /** The third try that does not pass is taken for what can be taken: a field of the wrong shape is left out (and said so), never written as it is. */
 function dropBadFields(merged, problems) {
   const dropped = [];
@@ -593,13 +912,26 @@ function dropBadFields(merged, problems) {
 
 /** What a look hands back. Rejected: nothing is taken, and only the fields that did not pass are asked for again. */
 /** @returns {Promise<Result>} */
-export async function report(ctx, ref, data) {
+export async function report(ctx, ref, data, { from = "" } = {}) {
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
+  if (from === "chat" || byChat(ctx)) {
+    if (!byChat(ctx)) return fail("--from chat 只有对话的会话用。");
+    if (from !== "chat") return fail(`对话里交回要写 --from chat：${ctx.command} report ${s.id} --from chat --file <json>`);
+    return reportFromChat(ctx, s, data);
+  }
   if (!isOpen(s)) return fail("这件事已经办完或者不盯了，不用再交。");
   if (!s.running) return fail(`没有在看的一次：先跑 ${ctx.command} brief ${s.id}。`);
+  // He talked to the chat while this look was on and something was handed in there: once, the look reads that before it hands in.
+  const chatDone = [...s.lines].reverse().find((l) => l.kind === "report" && l.from === "chat" && l.verdict !== "rejected" && l.seq > (s.lastWake?.seq ?? 0));
+  if (chatDone && !s.lines.some((l) => l.kind === "bounce" && l.for === "look" && l.report === chatDone.seq)) {
+    write(ctx, s.id, [{ kind: "bounce", for: "look", report: chatDone.seq }]);
+    return fail(`你看的时候，他在对话里改了东西（#${chatDone.seq}，见记住的、下次）。先跑 ${ctx.command} brief ${s.id} 看新的，再交一次。`);
+  }
   const merged = s.rejected ? { ...s.rejected, ...data } : data;
+  // A look that says what to drop (`drop`) adds to the facts instead of replacing them: what the chat wrote down stays.
+  if (Array.isArray(merged.drop) && merged.drop.every((d) => typeof d === "string")) merged.facts = mergeFacts(s.facts, Array.isArray(merged.facts) ? merged.facts : [], merged.drop);
   const now = ctx.now();
   const policy = ctx.policy;
   const facts = buildFacts(s, now, policy);
@@ -722,6 +1054,7 @@ export function ls(ctx) {
  */
 export async function pauseAll(ctx) {
   if (byLook(ctx)) return lookRefused("停掉全部事项的计划");
+  if (byChat(ctx)) return chatRefused("停掉全部事项的计划");
   const done = [];
   const failed = [];
   for (const id of listIds(ctx.root)) {
@@ -753,6 +1086,7 @@ export async function pauseAll(ctx) {
 /** @returns {Promise<Result>} */
 export async function resumeAll(ctx) {
   if (byLook(ctx)) return lookRefused("放开全部事项的计划");
+  if (byChat(ctx)) return chatRefused("放开全部事项的计划");
   let n = 0;
   for (const id of listIds(ctx.root)) {
     const s = state(ctx, id);
