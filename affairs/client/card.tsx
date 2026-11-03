@@ -2,7 +2,8 @@ import * as pluginClient from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useState } from "react";
-import { Linking, Pressable, View, type TextStyle } from "react-native";
+import { Linking, type TextStyle } from "react-native";
+import { QuestionCard, ChoiceButton } from "./look";
 import { Words } from "./text";
 import type { Ask, Line, Segment } from "../shared/card";
 import { answerRpc } from "../shared/rpc";
@@ -52,24 +53,16 @@ export function AffairAsk({ item, theme, layout }: PluginTimelineItemProps<Ask>)
       .catch(() => setSent(""));
   };
   return (
-    <View style={{ backgroundColor: c.surface1, borderColor: c.border, borderWidth: 1, borderRadius: 10, padding: layout.compact ? 12 : 14, gap: 8, marginVertical: 6 }}>
-      <Words style={{ color: c.foreground, fontSize: 16, fontWeight: "600" }}>{title}</Words>
-      {line ? <Words style={{ color: c.foregroundMuted, fontSize: 14, lineHeight: 20 }}>{line}</Words> : null}
-      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-        {options.map((o) => (
-          <Pressable
-            key={o}
-            testID={`ask-${o}`}
-            accessibilityRole="button"
-            disabled={Boolean(sent)}
-            onPress={() => press(o)}
-            style={{ borderWidth: 1, borderColor: sent === o ? c.accent : c.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 7, maxWidth: "100%", opacity: sent && sent !== o ? 0.5 : 1 }}
-          >
-            <Words style={{ color: c.foreground, fontSize: 14 }}>{o}</Words>
-          </Pressable>
-        ))}
-      </View>
-      <Words style={{ color: c.foregroundMuted, fontSize: 13 }}>{sent ? "好，记下了" : "也可以直接跟我说"}</Words>
-    </View>
+    <QuestionCard
+      c={c}
+      title={title}
+      line={line}
+      size={layout.compact ? 15 : 16}
+      footer={<Words style={{ color: c.foregroundMuted, fontSize: 12 }}>{sent ? "好，记下了" : "也可以直接跟我说"}</Words>}
+    >
+      {options.map((o, i) => (
+        <ChoiceButton key={o} testID={`ask-${o}`} text={o} primary={i === 0} picked={sent === o} c={c} disabled={Boolean(sent)} dim={Boolean(sent) && sent !== o} onPress={() => press(o)} />
+      ))}
+    </QuestionCard>
   );
 }

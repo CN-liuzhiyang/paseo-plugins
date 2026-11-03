@@ -104,6 +104,15 @@ const withParts = (text, lc) => {
   return parts ? { text, parts } : { text };
 };
 
+/** The one word for how the affair stands, for the colour of its dot: waiting for him, trouble, held (out of looks today), watching, done, or not watched any more. */
+export function moodOf(state, asked, trouble, held) {
+  if (state.status === "done") return "done";
+  if (state.status !== "watching") return "stopped";
+  if (asked || state.system) return "ask";
+  if (trouble) return "error";
+  return held ? "paused" : "watching";
+}
+
 /** The whole panel for one affair. */
 export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "" } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
@@ -115,6 +124,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     id: state.id,
     title: state.title,
     open: card.open,
+    mood: moodOf(state, asks.length > 0, Boolean(trouble), Boolean(budget)),
     asks: asks.map((a) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),

@@ -13,6 +13,7 @@ export const panelSchema = z.object({
   id: z.string(),
   title: z.string(),
   open: z.boolean(),
+  mood: z.enum(["watching", "ask", "done", "error", "paused", "stopped"]),
   asks: z.array(ask),
   waiting: text,
   now: text,
