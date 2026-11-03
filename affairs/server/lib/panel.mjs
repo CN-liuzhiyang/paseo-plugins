@@ -119,7 +119,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),
     next: withParts(card.next, lc),
-    spent: spent > 0 ? `今天花了 ${spent.toFixed(2)}` : "",
+    spent: spent > 0 ? `今天花了 $${spent.toFixed(2)}` : "",
     recent: rows.slice(-RECENT_ROWS).map((r) => ({ key: r.key, ...withParts(r.text, lc), tone: r.tone === "red" ? "red" : "normal" })),
     facts: (state.facts ?? []).slice(0, FACTS_SHOWN).map((f) => withParts(String(f), lc)),
     sources: sourcesOf(state, now, policy, lc),

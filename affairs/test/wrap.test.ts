@@ -66,3 +66,17 @@ test("a long reading is cut to CLIP_CHARS with … and the whole (to FULL_CHARS)
   assert.equal(by("短的").status, "已进：trunk 、 release", "line breaks and runs of spaces become one space");
   assert.equal(by("短的").full, undefined);
 });
+
+test("the panel says what today cost in dollars, with the sign (a template can lose it without anything failing)", async () => {
+  const { world } = await import("./kit");
+  const { append, load, read } = await import("../server/lib/log.mjs");
+  const { panelOf } = await import("../server/lib/panel.mjs");
+  const ops = await import("../server/lib/ops.mjs");
+  const w = world();
+  const made = await ops.create(w.ctx, { title: "洗牙", goal: "洗牙", said: "盯一下洗牙", noWait: true });
+  const id = made.id as string;
+  const view = () => panelOf(w.root, { ...load(w.root, id), lines: read(w.root, id) }, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null));
+  assert.equal(view().spent, "", "nothing spent, nothing said");
+  append(w.root, id, [{ kind: "chat.turn", agentId: "c", tokens: 1000, usd: 0.0187, usdTotal: 0.0187 }], { now: w.now() });
+  assert.match(view().spent, /^今天花了 \$0\.0[12]\d?$|^今天花了 \$0\.02$/);
+});
