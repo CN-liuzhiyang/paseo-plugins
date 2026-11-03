@@ -145,7 +145,8 @@ test("warm, however long, is not replaced until it is very long and idle; cold a
 });
 
 test("never while he is typing, and not more than twice a day; unknown length is left alone", () => {
-  const c = chatAt(200_000, 11 * MIN);
+  // (with no wait required, so that it is the typing that holds it back)
+  const c = chatAt(200_000, 11 * MIN, { chat: { ...DEFAULT_POLICY.chat, idleMinutes: 0 } });
   c.s.said.push({ via: "chat-session", at: new Date(c.now - 60_000).toISOString() });
   assert.equal(rotationReason(c.s, c.now, c.policy), "", "he spoke a minute ago");
   const d = chatAt(200_000, 60 * MIN);
@@ -337,12 +338,13 @@ test("the panel's materials are what is in files/ and only that: his chat pictur
   const dir = path.join(w.root, id, "files");
   mkdirSync(dir, { recursive: true });
   for (let i = 0; i < MATERIALS_SHOWN + 2; i++) writeFileSync(path.join(dir, `整理-${i}.md`), "x");
+  mkdirSync(path.join(dir, "子目录"), { recursive: true });
   const r = await ops.note(w.ctx, id, { said: "发个图", attachments: [{ type: "image", data: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64").toString("base64"), mimeType: "image/png", name: "sms.png" }] });
   assert.equal(r.ok, true, r.text);
   s = { ...load(w.root, id), lines: read(w.root, id) };
   const m = panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null)).materials;
   assert.equal(m.items.length, MATERIALS_SHOWN);
-  assert.equal(m.more, 3);
+  assert.equal(m.more, 3, "a folder is not a thing in the list");
   const all = panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null)).materials.items;
   assert.ok(all.every((i: { who: string }) => ["整理的", "你发的"].includes(i.who)));
 });
