@@ -2,7 +2,8 @@ import * as pluginClient from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useState } from "react";
-import { Linking, Pressable, Text, View, type TextStyle } from "react-native";
+import { Linking, Pressable, View, type TextStyle } from "react-native";
+import { Words } from "./text";
 import type { Ask, Line, Segment } from "../shared/card";
 import { answerRpc } from "../shared/rpc";
 
@@ -15,19 +16,19 @@ export function openExternal(url: string): void {
 
 /** Text in pieces: the pieces that have an address can be pressed to open it, in the host's link color; the rest is plain. */
 export function Pieces({ text, parts, color, style }: { text: string; parts?: Segment[]; color: string; style: TextStyle | TextStyle[] }) {
-  if (!parts?.some((p) => p.href)) return <Text style={style}>{text}</Text>;
+  if (!parts?.some((p) => p.href)) return <Words style={style}>{text}</Words>;
   return (
-    <Text style={style}>
+    <Words style={style}>
       {parts.map((p, i) =>
         p.href ? (
-          <Text key={i} accessibilityRole="link" onPress={() => openExternal(p.href!)} style={{ color, textDecorationLine: "underline" }}>
+          <Words key={i} accessibilityRole="link" onPress={() => openExternal(p.href!)} style={{ color, textDecorationLine: "underline" }}>
             {p.text}
-          </Text>
+          </Words>
         ) : (
           p.text
         ),
       )}
-    </Text>
+    </Words>
   );
 }
 
@@ -52,8 +53,8 @@ export function AffairAsk({ item, theme, layout }: PluginTimelineItemProps<Ask>)
   };
   return (
     <View style={{ backgroundColor: c.surface1, borderColor: c.border, borderWidth: 1, borderRadius: 10, padding: layout.compact ? 12 : 14, gap: 8, marginVertical: 6 }}>
-      <Text style={{ color: c.foreground, fontSize: 16, fontWeight: "600" }}>{title}</Text>
-      {line ? <Text style={{ color: c.foregroundMuted, fontSize: 14, lineHeight: 20 }}>{line}</Text> : null}
+      <Words style={{ color: c.foreground, fontSize: 16, fontWeight: "600" }}>{title}</Words>
+      {line ? <Words style={{ color: c.foregroundMuted, fontSize: 14, lineHeight: 20 }}>{line}</Words> : null}
       <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
         {options.map((o) => (
           <Pressable
@@ -62,13 +63,13 @@ export function AffairAsk({ item, theme, layout }: PluginTimelineItemProps<Ask>)
             accessibilityRole="button"
             disabled={Boolean(sent)}
             onPress={() => press(o)}
-            style={{ borderWidth: 1, borderColor: sent === o ? c.accent : c.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 7, opacity: sent && sent !== o ? 0.5 : 1 }}
+            style={{ borderWidth: 1, borderColor: sent === o ? c.accent : c.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 7, maxWidth: "100%", opacity: sent && sent !== o ? 0.5 : 1 }}
           >
-            <Text style={{ color: c.foreground, fontSize: 14 }}>{o}</Text>
+            <Words style={{ color: c.foreground, fontSize: 14 }}>{o}</Words>
           </Pressable>
         ))}
       </View>
-      <Text style={{ color: c.foregroundMuted, fontSize: 13 }}>{sent ? "好，记下了" : "也可以直接跟我说"}</Text>
+      <Words style={{ color: c.foregroundMuted, fontSize: 13 }}>{sent ? "好，记下了" : "也可以直接跟我说"}</Words>
     </View>
   );
 }

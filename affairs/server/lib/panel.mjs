@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
+import { CLIP_CHARS, FULL_CHARS, clip } from "./clip.mjs";
 import { counts } from "./limits.mjs";
 import { cardOf, rowsOf, sentOf, stamp } from "./view.mjs";
 
@@ -44,6 +45,13 @@ const toolName = (tool) => TOOL_NAME[tool] ?? tool;
 
 const shortWhen = (atIso, now, tz) => (atIso ? stamp(atIso, now, tz) : "");
 
+/** What a source says about what it read: the first CLIP_CHARS characters, and the whole text (up to FULL_CHARS) to open when it is longer. A reading can be a long title or a long list; the panel does not grow with it. */
+function shown(summary) {
+  const text = String(summary ?? "").replace(/\s+/g, " ").trim();
+  const status = clip(text, CLIP_CHARS);
+  return status === text ? { status } : { status, full: clip(text, FULL_CHARS) };
+}
+
 /**
  * What the affair stands on: its own link first, then what is watched (with the value it has now), then the other things
  * it names (a ticket, a revision) and the other things it has read. Each is one line; a reference with an address can be opened.
@@ -61,7 +69,7 @@ export function sourcesOf(state, now, policy, lc) {
   if (main) add({ label: main.label, status: state.status === "done" ? "办完了" : state.status === "stopped" ? "不盯了" : "", at: "", href: main.href });
   for (const w of Object.values(state.watches ?? {})) {
     const label = w.label || toolName(w.tool);
-    add({ label, status: w.lastError ? "读不到" : String(w.summary ?? "").slice(0, 60), at: shortWhen(w.readAt, now, policy.tz), href: null });
+    add({ label, ...(w.lastError ? { status: "读不到" } : shown(w.summary)), at: shortWhen(w.readAt, now, policy.tz), href: null });
   }
   // The references in what is remembered and said: each once, newest wording kept.
   const texts = [...(state.facts ?? []), state.nowText ?? ""];
@@ -71,7 +79,7 @@ export function sourcesOf(state, now, policy, lc) {
   // Things read once (not watched), newest of each tool and arguments.
   const newest = new Map();
   for (const r of state.reads ?? []) if (r.ok) newest.set(`${r.tool}|${JSON.stringify(r.args)}`, r);
-  for (const r of [...newest.values()].reverse()) add({ label: toolName(r.tool), status: String(r.summary ?? "").slice(0, 60), at: shortWhen(r.at, now, policy.tz), href: null });
+  for (const r of [...newest.values()].reverse()) add({ label: toolName(r.tool), ...shown(r.summary), at: shortWhen(r.at, now, policy.tz), href: null });
   return { items: out.slice(0, SOURCES_SHOWN), more: Math.max(0, out.length - SOURCES_SHOWN) };
 }
 
