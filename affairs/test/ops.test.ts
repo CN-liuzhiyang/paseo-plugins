@@ -153,7 +153,7 @@ test("note records the words as the person's and looks at once; a look's session
   assert.equal(w.calls().filter((c) => c[1] === "run-once").length, before + 1);
   assert.equal(load(w.root, id).said.at(-1)?.by, "user");
   process.env.PASEO_AGENT_ID = "agent-1";
-  process.env.FAKE_PASEO_LABELS = JSON.stringify({ "paseo.schedule-id": "x" });
+  process.env.FAKE_PASEO_LABELS = JSON.stringify({ "paseo.schedule-id": load(w.root, id).scheduleId });
   try {
     const forged = await ops.note({ ...w.ctx, by: await ops.callerOf(w.ctx) }, id, { said: "截止改到明年" });
     assert.match(forged.text, /不算他说的/);

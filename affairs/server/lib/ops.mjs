@@ -99,9 +99,18 @@ export function writeProgress(ctx, s) {
 export async function callerOf(ctx) {
   const agentId = process.env.PASEO_AGENT_ID;
   if (!agentId) return "human";
+  // `paseo agent inspect` prints no labels; `paseo ls --label key=value` filters by them. So ask, for each plan this root
+  // knows, whether this session is among the ones carrying that plan's label.
   try {
-    const info = await json(ctx.run, ["agent", "inspect", agentId]);
-    return JSON.stringify(info?.labels ?? {}).includes("paseo.schedule-id") ? "look" : "human";
+    const plans = [...new Set(listIds(ctx.root).map((id) => loadState(ctx.root, id).scheduleId).filter(Boolean))];
+    const found = await Promise.all(
+      plans.map(async (plan) => {
+        const r = await ctx.run(["ls", "-a", "--label", `paseo.schedule-id=${plan}`, "-q"]);
+        if (r.exitCode !== 0) throw new Error(r.stderr || "ls failed");
+        return r.stdout.split(/\s+/).some((short) => short && agentId.startsWith(short));
+      }),
+    );
+    return found.some(Boolean) ? "look" : "human";
   } catch {
     return "look";
   }
