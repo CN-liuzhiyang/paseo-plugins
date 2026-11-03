@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import { append, load, logFile, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
@@ -30,7 +31,7 @@ function setup(policyOver: Record<string, unknown> = {}) {
     if (state.deliverFails) throw new Error("popo down");
     calls.pushed.push({ text: m.text, key: m.idempotencyKey });
   };
-  const engine = createEngine({ ctx: w.ctx, paseo, deliver, refresh: (id, force) => void calls.refreshed.push(force ? `${id}!` : id), log: () => {} });
+  const engine = createEngine({ ctx: w.ctx, paseo, deliver, refresh: (id, force) => void calls.refreshed.push(force ? `${id}!` : id), log: () => {}, lookDelaysMs: [0, 0, 0] });
   return { w, calls, engine, state, status };
 }
 
@@ -178,6 +179,7 @@ test("a run that ends: noted; what came in meanwhile is looked at again; three t
   await ops.note(s.w.ctx, id, { said: "改成下周一看", by: "user" });
   const before = s.w.calls().filter((c) => c[1] === "run-once").length;
   await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
+  await s.engine.settle();
   assert.equal(s.w.calls().filter((c) => c[1] === "run-once").length, before + 1, "said while it ran: one more look");
   for (let i = 0; i < 2; i++) {
     s.w.advance(HOUR);
@@ -365,4 +367,79 @@ test("a policy.json with something missing says so on a card of its own, once; w
   await run(right);
   assert.equal(load(w.root, "D0").status, "stopped");
   assert.equal(load(w.root, "D0").asks.filter((a: { state: string }) => a.state === "open").length, 0);
+});
+
+const runs = (s: ReturnType<typeof setup>) => s.w.calls().filter((c) => c[1] === "run-once").length;
+const setBusy = (s: ReturnType<typeof setup>, n: number) => {
+  const file = path.join(s.w.dir, "paseo.json");
+  const db = JSON.parse(readFileSync(file, "utf8"));
+  db.busy = n;
+  writeFileSync(file, JSON.stringify(db));
+};
+
+test("a look for what came in meanwhile is not asked for inside the run's delivery: Paseo counts that run as running until it returns", async () => {
+  const s = setup();
+  // Delays that are not zero: the delivery must be over before the look is asked for.
+  const slow = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {}, lookDelaysMs: [30, 30, 30] });
+  const id = await start(s);
+  await ops.brief(s.w.ctx, id);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看" });
+  const before = runs(s);
+  await slow.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
+  assert.equal(runs(s), before, "nothing asked for yet when the delivery returns");
+  await slow.settle();
+  assert.equal(runs(s), before + 1, "asked for a moment after");
+  await slow.stop();
+});
+
+test("Paseo still counting the last look as running: asked again after 10 and 30 seconds, until it takes", async () => {
+  const s = setup();
+  s.w.ctx.runRetries = 0;
+  const id = await start(s);
+  await ops.brief(s.w.ctx, id);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看" });
+  setBusy(s, 2);
+  const before = runs(s);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
+  await s.engine.settle();
+  assert.equal(runs(s), before + 3, "refused twice, taken the third time");
+  assert.equal(s.w.paseo().schedules[0].runs, 2, "the first look and this one");
+});
+
+test("if every try is refused, the loop's next pass asks again once two minutes have gone; not before", async () => {
+  const s = setup();
+  s.w.ctx.runRetries = 0;
+  const id = await start(s);
+  await ops.brief(s.w.ctx, id);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看" });
+  setBusy(s, 99);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
+  await s.engine.settle();
+  const stuck = runs(s);
+  assert.ok(load(s.w.root, id).pending.length > 0, "still waiting to be looked at");
+  setBusy(s, 0);
+  s.w.advance(60_000);
+  await s.engine.readPass();
+  assert.equal(runs(s), stuck, "a minute after the delivery: not yet");
+  s.w.advance(2 * 60_000);
+  await s.engine.readPass();
+  assert.equal(runs(s), stuck + 1, "after two minutes: the pass asks for the look");
+  assert.equal(load(s.w.root, id).wakes.length, 1, "(the look is the plan's to start; the log shows it asked)");
+});
+
+test("a look that is on is not asked for again by the pass, and an affair with nothing waiting is left alone", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id);
+  s.w.advance(10 * 60_000);
+  const before = runs(s);
+  await s.engine.readPass();
+  assert.equal(runs(s), before, "nothing came in: nothing to look at");
+  s.w.advance(3 * HOUR);
+  await ops.brief(s.w.ctx, id);
+  await ops.note(s.w.ctx, id, { said: "改成下周一看" });
+  s.w.advance(10 * 60_000);
+  const mid = runs(s);
+  await s.engine.readPass();
+  assert.equal(runs(s), mid, "a look is on (running): the pass leaves it");
 });

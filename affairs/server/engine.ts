@@ -37,6 +37,8 @@ export interface EngineDeps {
   log(message: string): void;
   /** Something to do once in each pass of the reading loop (the runtime's sweep for runs that were lost); none for now. */
   wakeLost?(): Promise<void>;
+  /** How long after a run's delivery a look for what came in meanwhile is first tried, and again while Paseo still counts the last one as running. */
+  lookDelaysMs?: number[];
   /** At start, say on a card what is missing from policy.json (the plugin does; the tests that have no policy do not). */
   checkSetup?: boolean;
 }
@@ -65,6 +67,9 @@ export function createEngine(deps: EngineDeps) {
   const triedAt = new Map<string, number>();
   let reading = false;
   const redraws = new Set<ReturnType<typeof setTimeout>>();
+  const lookDelays = deps.lookDelaysMs ?? [2000, 10_000, 30_000];
+  const lookTimers = new Set<ReturnType<typeof setTimeout>>();
+  const lookWork = new Set<Promise<void>>();
 
   const state = (id: string) => ({ ...load(ctx.root, id), lines: read(ctx.root, id) });
   const write = (id: string, entries: Array<Record<string, unknown>>) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
@@ -221,6 +226,45 @@ export function createEngine(deps: EngineDeps) {
     else if (w.failures || w.downAsked || w.lastError) write(id, [{ ...entry, changed: false }]);
   }
 
+  /**
+   * A look for what came in while the last one was on, asked a moment after that one's delivery -- not inside it: Paseo
+   * counts a run as running until its delivery has returned, so a look asked for in there is always refused. Refused
+   * anyway (the count lags), it is asked again after 10 s and after 30 s; the loop's pass catches what is still left.
+   */
+  function lookSoon(id: string, attempt = 0) {
+    let resolveWork: () => void = () => {};
+    const work = new Promise<void>((resolve) => (resolveWork = resolve));
+    lookWork.add(work);
+    const timer = setTimeout(async () => {
+      lookTimers.delete(timer);
+      try {
+        if (stopped) return;
+        const s = state(id);
+        if (!isOpen(s) || s.pending.length === 0) return;
+        const r = await ops.requestLook(ctx, id, "pending");
+        if ((r as { busy?: boolean }).busy && attempt + 1 < lookDelays.length) lookSoon(id, attempt + 1);
+      } catch (error) {
+        log(`${id}: looking for what came in failed: ${(error as Error).message}`);
+      } finally {
+        lookWork.delete(work);
+        resolveWork();
+      }
+    }, lookDelays[attempt] ?? 0);
+    lookTimers.add(timer);
+  }
+
+  /** Whatever came in (he spoke, answered, a read changed) and no look has taken up for two minutes: asked for now, so nothing waits for the two-hour fallback. */
+  async function lookAtPending(id: string) {
+    const s = state(id);
+    const now = ctx.now();
+    if (!isOpen(s) || s.system || s.pending.length === 0 || s.pending.every((p: string) => p.startsWith("watch"))) return;
+    if (s.running && now - Date.parse(s.runningSince) < 45 * 60_000) return;
+    const ended = s.lastEnd ? Date.parse(s.lastEnd.at) : 0;
+    if (now - ended < 2 * 60_000 || now - (triedAt.get(id) ?? 0) < 2 * 60_000) return;
+    triedAt.set(id, now);
+    await ops.requestLook(ctx, id, "pending");
+  }
+
   /** What came of a change, if a look could not be made at once: tried again, but not more than once in a while. */
   async function lookAtChanges(id: string) {
     const s = state(id);
@@ -254,6 +298,7 @@ export function createEngine(deps: EngineDeps) {
           await readWatch(id, w).catch((error: unknown) => log(`${key}: ${(error as Error).message}`));
         }
         await lookAtChanges(id).catch((error: unknown) => log(`${id}: ${(error as Error).message}`));
+        await lookAtPending(id).catch((error: unknown) => log(`${id}: ${(error as Error).message}`));
       }
       await deps.wakeLost?.().catch((error: unknown) => log(`sweeping lost runs failed: ${(error as Error).message}`));
     } finally {
@@ -282,7 +327,7 @@ export function createEngine(deps: EngineDeps) {
     }
     await ops.syncPlan(ctx, id);
     s = state(id);
-    if (isOpen(s) && s.pending.length > 0) await ops.requestLook(ctx, id, "pending");
+    if (isOpen(s) && s.pending.length > 0) lookSoon(id);
     await scan(id);
   }
 
@@ -346,11 +391,18 @@ export function createEngine(deps: EngineDeps) {
     if (timer) clearInterval(timer);
     for (const t of debounce.values()) clearTimeout(t);
     for (const t of redraws) clearTimeout(t);
+    for (const t of lookTimers) clearTimeout(t);
+    lookTimers.clear();
+    lookWork.clear();
     await Promise.all(queues.values());
   }
 
   return {
     start, stop, scan, scanAll, view, runEnded, readPass,
+    /** Waits for the looks asked for after a delivery (tests). */
+    settle: async () => {
+      while (lookWork.size) await Promise.all([...lookWork]);
+    },
     said: async (id: string, text: string, sent: Sent[] = []) => {
       const r = await ops.note(ctx, id, { said: text, via: "workspace", attachments: sent });
       // Refused (a secret, an over-size file, an affair that is over): the person is told why, in place of "收到".
