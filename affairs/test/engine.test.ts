@@ -272,11 +272,11 @@ test("the watcher's names: the id is the folder beside the log, whatever is cut 
   assert.equal(idOfWatch("project.json"), null);
 });
 
-test("a chat the restart left closed is replaced by a new one, so the app shows no broken line and no message nobody wrote", async () => {
+test("a chat that has failed is replaced by a new one, and the old is put away", async () => {
   const s = setup();
   const id = await start(s);
   const old = load(s.w.root, id).chatId;
-  s.status.value = "closed";
+  s.status.value = "error";
   const created: string[] = [];
   const archived: string[] = [];
   const again = createEngine({

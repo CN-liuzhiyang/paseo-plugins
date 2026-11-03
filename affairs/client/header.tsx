@@ -50,7 +50,8 @@ export function installHeaders(client: PluginClientContext) {
             for (const { workspaceId } of items) {
               if (registered.has(workspaceId)) continue;
               const button = client.addHeaderButton({
-                id: `progress-${workspaceId}`,
+                // a button id is lower-case letters, digits and hyphens
+                id: `progress-${workspaceId.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
                 workspaceId,
                 button: { title: "进展", label: "进展", icon: Icon, behavior: { kind: "action", onPress: () => client.openPanel(PANEL_ID, { workspaceId, location: "explorer" }) } },
               });

@@ -4,7 +4,7 @@ import * as ops from "./lib/ops.mjs";
 import { ASK_KIND, ASK_VERSION, LINE_KIND, LINE_VERSION, type Segment } from "../shared/card";
 
 // The chat of an affair is a real session of the model (made in the affair's workspace, here). This file keeps it:
-// makes it when there is none (or replaces one that is closed, or too long and cold), listens to it so that what he
+// makes it when there is none (or replaces one that has failed, or is too long and cold), listens to it so that what he
 // types is put in the log as his, and draws into it what the model cannot see -- what the looks found, the question
 // waiting for him. What is drawn into a session is lost when the daemon restarts; the next scan draws it again.
 
@@ -97,9 +97,10 @@ export function createChats(deps: ChatDeps) {
     if (!checked.has(s.chatId)) {
       checked.add(s.chatId);
       const status = (await paseo.agents.ref(s.chatId).refresh())?.agent.status;
-      if (status === "closed" || status === "error") {
-        // Waking it would show a message nobody wrote; a new one starts clean and the old is put away.
-        await replace(id, "closed", s.chatId);
+      // A chat is a real session: after a restart it is only "closed", and the next thing he types wakes it where it was (checked
+      // by hand). Only one that has failed is replaced.
+      if (status === "error") {
+        await replace(id, "failed", s.chatId);
         return;
       }
     }

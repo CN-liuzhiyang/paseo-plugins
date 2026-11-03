@@ -74,7 +74,7 @@ export function chatCreateOptions(ctx, s) {
   };
 }
 
-/** The one line a new chat starts with (it is drawn, not said: the model does not see it); nothing when it replaces one that broke. */
+/** The one line a new chat starts with (it is drawn, not said: the model does not see it); nothing when it replaces one that failed. */
 export function noticeFor(why, title) {
   if (why === "first") return `开始盯「${title}」。我先去看一眼，有结果写在这里。`;
   if (why === "migrate") return "现在可以在这里直接跟我聊这件事了；右边的「进展」是最新的情况。";

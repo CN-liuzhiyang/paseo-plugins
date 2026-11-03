@@ -79,7 +79,7 @@ export function createEngine(deps: EngineDeps) {
     const lc = linksOf(s);
     return {
       rows: (rowsOf(s, now, ctx.policy) as Row[]).map((r) => { const parts = partsOf(r.text, lc); return parts ? { ...r, parts } : r; }),
-      asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: withUrls(a.title, lc), line: withUrls(a.line, lc), options: a.options })),
+      asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
     };
   }
 

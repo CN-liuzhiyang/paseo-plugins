@@ -100,7 +100,7 @@ test("an affair from before (with the old conversation): a chat is made, the old
   assert.match(textOf(lines(t)[0]!), /在这里直接跟我聊/);
 });
 
-test("the chat is made once however many scans; and one the restart left closed is replaced and the old put away", async () => {
+test("the chat is made once however many scans; one a restart left closed is kept (it wakes where it was); one that failed is replaced and the old put away", async () => {
   let status = "idle";
   const s = setup({}, { status: () => status });
   const id = await start(s);
@@ -108,6 +108,12 @@ test("the chat is made once however many scans; and one the restart left closed 
   await s.engine.scan(id);
   assert.equal(s.p.made.length, 1);
   status = "closed";
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: s.p.paseo, deliver: null, log: () => {} });
+  await restarted.scan(id);
+  assert.equal(s.p.made.length, 1, "closed after a restart: kept");
+  assert.ok(s.p.handlers.has("chat-1"), "and listened to");
+  await restarted.stop();
+  status = "error";
   const again = createEngine({ ctx: s.w.ctx, paseo: s.p.paseo, deliver: null, log: () => {} });
   await again.scan(id);
   await again.scan(id);

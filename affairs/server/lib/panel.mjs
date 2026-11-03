@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { hrefOf, linkify, parseLink, partsOf, withUrls } from "./links.mjs";
+import { hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
 import { cardOf, rowsOf, sentOf, stamp } from "./view.mjs";
 
 // What the "进展" panel beside an affair's conversation shows: three blocks (now, sources, materials), all drawn from the
@@ -25,6 +25,10 @@ function mainSource(state, lc) {
   return { label, href };
 }
 
+/** What a person calls a thing that is read, by the name of the tool that reads it; an unknown tool shows its own name. */
+const TOOL_NAME = { "feishu-task": "飞书任务", "http-json": "网页数据" };
+const toolName = (tool) => TOOL_NAME[tool] ?? tool;
+
 const shortWhen = (atIso, now, tz) => (atIso ? stamp(atIso, now, tz) : "");
 
 /**
@@ -43,7 +47,7 @@ export function sourcesOf(state, now, policy, lc) {
   const main = mainSource(state, lc);
   if (main) add({ label: main.label, status: state.status === "done" ? "办完了" : state.status === "stopped" ? "不盯了" : "", at: "", href: main.href });
   for (const w of Object.values(state.watches ?? {})) {
-    const label = w.label || w.tool;
+    const label = w.label || toolName(w.tool);
     add({ label, status: w.lastError ? "读不到" : String(w.summary ?? "").slice(0, 60), at: shortWhen(w.readAt, now, policy.tz), href: null });
   }
   // The references in what is remembered and said: each once, newest wording kept.
@@ -54,7 +58,7 @@ export function sourcesOf(state, now, policy, lc) {
   // Things read once (not watched), newest of each tool and arguments.
   const newest = new Map();
   for (const r of state.reads ?? []) if (r.ok) newest.set(`${r.tool}|${JSON.stringify(r.args)}`, r);
-  for (const r of [...newest.values()].reverse()) add({ label: r.tool, status: String(r.summary ?? "").slice(0, 60), at: shortWhen(r.at, now, policy.tz), href: null });
+  for (const r of [...newest.values()].reverse()) add({ label: toolName(r.tool), status: String(r.summary ?? "").slice(0, 60), at: shortWhen(r.at, now, policy.tz), href: null });
   return { items: out.slice(0, SOURCES_SHOWN), more: Math.max(0, out.length - SOURCES_SHOWN) };
 }
 
@@ -88,7 +92,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     id: state.id,
     title: state.title,
     open: card.open,
-    asks: asks.map((a) => ({ id: a.id, title: withUrls(a.title, lc), line: withUrls(a.line, lc), options: a.options })),
+    asks: asks.map((a) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),
     next: withParts(card.next, lc),

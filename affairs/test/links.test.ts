@@ -175,7 +175,7 @@ test("in the chat: a line with a ticket is drawn with pieces the client can open
   assert.equal(byId("row-s3").data.parts, undefined);
 });
 
-test("a question he is asked: the ticket in it comes with its address in the text", async () => {
+test("a question he is asked, in the chat and the panel, is plain words: the address is for places that can only show text (a push)", async () => {
   const w = world({ policy });
   const id = await started(w);
   await ops.brief(w.ctx, id);
@@ -187,7 +187,7 @@ test("a question he is asked: the ticket in it comes with its address in the tex
   assert.equal(r.ok, true, r.text);
   const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {} });
   const [ask] = engine.view(id)!.asks;
-  assert.equal(ask!.title, `#555001 ${gcp("555001")} 要关掉吗？`);
+  assert.equal(ask!.title, "#555001 要关掉吗？");
   assert.equal(ask!.line, "关了我就不盯了");
   assert.equal(load(w.root, id).asks[0].title, "#555001 要关掉吗？", "the log keeps what was asked");
 });
