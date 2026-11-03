@@ -16,7 +16,7 @@ import { CARD_ID, CARD_KIND, CARD_VERSION, LINE_KIND, LINE_VERSION, type Card } 
 
 export const PROVIDER_ID = "affairs";
 export const MODEL_ID = "conversation";
-const CAPABILITIES = ["prompt.message", "prompt.steer", "permission", "session.persistence"] as const;
+const CAPABILITIES = ["prompt.message", "prompt.image", "prompt.steer", "permission", "session.persistence"] as const;
 export const ACK = "收到，看一下…";
 const BOOT = /^事项 (\S+)/;
 
@@ -39,10 +39,17 @@ export interface View {
   rows: Row[];
   asks: OpenAsk[];
 }
+/** A picture or a file that came with what he typed. Other kinds of attachment (a pull request, a note) are not kept. */
+export type Sent = { type: "image"; data: string; mimeType: string } | { type: "file"; from: string; name: string; mimeType: string };
+/** `recorded: false`: nothing was taken (so "收到" is withdrawn); `notice`: a sentence for him (something was refused). */
+export interface SaidResult {
+  recorded?: boolean;
+  notice?: string;
+}
 export interface ConversationDeps {
   view(affairId: string): View | null;
-  /** The person typed in the conversation. */
-  said(affairId: string, text: string): Promise<void>;
+  /** The person typed in the conversation, perhaps with pictures or files. */
+  said(affairId: string, text: string, sent: Sent[]): Promise<SaidResult | void>;
   /** The person answered a question in the app (a choice, or what they typed under "other"). */
   answered(affairId: string, askId: string, text: string): Promise<void>;
 }
@@ -79,6 +86,15 @@ const textOf = (input: Extract<ProviderInput, { type: "session.prompt" }>) =>
   input.prompt.input.type === "message"
     ? input.prompt.input.content.filter((p): p is { type: "text"; text: string } => p.type === "text").map((p) => p.text).join("\n")
     : `/${input.prompt.input.name} ${input.prompt.input.arguments}`.trim();
+
+const sentOf = (input: Extract<ProviderInput, { type: "session.prompt" }>): Sent[] =>
+  input.prompt.input.type !== "message"
+    ? []
+    : input.prompt.input.content.flatMap((part): Sent[] => {
+        if (part.type === "image") return [{ type: "image", data: part.data, mimeType: part.mimeType }];
+        if (part.type === "uploaded_file") return [{ type: "file", from: part.path, name: part.fileName, mimeType: part.mimeType }];
+        return [];
+      });
 
 export function createConversations(deps: ConversationDeps) {
   const connections = new Set<{ sync(affairId: string, force?: boolean): void }>();
@@ -155,6 +171,23 @@ export function createConversations(deps: ConversationDeps) {
     const handle = { sync: (affairId: string, force = false) => sessions.forEach((s, id) => s.affairId === affairId && sync(id, force)) };
     connections.add(handle);
 
+    const line = (sessionId: string, id: string, text: string) =>
+      emit({ type: "timeline.item", sessionId, item: { type: "plugin", id, pluginId: "affairs", kind: LINE_KIND, version: LINE_VERSION, data: { text, tone: "normal", detail: "" } } });
+
+    /** What he typed or sent is told "收到" at once, then said to the affair; a refusal is told in place of it. */
+    async function say(sessionId: string, session: Session, affairId: string, text: string, sent: Sent[]) {
+      session.ack = `ack-${session.turns}-${Date.now()}`;
+      const ackId = session.ack;
+      line(sessionId, ackId, ACK);
+      const result = await deps.said(affairId, text, sent);
+      if (!result?.notice) return;
+      if (result.recorded === false) {
+        // Nothing was taken: the "收到" line becomes the reason.
+        if (session.ack === ackId) session.ack = null;
+        line(sessionId, ackId, result.notice);
+      } else line(sessionId, `notice-${session.turns}-${Date.now()}`, result.notice);
+    }
+
     async function dispatch(input: ProviderInput): Promise<void> {
       switch (input.type) {
         case "catalog":
@@ -178,6 +211,7 @@ export function createConversations(deps: ConversationDeps) {
           const session = sessions.get(input.sessionId);
           if (!session) return;
           const text = textOf(input).trim();
+          const sent = sentOf(input);
           const boot = BOOT.exec(text);
           if (boot && !session.affairId) session.affairId = boot[1]!;
           const affairId = session.affairId;
@@ -188,17 +222,15 @@ export function createConversations(deps: ConversationDeps) {
               return;
             }
             emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "steer", turnId: session.turn ?? "turn-0" } });
-            await deps.answered(affairId, first, text);
+            if (text) await deps.answered(affairId, first, text);
+            // What came with the answer is his too; it is kept and looked at like anything else he sends.
+            if (sent.length) await say(input.sessionId, session, affairId, "", sent);
             return;
           }
           const isTurnOpen = Boolean(session.turn);
           if (!isTurnOpen) startTurn(input.sessionId, session);
           emit({ type: "session.prompt_result", sessionId: input.sessionId, clientMessageId: input.prompt.clientMessageId, result: { type: "turn", turnId: session.turn! } });
-          if (affairId && !boot && text) {
-            session.ack = `ack-${session.turns}-${Date.now()}`;
-            emit({ type: "timeline.item", sessionId: input.sessionId, item: { type: "plugin", id: session.ack, pluginId: "affairs", kind: LINE_KIND, version: LINE_VERSION, data: { text: ACK, tone: "normal", detail: "" } } });
-            await deps.said(affairId, text);
-          }
+          if (affairId && !boot && (text || sent.length)) await say(input.sessionId, session, affairId, text, sent);
           sync(input.sessionId);
           if (!isTurnOpen && session.asks.size === 0) endTurn(input.sessionId, session);
           return;

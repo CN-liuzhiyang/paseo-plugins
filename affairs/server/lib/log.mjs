@@ -147,6 +147,12 @@ export function nextId(root) {
   return `D${Math.max(0, ...used) + 1}`;
 }
 
+/** What a said line carries, kept only if each one has the four fields (a line written around the commands may have anything). */
+export const attachmentsOf = (l) =>
+  (Array.isArray(l.attachments) ? l.attachments : [])
+    .filter((a) => a && typeof a.name === "string" && typeof a.path === "string")
+    .map((a) => ({ name: a.name, path: a.path, mime: String(a.mime ?? ""), size: Number(a.size) || 0 }));
+
 const last = (list) => list[list.length - 1] ?? null;
 
 /**
@@ -183,7 +189,7 @@ export function fold(lines) {
         s.scheduleId = l.scheduleId;
         break;
       case "said":
-        s.said.push({ seq: l.seq, at: l.at, text: String(l.text ?? ""), via: l.via ?? "chat", by: l.by ?? "user", undone: undone.has(l.seq) });
+        s.said.push({ seq: l.seq, at: l.at, text: String(l.text ?? ""), via: l.via ?? "chat", by: l.by ?? "user", undone: undone.has(l.seq), attachments: attachmentsOf(l) });
         // What a look noted about its own view is not something he said: it does not call for another look.
         if (!undone.has(l.seq) && (l.by ?? "user") === "user") s.pending.push(`said:${l.seq}`);
         break;

@@ -12,6 +12,20 @@ export function stamp(atIso, now, tz) {
   return p.date === localParts(now, tz).date ? `${pad(p.h)}:${pad(p.mi)}` : `${pad(p.mo)}-${pad(p.d)} ${pad(p.h)}:${pad(p.mi)}`;
 }
 
+const isPicture = (a) => /^image\//i.test(a.mime);
+
+/** What he sent, in his words: "发了一张图：a.png", "发了一个文件：b.pdf", "发了 2 张图、1 个文件：a.png、b.pdf". */
+export function attachSummary(list) {
+  const pics = list.filter(isPicture).length;
+  const files = list.length - pics;
+  const names = list.map((a) => a.name).join("、");
+  if (list.length === 1) return `发了${pics ? "一张图" : "一个文件"}：${names}`;
+  return `发了 ${[pics ? `${pics} 张图` : "", files ? `${files} 个文件` : ""].filter(Boolean).join("、")}：${names}`;
+}
+
+/** The things he sent that still count (the line was not taken back), oldest first. */
+export const sentOf = (state) => (state.said ?? []).filter((m) => !m.undone && m.by === "user").flatMap((m) => (m.attachments ?? []).map((a) => ({ ...a, seq: m.seq, at: m.at })));
+
 export const md = (ms, tz) => {
   const p = localParts(ms, tz);
   return `${pad(p.mo)}-${pad(p.d)}`;
@@ -52,8 +66,12 @@ export function rowsOf(state, now, policy) {
     if (l.kind === "report" && l.verdict !== "rejected" && l.entry) {
       const costs = l.detail ?? "";
       add(`r${l.seq}`, l.at, `${time}  ${l.entry}`, "normal", costs);
-    } else if (l.kind === "said" && l.by === "user" && l.via !== "workspace" && !state.said.find((s) => s.seq === l.seq)?.undone) {
-      add(`s${l.seq}`, l.at, `${time}  你：${l.text}`);
+    } else if (l.kind === "said" && l.by === "user" && !state.said.find((s) => s.seq === l.seq)?.undone) {
+      // What he typed in the conversation is already on his screen; what he sent with it is drawn as his line too.
+      const sent = state.said.find((s) => s.seq === l.seq)?.attachments ?? [];
+      const summary = sent.length ? attachSummary(sent) : "";
+      if (l.via !== "workspace") add(`s${l.seq}`, l.at, `${time}  你：${l.text}${summary && !l.text.includes(summary) ? `（${summary}）` : ""}`);
+      else if (summary) add(`s${l.seq}`, l.at, `${time}  你：${summary}`);
     } else if (l.kind === "answered") {
       add(`a${l.seq}`, l.at, `${time}  你：${l.answer}`);
     } else if (l.kind === "status" && l.status === "done") {

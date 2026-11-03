@@ -29,7 +29,7 @@ export default function contribute(server: PluginServerContext) {
 
   const conversations = createConversations({
     view: (id) => engine?.view(id) ?? null,
-    said: async (id, text) => void (await engine?.said(id, text)),
+    said: async (id, text, sent) => await engine?.said(id, text, sent),
     answered: async (id, qid, text) => void (await engine?.answered(id, qid, text)),
   });
   server.registerProvider(conversations.registration);

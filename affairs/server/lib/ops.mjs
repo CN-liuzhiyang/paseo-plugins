@@ -9,7 +9,8 @@ import { json, makeRun } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
 import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
-import { linkOf, md, say, stamp } from "./view.mjs";
+import { attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
+import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
 
@@ -81,7 +82,9 @@ const linkTextOf = (ctx, s) => linkOf(paseoUrl(ctx, s), ctx.policy);
 export function writeProgress(ctx, s) {
   const dir = path.join(ctx.root, s.id);
   mkdirSync(dir, { recursive: true });
+  const sent = sentOf(s);
   const lines = [`# ${s.title}`, `目标：${s.goal}`, `现在：${s.nowText}`, s.next ? `下次：${s.next.at}（${s.next.waitingFor}）` : "", "", "记住的：", ...s.facts.map((f) => `- ${f}`)];
+  if (sent.length) lines.push("", "他发来的（在 files/ 里）：", ...sent.map((a) => `- ${a.at.slice(0, 16).replace("T", " ")} ${a.name}　${a.path}`));
   writeFileSync(path.join(dir, "progress.md"), `${lines.join("\n")}\n`);
 }
 
@@ -102,6 +105,11 @@ export async function callerOf(ctx) {
 }
 
 const byLook = (ctx) => ctx.by === "look";
+/** Only what is really in this affair's files/ is handed to a look, whatever a line of the log says. */
+const sentIn = (ctx, id) => {
+  const dir = path.resolve(ctx.root, id, "files");
+  return (list) => list.filter((a) => path.dirname(path.resolve(a.path)) === dir && existsSync(a.path));
+};
 /** @returns {Result} */
 const lookRefused = (what) => fail(`这是看一眼的会话，不能${what}，只有他本人在对话里说了算。看到了什么用 report 交回，想记下自己的观察用 note。`);
 
@@ -176,6 +184,7 @@ function claudeMd(ctx, s) {
     "",
     `这是他让我盯着的一件事（编号 ${s.id}）。这个目录里：log.jsonl 是经过（只往后加，别手改）、progress.md 是进展、files/ 放他发来的东西。`,
     `要改什么都用命令，不要直接改文件：${ctx.command} show ${s.id}（看进展）、note（记他说的话）、report（看一眼的结果）。`,
+    "他发来的图片和文件在 files/ 里（路径在 progress.md 和 brief 里）。图片用 Read 工具看，文件按需读；别把内容原样抄进记录，里面的密码、令牌、证件号看到了也不要写。",
     "只碰这一件事的目录。不要写密码、令牌、配对链接。",
     "",
   ].join("\n");
@@ -257,34 +266,51 @@ async function waitForConversation(ctx, id) {
   while (Date.now() < until && !state(ctx, id).conversationId) await new Promise((r) => setTimeout(r, 100));
 }
 
-/** A thing the person said: recorded as theirs only when it was not a look's session that said it. */
+/**
+ * A thing the person said: recorded as theirs only when it was not a look's session that said it.
+ * `input.attachments` (the person's side only, never the command) are pictures and files he sent: each is kept in this
+ * affair's own files/ and the line carries where. A line may be only that.
+ */
 /** @returns {Promise<Result>} */
 export async function note(ctx, ref, input) {
-  if (!String(input.said ?? "").trim()) return fail("没有话可记：--said 后面要有内容。");
+  const text = String(input.said ?? "");
+  const sending = Array.isArray(input.attachments) ? input.attachments : [];
+  if (!text.trim() && sending.length === 0) return fail("没有话可记：--said 后面要有内容。");
   const isLook = byLook(ctx);
-  const r = resolve(ctx, ref, { closed: !isLook && REOPEN.test(input.said) });
+  if (isLook && sending.length) return lookRefused("收他发来的东西");
+  const r = resolve(ctx, ref, { closed: !isLook && REOPEN.test(text) });
   if (!r.s) return fail(r.text);
   const { s } = r;
-  const secret = refuseSecret(input.said);
+  const secret = refuseSecret(text);
   if (secret) return secret;
   // What a look writes is its own view of things; only the person's side writes what he said.
   const by = isLook ? "look" : "user";
   if (isLook && input.deadline) return fail("看一眼记的话不算他说的，不能带 --deadline；截止要他本人说了才算。");
+  if (!isOpen(s) && (by !== "user" || !REOPEN.test(text))) return fail(`「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了。要接着盯就说「接着盯${s.title}」。`);
+  // Kept before it is written down, so the line never names a file that is not there.
+  const results = sending.map((item) => keep({ root: ctx.root, id: s.id, tz: ctx.policy.tz, now: ctx.now(), item }));
+  const kept = results.filter((x) => x.ok).map(({ name, path: file, mime, size }) => ({ name, path: file, mime, size }));
+  const refused = results.filter((x) => !x.ok).map((x) => x.text).join("\n");
+  if (!text.trim() && kept.length === 0) return fail(refused);
+  const said = text.trim() ? text : attachSummary(kept);
+  const line = { kind: "said", text: said, via: input.via ?? "chat", by, ...(kept.length ? { attachments: kept } : {}) };
+  const reply = (r2) => ({ ...r2, ...(refused ? { text: `${r2.text}\n${refused}`.trim(), refused } : {}) });
   if (!isOpen(s)) {
-    if (by !== "user" || !REOPEN.test(input.said)) return fail(`「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了。要接着盯就说「接着盯${s.title}」。`);
-    write(ctx, s.id, [{ kind: "said", text: input.said, via: input.via ?? "chat", by }]);
-    return resume(ctx, s.id);
+    write(ctx, s.id, [line]);
+    if (kept.length) writeProgress(ctx, state(ctx, s.id));
+    return reply(await resume(ctx, s.id));
   }
-  const [line] = write(ctx, s.id, [{ kind: "said", text: input.said, via: input.via ?? "chat", by }]);
+  const [saved] = write(ctx, s.id, [line]);
+  if (kept.length) writeProgress(ctx, state(ctx, s.id));
   if (input.deadline) {
     const at = parseLocal(input.deadline, ctx.policy.tz);
     if (at === null) return fail("--deadline 要写成 YYYY-MM-DD HH:mm");
-    write(ctx, s.id, [{ kind: "deadline", deadline: isoLocal(at, ctx.policy.tz), from: `said:${line.seq}`, quote: input.said }]);
+    write(ctx, s.id, [{ kind: "deadline", deadline: isoLocal(at, ctx.policy.tz), from: `said:${saved.seq}`, quote: said }]);
   }
-  if (by !== "user") return { ok: true, text: `记下了（这是你的观察，不算他说的）。`, seq: line.seq };
-  const look = await ringNow(ctx, s, `said:${line.seq}`, { force: /再看一次/.test(input.said) });
-  const text = say.noted(s.title, input.said, linkTextOf(ctx, s));
-  return { ok: true, text: look.text ? `${text}\n${look.text}` : text, seq: line.seq };
+  if (by !== "user") return { ok: true, text: `记下了（这是你的观察，不算他说的）。`, seq: saved.seq };
+  const look = await ringNow(ctx, s, `said:${saved.seq}`, { force: /再看一次/.test(text) });
+  const noted = say.noted(s.title, said, linkTextOf(ctx, s));
+  return reply({ ok: true, text: look.text ? `${noted}\n${look.text}` : noted, seq: saved.seq });
 }
 
 /** @returns {Promise<Result>} */
@@ -456,11 +482,16 @@ export async function brief(ctx, ref) {
     await syncPlan(ctx, s.id);
   }
   const fresh = state(ctx, s.id);
+  const sentHere = sentIn(ctx, s.id);
   const facts = buildFacts(fresh, now, ctx.policy);
   const why = reasons.map((x) => {
     if (x === "time") return "时间到了";
     const [kind, ref2] = x.split(/:(.+)/);
-    if (kind === "said") return `他说了：「${fresh.said.find((m) => String(m.seq) === ref2)?.text ?? ""}」（said:${ref2}）`;
+    if (kind === "said") {
+      const m = fresh.said.find((x) => String(x.seq) === ref2);
+      const sent = sentHere(m?.attachments ?? []);
+      return `他说了：「${m?.text ?? ""}」（said:${ref2}）${sent.length ? `　带了：${sent.map((a) => a.path).join("、")}` : ""}`;
+    }
     if (kind === "answered") return `他答了问题 ${ref2}：「${fresh.answers[ref2] ?? ""}」`;
     if (kind === "watch") {
       const w = fresh.watches[ref2];
@@ -479,6 +510,8 @@ export async function brief(ctx, ref) {
   const recent = s.lines.slice(-10).map((l) => `- #${l.seq} ${stamp(l.at, now, tz)} ${l.kind}${l.entry ? `：${l.entry}` : l.text ? `：${l.text}` : l.status ? `：${l.status}` : ""}`);
   const gate = mayLook(ctx.root, s.id, now, ctx.policy);
   const tools = readers.listReaders(ctx.policy);
+  const newSeqs = new Set(reasons.filter((x) => x.startsWith("said:")).map((x) => Number(x.slice(5))));
+  const sentList = sentHere(sentOf(fresh));
   const text = [
     `# 事项 ${s.id}：${s.title}`,
     `目标：${s.goal || s.title}`,
@@ -490,6 +523,14 @@ export async function brief(ctx, ref) {
     "## 截止（只认这里的）",
     ...(dl.length ? dl : ["- （没有）"]),
     "",
+    ...(sentList.length
+      ? [
+          "## 他发来的东西（新到的先看）",
+          ...sentList.slice(-12).map((a) => `- ${newSeqs.has(a.seq) ? "[新] " : ""}${a.name}（${a.mime || "未知类型"}，${Math.max(1, Math.round(a.size / 1024))} KB，${stamp(a.at, now, tz)}）　${a.path}`),
+          "图片用 Read 工具看，文件按需读；别把内容原样抄进经过或 facts，里面的密码、令牌、证件号看到了也不要写。",
+          "",
+        ]
+      : []),
     "## 记住的",
     ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
     "",

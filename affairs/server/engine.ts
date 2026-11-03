@@ -10,7 +10,7 @@ import { localParts } from "./lib/time.mjs";
 import { cardOf, linkOf, rowsOf, say } from "./lib/view.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
-import type { View } from "./conversation";
+import type { Sent, View } from "./conversation";
 import { MODEL_ID, PROVIDER_ID } from "./conversation";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
@@ -346,7 +346,11 @@ export function createEngine(deps: EngineDeps) {
 
   return {
     start, stop, scan, scanAll, view, runEnded, readPass,
-    said: async (id: string, text: string) => void (await ops.note(ctx, id, { said: text, via: "workspace" })),
+    said: async (id: string, text: string, sent: Sent[] = []) => {
+      const r = await ops.note(ctx, id, { said: text, via: "workspace", attachments: sent });
+      // Refused (a secret, an over-size file, an affair that is over): the person is told why, in place of "收到".
+      return r.ok ? { recorded: true, notice: r.refused as string | undefined } : { recorded: false, notice: r.text };
+    },
     answered: async (id: string, qid: string, text: string) => void (await ops.answer(ctx, id, qid, text, "workspace")),
   };
 }
