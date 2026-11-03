@@ -463,7 +463,7 @@ test("F-15: a look whose end was never heard is not waited for: the card stops s
   assert.equal(cardOf(load(w.root, id), w.now(), w.ctx.policy).next === "正在看一眼…", false);
   const runs = () => w.calls().filter((c) => c[1] === "run-once").length;
   const n = runs();
-  const e = createEngine({ ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  const e = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {} });
   await e.start();
   await e.stop();
   assert.equal(runs(), n + 1, "the look that came due while nobody was listening is made");

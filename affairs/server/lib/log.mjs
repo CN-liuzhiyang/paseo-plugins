@@ -166,7 +166,7 @@ export function fold(lines) {
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
-    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, notes: [], briefs: { look: 0, chat: 0 }, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
+    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
   };
   const undone = new Set(lines.filter((l) => l.kind === "undo").map((l) => l.target));
   for (const l of lines) {
@@ -177,7 +177,7 @@ export function fold(lines) {
         Object.assign(s, { id: l.id, title: l.title, goal: l.goal ?? "", domain: l.domain ?? "work", link: l.link ?? null, workdir: l.workdir ?? "", createdAt: l.at, paseoHome: l.paseoHome ?? "", roleName: l.role ?? "", system: l.system === true });
         break;
       case "workspace":
-        if (l.archived) Object.assign(s, { archived: true, workspaceId: null, conversationId: null, scheduleId: null });
+        if (l.archived) Object.assign(s, { archived: true, workspaceId: null, conversationId: null, chatId: null, scheduleId: null });
         if (l.workspaceId) Object.assign(s, { workspaceId: l.workspaceId, archived: false });
         if (l.projectId) s.projectId = l.projectId;
         if (l.title !== undefined) s.titleShown = l.title;
@@ -191,9 +191,14 @@ export function fold(lines) {
       case "chat":
         // The chat session of this affair (the person talks to it); an earlier one stays in the list, for `history`.
         if (l.agentId) {
-          s.chats.push({ agentId: String(l.agentId), at: l.at, seq: l.seq });
+          s.chats.push({ agentId: String(l.agentId), at: l.at, seq: l.seq, why: String(l.why ?? "") });
           s.chatId = String(l.agentId);
+          s.chatTurn = null;
         }
+        break;
+      case "chat.turn":
+        // One turn of the chat finished: when, how long the session's context is now, what it cost (the real figures from the turn).
+        if (l.agentId === s.chatId) s.chatTurn = { at: l.at, tokens: Number(l.tokens) || 0, usd: Number(l.usd) || 0 };
         break;
       case "note":
         // What the chat session wrote down for itself (a conclusion, a decision): its own words, never taken for his.

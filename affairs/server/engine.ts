@@ -7,15 +7,15 @@ import { policyProblems } from "./lib/policy.mjs";
 import * as ops from "./lib/ops.mjs";
 import * as readers from "./lib/readers.mjs";
 import { localParts } from "./lib/time.mjs";
-import { cardOf, linkOf, rowsOf, say } from "./lib/view.mjs";
+import { linkOf, rowsOf, say } from "./lib/view.mjs";
+import { panelOf } from "./lib/panel.mjs";
 import { linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
-import type { Row, Sent, View } from "./conversation";
-import { MODEL_ID, PROVIDER_ID } from "./conversation";
+import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
-// world agree with it -- its conversation exists, the sidebar title is right, the conversation shows what the log
+// world agree with it -- its chat exists, the sidebar title is right, the chat shows what the log
 // says, anything that must reach the person is pushed within the day's budget, and an affair that ended three days
 // ago is archived. Nothing here decides anything about an affair; the log and the check do.
 
@@ -23,8 +23,7 @@ type Ctx = ReturnType<typeof ops.makeCtx>;
 const DAY = 86_400_000;
 const TICK_MS = 60_000;
 
-export interface PaseoLike {
-  agents: { ref(id: string): { refresh(): Promise<{ agent: { status: string } } | null>; archive(): Promise<unknown> } };
+export interface PaseoLike extends ChatPaseo {
   workspaces: { ref(id: string): { setTitle(title: string | null): Promise<unknown>; archive(): Promise<unknown>; agents: { create(options: Record<string, unknown>): Promise<{ id: string }> } } };
 }
 export type Deliver = (channelId: string, message: { to: string; idempotencyKey: string; title: string; text: string; status: "succeeded" | "failed" }) => Promise<void>;
@@ -33,7 +32,6 @@ export interface EngineDeps {
   ctx: Ctx;
   paseo: PaseoLike | null;
   deliver: Deliver | null;
-  refresh(affairId: string, force?: boolean): void;
   log(message: string): void;
   /** Something to do once in each pass of the reading loop (the runtime's sweep for runs that were lost); none for now. */
   wakeLost?(): Promise<void>;
@@ -49,8 +47,6 @@ export function idOfWatch(name: string | Buffer | null): string | null {
   return ID.test(id) ? id : null;
 }
 
-const conversationOptions = (s: { title: string }, id: string) => ({ title: s.title, config: { provider: `${PROVIDER_ID}/${MODEL_ID}` }, env: { AFFAIR_ID: id }, prompt: `事项 ${id}`, labels: { "affairs.affair": id } });
-
 type Candidate = { key: string; text: string; live: boolean };
 
 export function createEngine(deps: EngineDeps) {
@@ -60,35 +56,50 @@ export function createEngine(deps: EngineDeps) {
   let timer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
   const debounce = new Map<string, ReturnType<typeof setTimeout>>();
-  /** Conversations looked at since this start: after a restart the app shows a closed one as broken until someone opens it. */
-  const revived = new Set<string>();
   /** When each watched value was last read, and when each affair was last asked to look because of one. Not in the log: after a restart everything is read once. */
   const readAt = new Map<string, number>();
   const triedAt = new Map<string, number>();
   let reading = false;
-  const redraws = new Set<ReturnType<typeof setTimeout>>();
   const lookDelays = deps.lookDelaysMs ?? [2000, 10_000, 30_000];
   const lookTimers = new Set<ReturnType<typeof setTimeout>>();
   const lookWork = new Set<Promise<void>>();
 
   const state = (id: string) => ({ ...load(ctx.root, id), lines: read(ctx.root, id) });
   const write = (id: string, entries: Array<Record<string, unknown>>) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
+  const chats = deps.paseo ? createChats({ ctx, paseo: deps.paseo, state, write: (id, entries) => void write(id, entries), view: (id) => view(id), log }) : null;
 
+  /** The links in what he reads: a reference (a ticket number) comes with where it leads. */
+  const linksOf = (s: { link: string | null }) => linkContext(ctx.policy, s.link);
+
+  /** What the chat is drawn from: the lines (oldest first) and the questions waiting. */
   function view(id: string): View | null {
     const s = state(id);
     if (!s.id) return null;
     const now = ctx.now();
-    const gate = isOpen(s) ? mayLook(ctx.root, id, now, ctx.policy) : { ok: true };
-    const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? `这次没看成：${String(s.lastEnd.error ?? "没有说明").slice(0, 60)}` : "";
-    // A reference in what he reads (a ticket number) is shown with where it leads: pieces for the card and the lines, the address after it where only text fits.
-    const lc = linkContext(ctx.policy, s.link);
-    const card = cardOf(s, now, ctx.policy, { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
-    const parts = Object.fromEntries((["title", "waiting", "now", "next"] as const).map((k) => [k, partsOf(card[k], lc)]).filter(([, v]) => v));
+    const lc = linksOf(s);
     return {
-      card: Object.keys(parts).length ? { ...card, parts } : card,
       rows: (rowsOf(s, now, ctx.policy) as Row[]).map((r) => { const parts = partsOf(r.text, lc); return parts ? { ...r, parts } : r; }),
       asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: withUrls(a.title, lc), line: withUrls(a.line, lc), options: a.options })),
     };
+  }
+
+  /** The affairs that have a workspace: where the 进展 button goes. */
+  function affairs(): Array<{ id: string; workspaceId: string }> {
+    return listIds(ctx.root).flatMap((id) => {
+      const s = load(ctx.root, id);
+      return s.id && s.workspaceId ? [{ id, workspaceId: String(s.workspaceId) }] : [];
+    });
+  }
+
+  /** The panel of the affair that lives in this workspace, or null when the workspace is not an affair's. */
+  function panel(workspaceId: string) {
+    const found = affairs().find((a) => a.workspaceId === workspaceId);
+    if (!found) return null;
+    const s = state(found.id);
+    const now = ctx.now();
+    const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy) : { ok: true };
+    const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? `这次没看成：${String(s.lastEnd.error ?? "没有说明").slice(0, 60)}` : "";
+    return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
   }
 
   /** What should reach the person on another channel, from the log alone. */
@@ -155,14 +166,7 @@ export function createEngine(deps: EngineDeps) {
       log(`${id}: the log does not follow from line ${s.chainBroken}`);
       s = state(id);
     }
-    let made = false;
     const ws = s.workspaceId && deps.paseo ? deps.paseo.workspaces.ref(s.workspaceId) : null;
-    if (ws && !s.conversationId) {
-      const agent = await ws.agents.create(conversationOptions(s, id));
-      write(id, [{ kind: "conversation", agentId: agent.id }]);
-      s = state(id);
-      made = true;
-    }
     if (ws) {
       const want = titleOf(s, ctx.now(), ctx.policy);
       // While a look is on, the plan in the log is only the fallback that guards against a look that never reports: the title waits for what the look decides.
@@ -177,29 +181,8 @@ export function createEngine(deps: EngineDeps) {
         if (s.scheduleId) await schedule.remove(ctx.run, s.scheduleId).catch((error: unknown) => log(`${id}: removing the plan failed: ${(error as Error).message}`));
       }
     }
-    if (s.conversationId && deps.paseo && ws && !revived.has(id)) {
-      revived.add(id);
-      const old = deps.paseo.agents.ref(s.conversationId);
-      const status = (await old.refresh())?.agent.status;
-      if (status === "closed" || status === "error") {
-        // Waking the old one would show a line the person never wrote ("事项 D3") under the host's "connection closed" error; a new conversation starts clean and the old one is put away.
-        const fresh = await ws.agents.create(conversationOptions(s, id));
-        write(id, [{ kind: "conversation", agentId: fresh.id }]);
-        made = true;
-        await old.archive().catch((error: unknown) => log(`${id}: putting the old conversation away failed: ${(error as Error).message}`));
-        s = state(id);
-      }
-    }
-    deps.refresh(id, made);
-    // What a conversation is shown while it is being made may not reach the app: once more a moment later.
-    if (made) {
-      const timer = setTimeout(() => {
-        redraws.delete(timer);
-        if (!stopped) deps.refresh(id, true);
-      }, 3000);
-      timer.unref?.();
-      redraws.add(timer);
-    }
+    // The chat: made, listened to, and shown what the log says.
+    if (ws && chats) await chats.sync(id).catch((error: unknown) => log(`${id}: the chat: ${(error as Error).message}`));
     await pushes(id);
   }
 
@@ -388,9 +371,9 @@ export function createEngine(deps: EngineDeps) {
   async function stop() {
     stopped = true;
     watcher?.close();
+    chats?.stop();
     if (timer) clearInterval(timer);
     for (const t of debounce.values()) clearTimeout(t);
-    for (const t of redraws) clearTimeout(t);
     for (const t of lookTimers) clearTimeout(t);
     lookTimers.clear();
     lookWork.clear();
@@ -398,16 +381,11 @@ export function createEngine(deps: EngineDeps) {
   }
 
   return {
-    start, stop, scan, scanAll, view, runEnded, readPass,
+    start, stop, scan, scanAll, view, panel, affairs, runEnded, readPass,
     /** Waits for the looks asked for after a delivery (tests). */
     settle: async () => {
       while (lookWork.size) await Promise.all([...lookWork]);
     },
-    said: async (id: string, text: string, sent: Sent[] = []) => {
-      const r = await ops.note(ctx, id, { said: text, via: "workspace", attachments: sent });
-      // Refused (a secret, an over-size file, an affair that is over): the person is told why, in place of "收到".
-      return r.ok ? { recorded: true, notice: r.refused as string | undefined } : { recorded: false, notice: r.text };
-    },
-    answered: async (id: string, qid: string, text: string) => void (await ops.answer(ctx, id, qid, text, "workspace")),
+    answered: async (id: string, qid: string, text: string) => void (await ops.answer(ctx, id, qid, text, "panel")),
   };
 }

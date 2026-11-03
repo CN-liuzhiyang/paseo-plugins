@@ -31,6 +31,8 @@ function tally(lines, since) {
         if (!(l.why?.length === 1 && l.why[0] === "time")) out.bursts += 1;
       }
     }
+    // What the chat costs counts toward the day's money, so that the looks stop first; the chat itself is never stopped.
+    if (l.kind === "chat.turn" && t >= since.day && typeof l.usd === "number") out.usd += l.usd;
     if (l.kind === "wake.end" && t >= since.day && typeof l.usd === "number") {
       out.usd += l.usd - estimated;
       estimated = 0;

@@ -14,10 +14,24 @@ const DAY = 24 * HOUR;
 
 function setup(policyOver: Record<string, unknown> = {}) {
   const w = world({ policy: { push: { ...DEFAULT_POLICY.push, to: "p2p:me" }, ...policyOver } });
-  const calls = { woken: [] as string[], created: [] as Array<Record<string, unknown>>, titles: [] as string[], archived: 0, refreshed: [] as string[], pushed: [] as Array<{ text: string; key: string }> };
+  const calls = { woken: [] as string[], created: [] as Array<Record<string, unknown>>, titles: [] as string[], archived: 0, appended: [] as Array<{ chat: string; item: any }>, subscribed: [] as Array<{ chat: string; handler: (e: any) => void }>, pushed: [] as Array<{ text: string; key: string }> };
+  const tail: { entries: Array<{ item: any }> } = { entries: [] };
   const status = { value: "idle" };
   const paseo = {
-    agents: { ref: (id: string) => ({ refresh: async () => ({ agent: { status: status.value } }), archive: async () => void calls.woken.push(id) }) },
+    agents: {
+      ref: (id: string) => ({
+        refresh: async () => ({ agent: { status: status.value } }),
+        archive: async () => void calls.woken.push(id),
+        timeline: {
+          append: async (item: any) => void calls.appended.push({ chat: id, item }),
+          subscribe: (handler: (e: any) => void) => {
+            calls.subscribed.push({ chat: id, handler });
+            return Object.assign(() => {}, { ready: Promise.resolve() });
+          },
+          refetch: async () => tail,
+        },
+      }),
+    },
     workspaces: {
       ref: () => ({
         setTitle: async (t: string | null) => void calls.titles.push(String(t)),
@@ -31,8 +45,8 @@ function setup(policyOver: Record<string, unknown> = {}) {
     if (state.deliverFails) throw new Error("popo down");
     calls.pushed.push({ text: m.text, key: m.idempotencyKey });
   };
-  const engine = createEngine({ ctx: w.ctx, paseo, deliver, refresh: (id, force) => void calls.refreshed.push(force ? `${id}!` : id), log: () => {}, lookDelaysMs: [0, 0, 0] });
-  return { w, calls, engine, state, status };
+  const engine = createEngine({ ctx: w.ctx, paseo, deliver, log: () => {}, lookDelaysMs: [0, 0, 0] });
+  return { w, calls, engine, state, status, tail };
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
@@ -49,15 +63,20 @@ const report = async (s: ReturnType<typeof setup>, id: string, over: Record<stri
   if (end) await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
 };
 
-test("a new affair gets one conversation in its workspace, with its id in the environment, once", async () => {
+test("a new affair gets one chat in its workspace: its id and a long cache in the environment, its label, no first message; once", async () => {
   const s = setup();
   const id = await start(s);
   await s.engine.scan(id);
   assert.equal(s.calls.created.length, 1);
-  assert.deepEqual((s.calls.created[0] as { env: unknown }).env, { AFFAIR_ID: id });
-  assert.equal(load(s.w.root, id).conversationId, "agent-1");
-  assert.ok(s.calls.refreshed.includes(`${id}!`), "drawn by force the moment it is made: what was drawn while it was being made may not have reached the app");
-  assert.ok(s.calls.refreshed.includes(id), "and as usual on the scan that follows");
+  const made = s.calls.created[0] as { env: Record<string, string>; labels: Record<string, string>; prompt?: string; config: { provider: string; systemPrompt: string } };
+  assert.deepEqual(made.env, { AFFAIR_ID: id, CLAUDE_CODE_PROMPT_CACHE_TTL: "1h" });
+  assert.equal(made.labels["affairs.chat"], id);
+  assert.equal(made.prompt, undefined, "an empty chat costs nothing until he speaks");
+  assert.match(made.config.systemPrompt, new RegExp(`brief ${id} --chat`));
+  assert.equal(load(s.w.root, id).chatId, "agent-1");
+  assert.equal(s.calls.subscribed.length, 1, "and it is listened to, once");
+  const lines = s.calls.appended.filter((a) => a.chat === "agent-1").map((a) => a.item.data.text);
+  assert.ok(lines.some((t: string) => t.startsWith("开始盯「洗牙」")), "it starts with a line that says what was started");
 });
 
 test("the sidebar title follows the log: a day when the next look is days away, ✓ when it ended", async () => {
@@ -206,21 +225,22 @@ test("at start, a look that came due while nothing ran is made once; a plan that
 
 async function createAgain(s: ReturnType<typeof setup>, id: string) {
   append(s.w.root, id, [{ kind: "wake", why: ["catchup"], gapMinutes: 0 }], { now: s.w.now() });
-  const e2 = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  const e2 = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
   await e2.start();
   await e2.stop();
 }
 
-test("the view for the conversation draws the card from the log, and says when the day's looks are used up", async () => {
+test("the panel is drawn from the log, and says when the day's looks are used up", async () => {
   const s = setup();
   const id = await start(s);
   await report(s, id);
-  const v = s.engine.view(id)!;
-  assert.equal(v.card.waiting, "等你去约");
-  assert.match(v.card.next, /明天 9:30 看；你一说话我马上看/);
+  const ws = load(s.w.root, id).workspaceId;
+  const p = s.engine.panel(ws)!;
+  assert.equal(p.waiting.text, "等你去约");
+  assert.match(p.next.text, /明天 9:30 看；你一说话我马上看/);
   s.w.advance(10 * 60_000);
   await ops.brief(s.w.ctx, id);
-  assert.equal(s.engine.view(id)!.card.next, "正在看一眼…", "while a look is on, the card does not show the fallback time as if it were the plan");
+  assert.equal(s.engine.panel(ws)!.next.text, "正在看一眼…", "while a look is on, the panel does not show the fallback time as if it were the plan");
   append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
   // The looks the schedule starts count as much as any: the day runs out, and the card says the number that really was.
   for (let i = 0; i < 8; i++) {
@@ -229,10 +249,10 @@ test("the view for the conversation draws the card from the log, and says when t
     if (b.ok) await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "我看了一眼：还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
     append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
   }
-  assert.match(s.engine.view(id)!.card.next, /今天看了 8 次，明早 8 点接着看/);
+  assert.match(s.engine.panel(ws)!.next.text, /今天看了 8 次，明早 8 点接着看/);
 });
 
-test("the card of an affair that ended says why it ended, not what it last saw", async () => {
+test("the panel of an affair that ended says why it ended, not what it last saw", async () => {
   const s = setup();
   const id = await start(s);
   await report(s, id, { status: "约在周三" });
@@ -240,8 +260,8 @@ test("the card of an affair that ended says why it ended, not what it last saw",
   await ops.brief(s.w.ctx, id);
   const r = await ops.report(s.w.ctx, id, { entry: "我看了一眼：办完了。", finish: { kind: "done", summary: "你说做完了", evidence: { quote: "做完了", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
   assert.equal(r.ok, true, r.text);
-  const card = s.engine.view(id)!.card;
-  assert.deepEqual([card.waiting, card.now], ["办完了 ✓", "你说做完了"]);
+  const p = s.engine.panel(load(s.w.root, id).workspaceId)!;
+  assert.deepEqual([p.waiting.text, p.now.text], ["办完了 ✓", "你说做完了"]);
 });
 
 test("the watcher's names: the id is the folder beside the log, whatever is cut off in front", () => {
@@ -252,26 +272,26 @@ test("the watcher's names: the id is the folder beside the log, whatever is cut 
   assert.equal(idOfWatch("project.json"), null);
 });
 
-test("a conversation the restart left closed is replaced by a new one, so the app shows no broken line and no message nobody wrote", async () => {
+test("a chat the restart left closed is replaced by a new one, so the app shows no broken line and no message nobody wrote", async () => {
   const s = setup();
   const id = await start(s);
-  const old = load(s.w.root, id).conversationId;
+  const old = load(s.w.root, id).chatId;
   s.status.value = "closed";
   const created: string[] = [];
   const archived: string[] = [];
   const again = createEngine({
     ctx: s.w.ctx,
     paseo: {
-      agents: { ref: (a: string) => ({ refresh: async () => ({ agent: { status: s.status.value } }), archive: async () => void archived.push(a) }) },
+      agents: { ref: (a: string) => ({ refresh: async () => ({ agent: { status: s.status.value } }), archive: async () => void archived.push(a), timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
       workspaces: { ref: () => ({ setTitle: async () => {}, archive: async () => {}, agents: { create: async () => (created.push("new"), { id: "agent-new" }) } }) },
     },
-    deliver: null, refresh: () => {}, log: () => {},
+    deliver: null, log: () => {},
   });
   await again.scan(id);
   await again.scan(id);
   assert.equal(created.length, 1, "once");
   assert.deepEqual(archived, [old], "the old one is put away");
-  assert.equal(load(s.w.root, id).conversationId, "agent-new");
+  assert.equal(load(s.w.root, id).chatId, "agent-new");
 });
 
 test("a title shows no date for a proposal still waiting for the answer, and does not move while a look is on", async () => {
@@ -282,7 +302,7 @@ test("a title shows no date for a proposal still waiting for the answer, and doe
   assert.equal(r.ok, true, r.text);
   await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
   assert.ok(load(s.w.root, id).asks.some((a: { state: string; proposal: unknown }) => a.state === "open" && a.proposal), "a proposal waits");
-  assert.equal(titleOf(load(s.w.root, id), s.w.now(), s.w.ctx.policy), "洗牙", "no date before the answer");
+  assert.equal(titleOf(load(s.w.root, id), s.w.now(), s.w.ctx.policy), "洗牙 · 要你定", "no date before the answer: it says what is needed instead");
   await ops.answer(s.w.ctx, id, `${id}-1`, "可以");
   await s.engine.scan(id);
   assert.match(s.calls.titles.at(-1)!, /^洗牙 · 12月2日$/);
@@ -326,7 +346,7 @@ test("M25: at start, a look that already came after the time it was due is not m
   s.w.at(iso("2026-11-02 12:30"));
   const runs = () => s.w.calls().filter((c) => c[1] === "run-once").length;
   const n = runs();
-  const again = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  const again = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
   await again.start();
   await again.stop();
   assert.equal(runs(), n, "it was looked at at 12:10, after it was due");
@@ -346,9 +366,9 @@ test("a line put in around the commands is flagged once, shown in red and told t
 test("a policy.json with something missing says so on a card of its own, once; when it is right the card is put away", async () => {
   const w = world();
   const logs: string[] = [];
-  const paseo = { agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined }) }, workspaces: { ref: () => ({ setTitle: async () => undefined, archive: async () => undefined, agents: { create: async () => ({ id: "agent-9" }) } }) } };
+  const paseo = { agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined, timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) }, workspaces: { ref: () => ({ setTitle: async () => undefined, archive: async () => undefined, agents: { create: async () => ({ id: "agent-9" }) } }) } };
   const run = async (ctx: typeof w.ctx) => {
-    const e = createEngine({ ctx, paseo, deliver: null, refresh: () => {}, log: (m) => void logs.push(m), checkSetup: true });
+    const e = createEngine({ ctx, paseo, deliver: null, log: (m) => void logs.push(m), checkSetup: true });
     await e.start();
     await e.stop();
   };
@@ -380,7 +400,7 @@ const setBusy = (s: ReturnType<typeof setup>, n: number) => {
 test("a look for what came in meanwhile is not asked for inside the run's delivery: Paseo counts that run as running until it returns", async () => {
   const s = setup();
   // Delays that are not zero: the delivery must be over before the look is asked for.
-  const slow = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {}, lookDelaysMs: [30, 30, 30] });
+  const slow = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {}, lookDelaysMs: [30, 30, 30] });
   const id = await start(s);
   await ops.brief(s.w.ctx, id);
   await ops.note(s.w.ctx, id, { said: "改成下周一看" });

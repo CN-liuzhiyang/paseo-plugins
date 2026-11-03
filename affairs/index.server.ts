@@ -6,18 +6,20 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { loadPolicy, defaultRoot } from "./server/lib/policy.mjs";
 import { makeCtx } from "./server/lib/ops.mjs";
 import { settingsDefinition } from "./shared/settings";
-import { createConversations } from "./server/conversation";
+import { answerRpc, listRpc, panelRpc } from "./shared/rpc";
+import type { PanelData } from "./shared/panel";
 import { createEngine, type Deliver, type PaseoLike } from "./server/engine";
 
 // Affairs: one thing someone asked to have watched, with a workspace of its own. The affair command writes each
-// affair's log; this plugin draws it (the conversation at the top of the workspace, the sidebar title), carries the
-// questions, pushes what must reach the person, and takes in the schedules' "run finished" deliveries.
+// affair's log; this plugin keeps the chat of each affair (a real session of the model), draws into it what happened
+// and the question waiting, serves the 进展 panel beside it, pushes what must reach the person, and takes in the
+// schedules' "run finished" deliveries.
 
 const log = (message: string) => console.error(`affairs: ${message}`);
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(settingsDefinition);
-  // COMPAT(server.paseo, server.deliver, server.registerChannel): fork-only extension points; without them the plugin only draws.
+  // COMPAT(server.paseo, server.deliver, server.registerChannel): fork-only extension points; without them the plugin only serves the panel.
   const host = server as PluginServerContext & {
     readonly paseo?: PaseoApi;
     deliver?: Deliver;
@@ -27,12 +29,13 @@ export default function contribute(server: PluginServerContext) {
   let disposed = false;
   let generation = 0;
 
-  const conversations = createConversations({
-    view: (id) => engine?.view(id) ?? null,
-    said: async (id, text, sent) => await engine?.said(id, text, sent),
-    answered: async (id, qid, text) => void (await engine?.answered(id, qid, text)),
+  server.handle(listRpc, () => ({ items: engine?.affairs() ?? [] }));
+  server.handle(panelRpc, ({ workspaceId }) => ({ panel: (engine?.panel(workspaceId) ?? null) as PanelData | null }));
+  server.handle(answerRpc, async ({ affairId, askId, text }) => {
+    if (!engine) return { ok: false, text: "事项还没准备好" };
+    await engine.answered(affairId, askId, text);
+    return { ok: true, text: "" };
   });
-  server.registerProvider(conversations.registration);
 
   host.registerChannel?.({
     id: "affairs",
@@ -53,10 +56,10 @@ export default function contribute(server: PluginServerContext) {
     const home = process.env.PASEO_HOME;
     const own = home && path.resolve(home).toLowerCase() !== path.resolve(os.homedir(), ".paseo").toLowerCase();
     const ctx = makeCtx({ root, policy: loadPolicy(root), ...(own ? { paseoHome: home } : {}) });
-    const next = createEngine({ ctx, paseo: paseo ?? null, deliver: typeof host.deliver === "function" ? (channel, message) => host.deliver!(channel, message) : null, refresh: conversations.refresh, log, checkSetup: true });
+    const next = createEngine({ ctx, paseo: paseo ?? null, deliver: typeof host.deliver === "function" ? (channel, message) => host.deliver!(channel, message) : null, log, checkSetup: true });
     engine = next;
     await next.start();
-    log(`started (root ${root}${paseo ? "" : ", no server.paseo: nothing is drawn"})`);
+    log(`started (root ${root}${paseo ? "" : ", no server.paseo: no chat is kept"})`);
   }
 
   void start().catch((error: unknown) => log(`not started: ${(error as Error).stack ?? error}`));

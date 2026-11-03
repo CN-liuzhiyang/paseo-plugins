@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import type { ProviderEvent, ProviderInput } from "@getpaseo/plugin/server/provider";
-import { ACK, createConversations, type Sent, type SaidResult, type View } from "../server/conversation";
 import { MAX_BYTES, cleanName } from "../server/lib/attach.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
@@ -23,117 +21,6 @@ async function started(w: ReturnType<typeof world>) {
 const filesOf = (w: ReturnType<typeof world>, id: string) => readdirSync(path.join(w.root, id, "files"));
 const runs = (w: ReturnType<typeof world>) => w.calls().filter((c) => c[1] === "run-once").length;
 const lastSaid = (w: ReturnType<typeof world>, id: string) => [...read(w.root, id)].reverse().find((l) => l.kind === "said");
-
-// ---- the conversation (provider) ----
-
-const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
-const card = { title: "洗牙", waiting: "等你去约", now: "飞书任务还是待办", next: "明天 9:30 看", open: true };
-
-async function open(result: SaidResult | void = undefined, asks: View["asks"] = []) {
-  const said: Array<[string, string, Sent[]]> = [];
-  const answered: string[] = [];
-  const view: View = { card, rows: [], asks };
-  const convo = createConversations({
-    view: () => view,
-    said: async (id, text, sent) => {
-      said.push([id, text, sent]);
-      return result;
-    },
-    answered: async (_id, _q, text) => void answered.push(text),
-  });
-  // What the app asks for, image included.
-  const connection = await convo.registration.connect({ versions: [1], capabilities: ["prompt.message", "prompt.image", "prompt.steer", "permission", "session.list"] });
-  const events: ProviderEvent[] = [];
-  connection.onEvent((e) => events.push(e));
-  const send = async (input: ProviderInput) => {
-    await connection.send(input);
-    await settle();
-  };
-  await send({ type: "session.open", requestId: "o1", sessionId: "s1", history: "skip", config: { cwd: "C:/x", env: { AFFAIR_ID: "D1" }, mcpServers: {}, settings: {}, persist: true, title: "洗牙" } });
-  const prompt = (content: unknown[], delivery: "auto" | "steer" = "auto") =>
-    send({ type: "session.prompt", sessionId: "s1", prompt: { clientMessageId: `m${Math.random()}`, delivery, input: { type: "message", content } } } as ProviderInput);
-  const lines = () =>
-    events
-      .filter((e): e is Extract<ProviderEvent, { type: "timeline.item" }> => e.type === "timeline.item")
-      .map((e) => e.item as unknown as { id: string; data?: { text?: string } })
-      .filter((i) => i.data?.text !== undefined);
-  return { connection, said, answered, prompt, events, lines };
-}
-
-test("the conversation says it takes pictures, and a picture is no longer refused", async () => {
-  const w = await open();
-  assert.ok(w.connection.capabilities.includes("prompt.image"));
-  await w.prompt([{ type: "image", data: PNG.toString("base64"), mimeType: "image/png" }]);
-  assert.ok(!w.events.some((e) => e.type === "session.prompt_result" && e.result.type === "failed"));
-  assert.equal(w.said.length, 1);
-});
-
-test("typing with a picture and a file: the words and what came with them go to the affair; told 收到 at once", async () => {
-  const w = await open();
-  await w.prompt([
-    { type: "text", text: "这是预约短信" },
-    { type: "image", data: PNG.toString("base64"), mimeType: "image/png" },
-    { type: "uploaded_file", id: "u1", fileName: "预约单.pdf", mimeType: "application/pdf", size: 1234, path: "C:/uploads/abc" },
-  ]);
-  assert.equal(w.said.length, 1);
-  const [id, text, sent] = w.said[0]!;
-  assert.equal(id, "D1");
-  assert.equal(text, "这是预约短信");
-  assert.deepEqual(sent, [
-    { type: "image", data: PNG.toString("base64"), mimeType: "image/png" },
-    { type: "file", from: "C:/uploads/abc", name: "预约单.pdf", mimeType: "application/pdf" },
-  ]);
-  assert.ok(w.lines().some((i) => i.data?.text === ACK));
-});
-
-test("only a picture or a file: no words needed; it is still told 收到 and said once", async () => {
-  const w = await open();
-  await w.prompt([{ type: "uploaded_file", id: "u1", fileName: "a.txt", mimeType: "text/plain", size: 3, path: "C:/uploads/a" }]);
-  assert.equal(w.said.length, 1);
-  assert.equal(w.said[0]![1], "");
-  assert.equal(w.lines().filter((i) => i.data?.text === ACK).length, 1);
-});
-
-test("other kinds of attachment are left out without an error; nothing is said when nothing else came", async () => {
-  const w = await open();
-  const pr = { type: "github_pr", mimeType: "application/github-pr", number: 1, title: "t", url: "https://x/1" };
-  await w.prompt([pr]);
-  assert.equal(w.said.length, 0);
-  assert.ok(!w.events.some((e) => e.type === "session.prompt_result" && e.result.type === "failed"));
-  assert.ok(!w.lines().some((i) => i.data?.text === ACK));
-  await w.prompt([{ type: "text", text: "看一下这个" }, pr]);
-  assert.deepEqual(w.said.map((s) => [s[1], s[2].length]), [["看一下这个", 0]]);
-});
-
-test("when nothing was taken, 收到 becomes the reason; when only part was refused, the reason is a line of its own", async () => {
-  const none = await open({ recorded: false, notice: "「big.mov」有 35 MB，超过 20 MB，没收下。" });
-  await none.prompt([{ type: "uploaded_file", id: "u", fileName: "big.mov", mimeType: "video/quicktime", size: 1, path: "C:/u/big" }]);
-  const shown = none.lines();
-  const ack = shown.find((i) => i.data?.text === ACK)!;
-  assert.ok(ack);
-  assert.equal(shown.filter((i) => i.id === ack.id).at(-1)!.data!.text, "「big.mov」有 35 MB，超过 20 MB，没收下。");
-
-  const part = await open({ recorded: true, notice: "「big.mov」有 35 MB，没收下。" });
-  await part.prompt([{ type: "text", text: "看看" }, { type: "uploaded_file", id: "u", fileName: "big.mov", mimeType: "video/quicktime", size: 1, path: "C:/u/big" }]);
-  const texts = part.lines().map((i) => i.data!.text);
-  assert.ok(texts.includes(ACK), "收到 stays");
-  assert.ok(texts.some((t) => /没收下/.test(t!)));
-});
-
-test("while a question waits, an answer with a picture answers it and the picture is kept as well", async () => {
-  const ask = { id: "D1-1", title: "洗牙约上了吗？", line: "", options: ["约好了", "还没约"] };
-  const w = await open(undefined, [ask]);
-  await w.prompt([{ type: "text", text: "约好了" }, { type: "image", data: PNG.toString("base64"), mimeType: "image/png" }], "steer");
-  assert.deepEqual(w.answered, ["约好了"]);
-  assert.equal(w.said.length, 1);
-  assert.equal(w.said[0]![2].length, 1);
-});
-
-test("the first message that starts the conversation is not said to the affair, pictures or not", async () => {
-  const w = await open();
-  await w.prompt([{ type: "text", text: "事项 D1" }]);
-  assert.equal(w.said.length, 0);
-});
 
 // ---- keeping it ----
 

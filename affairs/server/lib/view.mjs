@@ -59,7 +59,7 @@ export function cardOf(state, now, policy, { budget = "", trouble = "" } = {}) {
 export function rowsOf(state, now, policy) {
   const { tz } = policy;
   const rows = [];
-  const add = (key, at, text, tone = "normal", detail = "") => rows.push({ key, at, text, tone, detail, own: key[0] === "s" || key[0] === "a" });
+  const add = (key, at, text, tone = "normal", detail = "", extra = {}) => rows.push({ key, at, text, tone, detail, own: key[0] === "s" || key[0] === "a", ...extra });
   const lines = state.lines ?? [];
   for (const l of lines) {
     const time = stamp(l.at, now, tz);
@@ -75,7 +75,7 @@ export function rowsOf(state, now, policy) {
     } else if (l.kind === "note" && l.by === "chat" && typeof l.text === "string") {
       add(`m${l.seq}`, l.at, `${time}  我记下：${l.text}`);
     } else if (l.kind === "answered") {
-      add(`a${l.seq}`, l.at, `${time}  你：${l.answer}`);
+      add(`a${l.seq}`, l.at, `${time}  你：${l.answer}`, "normal", "", { ask: String(l.id) });
     } else if (l.kind === "status" && l.status === "done") {
       add(`d${l.seq}`, l.at, `${time}  办完了 ✓ ${l.evidence ?? ""}`.trim());
     } else if (l.kind === "status" && l.status === "stopped") {

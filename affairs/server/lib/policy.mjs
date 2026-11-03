@@ -66,6 +66,27 @@ export const DEFAULT_POLICY = {
     perPass: 10,
   },
   role: "glance",
+  // The chat session of an affair. It is kept as long as it is cheap to keep: warm (spoken to within the cache's lifetime) it is
+  // never replaced; cold and long, or very long, or left over the night, it is replaced by a new one that reads the brief.
+  chat: {
+    // Cache lifetime asked for the chat session (the env of its session): its turns come minutes to an hour apart.
+    cacheTtl: "1h",
+    // Not spoken to for this long, and the context this long (tokens): replaced.
+    coldMinutes: 30,
+    coldContext: 80_000,
+    // Context this long: replaced when it has been idle for idleMinutes, warm or not.
+    hardContext: 150_000,
+    idleMinutes: 10,
+    // Once a day at this hour: a chat idle for nightIdleHours with at least nightContext is replaced (the first words of the morning get the new price).
+    nightHour: 4,
+    nightIdleHours: 6,
+    nightContext: 50_000,
+    maxPerDay: 2,
+    // He has typed in this many minutes: not replaced.
+    typingMinutes: 2,
+    // How many of the latest lines and which open questions are drawn again after a restart (what the plugin drew into a conversation is lost with the daemon).
+    redraw: 3,
+  },
   // estimateUsd is a guess per look (the real cost is not known yet); it is what the money limits count with.
   roles: { glance: { provider: "claude/claude-haiku-5-5", thinking: "high", mode: "bypassPermissions", estimateUsd: 0.02 } },
 };

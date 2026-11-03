@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
-import { createConversations } from "../server/conversation";
+import { createChats } from "../server/chat";
+import { panelOf } from "../server/lib/panel.mjs";
 import { createEngine, type Deliver } from "../server/engine";
 import { hasLinks, hrefOf, linkContext, linkProblems, linkify, parseLink, partsOf, withUrls } from "../server/lib/links.mjs";
 import { load, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { DEFAULT_POLICY, policyProblems } from "../server/lib/policy.mjs";
 import { whyOf } from "../server/lib/paseo.mjs";
-import { cardOf, rowsOf } from "../server/lib/view.mjs";
+import { rowsOf } from "../server/lib/view.mjs";
 import { world } from "./kit";
 
 const GCP = "https://pm.example.invalid/issues/{ref}";
@@ -115,27 +115,26 @@ test("what he reads has none of the inner words", () => {
 const link = "gcp:555001";
 const started = async (w: ReturnType<typeof world>) => (await ops.create(w.ctx, { title: "引擎外放 #555001", goal: "盯 #555001", said: "盯一下 #555001 这张单", link, noWait: true })).id as string;
 
-test("the card: title and the sentences carry pieces where a ticket is; a card with none is as it was", async () => {
+test("the panel: the sentences carry pieces where a ticket is; a panel with none is as it was", async () => {
   const w = world({ policy });
   const id = await started(w);
   assert.equal(id, "555001");
   const s = { ...load(w.root, id), lines: read(w.root, id) };
-  const card = cardOf(s, w.now(), w.ctx.policy);
-  assert.equal(card.title, "引擎外放 #555001");
-  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
-  const view = engine.view(id)!;
-  assert.deepEqual(view.card.parts?.title, [{ text: "引擎外放 " }, { text: "#555001", href: gcp("555001") }]);
-  assert.equal(view.card.parts?.waiting, undefined, "a sentence with no ticket has no pieces");
-  assert.equal(view.card.title, "引擎外放 #555001", "the plain text stays for a client that does not know pieces");
+  const p = panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, s.link));
+  assert.equal(p.title, "引擎外放 #555001");
+  assert.deepEqual(p.now.parts, [{ text: "盯 " }, { text: "#555001", href: gcp("555001") }]);
+  assert.equal(p.waiting.parts, undefined, "a sentence with no ticket has no pieces");
+  assert.equal(p.now.text, "盯 #555001", "the plain text stays for a client that does not know pieces");
   const plain = world({ policy: { links: {}, linkHash: "" } });
   const pid = await started(plain);
-  assert.equal(createEngine({ ctx: plain.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} }).view(pid)!.card.parts, undefined);
+  const ps = { ...load(plain.root, pid), lines: read(plain.root, pid) };
+  assert.equal(panelOf(plain.root, ps, plain.now(), plain.ctx.policy, linkContext(plain.ctx.policy, ps.link)).now.parts, undefined);
 });
 
 test("the lines: a line with a ticket in it has pieces, his own too (drawn as a line so it can be opened); a line without is as it was", async () => {
   const w = world({ policy });
   const id = await started(w);
-  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {} });
   await ops.note(w.ctx, id, { said: "#555001 的备注我看过了", via: "chat" });
   await ops.note(w.ctx, id, { said: "洗好牙了", via: "chat" });
   const rows = engine.view(id)!.rows;
@@ -147,27 +146,33 @@ test("the lines: a line with a ticket in it has pieces, his own too (drawn as a 
   assert.equal(rowsOf({ ...load(w.root, id), lines: read(w.root, id) }, w.now(), w.ctx.policy).length, rows.length);
 });
 
-test("in the conversation: a line with a ticket is a line the client can open; his own line with one too; the others as before", async () => {
-  const events: ProviderEvent[] = [];
+test("in the chat: a line with a ticket is drawn with pieces the client can open; the others as before", async () => {
+  const appended: Array<{ id: string; kind: string; data: { parts?: unknown } }> = [];
   const parts = [{ text: "11:00  我看了一眼：" }, { text: "#555001", href: gcp("555001") }, { text: " 还开着。" }];
   const view = {
-    card: { title: "t", waiting: "w", now: "n", next: "", open: true },
     rows: [
       { key: "r1", text: "11:00  我看了一眼：#555001 还开着。", own: false, tone: "normal", detail: "", parts },
-      { key: "s2", text: "11:01  你：#555001", own: true, tone: "normal", detail: "", parts: [{ text: "11:01  你：" }, { text: "#555001", href: gcp("555001") }] },
       { key: "s3", text: "11:02  你：好", own: true, tone: "normal", detail: "" },
     ],
     asks: [],
   };
-  const convo = createConversations({ view: () => view, said: async () => undefined, answered: async () => undefined });
-  const c = await convo.registration.connect({ versions: [1], capabilities: ["prompt.message", "prompt.image", "prompt.steer", "permission"] });
-  c.onEvent((e) => events.push(e));
-  await c.send({ type: "session.open", requestId: "o1", sessionId: "s1", history: "skip", config: { cwd: "C:/x", env: { AFFAIR_ID: "555001" }, mcpServers: {}, settings: {}, persist: true, title: "t" } });
-  await new Promise((r) => setTimeout(r, 10));
-  const items = events.filter((e): e is Extract<ProviderEvent, { type: "timeline.item" }> => e.type === "timeline.item").map((e) => e.item as unknown as { type: string; id: string; data?: { parts?: unknown } });
-  const byId = (id: string) => items.find((i) => i.id === id)!;
-  assert.deepEqual([byId("row-r1").type, byId("row-s2").type, byId("row-s3").type], ["plugin", "plugin", "user_message"]);
-  assert.deepEqual(byId("row-r1").data?.parts, parts);
+  const w = world({ policy: { ...policy, chat: { ...DEFAULT_POLICY.chat, redraw: 5 } } });
+  const id = await started(w);
+  const chats = createChats({
+    ctx: w.ctx,
+    paseo: {
+      agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined, timeline: { append: async (i: any) => void appended.push(i), subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
+      workspaces: { ref: () => ({ agents: { create: async () => ({ id: "c1" }) } }) },
+    },
+    state: (i: string) => ({ ...load(w.root, i), chatId: "c1", workspaceId: "w1", lines: read(w.root, i) }),
+    write: () => {},
+    view: () => view,
+    log: () => {},
+  });
+  await chats.draw(id);
+  const byId = (i: string) => appended.find((a) => a.id === i)!;
+  assert.deepEqual(byId("row-r1").data.parts, parts);
+  assert.equal(byId("row-s3").data.parts, undefined);
 });
 
 test("a question he is asked: the ticket in it comes with its address in the text", async () => {
@@ -180,7 +185,7 @@ test("a question he is asked: the ticket in it comes with its address in the tex
     ask: { title: "#555001 要关掉吗？", line: "关了我就不盯了", options: ["关", "不关"] },
   });
   assert.equal(r.ok, true, r.text);
-  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {} });
+  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {} });
   const [ask] = engine.view(id)!.asks;
   assert.equal(ask!.title, `#555001 ${gcp("555001")} 要关掉吗？`);
   assert.equal(ask!.line, "关了我就不盯了");
@@ -192,7 +197,7 @@ test("the push to POPO: plain address after the ticket, and only for a ticket; n
     const w = world({ policy: { ...policy, links, push: { ...DEFAULT_POLICY.push, to: "p2p:me" } } });
     const pushed: string[] = [];
     const deliver: Deliver = async (_c, m) => void pushed.push(m.text);
-    const engine = createEngine({ ctx: w.ctx, paseo: null, deliver, refresh: () => {}, log: () => {} });
+    const engine = createEngine({ ctx: w.ctx, paseo: null, deliver, log: () => {} });
     const id = await started(w);
     await ops.brief(w.ctx, id);
     await ops.report(w.ctx, id, {

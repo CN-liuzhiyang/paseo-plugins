@@ -78,10 +78,11 @@ const refuseSecret = (text) => (secretIn(text) ? fail(`这句话里有${secretIn
 export function paseoUrl(ctx, s) {
   const home = ctx.paseoHome || path.join(process.env.USERPROFILE || process.env.HOME || "", ".paseo");
   const file = path.join(home, "server-id");
-  if (!s.conversationId || !existsSync(file)) return "";
+  const talk = s.chatId || s.conversationId;
+  if (!talk || !existsSync(file)) return "";
   const server = readFileSync(file, "utf8").trim();
   // https, not paseo://: POPO renders it as a link and the web app opens the affair's own workspace (checked by hand 2026-11-03).
-  return s.workspaceId ? `https://app.paseo.sh/h/${server}/workspace/${s.workspaceId}` : `https://app.paseo.sh/h/${server}/agent/${s.conversationId}`;
+  return s.workspaceId ? `https://app.paseo.sh/h/${server}/workspace/${s.workspaceId}` : `https://app.paseo.sh/h/${server}/agent/${talk}`;
 }
 
 const linkTextOf = (ctx, s) => linkOf(paseoUrl(ctx, s), ctx.policy);
@@ -311,7 +312,7 @@ async function rollbackCreate(ctx, id, error) {
 
 async function waitForConversation(ctx, id) {
   const until = Date.now() + ctx.waitMs;
-  while (Date.now() < until && !state(ctx, id).conversationId) await new Promise((r) => setTimeout(r, 100));
+  while (Date.now() < until && !(state(ctx, id).chatId || state(ctx, id).conversationId)) await new Promise((r) => setTimeout(r, 100));
 }
 
 /**
@@ -354,7 +355,7 @@ function noteMine(ctx, ref, input) {
  * nothing a session had a hand in. It is no call for a look (the chat is already answering). The plugin's side only.
  * @returns {Promise<Result>}
  */
-export async function hear(ctx, ref, text) {
+export async function hear(ctx, ref, text, { messageId = "", fromAgent = false } = {}) {
   if (ctx.by !== "human") return fail("他在对话里说的话只有插件从对话里记，会话不能代记。");
   const said = String(text ?? "");
   if (!said.trim()) return fail("没有话可记。");
@@ -362,7 +363,10 @@ export async function hear(ctx, ref, text) {
   if (secret) return secret;
   const r = resolve(ctx, ref, { closed: true });
   if (!r.s) return fail(r.text);
-  const [line] = write(ctx, r.s.id, [{ kind: "said", text: said, via: "chat-session", by: "user" }]);
+  // The same message heard twice (the plugin was restarted and read the chat's end again) is one line.
+  if (messageId && r.s.lines.some((l) => l.kind === "said" && l.msg === messageId)) return { ok: true, text: "", seen: true };
+  // A message another session sent into the chat (not typed by him) is put down as what it is: not his word.
+  const [line] = write(ctx, r.s.id, [{ kind: "said", text: said, via: fromAgent ? "chat-agent" : "chat-session", by: fromAgent ? "look" : "user", ...(messageId ? { msg: messageId } : {}) }]);
   return { ok: true, text: "", seq: line.seq };
 }
 

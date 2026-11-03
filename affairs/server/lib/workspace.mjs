@@ -41,6 +41,8 @@ export const archiveWorkspace = (run, workspaceId) => json(run, ["workspace", "a
 export function titleOf(state, now, policy) {
   const base = state.title;
   if (state.status !== "watching") return `${ARCHIVE_PREFIX}${base}`;
+  // A question he has not answered shows in the sidebar: that is the one thing that needs him.
+  if (state.asks.some((a) => a.state === "open")) return `${base} · 要你定`;
   // A date the person has not agreed to yet (a proposal waits for their answer) is not shown as if it were the plan.
   const proposed = state.asks.some((a) => a.state === "open" && a.proposal);
   const at = state.next && !proposed ? Date.parse(state.next.at) : NaN;

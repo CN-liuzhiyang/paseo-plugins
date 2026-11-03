@@ -126,7 +126,7 @@ async function watching(over: Record<string, unknown> = {}) {
   const src = source(w, { mode: "ok", value: { 版本: "1.0" }, summary: "版本 1.0" });
   const calls = { looks: () => w.calls().filter((c) => c[1] === "run-once").length, asked: [] as string[], pushed: 0 };
   const engine = createEngine({
-    ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {},
+    ctx: w.ctx, paseo: null, deliver: null, log: () => {},
   });
   const made = await ops.create(w.ctx, { title: "引擎上车", said: "帮我盯一下引擎", noWait: true });
   const id = made.id as string;
@@ -240,7 +240,7 @@ test("one pass reads only so many; the loop sweeps lost runs through the hook it
   const w = world({ policy: policy({ perPass: 2 }) });
   const src = source(w, { mode: "ok", value: { n: 1 }, summary: "一" });
   let swept = 0;
-  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, refresh: () => {}, log: () => {}, wakeLost: async () => void (swept += 1) });
+  const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {}, wakeLost: async () => void (swept += 1) });
   const made = await ops.create(w.ctx, { title: "多", noWait: true });
   await ops.brief(w.ctx, made.id);
   const r = await ops.report(w.ctx, made.id, {
