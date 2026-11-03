@@ -61,6 +61,13 @@ else if (group === "schedule") {
   else if (action === "delete") db.schedules = db.schedules.filter((x) => x.id !== first);
   else if (action === "run-once") {
     if (s.running) die("already running");
+    // The look that ended is still counted as running for this many calls; said the way the CLI does, as pretty-printed JSON.
+    if ((db.busy ?? Number(process.env.FAKE_PASEO_BUSY ?? 0)) > 0) {
+      db.busy = (db.busy ?? Number(process.env.FAKE_PASEO_BUSY)) - 1;
+      save();
+      console.error(JSON.stringify({ error: { code: "schedule_conflict", message: `Schedule ${first} is already running` } }, null, 2));
+      process.exit(1);
+    }
     s.runs += 1;
   }
   save();

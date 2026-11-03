@@ -29,10 +29,11 @@ export function world(options: { policy?: Record<string, unknown> } = {}) {
   const calls = path.join(dir, "calls.jsonl");
   Object.assign(process.env, { PASEO_BIN: FAKE, FAKE_PASEO_STATE: path.join(dir, "paseo.json"), FAKE_PASEO_CALLS: calls });
   delete process.env.FAKE_PASEO_FAIL;
+  delete process.env.FAKE_PASEO_BUSY;
   delete process.env.PASEO_AGENT_ID;
   delete process.env.AFFAIR_BY;
   let clock = T0;
-  const ctx = makeCtx({ root, paseoHome: "", run: makeRun({ home: null }), now: () => clock, waitMs: 0, policy: { ...DEFAULT_POLICY, ...(options.policy ?? {}) } });
+  const ctx = makeCtx({ root, paseoHome: "", run: makeRun({ home: null }), now: () => clock, waitMs: 0, runRetryMs: 0, policy: { ...DEFAULT_POLICY, ...(options.policy ?? {}) } });
   return {
     dir, root, ctx,
     at: (ms: number) => void (clock = ms),

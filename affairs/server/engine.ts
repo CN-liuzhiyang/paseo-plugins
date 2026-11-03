@@ -8,9 +8,10 @@ import * as ops from "./lib/ops.mjs";
 import * as readers from "./lib/readers.mjs";
 import { localParts } from "./lib/time.mjs";
 import { cardOf, linkOf, rowsOf, say } from "./lib/view.mjs";
+import { linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
-import type { Sent, View } from "./conversation";
+import type { Row, Sent, View } from "./conversation";
 import { MODEL_ID, PROVIDER_ID } from "./conversation";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
@@ -74,10 +75,14 @@ export function createEngine(deps: EngineDeps) {
     const now = ctx.now();
     const gate = isOpen(s) ? mayLook(ctx.root, id, now, ctx.policy) : { ok: true };
     const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? `这次没看成：${String(s.lastEnd.error ?? "没有说明").slice(0, 60)}` : "";
+    // A reference in what he reads (a ticket number) is shown with where it leads: pieces for the card and the lines, the address after it where only text fits.
+    const lc = linkContext(ctx.policy, s.link);
+    const card = cardOf(s, now, ctx.policy, { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
+    const parts = Object.fromEntries((["title", "waiting", "now", "next"] as const).map((k) => [k, partsOf(card[k], lc)]).filter(([, v]) => v));
     return {
-      card: cardOf(s, now, ctx.policy, { budget: gate.ok ? "" : (gate as { text: string }).text, trouble }),
-      rows: rowsOf(s, now, ctx.policy),
-      asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
+      card: Object.keys(parts).length ? { ...card, parts } : card,
+      rows: (rowsOf(s, now, ctx.policy) as Row[]).map((r) => { const parts = partsOf(r.text, lc); return parts ? { ...r, parts } : r; }),
+      asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: withUrls(a.title, lc), line: withUrls(a.line, lc), options: a.options })),
     };
   }
 
@@ -126,7 +131,7 @@ export function createEngine(deps: EngineDeps) {
       if (!deps.deliver || !ctx.policy.push.to) return;
       if (quietNow(s.domain) || pushedToday() >= ctx.policy.push.perDay) return;
       try {
-        await deps.deliver("popo", { to: ctx.policy.push.to, idempotencyKey: `${id}:${c.key}`, title: s.title, text: c.text, status: "succeeded" });
+        await deps.deliver("popo", { to: ctx.policy.push.to, idempotencyKey: `${id}:${c.key}`, title: s.title, text: withUrls(c.text, linkContext(ctx.policy, s.link)), status: "succeeded" });
         write(id, [{ kind: "push", for: c.key, ok: true }]);
       } catch (error) {
         // Once, not on every scan: a channel that is down must not turn into a stream of retries.

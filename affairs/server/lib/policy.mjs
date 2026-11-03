@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { linkProblems } from "./links.mjs";
 
 // The thresholds live in policy.json under the affairs root, so tuning them is a file edit, not a code change.
 
@@ -35,6 +36,10 @@ export const DEFAULT_POLICY = {
   archiveAfterDays: 3,
   // Off until a test push with the link has been opened by a person (the link kind is not known to work on every phone).
   popoLink: false,
+  // Where an outside reference leads, by the kind of link: { "<kind>": "https://…/{ref}" }; the address is the private part, so it lives in policy.json.
+  links: {},
+  // The kind a bare "#12345" (five digits or more) means; empty: such a number is left as text.
+  linkHash: "",
   homes: {},
   handbooksDir: "",
   // The handbook to read after affair.md for an affair whose link is of that kind (otherwise asked.md): { "<kind>": "<file>.md" }.
@@ -78,6 +83,7 @@ export function policyProblems(policy) {
   need("readers.dirs", Array.isArray(policy.readers?.dirs) && policy.readers.dirs.length > 0 && policy.readers.dirs.every((d) => existsSync(d)), "readers.dirs 要列出放读取工具的目录，目录要在");
   need("readers.publicDir", Boolean(policy.readers?.publicDir) && existsSync(policy.readers.publicDir), "readers.publicDir 要写成公开读取工具目录（readers/）的完整路径，目录要在");
   need("handbooksDir", Boolean(policy.handbooksDir) && existsSync(policy.handbooksDir), "handbooksDir 要写成私有手册目录，目录要在");
+  out.push(...linkProblems(policy));
   need("roles", Object.values(policy.roles ?? {}).every((r) => typeof r?.provider === "string" && r.provider), "roles 里每一档要写 provider");
   return out;
 }

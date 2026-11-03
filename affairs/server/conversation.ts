@@ -7,7 +7,7 @@ import {
   type ProviderPermissionRequest,
   type ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
-import { CARD_ID, CARD_KIND, CARD_VERSION, LINE_KIND, LINE_VERSION, type Card } from "../shared/card";
+import { CARD_ID, CARD_KIND, CARD_VERSION, LINE_KIND, LINE_VERSION, type Card, type Segment } from "../shared/card";
 
 // The conversation of one affair: a provider with no model. Its timeline is drawn from the affair's log, never from
 // what was said to it before: the card on top (one id, so every new version replaces the last), one line per thing
@@ -27,6 +27,8 @@ export interface Row {
   own: boolean;
   tone: string;
   detail: string;
+  /** The text in pieces, when it has a reference in it that can be opened. */
+  parts?: Segment[];
 }
 export interface OpenAsk {
   id: string;
@@ -150,7 +152,8 @@ export function createConversations(deps: ConversationDeps) {
         // A line that answers the "收到，看一下…" the person was told takes its place.
         const id = !row.own && session.ack ? session.ack : `row-${row.key}`;
         if (!row.own) session.ack = null;
-        emit({ type: "timeline.item", sessionId, item: row.own ? { type: "user_message", id, text: row.text } : { type: "plugin", id, pluginId: "affairs", kind: LINE_KIND, version: LINE_VERSION, data: { text: row.text, tone: row.tone === "red" ? "red" : "normal", detail: row.detail } } });
+        // His own line is a message of his; one with a reference in it is drawn as a line instead, which is the only one that can be opened.
+        emit({ type: "timeline.item", sessionId, item: row.own && !row.parts ? { type: "user_message", id, text: row.text } : { type: "plugin", id, pluginId: "affairs", kind: LINE_KIND, version: LINE_VERSION, data: { text: row.text, tone: row.tone === "red" ? "red" : "normal", detail: row.detail, ...(row.parts ? { parts: row.parts } : {}) } } });
       }
       const open = new Set(view.asks.map((a) => a.id));
       for (const ask of view.asks) {

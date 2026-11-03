@@ -48,6 +48,9 @@ export function makeCtx(options = {}) {
     now: options.now ?? Date.now,
     command: options.command ?? ((policy.binPath || BIN) ? `node "${policy.binPath || BIN}"` : "affair") + (flags ? ` ${flags}` : ""),
     waitMs: options.waitMs ?? 3000,
+    // A look asked for while Paseo still counts the last as running is tried again this many times, this many ms apart.
+    runRetries: options.runRetries ?? 4,
+    runRetryMs: options.runRetryMs ?? 1500,
     // Who is calling: "human" (the person's side: a conversation, the plugin) or "look" (a session the schedule started).
     // The command works it out from the session it runs in; there is no way to say it in words or in the environment.
     by: options.by ?? "human",
@@ -150,19 +153,27 @@ async function ringNow(ctx, s, why, { force = false } = {}) {
   if (!s.scheduleId) return { ok: false, text: "" };
   // The limits were checked here, for this look; the look's own start does not count it twice.
   write(ctx, s.id, [{ kind: "cleared", why, force }]);
-  try {
-    await schedule.runOnce(ctx.run, s.scheduleId);
-  } catch (error) {
-    write(ctx, s.id, [{ kind: "cleared", void: true }]);
-    // Paseo refuses a second run while one is going; the reason stays in the log for the look that is on.
-    if (/already running/i.test(error.message)) {
-      write(ctx, s.id, [{ kind: "ring", why }]);
-      return { ok: true, queued: true, text: "" };
+  // A look asked for as the last one ends can meet Paseo still counting the last one as running (its delivery comes first):
+  // tried again a few times, a second apart, before it is taken for a look that is really on.
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await schedule.runOnce(ctx.run, s.scheduleId);
+      return { ok: true, queued: false, text: "" };
+    } catch (error) {
+      if (/already running/i.test(error.message) && attempt < ctx.runRetries) {
+        await new Promise((resolve) => setTimeout(resolve, ctx.runRetryMs));
+        continue;
+      }
+      write(ctx, s.id, [{ kind: "cleared", void: true }]);
+      // Still running after that: the reason stays in the log for the look that is on.
+      if (/already running/i.test(error.message)) {
+        write(ctx, s.id, [{ kind: "ring", why }, { kind: "flag", what: "look", detail: `${error.message}（试了 ${attempt + 1} 次，留给正在看的那次）` }]);
+        return { ok: true, queued: true, text: "" };
+      }
+      write(ctx, s.id, [{ kind: "flag", what: "look", detail: error.message }]);
+      return { ok: false, text: "" };
     }
-    write(ctx, s.id, [{ kind: "flag", what: "look", detail: error.message }]);
-    return { ok: false, text: "" };
   }
-  return { ok: true, queued: false, text: "" };
 }
 
 /** Looking far too often: this affair's plan is paused and the person is asked once; "接着看" lets it go on. */

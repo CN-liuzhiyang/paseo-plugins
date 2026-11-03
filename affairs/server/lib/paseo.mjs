@@ -65,11 +65,24 @@ export function makeRun({ home = process.env.PASEO_HOME || null, timeoutMs = 60_
     });
 }
 
+/** What a failed CLI said, in one line: the message of a JSON error, else all its lines joined (the first of a pretty-printed JSON is only "{"). */
+export function whyOf(stderr, stdout) {
+  const text = String(stderr || stdout || "").trim();
+  try {
+    const parsed = JSON.parse(text);
+    const message = parsed?.error?.message ?? (typeof parsed?.error === "string" ? parsed.error : parsed?.message);
+    if (message) return String(message).replace(/\s+/g, " ").slice(0, 200);
+  } catch {
+    // not JSON
+  }
+  return text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).join(" ").slice(0, 200);
+}
+
 /** Runs a command that prints JSON; a failure carries what the CLI said. */
 export async function json(run, args, options) {
   const { stdout, stderr, exitCode, detached } = await run([...args, "--json"], options);
   if (detached) return {};
-  if (exitCode !== 0) throw new Error(`paseo ${args.slice(0, 2).join(" ")} 失败：${(stderr || stdout).trim().split("\n")[0]}`);
+  if (exitCode !== 0) throw new Error(`paseo ${args.slice(0, 2).join(" ")} 失败：${whyOf(stderr, stdout)}`);
   try {
     return JSON.parse(stdout);
   } catch {
