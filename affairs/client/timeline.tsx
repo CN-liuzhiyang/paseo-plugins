@@ -5,7 +5,7 @@ import { FILTERS, KINDS, filterCounts, tint, type Colors, type FilterId } from "
 import { Pieces, openExternal } from "./card";
 import { Preview, type Files } from "./files";
 import { Dot, Heading } from "./look";
-import { Clip, Words } from "./text";
+import { Clip, Words, only } from "./text";
 
 // The 经过 block: what happened, newest first, under the day it was. Each row says who (the dot), what it was (the small
 // title) and the result in one sentence; pressing a row opens what it stood on and the exact time. The rows are worked out
@@ -42,7 +42,7 @@ function EventRow({ e, c, last, open, onToggle, files }: { e: PanelEvent; c: Col
         </View>
         {e.text && !e.bubble ? (
           <View style={{ marginTop: 2, ...(style.bar ? { borderLeftWidth: 2, borderLeftColor: c.accent, paddingLeft: 8 } : null) }}>
-            <Clip text={e.text} parts={e.parts} linkColor={c.accent} onLink={openExternal} open={open} onOpen={onToggle} style={{ color: e.calm ? c.foregroundMuted : c.foreground, fontSize: 14, lineHeight: 20, fontWeight: e.strong ? "600" : "400" }} />
+            <Clip text={e.text} parts={e.parts} linkColor={c.accent} onLink={openExternal} open={open} onOpen={() => onToggle()} style={{ color: e.calm ? c.foregroundMuted : c.foreground, fontSize: 14, lineHeight: 20, fontWeight: e.strong ? "600" : "400" }} />
           </View>
         ) : null}
         {e.bubble && e.text ? (
@@ -56,10 +56,10 @@ function EventRow({ e, c, last, open, onToggle, files }: { e: PanelEvent; c: Col
           return (
             <View key={f.name}>
               <Pressable
-                onPress={() => {
+                onPress={only(() => {
                   files.fetchOnce(f.name, "");
                   files.open(f.name, "", f.path, place);
-                }}
+                })}
                 accessibilityRole="button"
                 style={{ flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start", maxWidth: "100%", borderWidth: 1, borderColor: c.border, borderRadius: 8, padding: 3, paddingRight: 8, marginTop: 6, backgroundColor: c.surface1 }}
               >
@@ -92,7 +92,7 @@ function EventRow({ e, c, last, open, onToggle, files }: { e: PanelEvent; c: Col
                 {e.basis.rows.map((r, i) => (
                   <View key={i} style={{ gap: 1 }}>
                     {r.href ? (
-                      <Pressable onPress={() => openExternal(r.href!)} accessibilityRole="link">
+                      <Pressable onPress={only(() => openExternal(r.href!))} accessibilityRole="link">
                         <Words style={{ color: c.accent, fontSize: 11, textDecorationLine: "underline" }}>{r.name}</Words>
                       </Pressable>
                     ) : (

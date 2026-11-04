@@ -4,7 +4,7 @@ import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { useState } from "react";
 import { Linking, type TextStyle } from "react-native";
 import { QuestionCard, ChoiceButton } from "./look";
-import { Words } from "./text";
+import { Words, only } from "./text";
 import type { Ask, Line, Segment } from "../shared/card";
 import { answerRpc } from "../shared/rpc";
 
@@ -22,7 +22,7 @@ export function Pieces({ text, parts, color, style }: { text: string; parts?: Se
     <Words style={style}>
       {parts.map((p, i) =>
         p.href ? (
-          <Words key={i} accessibilityRole="link" onPress={() => openExternal(p.href!)} style={{ color, textDecorationLine: "underline" }}>
+          <Words key={i} accessibilityRole="link" onPress={only(() => openExternal(p.href!))} style={{ color, textDecorationLine: "underline" }}>
             {p.text}
           </Words>
         ) : (
