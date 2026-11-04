@@ -1,11 +1,12 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Image, Modal, Pressable, View } from "react-native";
+import { Image, Pressable, View, type ViewStyle } from "react-native";
 import type { PanelMaterial } from "../shared/panel";
 import { fileRpc } from "../shared/rpc";
 import type { Colors } from "../shared/look";
 import { Rule, Tag } from "./look";
 import { Words } from "./text";
+import { Zoomed } from "./zoom";
 
 // The 资料 block: one row for each file in the affair's folder. Pressing a file opens it where the host can show it (a tab
 // of its own in the workspace, when the host has one to give); a host that has not (a phone's web page, an older app)
@@ -88,7 +89,6 @@ export function Preview({ name, version, files, c }: { name: string; version: st
   if (!got.ok) return <View style={box}><Words style={{ color: c.foregroundMuted, fontSize: 12 }}>没有这个文件。</Words></View>;
   const bar = (
     <View style={{ flexDirection: "row", gap: 12, marginTop: 8 }}>
-      {got.kind === "image" && got.dataUrl ? act("放大看", () => setBig(true)) : null}
       {act(copied ? "已复制" : "复制路径", () => copy(got.path))}
     </View>
   );
@@ -96,12 +96,10 @@ export function Preview({ name, version, files, c }: { name: string; version: st
     <View style={box}>
       {got.kind === "image" && got.dataUrl ? (
         <>
-          <Image source={{ uri: got.dataUrl }} style={{ width: "100%", aspectRatio: ratio, maxHeight: 280, borderRadius: 4 }} resizeMode="contain" accessibilityLabel={name} />
-          <Modal visible={big} transparent animationType="fade" onRequestClose={() => setBig(false)}>
-            <Pressable onPress={() => setBig(false)} style={{ flex: 1, backgroundColor: c.surface0, justifyContent: "center", padding: 12 }}>
-              <Image source={{ uri: got.dataUrl }} style={{ width: "100%", height: "100%" }} resizeMode="contain" accessibilityLabel={name} />
-            </Pressable>
-          </Modal>
+          <Pressable testID="preview-image" accessibilityRole="button" accessibilityLabel={name} onPress={() => setBig(true)} style={{ cursor: "pointer" } as ViewStyle}>
+            <Image source={{ uri: got.dataUrl }} style={{ width: "100%", aspectRatio: ratio, maxHeight: 280, borderRadius: 4 }} resizeMode="contain" />
+          </Pressable>
+          {big ? <Zoomed uri={got.dataUrl} name={name} onClose={() => setBig(false)} c={c} /> : null}
         </>
       ) : got.kind === "text" ? (
         <Words selectable style={{ color: c.foreground, fontSize: 12, lineHeight: 17 }}>
