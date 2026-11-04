@@ -9,7 +9,9 @@ import { Words } from "./text";
 
 export const GAP = 18;
 
-export const Dot = ({ color, size = 8 }: { color: string; size?: number }) => <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: color, flexShrink: 0 }} />;
+export const Dot = ({ color, size = 8, ring, fill }: { color: string; size?: number; ring?: boolean; fill?: string }) => (
+  <View style={{ width: size, height: size, borderRadius: size / 2, flexShrink: 0, ...(ring ? { backgroundColor: fill, borderWidth: 2, borderColor: color } : { backgroundColor: color }) }} />
+);
 
 /** The state of the affair: a colored dot and its word. "等你" is the loud one: a filled pill. */
 export function StateBadge({ mood, c }: { mood: PanelData["mood"]; c: Colors }) {
@@ -25,8 +27,11 @@ export function StateBadge({ mood, c }: { mood: PanelData["mood"]; c: Colors }) 
 }
 
 /** A block's small heading: grey, small, spaced, never louder than what is under it. */
-export const Heading = ({ text, c }: { text: string; c: Colors }) => (
-  <Words style={{ color: c.foregroundMuted, fontSize: 11, fontWeight: "700", letterSpacing: 1, marginTop: GAP, marginBottom: 8 }}>{text}</Words>
+export const Heading = ({ text, c, right }: { text: string; c: Colors; right?: ReactNode }) => (
+  <View style={{ flexDirection: "row", alignItems: "baseline", justifyContent: "space-between", gap: 8, marginTop: GAP, marginBottom: 8 }}>
+    <Words style={{ color: c.foregroundMuted, fontSize: 11, fontWeight: "700", letterSpacing: 1 }}>{text}</Words>
+    {right}
+  </View>
 );
 
 /** A small label on a grey ground. */
