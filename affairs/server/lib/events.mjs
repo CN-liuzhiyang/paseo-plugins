@@ -52,6 +52,14 @@ export function dayOf(ms, now, tz) {
   return diff === 0 ? `今天 · ${base}` : diff === 1 ? `昨天 · ${base}` : base;
 }
 
+/** The day in front of a time that is not today's: "昨天 ", "11-02 ", or nothing. */
+function dayWord(ms, now, tz) {
+  const p = localParts(ms, tz);
+  const t = localParts(now, tz);
+  const diff = Math.round((Date.UTC(t.y, t.mo - 1, t.d) - Date.UTC(p.y, p.mo - 1, p.d)) / 86_400_000);
+  return diff <= 0 ? "" : diff === 1 ? "昨天 " : `${pad(p.mo)}-${pad(p.d)} `;
+}
+
 const md = (ms, tz) => {
   const p = localParts(ms, tz);
   return `${pad(p.mo)}-${pad(p.d)}`;
@@ -116,13 +124,20 @@ export function eventsOf(state, now, policy, lc, helpers) {
     // One failed look writes two lines (the end of the look and the note on it); that is one row.
     if (lastError && lastError.what === what && Date.parse(l.at) - lastError.ms < 120_000) return;
     lastError = { what, ms: Date.parse(l.at) };
-    add(l, { kind: "error", label: "出错", text, tone: "red", errorKey: what });
+    return add(l, { kind: "error", label: "出错", text, tone: "red", errorKey: what });
   };
+  // A look that could not be asked for and is then started anyway (a moment later) did not fail: its note is taken back.
+  let unasked = null;
 
   for (const l of lines) {
     switch (l.kind) {
       case "wake":
         wake = { why: Array.isArray(l.why) ? l.why : [], reads: [], next: null };
+        if (unasked && Date.parse(l.at) - unasked.ms < 120_000) {
+          out.splice(out.indexOf(unasked.row), 1);
+          lastError = null;
+        }
+        unasked = null;
         break;
       case "wake.end":
         if (l.state === "failed") trouble(l, "look", TROUBLE.look);
@@ -257,7 +272,10 @@ export function eventsOf(state, now, policy, lc, helpers) {
       }
       case "flag": {
         if (l.what === "chain") trouble(l, "chain", String(l.detail ?? ""));
-        else if (TROUBLE[l.what]) trouble(l, l.what, TROUBLE[l.what]);
+        else if (TROUBLE[l.what]) {
+          const row = trouble(l, l.what, TROUBLE[l.what]);
+          unasked = row && (l.what === "look" || l.what === "first-look") ? { row, ms: Date.parse(l.at) } : null;
+        }
         break;
       }
       default:
@@ -300,7 +318,9 @@ function finish(e, state, now, tz) {
   const firstMs = merged ? e.members[0].ms : e.ms;
   const label = merged === "looks" ? `看了 ${e.count} 次` : e.label;
   const sub = merged === "looks" ? "都没变化" : merged === "errors" ? `连着 ${e.count} 次` : e.sub;
-  const when = merged ? `${clock(firstMs, tz)}–${clock(e.ms, tz)}` : whenOf(e.ms, now, tz);
+  // a range that began on an earlier day says which
+  const began = localParts(firstMs, tz).date === localParts(e.ms, tz).date ? "" : dayWord(firstMs, now, tz);
+  const when = merged ? `${began}${clock(firstMs, tz)}–${clock(e.ms, tz)}` : whenOf(e.ms, now, tz);
   const row = {
     key: `e${merged ? e.members[0].key.slice(1) : e.key.slice(1)}`,
     kind: e.kind,

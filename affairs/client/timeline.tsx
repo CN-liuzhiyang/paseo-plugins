@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Image, Pressable, View } from "react-native";
 import type { PanelEvent } from "../shared/panel";
 import { FILTERS, KINDS, filterCounts, tint, type Colors, type FilterId } from "../shared/look";
@@ -22,6 +22,10 @@ function EventRow({ e, c, last, open, onToggle, files }: { e: PanelEvent; c: Col
   const muted = { color: c.foregroundMuted, fontSize: 12, lineHeight: 18 } as const;
   const changed = /有变化$/.test(e.sub);
   const names = e.basis?.rows.map((r) => r.name) ?? [];
+  // the small picture on a file he sent is the file itself, fetched once
+  useEffect(() => {
+    for (const f of e.files) if (f.image) files.fetchOnce(f.name, "");
+  }, [e.files.map((f) => f.name).join(",")]);
   return (
     <Pressable onPress={onToggle} accessibilityRole="button" accessibilityLabel={open ? "收起" : "展开"} style={{ flexDirection: "row", gap: 8, paddingBottom: 12, ...(red ? { backgroundColor: tint(c.statusDanger, "1a", c.surface1), borderRadius: 8, marginHorizontal: -6, paddingHorizontal: 6, paddingTop: 6, marginBottom: 6 } : null) }}>
       <View style={{ width: 18, alignItems: "center", paddingTop: 4 }}>

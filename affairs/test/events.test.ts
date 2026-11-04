@@ -275,3 +275,26 @@ test("what a person reads in the rows names no machinery, and the whole panel is
   assert.doesNotThrow(() => panelSchema.parse(panel));
   assert.equal(panel.events.items.length, 7);
 });
+
+test("a look that could not be asked for and was started a moment later did not fail; one that was not started did", () => {
+  const head: Array<[string, string, Record<string, unknown>?]> = [[day3("09:00:00"), "created", { id: "555001", title: "#555001", link: "gcp:555001" }], [day3("09:00:00"), "said", { text: "盯一下", via: "chat", by: "user" }]];
+  const flag = (at: string): [string, string, Record<string, unknown>] => [at, "flag", { what: "look", detail: "paseo 说它在跑（留给正在看的那次）" }];
+  const started = make([...head, flag(day3("10:00:00")), [day3("10:00:04"), "wake", { why: ["time"] }], [day3("10:00:50"), "wake.end", { state: "ok" }]]);
+  assert.deepEqual(eventsFor({ ...fold(started as never), lines: started }).items.map((e: { kind: string }) => e.kind), ["said"]);
+  const lost = make([...head, flag(day3("10:00:00")), [day3("13:00:00"), "wake", { why: ["time"] }], [day3("13:00:50"), "wake.end", { state: "ok" }]]);
+  assert.deepEqual(eventsFor({ ...fold(lost as never), lines: lost }).items.map((e: { kind: string }) => e.kind), ["error", "said"]);
+});
+
+test("a run of quiet looks that began on an earlier day says so in its time range", () => {
+  const quiet = (day: string, clockAt: string): Array<[string, string, Record<string, unknown>?]> => [
+    [`${day}T${clockAt}:00+08:00`, "wake", { why: ["time"] }],
+    [`${day}T${clockAt}:10+08:00`, "read", { tool: "ticket", args: { id: 555001 }, ok: true, value: ticket, summary: "等待审核" }],
+    [`${day}T${clockAt}:30+08:00`, "report", look({ entry: "还在等审核。" })],
+    [`${day}T${clockAt}:40+08:00`, "wake.end", { state: "ok" }],
+  ];
+  const lines = make([[day3("09:00:00"), "created", { id: "555001", title: "#555001", link: "gcp:555001" }], [day3("09:00:00"), "said", { text: "盯一下", via: "chat", by: "user" }], ...quiet("2026-11-03", "10:00"), ...quiet("2026-11-03", "16:00"), ...quiet("2026-11-04", "07:00")]);
+  const [row] = eventsFor({ ...fold(lines as never), lines }).items;
+  assert.equal(row.label, "看了 2 次", "the first of the three is the first look; the two after it saw nothing new");
+  assert.equal(row.when, "昨天 16:00–7:00");
+  assert.equal(row.day, "今天 · 11-04 周三");
+});
