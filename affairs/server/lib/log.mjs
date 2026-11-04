@@ -164,7 +164,7 @@ export function fold(lines) {
     id: "", title: "", goal: "", domain: "work", link: null, workdir: "", createdAt: null,
     status: "watching", statusAt: null, doneEvidence: "",
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
-    next: null, nowText: "", facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
+    next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
     pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
   };
@@ -254,7 +254,11 @@ export function fold(lines) {
             s.chatRejected = null;
             s.chatAttempt = 0;
             s.reports.push(l);
-            if (typeof l.status === "string") s.nowText = l.status;
+            // A chat hand-in that only carries the old text along (no status of its own) did not write the "now" again.
+            if (typeof l.status === "string") {
+              if (l.status !== s.nowText) Object.assign(s, { nowAt: l.at, nowSeq: l.seq });
+              s.nowText = l.status;
+            }
             if (Array.isArray(l.facts)) s.facts = l.facts.filter((f) => typeof f === "string");
           }
           break;
@@ -269,7 +273,7 @@ export function fold(lines) {
           const w = last(s.wakes);
           if (w) Object.assign(w, { changed: l.changed ?? null, reported: true });
           // A field of the wrong shape (a line written around the check) is not taken: the card and the files stay readable.
-          if (typeof l.status === "string") s.nowText = l.status;
+          if (typeof l.status === "string") Object.assign(s, { nowText: l.status, nowAt: l.at, nowSeq: l.seq });
           if (Array.isArray(l.facts)) s.facts = l.facts.filter((f) => typeof f === "string");
         }
         break;

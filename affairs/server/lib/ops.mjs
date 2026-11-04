@@ -9,7 +9,7 @@ import { json, makeRun, whyOf } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
 import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
-import { attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
+import { ago, attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
 import { clampMax, findTurns, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
 import { linkContext, usableTemplates } from "./links.mjs";
 import { keep } from "./attach.mjs";
@@ -324,6 +324,13 @@ const NOTE_MAX = 120;
 /** The same words from the same chat within this long of each other are one message heard twice. */
 const HEAR_WINDOW_MS = 5000;
 
+/** The notes the chat wrote since the "now" was last written; null when there are none or the "now" was never written. */
+function notesSinceNow(s, now) {
+  if (!s.nowAt || !s.nowText) return null;
+  const n = s.notes.filter((x) => x.seq > s.nowSeq).length;
+  return n ? { n, when: ago(s.nowAt, now), text: s.nowText } : null;
+}
+
 /**
  * What the chat session writes down for itself as it goes (a conclusion, something he decided): one sentence in its own
  * words, never taken for his. `input.saidSeq` may point at the line of his that it comes from; it has to be a real one.
@@ -348,8 +355,12 @@ function noteMine(ctx, ref, input) {
     if (!from) return fail(`--said-seq ${input.saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号）。`);
   }
   const [line] = write(ctx, s.id, [{ kind: "note", by: "chat", text, ...(said !== null ? { said } : {}) }]);
-  writeProgress(ctx, state(ctx, s.id));
-  return { ok: true, text: "记下了。", seq: line.seq };
+  const after = state(ctx, s.id);
+  writeProgress(ctx, after);
+  // A note never changes the "now"; say so when the "now" has fallen behind what was noted after it.
+  const stale = notesSinceNow(after, ctx.now());
+  return { ok: true, text: stale ? `记下了。
+注意：现在的情况还停在 ${stale.when}「${stale.text}」，这条之后如果有进展，请用 report 交回。` : "记下了。", seq: line.seq };
 }
 
 /**
@@ -653,6 +664,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
     `# 事项 ${s.id}：${s.title}`,
     `目标：${s.goal || s.title}`,
     `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next?.remind ? `　上次约好要提醒他：${s.next.remind}` : ""}`,
+    ...staleLine(s, ctx.now()),
     "",
     "## 这次为什么来",
     ...why.map((w) => `- ${w}`),
@@ -693,6 +705,12 @@ export async function brief(ctx, ref, { chat = false } = {}) {
     "",
   ].join("\n");
   return { ok: true, text };
+}
+
+/** Under the "now" line of a brief: how old it is and how many notes came after it (nothing when none did). */
+function staleLine(s, now) {
+  const stale = notesSinceNow(s, now);
+  return stale ? [`　↑ 这句是 ${stale.when}写的，之后记了 ${stale.n} 条，没有交回新的现在；有进展的话先用 report 交回。`] : [];
 }
 
 /** One line of the log as the chat session reads it: what was said, by whom, with the number it can point to. */
@@ -740,6 +758,7 @@ async function briefChat(ctx, s) {
     `# 事项 ${s.id}：${s.title}${isOpen(s) ? "" : `（已经${s.status === "done" ? "办完" : "不盯"}了；他要接着盯就跑 ${ctx.command} resume ${s.id}）`}`,
     `目标：${s.goal || s.title}`,
     `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next && isOpen(s) ? `　下次看：${localParts(Date.parse(s.next.at), tz).text}` : ""}${s.next?.remind ? `　约好要提醒他：${s.next.remind}` : ""}`,
+    ...staleLine(s, now),
     "",
     "## 上次读完以后新的",
     ...(news.length ? news : ["- 没有新的"]),
@@ -772,6 +791,7 @@ async function briefChat(ctx, s) {
       : "没有（这是这件事的第一段对话）。",
     "",
     "## 怎么记、怎么交",
+    `- 记一句不会改「现在」。每个里程碑（提交了、对方系统里状态变了、他拍板了、产物出来了）当场用 report 交回新的 status，记住的旧的用 drop 删；回他话之前拿上面的「现在」对一下刚做完的事，不一致先补交。`,
     `- 得出一个结论、他做了一个决定，当场记一句（≤${NOTE_MAX} 字，别攒到最后，换新随时会发生）：${ctx.command} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
     `- 要让后面看一眼用上他发给你的图：把要点（不抄密码、令牌、证件号）用 note --mine 记成文字；图本身只在这个对话里，看一眼拿不到。`,
     `- 状态、记住的（facts 新增、drop 删旧的）、下次、问题、办完：${ctx.command} report ${s.id} --from chat --file <json>（每项都可以不写）`,

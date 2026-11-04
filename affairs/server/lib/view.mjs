@@ -12,6 +12,15 @@ export function stamp(atIso, now, tz) {
   return p.date === localParts(now, tz).date ? `${pad(p.h)}:${pad(p.mi)}` : `${pad(p.mo)}-${pad(p.d)} ${pad(p.h)}:${pad(p.mi)}`;
 }
 
+/** How long ago, in the words he uses: 刚才 / 12 分钟前 / 3 小时前 / 2 天前. */
+export function ago(atIso, now) {
+  const m = Math.max(0, Math.round((now - Date.parse(atIso)) / 60_000));
+  if (m < 1) return "刚才";
+  if (m < 60) return `${m} 分钟前`;
+  if (m < 1440) return `${Math.round(m / 60)} 小时前`;
+  return `${Math.round(m / 1440)} 天前`;
+}
+
 const isPicture = (a) => /^image\//i.test(a.mime);
 
 /** What he sent, in his words: "发了一张图：a.png", "发了一个文件：b.pdf", "发了 2 张图、1 个文件：a.png、b.pdf". */
