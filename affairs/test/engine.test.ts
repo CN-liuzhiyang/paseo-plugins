@@ -58,7 +58,7 @@ const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown>
 /** A look that reports; `end` is the run being delivered (which also draws and pushes), left off to draw later. */
 const report = async (s: ReturnType<typeof setup>, id: string, over: Record<string, unknown> = {}, end = true) => {
   await ops.brief(s.w.ctx, id);
-  const r = await ops.report(s.w.ctx, id, { status: "还没约", entry: "我看了一眼：还没约。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] }, ...over });
+  const r = await ops.report(s.w.ctx, id, { status: "还没约", entry: "还没约。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] }, ...over });
   assert.equal(r.ok, true, r.text);
   if (end) await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
 };
@@ -181,7 +181,7 @@ test("finished by the look: one push that says what shows it and how to take it 
   const id = await start(s);
   await ops.note(s.w.ctx, id, { said: "约好了，下周三" });
   await ops.brief(s.w.ctx, id);
-  await ops.report(s.w.ctx, id, { entry: "我看了一眼：办完了。", finish: { kind: "done", summary: "飞书任务 11-11 勾掉了", evidence: { quote: "约好了，下周三", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
+  await ops.report(s.w.ctx, id, { entry: "办完了。", finish: { kind: "done", summary: "飞书任务 11-11 勾掉了", evidence: { quote: "约好了，下周三", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
   await s.engine.scan(id);
   assert.equal(s.calls.pushed.length, 1);
   assert.match(s.calls.pushed[0]!.text, /洗牙办完了 ✓ 飞书任务 11-11 勾掉了。不对就回「还没完」/);
@@ -246,7 +246,7 @@ test("the panel is drawn from the log, and says when the day's looks are used up
   for (let i = 0; i < 8; i++) {
     s.w.advance(10 * 60_000);
     const b = await ops.brief(s.w.ctx, id);
-    if (b.ok) await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "我看了一眼：还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
+    if (b.ok) await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
     append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
   }
   assert.match(s.engine.panel(ws)!.next.text, /今天看了 8 次，明早 8 点接着看/);
@@ -258,7 +258,7 @@ test("the panel of an affair that ended says why it ended, not what it last saw"
   await report(s, id, { status: "约在周三" });
   await ops.note(s.w.ctx, id, { said: "做完了", by: "user" });
   await ops.brief(s.w.ctx, id);
-  const r = await ops.report(s.w.ctx, id, { entry: "我看了一眼：办完了。", finish: { kind: "done", summary: "你说做完了", evidence: { quote: "做完了", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
+  const r = await ops.report(s.w.ctx, id, { entry: "办完了。", finish: { kind: "done", summary: "你说做完了", evidence: { quote: "做完了", from: `said:${load(s.w.root, id).said.at(-1).seq}` } } });
   assert.equal(r.ok, true, r.text);
   const p = s.engine.panel(load(s.w.root, id).workspaceId)!;
   assert.deepEqual([p.waiting.text, p.now.text], ["办完了 ✓", "你说做完了"]);
@@ -298,7 +298,7 @@ test("a title shows no date for a proposal still waiting for the answer, and doe
   const s = setup();
   const id = await start(s, { said: "洗牙最迟明天", deadline: "2026-11-03 18:00" });
   await ops.brief(s.w.ctx, id);
-  const r = await ops.report(s.w.ctx, id, { status: "等", entry: "我看了一眼：改到下个月。", facts: [], next: { at: "2026-12-02 09:00", waitingFor: "12月2日再看", why: "他说改到下个月", earlyIf: [], evidence: [{ from: "said:2", quote: "洗牙最迟明天" }] } });
+  const r = await ops.report(s.w.ctx, id, { status: "等", entry: "改到下个月。", facts: [], next: { at: "2026-12-02 09:00", waitingFor: "12月2日再看", why: "他说改到下个月", earlyIf: [], evidence: [{ from: "said:2", quote: "洗牙最迟明天" }] } });
   assert.equal(r.ok, true, r.text);
   await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
   assert.ok(load(s.w.root, id).asks.some((a: { state: string; proposal: unknown }) => a.state === "open" && a.proposal), "a proposal waits");

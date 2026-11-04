@@ -2,8 +2,8 @@ import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
 import { panelSchema } from "./panel";
 
-// The client asks the plugin for three things: which workspaces are affairs (to put the 进展 button on them), the
-// panel of one, and to answer a question from its card.
+// The client asks the plugin for four things: which workspaces are affairs (to put the 进展 button on them), the
+// panel of one, a file of its folder to draw, and to answer a question from its card.
 
 export const listRpc = defineRpc({
   name: "affairs.list",
@@ -17,10 +17,21 @@ export const panelRpc = defineRpc({
   output: z.object({ panel: panelSchema.nullable() }),
 });
 
-export const materialRpc = defineRpc({
-  name: "affairs.material",
+// One file of the affair's files/ folder: a picture as data to draw (not above a size), a text as its first part, anything
+// else as what it is. `path` is where it is on the machine the plugin runs on.
+export const fileRpc = defineRpc({
+  name: "affairs.file",
   input: z.object({ workspaceId: z.string(), name: z.string() }),
-  output: z.object({ ok: z.boolean(), text: z.string(), truncated: z.boolean() }),
+  output: z.object({
+    ok: z.boolean(),
+    kind: z.enum(["image", "text", "other"]),
+    mime: z.string(),
+    size: z.number(),
+    dataUrl: z.string().optional(),
+    text: z.string().optional(),
+    truncated: z.boolean(),
+    path: z.string(),
+  }),
 });
 
 export const answerRpc = defineRpc({

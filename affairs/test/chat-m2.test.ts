@@ -294,7 +294,7 @@ test("a finished turn writes how long the chat is and what it cost; the day's mo
 
 async function askOne(s: ReturnType<typeof setup>, id: string) {
   await ops.brief(s.w.ctx, id);
-  const r = await ops.report(s.w.ctx, id, { status: "还没约", entry: "我看了一眼：还没约。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] }, ask: { title: "洗牙约上了吗？", line: "约上了告诉我哪天", options: ["约好了", "还没约", "不用盯了"] } });
+  const r = await ops.report(s.w.ctx, id, { status: "还没约", entry: "还没约。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] }, ask: { title: "洗牙约上了吗？", line: "约上了告诉我哪天", options: ["约好了", "还没约", "不用盯了"] } });
   assert.equal(r.ok, true, r.text);
   await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a1" });
 }
@@ -323,7 +323,7 @@ test("the look's result is a line in the chat; a line is drawn once; the title s
   await askOne(s, id);
   await s.engine.scan(id);
   await s.engine.scan(id);
-  const row = lines(s).filter((d) => d.item.kind === "affair-line" && /我看了一眼/.test(textOf(d)));
+  const row = lines(s).filter((d) => d.item.kind === "affair-line" && /看了一眼：/.test(textOf(d)));
   assert.equal(row.length, 1);
   assert.match(titleOf(load(s.w.root, id), s.w.now(), s.w.ctx.policy), /^洗牙 · 要你定$/);
 });
@@ -365,7 +365,7 @@ test("the panel's sources: the affair's own link first, what is watched, referen
   const id = made.id as string;
   await ops.brief(w.ctx, id);
   const facts = Array.from({ length: 8 }, (_, i) => `提交 #${100001 + i} 已合并`);
-  const r = await ops.report(w.ctx, id, { status: "等发布", entry: "我看了一眼：等发布。", facts: [...facts, "还是 #987735"], next: { at: "2026-11-03 09:30", waitingFor: "等发布", why: "他说明早", earlyIf: [] } });
+  const r = await ops.report(w.ctx, id, { status: "等发布", entry: "等发布。", facts: [...facts, "还是 #987735"], next: { at: "2026-11-03 09:30", waitingFor: "等发布", why: "他说明早", earlyIf: [] } });
   assert.equal(r.ok, true, r.text);
   const s = { ...load(w.root, id), lines: read(w.root, id) };
   const p = panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, s.link));
@@ -408,7 +408,7 @@ test("nothing a person reads in the panel, the chat's lines or the first line of
   await ops.note(s.w.ctx, id, { said: "改成下周一", via: "popo" });
   await s.engine.scan(id);
   const p = s.engine.panel(load(s.w.root, id).workspaceId)!;
-  const texts = [p.title, p.waiting.text, p.now.text, p.next.text, ...p.recent.map((r: { text: string }) => r.text), ...p.facts.map((f: { text: string }) => f.text), ...p.asks.flatMap((a: { title: string; line: string; options: string[] }) => [a.title, a.line, ...a.options]), ...p.sources.items.map((i: { label: string; status?: string }) => `${i.label} ${i.status ?? ""}`), "现在", "来源", "资料", "还没有", "这里不是事项。"];
+  const texts = [p.title, p.waiting.text, p.now.text, p.next.text, ...p.events.items.flatMap((e: { label: string; sub: string; text: string; meta?: string }) => [e.label, e.sub, e.text, e.meta ?? ""]), ...p.facts.map((f: { text: string }) => f.text), ...p.asks.flatMap((a: { title: string; line: string; options: string[] }) => [a.title, a.line, ...a.options]), ...p.sources.items.map((i: { label: string; status?: string }) => `${i.label} ${i.status ?? ""}`), "现在", "来源", "资料", "还没有", "这里不是事项。"];
   for (const t of texts) assert.doesNotMatch(t, MECHANISM, t);
   for (const why of ["first", "migrate", "rotate:cold", "rotate:long", "rotate:night"]) assert.doesNotMatch(noticeFor(why, "洗牙"), MECHANISM, why);
   for (const d of lines(s)) assert.doesNotMatch(JSON.stringify(d.item.data), MECHANISM, JSON.stringify(d.item.data));

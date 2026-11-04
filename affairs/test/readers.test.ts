@@ -77,11 +77,11 @@ test("affair read: prints what it read; with --for it is written down and its re
   assert.ok(ref);
   await ops.brief(w.ctx, made.id);
   const r = await ops.report(w.ctx, made.id, {
-    status: "提现审核中", entry: "我看了一眼：提现还在审核。", facts: [],
+    status: "提现审核中", entry: "提现还在审核。", facts: [],
     next: { at: "2026-11-30 09:00", waitingFor: "等提现审核", why: "审核要几天", earlyIf: [], evidence: [{ from: ref, quote: "提现状态审核中" }] },
   });
   assert.equal(r.ok, true, r.text);
-  const bad = await ops.report(w.ctx, made.id, { entry: "我看了一眼", status: "x", facts: [], next: { at: "2026-11-30 09:00", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [], evidence: [{ from: "reader:r999", quote: "提现状态审核中" }] } }).catch((e: Error) => ({ ok: false, text: e.message }));
+  const bad = await ops.report(w.ctx, made.id, { entry: "还没进外网", status: "x", facts: [], next: { at: "2026-11-30 09:00", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [], evidence: [{ from: "reader:r999", quote: "提现状态审核中" }] } }).catch((e: Error) => ({ ok: false, text: e.message }));
   assert.equal(bad.ok, false, "a reference that was never read is not evidence");
 });
 
@@ -105,10 +105,10 @@ test("the brief lists the tools and what is watched; a watch needs a tool that e
   const src = source(w, { mode: "ok", value: { n: 1 }, summary: "一" });
   const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
   await ops.brief(w.ctx, made.id);
-  const bad = await ops.report(w.ctx, made.id, { status: "等", entry: "我看了一眼：等。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] }, watches: [{ id: "w1", tool: "no-such-tool", args: {} }] });
+  const bad = await ops.report(w.ctx, made.id, { status: "等", entry: "等。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] }, watches: [{ id: "w1", tool: "no-such-tool", args: {} }] });
   assert.equal(bad.ok, false);
   assert.match(bad.text, /no-such-tool/);
-  const good = await ops.report(w.ctx, made.id, { status: "等", entry: "我看了一眼：等。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: ["watch:w1"] }, watches: [{ id: "w1", tool: "fake", args: { file: src.file }, value: { n: 1 }, summary: "一", label: "数", every: 1 }] });
+  const good = await ops.report(w.ctx, made.id, { status: "等", entry: "等。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: ["watch:w1"] }, watches: [{ id: "w1", tool: "fake", args: { file: src.file }, value: { n: 1 }, summary: "一", label: "数", every: 1 }] });
   assert.equal(good.ok, true, good.text);
   const w1 = load(w.root, made.id).watches.w1;
   assert.equal(w1.hash, hashOf({ n: 1 }), "the look's own reading is the baseline");
@@ -132,7 +132,7 @@ async function watching(over: Record<string, unknown> = {}) {
   const id = made.id as string;
   await ops.brief(w.ctx, id);
   const r = await ops.report(w.ctx, id, {
-    status: "等引擎", entry: "我看了一眼：等引擎。", facts: [],
+    status: "等引擎", entry: "等引擎。", facts: [],
     next: { at: "2026-11-09 09:30", waitingFor: "等引擎进外网", why: "还没进", earlyIf: ["watch:w1"], waitingOn: "others" },
     watches: [{ id: "w1", tool: "fake", args: { file: src.file }, value: { 版本: "1.0" }, summary: "版本 1.0", label: "外网版本", every: 10 }],
   });
@@ -224,7 +224,7 @@ test("a watch with an end time ends then, and the affair is looked at once more"
   const t = await watching();
   await ops.brief(t.w.ctx, t.id);
   await ops.report(t.w.ctx, t.id, {
-    status: "盯着", entry: "我看了一眼：盯半小时。", facts: [],
+    status: "盯着", entry: "盯半小时。", facts: [],
     next: { at: "2026-11-09 09:30", waitingFor: "盯半小时", why: "他说盯半小时", earlyIf: ["watch:w1"] },
     watches: [{ id: "w1", tool: "fake", args: { file: t.src.file }, value: { 版本: "1.0" }, summary: "x", every: 10, until: "2026-11-02 10:30" }],
   });
@@ -244,7 +244,7 @@ test("one pass reads only so many; the loop sweeps lost runs through the hook it
   const made = await ops.create(w.ctx, { title: "多", noWait: true });
   await ops.brief(w.ctx, made.id);
   const r = await ops.report(w.ctx, made.id, {
-    status: "等", entry: "我看了一眼：等。", facts: [], next: { at: "2026-11-09 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] },
+    status: "等", entry: "等。", facts: [], next: { at: "2026-11-09 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] },
     watches: ["w1", "w2", "w3"].map((id) => ({ id, tool: "fake", args: { file: src.file }, value: { n: 1 }, summary: "一", every: 10 })),
   });
   assert.equal(r.ok, true, r.text);

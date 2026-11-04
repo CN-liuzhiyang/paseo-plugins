@@ -65,7 +65,8 @@ export function rowsOf(state, now, policy, { withChat = false } = {}) {
     const time = stamp(l.at, now, tz);
     if (l.kind === "report" && l.verdict !== "rejected" && l.entry && l.from !== "chat") {
       const costs = l.detail ?? "";
-      add(`r${l.seq}`, l.at, `${time}  ${l.entry}`, "normal", costs);
+      // A look's sentence is the result only now; in the conversation it needs saying who looked.
+      add(`r${l.seq}`, l.at, `${time}  ${/^\s*我看了一眼/.test(l.entry) ? l.entry : `看了一眼：${l.entry}`}`, "normal", costs);
     } else if (l.kind === "said" && l.by === "user" && !state.said.find((s) => s.seq === l.seq)?.undone) {
       // What he typed in the conversation is already on his screen; what he sent with it is drawn as his line too.
       const sent = state.said.find((s) => s.seq === l.seq)?.attachments ?? [];

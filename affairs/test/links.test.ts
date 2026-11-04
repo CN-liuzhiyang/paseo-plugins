@@ -180,7 +180,7 @@ test("a question he is asked, in the chat and the panel, is plain words: the add
   const id = await started(w);
   await ops.brief(w.ctx, id);
   const r = await ops.report(w.ctx, id, {
-    status: "单子还开着", entry: "我看了一眼：单子还开着。", facts: [],
+    status: "单子还开着", entry: "单子还开着。", facts: [],
     next: { at: "2026-11-03 09:30", waitingFor: "等你回话", why: "他说明早再看", earlyIf: [] },
     ask: { title: "#555001 要关掉吗？", line: "关了我就不盯了", options: ["关", "不关"] },
   });
@@ -201,7 +201,7 @@ test("the push to POPO: plain address after the ticket, and only for a ticket; n
     const id = await started(w);
     await ops.brief(w.ctx, id);
     await ops.report(w.ctx, id, {
-      status: "单子还开着", entry: "我看了一眼：单子还开着。", facts: [],
+      status: "单子还开着", entry: "单子还开着。", facts: [],
       next: { at: "2026-11-03 09:30", waitingFor: "等你回话", why: "他说明早再看", earlyIf: [] },
       ask: { title: "#555001 要关掉吗？", options: ["关", "不关"] },
     });

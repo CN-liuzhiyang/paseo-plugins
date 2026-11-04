@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 // Reading tools: one file per tool, <name>.mjs, in a private directory (policy.readers.dirs, searched first) or in the
 // public one beside the command. A tool reads stdin {"args": {...}} and prints {"value": <JSON, up to 1 KB>, "summary":
 // "one sentence"}; when it cannot read it exits non-zero and says why in one line on stderr. The first line of the file
-// is a comment saying what it reads; that is what `affair brief` lists.
+// is a comment saying what it reads; that is what `affair brief` lists. A line `// label: 外网版本` in the first few lines is the
+// name a person reads for it in the panel.
 
 const HERE = (() => {
   try {
@@ -33,7 +34,7 @@ export function findReader(policy, name) {
   return null;
 }
 
-/** @returns {Array<{ name: string, what: string, file: string }>} */
+/** @returns {Array<{ name: string, what: string, label: string, file: string }>} `label` is what a person calls the thing it reads, from a `// label: …` line near the top of the file ("" when it has none). */
 export function listReaders(policy) {
   const seen = new Map();
   for (const dir of readerDirs(policy)) {
@@ -41,8 +42,10 @@ export function listReaders(policy) {
       const name = entry.name.replace(/\.mjs$/, "");
       if (!entry.isFile() || !entry.name.endsWith(".mjs") || !NAME.test(name) || seen.has(name)) continue;
       const file = path.join(dir, entry.name);
-      const first = readFileSync(file, "utf8").split(/\r?\n/, 1)[0] ?? "";
-      seen.set(name, { name, what: first.startsWith("//") ? first.replace(/^\/\/\s*/, "") : "", file });
+      const head = readFileSync(file, "utf8").split(/\r?\n/, 6);
+      const first = head[0] ?? "";
+      const label = head.map((l) => /^\/\/\s*label\s*[:：]\s*(.+?)\s*$/.exec(l)?.[1]).find(Boolean) ?? "";
+      seen.set(name, { name, what: first.startsWith("//") ? first.replace(/^\/\/\s*/, "") : "", label, file });
     }
   }
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));

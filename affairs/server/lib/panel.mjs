@@ -1,29 +1,68 @@
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
 import { CLIP_CHARS, FULL_CHARS, clip } from "./clip.mjs";
 import { counts } from "./limits.mjs";
-import { cardOf, rowsOf, sentOf, stamp } from "./view.mjs";
+import { cardOf, sentOf, stamp } from "./view.mjs";
+import { eventsOf, shownName, whenOf } from "./events.mjs";
+import { listReaders } from "./readers.mjs";
 
-// What the "进展" panel beside an affair's conversation shows: three blocks (now, sources, materials), all drawn from the
+// What the "进展" panel beside an affair's conversation shows: four blocks (now, what happened, sources, materials), all drawn from the
 // affair's log and its files/ folder, nothing remembered anywhere else. The words are what a person reads: none of
 // 叫醒, 校验, 记录, 计划, 读数, 会话, agent (a test holds it to that).
 
 export const SOURCES_SHOWN = 6;
 export const MATERIALS_SHOWN = 5;
-export const RECENT_ROWS = 10;
 const FACTS_SHOWN = 12;
 const MATERIAL_CHARS = 20_000;
+/** A picture bigger than this is not sent to the panel to be drawn: it is a block with its type on it. */
+export const PICTURE_BYTES = 3 * 1024 * 1024;
 
-/** The text of one file in the affair's files/ folder, to show where it is listed; a name that is not a file there is refused. */
-export function materialText(root, id, name) {
+const PICTURE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp" };
+const extOf = (name) => path.extname(String(name)).slice(1).toLowerCase();
+const slashed = (file) => file.replace(/\\/g, "/");
+
+/** The file in the affair's files/ folder by that name, or null when the name is anything else (a path, a folder, nothing). */
+export function fileIn(root, id, name) {
   const dir = path.resolve(root, id, "files");
   const file = path.resolve(dir, String(name ?? ""));
-  if (path.dirname(file) !== dir || !existsSync(file) || !statSync(file).isFile()) return { ok: false, text: "没有这个文件。", truncated: false };
-  const raw = readFileSync(file);
-  if (raw.subarray(0, 4000).includes(0)) return { ok: false, text: `这个文件不是文字，在文件夹里打开：${file}`, truncated: false };
-  const text = raw.toString("utf8");
-  return { ok: true, text: text.slice(0, MATERIAL_CHARS), truncated: text.length > MATERIAL_CHARS };
+  if (path.dirname(file) !== dir || !existsSync(file) || !statSync(file).isFile()) return null;
+  return file;
+}
+
+/** A picture, a text or something else; a text is told by its look (no zero byte at the start), not only by its name. */
+/** @returns {"image" | "text" | "other"} */
+function kindOf(file) {
+  if (PICTURE_TYPES[extOf(file)]) return "image";
+  const fd = openSync(file, "r");
+  try {
+    const buf = Buffer.alloc(4000);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n).includes(0) ? "other" : "text";
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * One file in the affair's files/ folder, to show where it is listed: a picture as data to draw, a text as its first part; a name that is not a file there is refused.
+ * @returns {{ ok: boolean, kind: "image" | "text" | "other", mime: string, size: number, truncated: boolean, path: string, dataUrl?: string, text?: string }}
+ */
+export function materialFile(root, id, name) {
+  const file = fileIn(root, id, name);
+  if (!file) return { ok: false, kind: "other", mime: "", size: 0, truncated: false, path: "" };
+  const size = statSync(file).size;
+  const kind = kindOf(file);
+  const base = { ok: true, kind, size, path: slashed(file) };
+  if (kind === "image") {
+    const mime = PICTURE_TYPES[extOf(file)];
+    return size <= PICTURE_BYTES ? { ...base, mime, truncated: false, dataUrl: `data:${mime};base64,${readFileSync(file).toString("base64")}` } : { ...base, mime, truncated: true };
+  }
+  if (kind === "text") {
+    const text = readFileSync(file, "utf8");
+    return { ...base, mime: "text/plain", text: text.slice(0, MATERIAL_CHARS), truncated: text.length > MATERIAL_CHARS };
+  }
+  return { ...base, mime: "", truncated: false };
 }
 
 /** How a link kind is named to a person. */
@@ -41,7 +80,24 @@ function mainSource(state, lc) {
 
 /** What a person calls a thing that is read, by the name of the tool that reads it; an unknown tool shows its own name. */
 const TOOL_NAME = { "feishu-task": "飞书任务", "http-json": "网页数据" };
-const toolName = (tool) => TOOL_NAME[tool] ?? tool;
+
+/**
+ * The names of the reading tools: what the tool's own second line says (`// label: 外网版本`), else the plain name above,
+ * else its own name. A tool whose label is the name of the kind of link the affair itself has (易协作) and that read that
+ * very thing is named with its number and opens its address.
+ */
+export function namesOf(policy, state, lc) {
+  const labels = new Map(listReaders(policy).map((r) => [r.name, r.label]));
+  const toolName = (tool) => labels.get(tool) || TOOL_NAME[tool] || tool;
+  const own = parseLink(state.link);
+  const labelOf = (tool, args) => {
+    const name = toolName(tool);
+    const ref = String(args?.id ?? args?.itemNo ?? "");
+    if (own && ref && ref === own.ref && name === KIND_NAME[own.kind] && hrefOf(lc.templates, own.kind, own.ref)) return { name: `${name} #${ref}`, kind: own.kind, ref };
+    return { name };
+  };
+  return { toolName, labelOf };
+}
 
 const shortWhen = (atIso, now, tz) => (atIso ? stamp(atIso, now, tz) : "");
 
@@ -57,6 +113,7 @@ function shown(summary) {
  * it names (a ticket, a revision) and the other things it has read. Each is one line; a reference with an address can be opened.
  */
 export function sourcesOf(state, now, policy, lc) {
+  const { toolName } = namesOf(policy, state, lc);
   const out = [];
   const seen = new Set();
   const add = (item) => {
@@ -83,6 +140,15 @@ export function sourcesOf(state, now, policy, lc) {
   return { items: out.slice(0, SOURCES_SHOWN), more: Math.max(0, out.length - SOURCES_SHOWN) };
 }
 
+/** "43 KB", "1.2 MB". */
+const sizeText = (bytes) => (bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.max(1, Math.round(bytes / 1024))} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+
+/** The time the folder put in front of a name when he sent it (20261103-111416-), as 11:14, or "". */
+const prefixTime = (name) => {
+  const m = /^\d{8}-(\d{2})(\d{2})\d{2}-/.exec(name);
+  return m ? `${Number(m[1])}:${m[2]}` : "";
+};
+
 /** What is in the affair's files/ folder: only what is really there. Pictures he typed into the conversation are not kept there, so they are not here. */
 export function materialsOf(root, state, now, policy) {
   const dir = path.join(root, state.id, "files");
@@ -92,11 +158,31 @@ export function materialsOf(root, state, now, policy) {
     .filter((d) => d.isFile())
     .map((d) => {
       const file = path.join(dir, d.name);
-      const at = statSync(file).mtimeMs;
-      return { name: d.name, who: sent.has(path.resolve(file).toLowerCase()) ? "你发的" : "整理的", at: stamp(new Date(at).toISOString(), now, policy.tz), ms: at };
+      const stat = statSync(file);
+      return { name: d.name, file, size: stat.size, ms: stat.mtimeMs, you: sent.has(path.resolve(file).toLowerCase()) };
     })
     .sort((a, b) => b.ms - a.ms);
-  return { items: files.slice(0, MATERIALS_SHOWN).map(({ ms, ...rest }) => rest), more: Math.max(0, files.length - MATERIALS_SHOWN) };
+  const count = new Map();
+  for (const f of files) count.set(shownName(f.name), (count.get(shownName(f.name)) ?? 0) + 1);
+  const items = files.slice(0, MATERIALS_SHOWN).map((f) => {
+    const name = shownName(f.name);
+    const when = count.get(name) > 1 ? prefixTime(f.name) : "";
+    const kind = kindOf(f.file);
+    return {
+      name: f.name,
+      shown: when ? `${name} · ${when}` : name,
+      who: f.you ? "你发的" : "整理的",
+      at: now - f.ms < 60 * 60_000 ? whenOf(f.ms, now, policy.tz) : stamp(new Date(f.ms).toISOString(), now, policy.tz),
+      size: sizeText(f.size),
+      kind,
+      ext: extOf(f.name).toUpperCase().slice(0, 4),
+      thumb: kind === "image" && f.size <= PICTURE_BYTES,
+      // a thumbnail is fetched once per file as it stands: the same size and time are the same picture
+      version: `${f.size}-${Math.round(f.ms)}`,
+      path: slashed(f.file),
+    };
+  });
+  return { items, more: Math.max(0, files.length - MATERIALS_SHOWN) };
 }
 
 const withParts = (text, lc) => {
@@ -116,8 +202,8 @@ export function moodOf(state, asked, trouble, held) {
 /** The whole panel for one affair. */
 export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "" } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
-  // His words in the chat are on his screen already, but this is where he looks back at what happened.
-  const rows = rowsOf(state, now, policy, { withChat: true });
+  const { labelOf } = namesOf(policy, state, lc);
+  const happened = eventsOf(state, now, policy, lc, { labelOf, fileAt: (name) => { const f = fileIn(root, state.id, name); return f ? slashed(f) : null; } });
   const spent = counts(root, now, policy).per[state.id]?.usd ?? 0;
   const asks = (state.asks ?? []).filter((a) => a.state === "open");
   return {
@@ -130,7 +216,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     now: withParts(card.now, lc),
     next: withParts(card.next, lc),
     spent: spent > 0 ? `今天花了 $${spent.toFixed(2)}` : "",
-    recent: rows.slice(-RECENT_ROWS).map((r) => ({ key: r.key, ...withParts(r.text, lc), tone: r.tone === "red" ? "red" : "normal" })),
+    events: { total: happened.total, items: happened.items.map((e) => ({ ...e, ...withParts(e.text, lc) })) },
     facts: (state.facts ?? []).slice(0, FACTS_SHOWN).map((f) => withParts(String(f), lc)),
     sources: sourcesOf(state, now, policy, lc),
     materials: materialsOf(root, state, now, policy),

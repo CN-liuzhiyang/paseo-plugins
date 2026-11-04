@@ -22,7 +22,7 @@ function setup(now: string, lines: Line[] = []) {
   return { state, ms, facts: buildFacts(state, ms, policy) };
 }
 
-const base = { status: "还没约", entry: "我看了一眼：还没约", next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天最好搞定", earlyIf: [] as string[] } };
+const base = { status: "还没约", entry: "还没约", next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天最好搞定", earlyIf: [] as string[] } };
 const run = (s: ReturnType<typeof setup>, report: Record<string, unknown>, attempt = 1) => checkReport({ report, state: s.state, facts: s.facts, policy, now: s.ms, attempt }) as { problems: Array<{ field: string; text: string }>; verdict: string; atMs: number | null; detail: string; limitMs: number };
 const withNext = (over: Record<string, unknown>) => ({ ...base, next: { ...base.next, ...over } });
 
@@ -169,7 +169,7 @@ test("three tries that do not pass fall back to the limit (or a workday, whichev
 test("report fields: status length, banned words, finish evidence", () => {
   const s = setup("2026-11-02 10:00", [line("said", { text: "洗牙约好了，周三", by: "user" })]);
   assert.ok(run(s, { ...base, status: "x".repeat(41) }).problems.some((p) => p.field === "status"));
-  assert.ok(run(s, { ...base, entry: "我看了一眼：计划里没有读数" }).problems.some((p) => p.field === "entry"));
-  assert.equal(run(s, { entry: "我看了一眼：办完了", finish: { kind: "done", evidence: { quote: "洗牙约好了，周三", from: "said:2" } } }).verdict, "pass");
-  assert.equal(run(s, { entry: "我看了一眼：办完了", finish: { kind: "done", evidence: { quote: "已经勾掉", from: "said:2" } } }).verdict, "rejected");
+  assert.ok(run(s, { ...base, entry: "计划里没有读数" }).problems.some((p) => p.field === "entry"));
+  assert.equal(run(s, { entry: "办完了", finish: { kind: "done", evidence: { quote: "洗牙约好了，周三", from: "said:2" } } }).verdict, "pass");
+  assert.equal(run(s, { entry: "办完了", finish: { kind: "done", evidence: { quote: "已经勾掉", from: "said:2" } } }).verdict, "rejected");
 });

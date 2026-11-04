@@ -24,7 +24,7 @@ async function started(w: W, extra: Record<string, unknown> = {}) {
 
 const lookReport = (over: Record<string, unknown> = {}) => ({
   status: "飞书任务还是待办。",
-  entry: "我看了一眼：飞书里有「定期洗牙」，还没约。",
+  entry: "飞书里有「定期洗牙」，还没约。",
   facts: ["飞书任务 定期洗牙 未完成"],
   next: { at: "2026-11-03 09:30", waitingFor: "等你去约", waitingOn: "me", why: "他说今天最好搞定，明早再看一次", earlyIf: [] },
   ...over,
@@ -445,7 +445,7 @@ test("brief --chat: where it stands, what is new since it last read, what it wro
   await ops.answer(w.ctx, id, q.id, "要", "workspace");
   await heard(w, id, "在对话里说的话不算新消息");
   const b1 = await chatReads(w, id);
-  assert.match(b1, /看一眼的结果：我看了一眼/);
+  assert.match(b1, /看一眼的结果：飞书里有/);
   assert.match(b1, /他说：「下周一我出差」/);
   assert.match(b1, /他答了问题 .*「要」/);
   assert.doesNotMatch(b1.split("## 没答的问题")[0], /在对话里说的话不算新消息/);

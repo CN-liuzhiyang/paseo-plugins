@@ -29,7 +29,7 @@ const started = async (w: W, title = "洗牙") => {
   return made.id as string;
 };
 const good = (over: Record<string, unknown> = {}, next: Record<string, unknown> = {}) => ({
-  status: "还没约", entry: "我看了一眼：还没约。", facts: [],
+  status: "还没约", entry: "还没约。", facts: [],
   next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [], ...next }, ...over,
 });
 /** A look as the schedule starts it: the brief, then what it hands in. */
@@ -260,7 +260,7 @@ test("F-08: a field of the wrong shape on the third try is left out and said so;
   const w = world();
   const id = await started(w);
   await ops.brief(w.ctx, id);
-  const bad = { status: "x", entry: "我看了一眼：x", facts: "不是数组", next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } };
+  const bad = { status: "x", entry: "x", facts: "不是数组", next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } };
   for (let i = 0; i < 2; i++) assert.equal((await ops.report(w.ctx, id, bad)).ok, false);
   const third = await ops.report(w.ctx, id, bad);
   assert.equal(third.ok, true, third.text);
@@ -413,10 +413,10 @@ test("words: only what a person reads is held to the mechanism words; everyday o
   const w = world();
   const id = await started(w);
   await ops.brief(w.ctx, id);
-  const ok = await ops.report(w.ctx, id, good({ entry: "我看了一眼：他的计划里没有这一项，通话记录也没有", facts: ["读数 r12 是 3，记录里有两条计划"] }));
+  const ok = await ops.report(w.ctx, id, good({ entry: "他的计划里没有这一项，通话记录也没有", facts: ["读数 r12 是 3，记录里有两条计划"] }));
   assert.equal(ok.ok, true, ok.text);
   await ops.brief(w.ctx, id);
-  const bad = await ops.report(w.ctx, id, good({ entry: "我看了一眼：读数没变" }));
+  const bad = await ops.report(w.ctx, id, good({ entry: "读数没变" }));
   assert.equal(bad.ok, false);
   assert.match(bad.text, /内部用词/);
   for (const text of ['{"token":"abcdef123456"}', "pwd=hunter22x", "Authorization: Basic dXNlcjpwYXNzd29yZDEyMzQ1Ng==", "run it with --password hunter2x", "token: 'abcdef1234'"]) assert.ok(secretIn(text), text);

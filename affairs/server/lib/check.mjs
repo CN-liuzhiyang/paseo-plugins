@@ -8,6 +8,9 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 /** Mechanism words a person should never read in a card, a line, a push or a question (the session writes those texts, so they are checked too). */
 const INNER_WORDS = /叫醒|校验|读数|会话|agent/i;
+/** What a look's one-sentence result may be: the prompt says ENTRY_SAY, the check lets a few more through before it sends the look back. */
+export const ENTRY_SAY = 32;
+export const ENTRY_MAX = 40;
 /** A quote shorter than this does not prove anything, unless it is the whole of what was said. */
 const MIN_QUOTE = 6;
 const EVIDENCE_FROM = /^(?:said:\d+|answer:[\w-]+|link:\S+|watch:[\w.-]+|reader:\S+)$/;
@@ -132,7 +135,8 @@ function checkStructure(report, finishing, chat = false) {
   if (chat && report.entry === undefined) {
     // nothing to say about a look: there was none
   } else if (typeof report.entry !== "string" || !report.entry.trim()) add("entry", "entry 要写这次看到了什么，一句话");
-  else if ([...report.entry].length > 200) add("entry", "entry 不超过 200 个字");
+  else if ([...report.entry].length > ENTRY_MAX) add("entry", `entry 写这次的结论，一句话，不超过 ${ENTRY_SAY} 个字，不用「我看了一眼」开头（数字和细节不用写在这里，读到的东西自己会列出来）`);
+  else if (/^\s*我看了一眼/.test(report.entry)) add("entry", `entry 不用「我看了一眼」开头，直接写这次的结论，不超过 ${ENTRY_SAY} 个字`);
   if (report.facts !== undefined && (!Array.isArray(report.facts) || report.facts.length > 20 || report.facts.some((f) => typeof f !== "string" || f.length > 300))) add("facts", "facts 是字符串数组（≤20 条，每条 ≤300 字），整组替换");
   const watches = report.watches ?? [];
   if (!Array.isArray(watches) || watches.length > 5 || watches.some((w) => !w || typeof w.id !== "string" || !/^[\w.-]{1,20}$/.test(w.id) || typeof w.tool !== "string")) add("watches", "watches 最多 5 个，每个要有 id 和 tool");
@@ -245,7 +249,7 @@ export function checkReport({ report, state, facts, policy, now, attempt, reader
 export function skeletonOf(fields) {
   const shapes = {
     status: "\"现在的情况，≤40 字\"",
-    entry: "\"我看了一眼：…\"",
+    entry: "\"这次的结论，≤32 字，不用『我看了一眼』开头\"",
     facts: "[\"记住的，整组\"]",
     watches: "[{\"id\":\"w1\",\"tool\":\"…\",\"args\":{}}]",
     next: "{\"at\":\"YYYY-MM-DD HH:mm\",\"waitingFor\":\"≤12 字\",\"waitingOn\":\"me|others|time\",\"why\":\"…\",\"earlyIf\":[],\"evidence\":[{\"quote\":\"原文\",\"from\":\"said:1\"}],\"appeal\":\"\"}",

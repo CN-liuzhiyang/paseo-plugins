@@ -63,7 +63,7 @@ test("fold: the state is only what the lines say", () => {
     { kind: "created", id: "D1", title: "洗牙", goal: "约上" },
     { kind: "said", text: "约在周三", by: "user" },
     { kind: "wake", why: ["said:2"], gapMinutes: null },
-    { kind: "report", verdict: "pass", status: "约在周三", entry: "我看了一眼：约在周三", facts: ["周三"], changed: true },
+    { kind: "report", verdict: "pass", status: "约在周三", entry: "约在周三", facts: ["周三"], changed: true },
     { kind: "next", next: "2026-11-04T20:00:00+08:00", waitingFor: "等周三", verdict: "pass" },
     { kind: "asked", id: "D1-1", title: "约上了吗？", options: ["是"] },
     { kind: "answered", id: "D1-1", answer: "是" },

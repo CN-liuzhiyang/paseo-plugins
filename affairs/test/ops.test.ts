@@ -26,7 +26,7 @@ const ended = (w: ReturnType<typeof world>, id: string, usd = 0.01) => append(w.
 
 const good = (over: Record<string, unknown> = {}) => ({
   status: "飞书任务还是待办，今天日历上没有洗牙。",
-  entry: "我看了一眼：飞书里有「定期洗牙」，还没约。",
+  entry: "飞书里有「定期洗牙」，还没约。",
   facts: ["飞书任务 定期洗牙 未完成"],
   next: { at: "2026-11-03 09:30", waitingFor: "等你去约", waitingOn: "me", why: "他说今天最好搞定，明早再看一次", earlyIf: [] },
   ...over,
@@ -132,7 +132,7 @@ test("report: finish needs evidence that checks out, then the affair is over and
   const id = await started(w);
   const spoken = await ops.note(w.ctx, id, { said: "洗牙约在下周三下午了", by: "user" });
   await looking(w, id);
-  const nope = await ops.report(w.ctx, id, { status: "办完了", entry: "我看了一眼：办完了", finish: { kind: "done", evidence: { quote: "飞书任务勾掉了", from: "said:99" } } });
+  const nope = await ops.report(w.ctx, id, { status: "办完了", entry: "办完了", finish: { kind: "done", evidence: { quote: "飞书任务勾掉了", from: "said:99" } } });
   assert.equal(nope.ok, false);
   const yes = await ops.report(w.ctx, id, { finish: { kind: "done", evidence: { quote: "约在下周三下午", from: `said:${spoken.seq}` } } });
   assert.equal(yes.ok, true, yes.text);

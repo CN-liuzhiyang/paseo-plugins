@@ -8,7 +8,7 @@ import * as ops from "./lib/ops.mjs";
 import * as readers from "./lib/readers.mjs";
 import { localParts } from "./lib/time.mjs";
 import { linkOf, rowsOf, say } from "./lib/view.mjs";
-import { materialText, panelOf } from "./lib/panel.mjs";
+import { materialFile, panelOf } from "./lib/panel.mjs";
 import { linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
@@ -102,10 +102,10 @@ export function createEngine(deps: EngineDeps) {
     return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
   }
 
-  /** A file in the panel's materials, read so it can be shown where it is listed. */
-  function material(workspaceId: string, name: string) {
+  /** A file in the panel's materials, read so it can be drawn where it is listed (a picture as data, a text as its first part). */
+  function file(workspaceId: string, name: string) {
     const found = affairs().find((a) => a.workspaceId === workspaceId);
-    return found ? materialText(ctx.root, found.id, name) : { ok: false, text: "这里不是事项。", truncated: false };
+    return found ? materialFile(ctx.root, found.id, name) : { ok: false, kind: "other" as const, mime: "", size: 0, truncated: false, path: "" };
   }
 
   /** What should reach the person on another channel, from the log alone. */
@@ -387,7 +387,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   return {
-    start, stop, scan, scanAll, view, panel, material, affairs, runEnded, readPass,
+    start, stop, scan, scanAll, view, panel, file, affairs, runEnded, readPass,
     /** Waits for the looks asked for after a delivery (tests). */
     settle: async () => {
       while (lookWork.size) await Promise.all([...lookWork]);

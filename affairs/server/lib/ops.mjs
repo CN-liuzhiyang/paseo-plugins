@@ -924,7 +924,7 @@ function dropBadFields(merged, problems) {
       dropped.push(field);
     }
   }
-  if (typeof merged.entry !== "string" || !merged.entry.trim()) merged.entry = "我看了一眼（交回的内容格式不对，只记下了这一次）";
+  if (typeof merged.entry !== "string" || !merged.entry.trim()) merged.entry = "交回的内容格式不对，这次只记下看过一次";
   return dropped;
 }
 
