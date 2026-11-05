@@ -21,7 +21,7 @@ const MECHANISM = /叫醒|校验|记录|计划|读数|会话|agent/i;
 type Event = Record<string, unknown>;
 
 /** A Paseo with chats in it: what was made, archived, drawn, and the handlers the plugin listens with (called by the test as the session would). */
-function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unknown }> } = {}) {
+function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unknown }>; archiveFails?: () => boolean } = {}) {
   const made: Array<Record<string, any>> = [];
   const archived: string[] = [];
   const drawn: Array<{ chat: string; item: any }> = [];
@@ -30,7 +30,10 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
     agents: {
       ref: (id: string) => ({
         refresh: async () => ({ agent: { status: opts.status?.() ?? "idle" } }),
-        archive: async () => void archived.push(id),
+        archive: async () => {
+          if (opts.archiveFails?.()) throw new Error("Paseo said no");
+          archived.push(id);
+        },
         timeline: {
           append: async (item: any) => void drawn.push({ chat: id, item }),
           subscribe: (h: (e: Event) => void) => {
@@ -199,6 +202,47 @@ test("a replaced chat: a new one is made, the old put away, the new one starts w
   // and the new one is the one listened to
   assert.ok(s.p.handlers.has("chat-2"));
   assert.ok(!s.p.handlers.has("chat-1"));
+});
+
+test("a chat in the middle of a turn is not replaced: the swap waits for a scan when it is quiet", async () => {
+  let status = "running";
+  const s = setup({}, { status: () => status });
+  const id = await start(s);
+  await s.engine.scan(id);
+  s.p.send("chat-1", turnDone(170_000));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 1, "still the same chat while it works");
+  assert.deepEqual(s.p.archived, []);
+  status = "idle";
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 2);
+  assert.deepEqual(s.p.archived, ["chat-1"]);
+  assert.equal(load(s.w.root, id).chats[1].why, "rotate:long");
+});
+
+test("a replaced chat that could not be put away is put away on a later scan, once, and not while it is working", async () => {
+  let fails = true;
+  let status = "idle";
+  const s = setup({}, { archiveFails: () => fails, status: () => status });
+  const id = await start(s);
+  await s.engine.scan(id);
+  s.p.send("chat-1", turnDone(170_000));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 2, "the new chat is made and the swap is in the log");
+  assert.deepEqual(s.p.archived, [], "the old one could not be put away");
+  fails = false;
+  status = "running"; // the old chat is busy again (he went back to it): leave it
+  await s.engine.scan(id);
+  assert.deepEqual(s.p.archived, []);
+  status = "idle";
+  await s.engine.scan(id);
+  assert.deepEqual(s.p.archived, ["chat-1"]);
+  await s.engine.scan(id);
+  assert.deepEqual(s.p.archived, ["chat-1"], "put away once, not on every scan");
+  assert.equal(s.p.made.length, 2);
 });
 
 // ---- what he types ----------------------------------------------------------------------------------------

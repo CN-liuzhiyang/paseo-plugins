@@ -72,7 +72,33 @@ export function createChats(deps: ChatDeps) {
   const drawn = new Map<string, Drawn>();
   const watching = new Map<string, { chatId: string; stop: () => void }>();
   const notices = new Map<string, string>();
+  /** Chats that were replaced and could not be put away yet (old chat id -> its affair): tried again on the next scan. */
+  const toPutAway = new Map<string, string>();
   let stopped = false;
+
+  /** Archiving a session that is in the middle of a turn cuts the turn short, so a busy one is left alone and tried again later. */
+  const busy = async (chatId: string): Promise<boolean> => {
+    try {
+      return ["running", "initializing"].includes((await paseo.agents.ref(chatId).refresh())?.agent.status ?? "");
+    } catch {
+      return false; // not there to ask: nothing is running in it
+    }
+  };
+
+  /** Puts a replaced chat away; whatever stops it (busy, or Paseo refusing) leaves it on the list for the next scan. */
+  async function putAway(id: string, old: string): Promise<void> {
+    try {
+      if (await busy(old)) {
+        toPutAway.set(old, id);
+        return;
+      }
+      await paseo.agents.ref(old).archive();
+      toPutAway.delete(old);
+    } catch (error) {
+      toPutAway.set(old, id);
+      log(`${id}: putting the old chat away failed, will try again: ${(error as Error).message}`);
+    }
+  }
 
   /** Makes a chat for the affair and puts the old one (if any) away. */
   async function replace(id: string, why: string, old: string | null): Promise<void> {
@@ -83,7 +109,7 @@ export function createChats(deps: ChatDeps) {
     checked.add(made.id);
     const text = noticeFor(why, s.title);
     if (text) notices.set(id, text);
-    if (old) await paseo.agents.ref(old).archive().catch((error: unknown) => log(`${id}: putting the old chat away failed: ${(error as Error).message}`));
+    if (old) await putAway(id, old);
   }
 
   /** The chat exists, and is the right one: made, remade after a restart left it closed, replaced when long and cold. */
@@ -104,9 +130,11 @@ export function createChats(deps: ChatDeps) {
         return;
       }
     }
+    for (const [old, owner] of [...toPutAway]) if (owner === id) await putAway(id, old);
     s = deps.state(id);
     const reason = isOpen(s) ? rotationReason(s, ctx.now(), ctx.policy) : "";
-    if (reason) await replace(id, reason, s.chatId);
+    // Not while the chat is in the middle of a turn: it may be working on what he just asked, and the new one would not know. The next scan asks again.
+    if (reason && !(await busy(s.chatId))) await replace(id, reason, s.chatId);
   }
 
   const asText = (value: unknown) => (typeof value === "string" ? value : "");
