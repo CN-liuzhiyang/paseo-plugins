@@ -101,6 +101,22 @@
 **model 载体**（角色 `gate` 被私有角色文件指到某个模型）不动，保持原样：它要自己 Write 回执，换了 cwd 会
 不会改变它的权限请求，没验证过。
 
+### 调用方已经有这个 workspace（`affair.workspace`，2026-11-05）
+
+调用方自己为这件事建了可见的 workspace（比如一个展示事项的插件）、并且想让运行的 agent 和人闸卡片就进它时，在 `--affair`
+里带 `workspace: "<workspace id>"`。运行时不去找、不去建，规则只有这几条：
+
+- **目录相同的 `$.ask` 进它。** 判断用的是 `workspace ls` 里它的 `cwd`（和别的比较一样按 `normalizeDir`：Windows 上不分大小写和斜杠方向）。
+  `--workspace` 下 `--cwd` 被忽略（见上面的实测），所以目录不同的 `$.ask` 不能进它。
+- **目录不同的 `$.ask` 照原来的办法**：按 (key, 目录) 找或建，登记文件照写。身份取 `key`、`link`、`url`；都没有就和没有 `workspace` 时一样记 caveat。
+- **人闸卡片（provider 载体）一律进它**，不管运行的目录是什么：卡片不需要自己的目录（上一节）。model 载体不动。
+- **它不在了**（人归档了，或 `workspace ls` 出错）：记一条 caveat（`affair: the workspace it names … is not there any more`；同一次运行只记一次），
+  之后按没有这个字段办——找或建 key 对应的那个。起 agent 时才被 Paseo 拒绝的，走上面"失败降级"的重试，重试里重新查一次。
+- **不为它写登记文件。** 调用方已经记着它的 id，登记只留一份；运行时自己建的才写。
+- 发一条 `workspace` 事件，`created: false`，`cwd`、`title` 取自 `workspace ls`（`title` 是人现在看到的名字）；一次运行里同一个 id 只发一条。
+  `key` 取身份；一个身份都没有时是 `workspace:<id>`。这样 orchestration-ui 的流程栏照旧按这条事件认出运行属于哪个 workspace，不用改。
+- 形状：字符串，匹配 `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；运行时只查形状，是不是真有这个 workspace，用到时才去 `workspace ls` 里查。
+
 ### 跨机（`--host`）
 
 保持现状，不用 workspace，记一条 caveat。理由：登记文件和锁是本机的，而 `workspace` 命令得在目标 daemon 上

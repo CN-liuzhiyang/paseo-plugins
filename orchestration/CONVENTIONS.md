@@ -610,6 +610,11 @@ committee 的配对不属于角色，放在 `flows/committee.mjs` 的 `COMMITTEE
 由此而来的几条：
 
 - **不要在 `runPaseo` 里清环境变量**，清了父子关系就断了。
+- **例外：由事项起的运行故意没有调用方。** 起运行的一方（事项插件的 `affair flow`）在**自己起 `orch.mjs` 的子进程时**
+  把 `PASEO_AGENT_ID`、`PASEO_AGENT_CWD`、`PASEO_WORKSPACE_ID` 删掉（保留 `PASEO_HOME`），`run.start.caller` 因此是 null。
+  这是它的选择，不是运行时清的：agent 若挂在聊天会话名下，该会话一被归档（聊天轮换就会），同一个 workspace 里挂在它名下的
+  agent 会一起被归档，等着的批准卡就没了（1.5.2 实测）；而且 `--cwd` 在调用方的 workspace 里被忽略。事项的 workspace 由 `--affair` 的
+  `workspace` 指定（`docs/affair-workspace.md`）。
 - **嵌套自然成树**：子 agent 里再跑编排，Paseo 给它注入的是它自己的 id，覆盖继承来的那个，
   孙辈挂在它下面。（源码确认，未实测）
 - **在普通终端里跑没有父**；不传 `--workspace` 时每次还会新建一个 workspace（`run.ts:527-533`

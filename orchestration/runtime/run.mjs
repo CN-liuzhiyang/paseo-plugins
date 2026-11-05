@@ -26,7 +26,7 @@ import { loadRoster, bindRole, composePrompt } from "./roster.mjs";
 import { fenceFor } from "./fences.mjs";
 import { EventLog, eventsFile } from "./events.mjs";
 import { affairProblems } from "./affair.mjs";
-import { affairKey, ensureWorkspace, normalizeDir, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
+import { affairKey, ensureWorkspace, normalizeDir, samePath, workspaceRefusal, workspaceTitle } from "./workspaces.mjs";
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { checkResumePoint } from "./resume.mjs";
 import { FROM_LIMIT, pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.mjs";
@@ -482,15 +482,47 @@ async function runClaimed(target, options, taken) {
   // workspace id, or null: whatever goes wrong is a caveat and the call goes
   // on as it did before workspaces were shared, never a failed run.
   // Keyed by the directory as the file system compares it (normalizeDir), the same spelling the registry is named by.
-  const affairWorkspaces = new Map(); // normalized cwd -> Promise<string | null>
+  const affairWorkspaces = new Map(); // slot (normalized cwd, or "<gate>") -> Promise<string | null>
   const key = affairKey(affair);
   // Set when Paseo says its CLI does not know --workspace: nothing later asks it to.
   let workspaceFlagRefused = false;
-  const resolveWorkspace = async (callCwd) => {
+
+  // A workspace the caller made for the affair and named (affair.workspace): looked for in the daemon's list
+  // once, and its directory is the one in the list. null when it is not there (the caller's, a person may have
+  // archived it), and then the run goes on as if none had been named. Nothing is written to the registry for it.
+  let givenLookup = null; // Promise<{ workspaceId, cwd, title } | null>
+  const givenWorkspace = () => {
+    givenLookup ??= (async () => {
+      try {
+        const row = (await executor.listWorkspaces()).find((w) => w.workspaceId === affair.workspace);
+        if (row) return { workspaceId: row.workspaceId, cwd: typeof row.cwd === "string" ? row.cwd : cwd, title: typeof row.name === "string" ? row.name : affair.label };
+        caveat(`affair: the workspace it names (${affair.workspace}) is not there any more; the agents are in the shared workspace found or made for its key instead`, null);
+      } catch (error) {
+        caveat(`affair: the workspace it names (${affair.workspace}) could not be looked up (${error?.message ?? error}); the agents are in the shared workspace found or made for its key instead`, null);
+      }
+      return null;
+    })();
+    return givenLookup;
+  };
+  const announced = new Set(); // workspace ids a workspace event was written for
+  const resolveWorkspace = async (callCwd, forGate) => {
     if (workspaceFlagRefused) return null;
     if (host) {
       caveat(`affair: the agents of a run on another host (${host}) are not put in a shared workspace`, null);
       return null;
+    }
+    if (affair.workspace !== undefined && typeof executor.listWorkspaces === "function") {
+      const given = await givenWorkspace();
+      // A gate card needs no directory of its own, so it goes in the named workspace whatever the run's directory is; an agent
+      // does (a workspace's agents all work in its directory), so only a call in that directory goes there. The others take the
+      // registry's way below: one workspace per directory.
+      if (given && (forGate || samePath(given.cwd, callCwd))) {
+        if (!announced.has(given.workspaceId)) {
+          announced.add(given.workspaceId);
+          log.emit("workspace", { workspaceId: given.workspaceId, cwd: given.cwd, title: given.title, key: key ?? `workspace:${given.workspaceId}`, created: false });
+        }
+        return given.workspaceId;
+      }
     }
     if (key === null) {
       caveat("affair: it has no key, link or url, so there is nothing to tell its runs apart by and no shared workspace", null);
@@ -513,9 +545,11 @@ async function runClaimed(target, options, taken) {
       return null;
     }
   };
-  const workspaceFor = (callCwd) => {
-    const at = normalizeDir(callCwd);
-    if (!affairWorkspaces.has(at)) affairWorkspaces.set(at, resolveWorkspace(callCwd));
+  // A gate card's workspace is its own slot when the affair names one: it is not the directory's.
+  const slotOf = (callCwd, forGate) => (forGate && affair?.workspace !== undefined ? "<gate>" : normalizeDir(callCwd));
+  const workspaceFor = (callCwd, forGate = false) => {
+    const at = slotOf(callCwd, forGate);
+    if (!affairWorkspaces.has(at)) affairWorkspaces.set(at, resolveWorkspace(callCwd, forGate));
     return affairWorkspaces.get(at);
   };
 
@@ -524,7 +558,7 @@ async function runClaimed(target, options, taken) {
   // or this CLI is too old for --workspace), nothing was started or spent, so the start is made once
   // more with whatever resolving again gives -- a workspace made anew, or none. Any other failure is
   // the call's own and is not repeated: an agent that began has spent something.
-  const startIn = async (callCwd, used, workspace, start) => {
+  const startIn = async (callCwd, used, workspace, start, forGate = false) => {
     try {
       return await start(workspace ?? undefined);
     } catch (error) {
@@ -537,8 +571,9 @@ async function runClaimed(target, options, taken) {
       );
       if (refusal === "flag") workspaceFlagRefused = true;
       // Only the answer that was refused is dropped: another call may have replaced it already.
-      if (affairWorkspaces.get(normalizeDir(callCwd)) === used) affairWorkspaces.delete(normalizeDir(callCwd));
-      const next = refusal === "flag" ? null : await workspaceFor(callCwd);
+      if (affairWorkspaces.get(slotOf(callCwd, forGate)) === used) affairWorkspaces.delete(slotOf(callCwd, forGate));
+      if (workspace === affair.workspace) givenLookup = null; // looked up again: it is probably gone, and then said
+      const next = refusal === "flag" ? null : await workspaceFor(callCwd, forGate);
       return start(next && next !== workspace ? next : undefined);
     }
   };
@@ -1444,7 +1479,7 @@ async function runClaimed(target, options, taken) {
       // with the run's own agents. A model carrier writes the receipt itself and stays where it was.
       // Resolved before the receipt path is looked at and claimed, not between the two: the wait would
       // let a parallel gate with the same path through the look. (No affair: nothing is awaited.)
-      const used = affair && carrier === "provider" && !taken ? workspaceFor(cwd) : null;
+      const used = affair && carrier === "provider" && !taken ? workspaceFor(cwd, true) : null;
       const workspace = used ? await used : null;
 
       // Two gates on one receipt path would remove each other's receipt (each starts by clearing its own).
@@ -1536,6 +1571,7 @@ async function runClaimed(target, options, taken) {
               cwd: path.dirname(holdPath),
               workspace: inWorkspace,
             }),
+            true,
           );
           announceAgent(record, agentId);
           return agentId;

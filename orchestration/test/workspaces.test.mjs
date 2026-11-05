@@ -349,3 +349,107 @@ test("a run whose flow never calls an agent makes no workspace", async () => {
   assert.equal(result.outcome, "done");
   assert.equal(workspaces.length, 0);
 });
+
+// --- A workspace the affair already has (affair.workspace) ------------------
+// The caller made it (a plugin that shows the affair) and says which; the run uses it and makes nothing.
+
+const THEIRS = { workspaceId: "wks_theirs", cwd: "C:/work", title: "#1 the affair's own", background: false };
+const WITH_WORKSPACE = { label: "Release 2.4", key: "release-24", workspace: "wks_theirs" };
+const registryFiles = async (logDir) => (existsSync(workspacesDir(logDir)) ? readdir(workspacesDir(logDir)) : []);
+
+test("affair.workspace: an ask in its directory goes there, nothing is made, no registry file, one event with created: false", async () => {
+  const logDir = await freshLogDir();
+  const workspaces = [{ ...THEIRS }];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces });
+  const result = await run(asking(), { logDir, executor, affair: WITH_WORKSPACE });
+
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(affairCaveats(result), []);
+  assert.equal(workspaces.length, 1, "no workspace was made");
+  assert.deepEqual(executor.requests.map((r) => r.workspace), ["wks_theirs", "wks_theirs"]);
+  assert.deepEqual(await registryFiles(logDir), [], "the caller's own record is the only one");
+  const found = workspaceEvents(result);
+  assert.equal(found.length, 1);
+  assert.deepEqual(
+    { workspaceId: found[0].workspaceId, cwd: found[0].cwd, title: found[0].title, created: found[0].created, key: found[0].key },
+    { workspaceId: "wks_theirs", cwd: "C:/work", title: "#1 the affair's own", created: false, key: "key:release-24" },
+  );
+});
+
+test("affair.workspace: the directory is compared as the file system would (case, slashes)", async () => {
+  const workspaces = [{ ...THEIRS, cwd: "c:\Work" }];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces });
+  const result = await run(asking(), { logDir: await freshLogDir(), executor, affair: WITH_WORKSPACE });
+  assert.deepEqual(executor.requests.map((r) => r.workspace), ["wks_theirs", "wks_theirs"]);
+  assert.equal(workspaceEvents(result).length, 1);
+});
+
+test("affair.workspace: an ask in another directory takes the registry's way -- its own workspace for that directory", async () => {
+  const logDir = await freshLogDir();
+  const workspaces = [{ ...THEIRS }];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces });
+  const result = await run(asksInTwoDirectories, { logDir, executor, affair: WITH_WORKSPACE });
+
+  assert.equal(result.outcome, "done");
+  assert.equal(workspaces.length, 2, "one made, for C:/work/sub");
+  const made = workspaces[1];
+  assert.equal(made.cwd, "C:/work/sub");
+  const where = executor.requests.map((r) => r.workspace).sort();
+  assert.deepEqual(where, ["wks_theirs", "wks_theirs", made.workspaceId].sort());
+  assert.equal((await registryFiles(logDir)).length, 1, "a registry file for the one it made, none for the caller's");
+  assert.deepEqual(workspaceEvents(result).map((e) => e.created).sort(), [false, true]);
+});
+
+test("affair.workspace: the gate card goes in it, even when the run's own directory is not its directory", async () => {
+  const workspaces = [{ ...THEIRS, cwd: "C:/elsewhere" }];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces, carrier: "approve" });
+  const result = await run(gating, { logDir: await freshLogDir(), executor, affair: WITH_WORKSPACE });
+
+  assert.equal(result.value.approved, true);
+  const card = executor.requests.find((r) => r.labels["orch-step"] === "gate");
+  assert.equal(card.workspace, "wks_theirs");
+  const ask = executor.requests.find((r) => r.labels["orch-step"] !== "gate");
+  assert.notEqual(ask.workspace, "wks_theirs", "the ask works in C:/work, which is not that workspace's directory");
+  assert.equal(workspaces.filter((w) => w.cwd === "C:/elsewhere").length, 1);
+  assert.equal(workspaceEvents(result).filter((e) => e.workspaceId === "wks_theirs").length, 1, "once, however many calls use it");
+});
+
+test("affair.workspace: not there any more -- a caveat, and the agents go where the key says, as without it", async () => {
+  const logDir = await freshLogDir();
+  const workspaces = [];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces, carrier: "approve" });
+  const result = await run(gating, { logDir, executor, affair: WITH_WORKSPACE });
+
+  assert.equal(result.outcome, "done");
+  assert.equal(result.value.approved, true);
+  assert.equal(affairCaveats(result).filter((c) => /wks_theirs.*not there/.test(c)).length, 1, "said once, not once per call");
+  assert.equal(workspaces.length, 1);
+  assert.deepEqual([...new Set(executor.requests.map((r) => r.workspace))], [workspaces[0].workspaceId]);
+  assert.equal((await registryFiles(logDir)).length, 1, "what the run made itself is recorded as ever");
+});
+
+test("affair.workspace: archived between the listing and the start -- the start is made again where the key says", async () => {
+  const workspaces = [{ ...THEIRS }];
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces, archiveOnStart: true });
+  const result = await run(asking(), { logDir: await freshLogDir(), executor, affair: WITH_WORKSPACE });
+
+  assert.equal(result.outcome, "done");
+  assert.equal(workspaces.length, 1);
+  assert.notEqual(workspaces[0].workspaceId, "wks_theirs");
+  assert.ok(affairCaveats(result).some((c) => /refused workspace wks_theirs/.test(c)));
+  assert.ok(affairCaveats(result).some((c) => /wks_theirs.*not there/.test(c)));
+});
+
+test("affair.workspace: listing fails -- a caveat, and the run goes on as without it", async () => {
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces: [{ ...THEIRS }], workspaceFails: "list" });
+  const result = await run(asking(), { logDir: await freshLogDir(), executor, affair: WITH_WORKSPACE });
+  assert.equal(result.outcome, "done");
+  assert.ok(affairCaveats(result).some((c) => /could not be looked up/.test(c)));
+});
+
+test("affair.workspace: its shape is checked before the run", () => {
+  assert.deepEqual(parseAffair(WITH_WORKSPACE), WITH_WORKSPACE);
+  for (const bad of [42, "", "a b", "../x", "a".repeat(65), null]) {
+    assert.throws(() => parseAffair({ label: "x", workspace: bad }), /affair\.workspace must be a workspace id/, JSON.stringify(bad));
+  }
+});

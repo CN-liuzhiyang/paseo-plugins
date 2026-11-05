@@ -128,6 +128,7 @@
 | `label` | string | 必填。1 到 120 个字符（按 Unicode 码点），不含控制字符、换行、改变文字方向的字符、零宽和不显示的字符（零宽空格、软连字符、Hangul 填充符、tag 字符等；连接符 U+200C、U+200D 和 emoji 选择符 U+FE0F 允许），清单在 `fixtures/affair-cases.json` |
 | `url` | string | 可选。绝对的 `http` / `https` 地址，最长 2048，不含空白和控制字符，不带用户名密码 |
 | `link` | `{ plugin, screen, params? }` | 可选，指向 Paseo 插件的一个屏。`plugin`、`screen`：`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`；`params`：字符串到字符串，最多 16 个，键同上，值最长 256 个字符、不含控制字符 |
+| `workspace` | string | 可选（后加，2026-11-05）：调用方已经为这件事建好的 Paseo workspace 的 id（`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`）。运行时让目录相同的 `$.ask` 和人闸卡片进它，不另建、不写登记文件；它不在了就记 caveat 并按没有这个字段办。界面不画。见 `docs/affair-workspace.md` |
 | `key` | string | 可选（后加，2026-10-27），给运行时用、界面不画：什么让两次运行是同一件事。1 到 256 个字符，文本限制同 `label`。没有时身份取 `link`（`plugin`、`screen` 和全部 `params`），再取 `url`；三样都没有就没有身份。同一件事的运行共用一个 Paseo workspace，见下面的 `workspace` 事件 |
 
 - 不合格式、多出不认识的键，运行在花钱之前就被拒（`RunRefused`），不会被"清理"后接受：记下来的就是调用方写下的。
@@ -147,7 +148,7 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
 | `cwd` | string | 这个 workspace 对应的目录（`$.ask` 的 `cwd` 或运行的 `cwd`） |
 | `title` | string | 建的时候发给 Paseo 的标题（最长 120 个字符，按码点；登记文件里也是这一串）；复用已有的时，人可能已经改过名，这里是**这次会用的**标题，不是 workspace 现在的 |
 | `key` | string | 事项的身份（带前缀 `key:` / `link:` / `url:`） |
-| `created` | boolean | true：这次新建的；false：用了之前某次运行建的 |
+| `created` | boolean | true：这次新建的；false：用了之前某次运行建的，或是调用方给的（`affair.workspace`；此时 `title` 是 `workspace ls` 里的名字，`key` 没有身份时是 `workspace:<id>`） |
 
 - 每个目录最多一条，在用到它的第一个 `call.start` 之前。没有 `affair`、身份认不出、跨机（`--host`）、或者找/建失败时
   **没有这条**；后三种会有一条 `caveat`（`affair: ...`），调用照老办法起 agent，运行不因此失败。

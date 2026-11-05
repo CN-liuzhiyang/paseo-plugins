@@ -5,12 +5,17 @@
 //
 //   { label: "Release 2.4 · blocked", url: "https://example.com/r/24",
 //     link: { plugin: "tracker", screen: "case", params: { id: "24" } },
-//     key: "release-24" }
+//     key: "release-24", workspace: "wks_0123456789abcdef" }
 //
 // `key` is for the runtime, not for a screen: what makes two runs the same
 // affair, when the link (which may carry more than the item's identity, a stage
 // say) or the url is not it. Runs of one affair share a Paseo workspace
 // (workspaces.mjs); without a key the link is the identity, then the url.
+//
+// `workspace` is a Paseo workspace the caller already made for this affair (a plugin
+// that shows the affair has one of its own). The run puts its agents and gate cards
+// in it instead of finding or making one, and writes no registry file for it: the
+// caller knows it, so there is one record. Its id is only checked for shape here.
 //
 // The label and the url are drawn on a screen and the file they sit in can be
 // edited by anyone with the disk, so they are checked here as untrusted text:
@@ -76,22 +81,25 @@ function urlProblem(where, value) {
 
 /**
  * What is wrong with an affair value: an empty list when it is `null` or fits
- * `{ label, url?, link?: { plugin, screen, params? }, key? }`.
+ * `{ label, url?, link?: { plugin, screen, params? }, key?, workspace? }`.
  *
  * @param {unknown} value
  * @returns {string[]}
  */
 export function affairProblems(value) {
   if (value === null || value === undefined) return [];
-  if (!isObject(value)) return ["affair must be an object { label, url?, link?, key? } or null"];
+  if (!isObject(value)) return ["affair must be an object { label, url?, link?, key?, workspace? } or null"];
   const problems = [];
-  onlyKeys("affair", value, ["label", "url", "link", "key"], problems);
+  onlyKeys("affair", value, ["label", "url", "link", "key", "workspace"], problems);
 
   const label = textProblem("affair.label", value.label, LABEL_LIMIT);
   if (label) problems.push(label);
   if (value.key !== undefined) {
     const key = textProblem("affair.key", value.key, KEY_LIMIT);
     if (key) problems.push(key);
+  }
+  if (value.workspace !== undefined && (typeof value.workspace !== "string" || !AFFAIR_NAME.test(value.workspace))) {
+    problems.push(`affair.workspace must be a workspace id matching ${AFFAIR_NAME}`);
   }
   if (value.url !== undefined) {
     const url = urlProblem("affair.url", value.url);
