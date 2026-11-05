@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { dayStart, mayLook, tripped } from "./limits.mjs";
-import { eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, marksOf, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
+import { eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
@@ -67,6 +67,8 @@ export function makeCtx(options = {}) {
     flowNow: new Map(),
     // A run that reads as lost is believed only if it still does this long after it first did (a machine that slept reads as lost for a moment).
     lostConfirmMs: options.lostConfirmMs ?? 35_000,
+    heartbeatMs: options.heartbeatMs ?? 30_000,
+    pause: options.pause ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
   };
 }
 
@@ -567,19 +569,34 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
  * looks at the run's claim and whether its process is alive). Time passed is no evidence that a run will not go on: when the
  * runtime cannot be asked, the run counts as going, so that nothing is started on top of it by mistake.
  */
-async function flowStateOf(ctx, x, orch, logDir) {
-  if (x.outcome) return { state: "over", outcome: x.outcome };
-  const st = await readStatus({ orch, logDir, runId: x.runId, spawnedAt: Date.parse(x.at) });
-  return st ? liveOf(st) : { state: "going", outcome: "" };
+export async function flowStateOf(ctx, x, orch, logDir) {
+  // An end the runtime reported (done, stopped, failed, timed out) stands; `lost` is only what was made of a stale claim.
+  if (x.outcome && x.outcome !== "lost") return { state: "over", outcome: x.outcome };
+  const dir = logDirOf(x, logDir);
+  const read = async () => {
+    const st = await readStatus({ orch, logDir: dir, runId: x.runId, spawnedAt: Date.parse(x.at) });
+    return st ? liveOf(st) : { state: "going", outcome: "" };
+  };
+  const first = await read();
+  if (first.state !== "doubt") return first;
+  // A stale claim is read twice, a heartbeat apart, before it counts: a machine that slept looks like this for a moment, and a run
+  // that comes back must not have another started on top of it. The log's own `lost` was written after such a wait: it is the first reading.
+  if (!x.outcome) await ctx.pause(ctx.heartbeatMs);
+  const second = await read();
+  return second.state === "doubt" ? { state: "over", outcome: "lost" } : second;
 }
 
 /**
  * The card provider the runtime asks him through is part of Paseo and comes up a little after the daemon does: until it has
- * (its entry in `provider ls` is `loading`, or not there yet) a run is turned away at the start. The sentence to say when it is
- * not ready, or "" (ready, or the list could not be had: the runtime will say if it is not).
+ * (its entry in `provider ls` is `loading`) a run is turned away at the start. Which provider that is, the runtime says
+ * (`orch.mjs gate-carrier`: the gate role's provider); when the gate is answered by a model, or the runtime cannot say, there is nothing
+ * to wait for. The sentence to say when it is not ready, or "" (ready, or not to be checked: the runtime will say if it is not).
  */
 async function gateNotReady(ctx) {
-  const family = String(ctx.policy.flows?.gateProvider || "orch-gate");
+  const orch = orchCommand(ctx.policy, BIN);
+  if (!orch || !existsSync(orch)) return "";
+  const carrier = await readGateCarrier({ orch });
+  if (!carrier || carrier.carrier !== "provider") return "";
   let rows;
   try {
     rows = await json(ctx.run, ["provider", "ls"]);
@@ -587,9 +604,10 @@ async function gateNotReady(ctx) {
     return "";
   }
   if (!Array.isArray(rows)) return "";
-  const row = rows.find((r) => r.provider === family);
+  const row = rows.find((r) => r.provider === carrier.family);
   if (row && row.status === "available" && row.enabled !== "Disabled") return "";
-  if (!row || row.status === "loading") return "Paseo 刚启动，过一两分钟再说一次。";
+  if (!row) return "Paseo 里还没有批准卡用的那个来源：要么插件没装、没开，要么刚启动还没出来。先在 Paseo 的插件设置里看一眼；刚启动的话过一两分钟再说一次。";
+  if (row.status === "loading") return "Paseo 刚启动，过一两分钟再说一次。";
   return `批准卡用的那个插件现在不能用（${row.enabled === "Disabled" ? "被关了" : row.status}），先在 Paseo 的插件设置里看一下，再起流程。`;
 }
 
@@ -608,7 +626,8 @@ export async function flowSync(ctx, id) {
   let changed = false;
   for (const f of first.flows) {
     if (f.failed || f.outcome) continue;
-    const seen = await readStatus({ orch, logDir, runId: f.runId, spawnedAt: Date.parse(f.at) });
+    // Where the run's files are is what its entry says, not what this process works out for itself (the command line and the daemon may differ).
+    const seen = await readStatus({ orch, logDir: logDirOf(f, logDir), runId: f.runId, spawnedAt: Date.parse(f.at) });
     if (!seen) continue;
     const now = ctx.now();
     if (seen.state === "refused" || (seen.state === "absent" && now - Date.parse(f.at) > 5 * 60_000)) {
@@ -617,11 +636,11 @@ export async function flowSync(ctx, id) {
       changed = true;
       continue;
     }
-    const lostLike = ["lost", "dead-before-start"].includes(seen.state);
+    const gone = lostLike(seen);
     const before = ctx.flowNow.get(f.runId);
-    const entry = { st: lostLike ? { ...seen, state: "lost" } : seen, lostAt: lostLike ? before?.lostAt ?? now : undefined };
+    const entry = { st: gone ? { ...seen, state: "lost" } : seen, lostAt: gone ? before?.lostAt ?? now : undefined };
     ctx.flowNow.set(f.runId, entry);
-    if (lostLike && now - entry.lostAt < ctx.lostConfirmMs) continue;
+    if (gone && now - entry.lostAt < ctx.lostConfirmMs) continue;
     const have = new Set(f.marks.map((m) => m.key));
     const news = marksOf(entry.st).filter((m) => !have.has(m.key));
     if (news.length === 0) continue;
@@ -683,8 +702,10 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
     said = Number(saidSeq);
     const his = s.said.filter((m) => !m.undone && m.by === "user" && m.via !== "chat-agent");
     if (!his.find((m) => m.seq === said)) return { fail: `--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。` };
-    // The word to go ahead is the latest thing he said: after "先别跑" an older "用 XX 做" does not stand. And it starts one run.
-    if (his[his.length - 1].seq !== said) return { fail: `--said-seq ${saidSeq} 不是他最近的一句。他后来又说过话（#${his[his.length - 1].seq}），要按他最新的意思来：他点了名要跑，就指给那一句；没有就问他。` };
+    // The word to go ahead is what he said in this turn of the chat: one from before the turn the chat last finished is old news (he
+    // may have changed his mind since), and the chat has to ask again. Something more he adds in the same turn ("quick") changes nothing.
+    const asked = s.said.find((m) => m.seq === said);
+    if (s.chatTurn && Date.parse(s.chatTurn.at) > Date.parse(asked.at)) return { fail: `--said-seq ${saidSeq}是之前那几轮说的，那之后你已经回过他了。要起就请他再明确说一次要跑，再用他新说的那一句的编号。` };
     const used = s.flows.find((x) => !x.failed && x.said === said);
     if (used) return { fail: `他那句话（#${said}）已经起过一次 ${used.flow} 了。要再起一次得他再说一句，不能拿同一句。` };
   } else if (saidSeq !== "") return { fail: "--said-seq 只有对话的会话用；本人直接起就行。" };
@@ -693,7 +714,7 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
   const tz = ctx.policy.tz;
   const earlier = s.flows.filter((x) => !x.failed);
   const states = new Map();
-  for (const x of earlier) states.set(x.runId, await flowStateOf(ctx, x, orch, logDir));
+  await Promise.all(earlier.map(async (x) => states.set(x.runId, await flowStateOf(ctx, x, orch, logDir))));
   const going = earlier.find((x) => states.get(x.runId).state === "going");
   if (going) return { fail: `已经在跑：${going.flow}（${stamp(going.at, now, tz)} 起）。` };
   const same = earlier.filter((x) => x.flow === name);

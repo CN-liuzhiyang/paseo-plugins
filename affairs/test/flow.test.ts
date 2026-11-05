@@ -25,6 +25,12 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 const argv = process.argv.slice(2);
+if (argv[0] === "gate-carrier") {
+  if (process.env.FAKE_GATE_CARRIER === "broken") { process.stderr.write("broken"); process.exit(2); }
+  const model = process.env.FAKE_GATE_CARRIER === "model";
+  console.log(JSON.stringify({ role: "gate", provider: model ? "claude/haiku" : "orch-gate/card", carrier: model ? "model" : "provider", family: model ? "claude" : "orch-gate" }));
+  process.exit(0);
+}
 if (argv[0] === "status") {
   if (process.env.FAKE_ORCH_STATUS_BROKEN) { process.stderr.write("broken"); process.exit(1); }
   const { runStatus } = await import(${JSON.stringify(STATUS_MODULE)});
@@ -89,6 +95,7 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
   delete process.env.FAKE_PREPARE_SLOW_SECOND;
   delete process.env.FAKE_PREPARE_HOLD;
   delete process.env.FAKE_ORCH_STATUS_BROKEN;
+  delete process.env.FAKE_GATE_CARRIER;
   const w = world({
     policy: {
       homes: { gcp: work },
@@ -97,6 +104,7 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
     },
   });
   w.ctx.flowWaitMs = 4000;
+  w.ctx.heartbeatMs = 20; // the wait before a stale claim is read again; the claim files here are aged by hand, so it need not be real
   return { w, work, logDir, out, ran: (runId: string) => JSON.parse(readFileSync(path.join(out, `${runId}.json`), "utf8")) };
 }
 
@@ -364,18 +372,28 @@ test("the day's number holds when different affairs ask at once", async () => {
   assert.equal(ids.reduce((n, id) => n + load(w.root, id).flows.length, 0), 1);
 });
 
-test("the word to go ahead is the latest thing he said, and it starts one run", async () => {
+/** The chat finished a turn (the session answered): what the log holds once a chat's turn is over. */
+const turnEnded = (w: ReturnType<typeof world>, id: string) => append(w.root, id, [{ kind: "chat.turn", agentId: load(w.root, id).chatId, tokens: 1000, usd: 0.01, usdTotal: 0.01 }], { now: w.now() });
+const chatMade = (w: ReturnType<typeof world>, id: string) => append(w.root, id, [{ kind: "chat", agentId: "chat-1", why: "made" }], { now: w.now() });
+
+test("the word to go ahead is what he said in this turn of the chat, it starts one run, and what he adds in the same turn changes nothing", async () => {
   const { w, logDir, out } = setup();
   const id = await ticket(w);
+  chatMade(w, id);
   const chat = chatOf(w, id);
   const go = await heard(w, id, "好，用 do-it 做");
-  const hold = await heard(w, id, "先别跑，告诉我现在的情况");
+  w.advance(5000);
+  turnEnded(w, id); // the chat answered: that was the turn of "go"
+  w.advance(5000);
+  await heard(w, id, "先别跑，告诉我现在的情况");
   const old = await ops.flow(chat, id, "do-it", { saidSeq: go });
   assert.equal(old.ok, false);
-  assert.match(old.text, new RegExp(`--said-seq ${go} 不是他最近的一句。他后来又说过话（#${hold}）`));
+  assert.match(old.text, new RegExp(`--said-seq ${go}是之前那几轮说的，那之后你已经回过他了。要起就请他再明确说一次要跑`));
+  assert.doesNotMatch(old.text, /指给那一句/);
   assert.equal(startedCount(out), 0);
 
   const ready = await heard(w, id, "现在可以了，开始吧");
+  await heard(w, id, "快点"); // more in the same turn: "ready" still stands
   const first = await ops.flow(chat, id, "do-it", { saidSeq: ready });
   assert.equal(first.ok, true, first.text);
   finish(logDir, first.runId);
@@ -452,12 +470,14 @@ test("a run that began and whose claim is no longer kept is lost, and one the ru
 test("just after Paseo starts, the card provider is not ready: said at once, in plain words, before anything is made", async () => {
   const { w, out } = setup();
   const id = await ticket(w);
-  for (const status of ["loading", "missing"]) {
-    process.env.FAKE_PASEO_GATE = status;
-    const result = await ops.flow(w.ctx, id, "do-it");
-    assert.equal(result.ok, false);
-    assert.equal(result.text, "Paseo 刚启动，过一两分钟再说一次。", status);
-  }
+  process.env.FAKE_PASEO_GATE = "loading";
+  const loading = await ops.flow(w.ctx, id, "do-it");
+  assert.equal(loading.ok, false);
+  assert.equal(loading.text, "Paseo 刚启动，过一两分钟再说一次。");
+  process.env.FAKE_PASEO_GATE = "missing";
+  const missing = await ops.flow(w.ctx, id, "do-it");
+  assert.equal(missing.ok, false);
+  assert.match(missing.text, /^Paseo 里还没有批准卡用的那个来源：要么插件没装、没开，要么刚启动还没出来/, "not there is said apart from still loading");
   process.env.FAKE_PASEO_GATE = "unavailable";
   assert.match((await ops.flow(w.ctx, id, "do-it")).text, /批准卡用的那个插件现在不能用（unavailable）/);
   assert.equal(startedCount(out), 0);
@@ -469,4 +489,126 @@ test("just after Paseo starts, the card provider is not ready: said at once, in 
   const through = await ops.flow(w.ctx, id, "do-it");
   delete process.env.FAKE_PASEO_FAIL;
   assert.equal(through.ok, true, through.text);
+});
+
+test("the provider to wait for is the gate role's, from the runtime; when a model answers the card, or the runtime cannot say, nothing is checked", async () => {
+  const { w, out, logDir } = setup();
+  const id = await ticket(w);
+  process.env.FAKE_PASEO_GATE = "missing";
+  process.env.FAKE_GATE_CARRIER = "model";
+  const byModel = await ops.flow(w.ctx, id, "do-it");
+  assert.equal(byModel.ok, true, `a card a model answers does not wait for the plugin: ${byModel.text}`);
+  finish(logDir, byModel.runId);
+  process.env.FAKE_GATE_CARRIER = "broken";
+  const unknown = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(unknown.ok, true, `the runtime cannot say: it is left to turn the run away itself: ${unknown.text}`);
+  assert.equal(startedCount(out), 2);
+  delete process.env.FAKE_PASEO_GATE;
+});
+
+test("a claim gone stale is read again a heartbeat later before it counts: a run that comes back is still going, and one that stays so is lost", async () => {
+  const { w, logDir } = setup();
+  const id = await ticket(w);
+  // Stale, its process alive, nothing written yet: the runtime cannot say it is gone, and nothing is started on top of it.
+  plant(w, id, logDir, "stalled", { claim: 10 * 60_000 });
+  const stalled = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(stalled.ok, false);
+  assert.match(stalled.text, /^已经在跑：do-it/);
+
+  // Stale at the first reading and kept alive again by the second: going, whatever --again says.
+  const second = setup();
+  const id2 = await ticket(second.w);
+  plant(second.w, id2, second.logDir, "wakes", { claim: 10 * 60_000, events: true });
+  let waited = 0;
+  second.w.ctx.pause = async () => {
+    waited++;
+    const now = new Date();
+    utimesSync(claimFile(second.logDir, "wakes"), now, now);
+  };
+  const woken = await ops.flow(second.w.ctx, id2, "do-it", { again: true });
+  assert.equal(woken.ok, false, "the machine had slept");
+  assert.match(woken.text, /^已经在跑/);
+  assert.equal(waited >= 1, true, "it did wait a heartbeat before the second reading");
+  assert.equal(startedCount(second.out), 0);
+
+  // The second reading on its own (the check under the lock would also see a claim that came back): a stale first reading is a doubt,
+  // kept alive by the second it is going, and left alone it is over.
+  const fourth = setup();
+  const id4 = await ticket(fourth.w);
+  plant(fourth.w, id4, fourth.logDir, "doubt", { claim: 10 * 60_000, events: true });
+  const entry = load(fourth.w.root, id4).flows[0];
+  const orch = String(fourth.w.ctx.policy.flows.orch);
+  assert.deepEqual(await ops.flowStateOf(fourth.w.ctx, entry, orch, fourth.logDir), { state: "over", outcome: "lost" }, "stale twice");
+  fourth.w.ctx.pause = async () => void utimesSync(claimFile(fourth.logDir, "doubt"), new Date(), new Date());
+  assert.deepEqual(await ops.flowStateOf(fourth.w.ctx, entry, orch, fourth.logDir), { state: "going", outcome: "" }, "stale once, then kept alive");
+
+  // A stale claim that stays stale is lost, and then --again may start another.
+  const third = setup();
+  const id3 = await ticket(third.w);
+  plant(third.w, id3, third.logDir, "gone", { claim: 10 * 60_000, events: true });
+  assert.equal((await ops.flow(third.w.ctx, id3, "do-it", { again: true })).ok, true);
+  assert.equal(startedCount(third.out), 1);
+});
+
+test("a run written down as lost is asked after again before another is started: if it came back, it is going", async () => {
+  const { w, logDir, out } = setup();
+  const id = await ticket(w);
+  plant(w, id, logDir, "gone", { claim: 10 * 60_000, events: true });
+  await ops.flowSync(w.ctx, id);
+  w.advance(40_000);
+  await ops.flowSync(w.ctx, id);
+  assert.equal(load(w.root, id).flows[0].outcome, "lost", "written down as lost");
+  const now = new Date();
+  utimesSync(claimFile(logDir, "gone"), now, now); // its keeper is back
+  const refused = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(refused.ok, false);
+  assert.match(refused.text, /^已经在跑/);
+  assert.equal(startedCount(out), 0);
+});
+
+test("a run's files are looked for where its entry in the log says, not where this process thinks the logs are", async () => {
+  const { w, logDir } = setup();
+  const id = await ticket(w);
+  plant(w, id, logDir, "alive", { claim: 2_000, events: true });
+  // The daemon's idea of the log directory differs from the one the command line started the run with.
+  process.env.ORCH_LOG_DIR = path.join(path.dirname(logDir), "elsewhere");
+  w.advance(6 * 60_000);
+  await ops.flowSync(w.ctx, id);
+  assert.ok(!load(w.root, id).flows[0].failed, "it is not taken back for not being found");
+  const again = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(again.ok, false);
+  assert.match(again.text, /^已经在跑/);
+});
+
+test("two commands in two processes that start the same affair's flow at the same moment: one starts it, the other is turned away", async () => {
+  const { spawn } = await import("node:child_process");
+  const { w, out, logDir } = setup();
+  const id = await ticket(w);
+  // An earlier run that has ended but is not yet written so in the log: each command has to ask the runtime about it, which takes a moment
+  // (the time in which, without the lock, both would have been let through).
+  plant(w, id, logDir, "earlier", { claim: null, events: false });
+  finish(logDir, "earlier");
+  writeFileSync(path.join(w.root, "policy.json"), JSON.stringify(w.ctx.policy));
+  process.env.FAKE_PREPARE_HOLD = "1";
+  const bin = path.resolve(import.meta.dirname, "../bin/affair.mjs");
+  const results: Array<{ code: number | null; text: string }> = [];
+  const children = [1, 2].map(
+    () =>
+      new Promise<void>((resolve) => {
+        const child = spawn(process.execPath, [bin, "flow", id, "do-it", "--again", "--root", w.root], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+        let text = "";
+        child.stdout.on("data", (d) => (text += d));
+        child.stderr.on("data", (d) => (text += d));
+        child.on("close", (code) => (results.push({ code, text }), resolve()));
+      }),
+  );
+  // Both are making the input; only then are they let go, together.
+  const until = Date.now() + 20_000;
+  while (Date.now() < until && !(existsSync(path.join(out, "hold-1")) && existsSync(path.join(out, "hold-2")))) await new Promise((r) => setTimeout(r, 50));
+  writeFileSync(path.join(out, "go-1"), "");
+  writeFileSync(path.join(out, "go-2"), "");
+  await Promise.all(children);
+  assert.deepEqual(results.map((r) => r.code).sort(), [0, 1], results.map((r) => r.text).join("\n---\n"));
+  assert.equal(startedCount(out), 1);
+  assert.equal(load(w.root, id).flows.filter((f: { failed?: string }) => !f.failed).length, 2, "the earlier one and one new");
 });

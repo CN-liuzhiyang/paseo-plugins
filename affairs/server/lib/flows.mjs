@@ -187,13 +187,50 @@ export function readStatus({ node = process.env.AFFAIR_NODE || "node", orch, log
   });
 }
 
-/** What the runtime's states come to for the affair: still on, over (with how), or never started. A lost run is over, not blocking. */
+/** The runtime's states that say a run has been given up on: the claim is stale. Read once, that is a doubt and no more (see `liveOf`). */
+export const lostLike = (st) => ["lost", "dead-before-start"].includes(st?.state);
+
+/**
+ * What the runtime's states come to for the affair: still on, over (with how), never started, or in doubt. Only a state that says
+ * for certain that a run has ended gives "over", and one that says it never began gives "never". A stale claim (`lost`,
+ * `dead-before-start`) is a doubt until it has been read twice, a heartbeat apart (EVENTS.md: a machine that slept looks like it),
+ * and `stalled-before-start` (stale, but its process is alive) and any state not known here count as going: nothing is started on top.
+ * @returns {{ state: "going" | "over" | "never" | "doubt", outcome: string }}
+ */
 export function liveOf(st) {
-  if (["running", "starting", "pending", "unreadable"].includes(st.state)) return { state: "going", outcome: "" };
   if (st.state === "ended") return { state: "over", outcome: String(st.outcome ?? "") };
-  // A claim nobody has touched for two minutes: the runner is gone. One whose process still exists (stalled) is not known to be gone.
-  if (["lost", "dead-before-start"].includes(st.state)) return { state: "over", outcome: "lost" };
-  return { state: "never", outcome: "" };
+  if (lostLike(st)) return { state: "doubt", outcome: "lost" };
+  if (["absent", "refused"].includes(st.state)) return { state: "never", outcome: "" };
+  return { state: "going", outcome: "" };
+}
+
+/** The directory a run's files are in: the one its entry in the log was made with (`<dir>/runs/<id>.jsonl`), else `fallback`. */
+export const logDirOf = (entry, fallback) => (entry?.events ? path.dirname(path.dirname(entry.events)) : fallback);
+
+/**
+ * Who answers a gate's card in the runtime (`orch.mjs gate-carrier`): { provider, carrier: "provider" | "model", family }, or null when
+ * it cannot be had.
+ * @returns {Promise<{ provider: string, carrier: string, family: string } | null>}
+ */
+export function readGateCarrier({ node = process.env.AFFAIR_NODE || "node", orch, env = process.env, timeoutMs = 20_000 }) {
+  return new Promise((resolve) => {
+    if (!orch) return resolve(null);
+    const child = spawn(node, [orch, "gate-carrier"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, env });
+    let out = "";
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.stdout.on("data", (d) => (out += d));
+    child.on("error", () => (clearTimeout(timer), resolve(null)));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(null);
+      try {
+        const parsed = JSON.parse(out);
+        resolve(isObject(parsed) && typeof parsed.carrier === "string" && typeof parsed.family === "string" ? parsed : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
 }
 
 const clip = (text, n) => {
