@@ -377,7 +377,7 @@ test("affair.workspace: an ask in its directory goes there, nothing is made, no 
 });
 
 test("affair.workspace: the directory is compared as the file system would (case, slashes)", async () => {
-  const workspaces = [{ ...THEIRS, cwd: "c:\Work" }];
+  const workspaces = [{ ...THEIRS, cwd: String.raw`c:\Work` }];
   const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces });
   const result = await run(asking(), { logDir: await freshLogDir(), executor, affair: WITH_WORKSPACE });
   assert.deepEqual(executor.requests.map((r) => r.workspace), ["wks_theirs", "wks_theirs"]);
