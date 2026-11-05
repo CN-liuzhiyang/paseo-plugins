@@ -9,6 +9,7 @@
 //   node runtime/orch.mjs wake-lost [--dry-run]
 //   node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done
 //   node runtime/orch.mjs steps <runId>
+//   node runtime/orch.mjs status <runId> [--spawned-at <ms>]
 //   node runtime/orch.mjs check <flow.mjs | name>
 //   node runtime/orch.mjs list
 //
@@ -28,6 +29,10 @@
 // `steps` prints what the journal of a run's line holds, one entry per place in the flow. `settle` says how a step that cannot be taken back
 // (`once`) ended when it began and left no word of how: that it was done (with the value it would have returned) or that it was not. Only
 // such a step can be settled, and only once the run that began it is no longer working.
+//
+// `status` prints one JSON object, what the run is doing now (status.mjs): `state` (state.mjs's table), `phase`, the agent calls it is waiting on
+// (`asking`), its person-gates and how each was answered (`gates`), `costUsd`, how it ended and the point it can be carried on from. It reads the
+// two files of the run and starts nothing; an id with no files prints state `absent`.
 //
 // `list` prints the flows that exist -- the shipped ones and those in `flowsDirs` -- as JSON: name,
 // description, phases, inputs, where the file is, and why a file that is not a usable flow is not
@@ -71,6 +76,7 @@ import { Journal, JournalError, MAX_VALUE_BYTES, known } from "./journal.mjs";
 import { LineBusy, takeLine } from "./line-lock.mjs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
+import { runStatus } from "./status.mjs";
 import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
 import { AGENT_ID, wakeLost } from "./wake.mjs";
 import { loadRoster } from "./roster.mjs";
@@ -85,6 +91,7 @@ const USAGE = [
   "  node runtime/orch.mjs wake-lost [--dry-run]",
   "  node runtime/orch.mjs settle <runId> <step> --done <json> | --not-done",
   "  node runtime/orch.mjs steps <runId>",
+  "  node runtime/orch.mjs status <runId> [--spawned-at <ms>]",
   "  node runtime/orch.mjs check <flow.mjs | name>",
   "  node runtime/orch.mjs list",
 ].join("\n");
@@ -541,7 +548,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     }
   }
 
-  if (!["run", "check", "resume", "settle", "steps"].includes(command) || !target) {
+  if (!["run", "check", "resume", "settle", "steps", "status"].includes(command) || !target) {
     console.error(USAGE);
     process.exit(2);
   }
@@ -556,6 +563,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     if (command === "steps") {
       if (rest.length > 0) throw new UsageError(`steps takes only the run id, got ${rest.join(" ")}`);
       print(listSteps(target));
+      process.exit(0);
+    }
+    if (command === "status") {
+      const parsed = parseArgs({ args: rest, options: { "spawned-at": { type: "string" } }, allowPositionals: false, strict: true });
+      const spawned = parsed.values["spawned-at"];
+      if (spawned !== undefined && !/^[0-9]+$/.test(spawned)) throw new UsageError("--spawned-at takes milliseconds since the epoch");
+      print(runStatus({ dir: configuredLogDir(), runId: target, spawnedAt: spawned === undefined ? null : Number(spawned) }));
       process.exit(0);
     }
     if (command === "settle") {

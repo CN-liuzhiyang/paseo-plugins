@@ -79,6 +79,15 @@
 只能用老办法，最后一条事件的 `ts` 超过 15 分钟没动、或同一台机器上 `run.start.pid` 已经不在，就是 `lost`，
 否则 `running`。
 
+### 读：一个命令
+
+不想自己读事件文件的调用方（一个把运行画给人看的插件）用 `node runtime/orch.mjs status <runId> [--spawned-at <毫秒>]`（`ORCH_LOG_DIR` 和运行器一致）：
+只读那两个文件，什么都不起，打印一个 JSON：`state`、`reason`、`refused`、`outcome`（同上面的 `readRunState`）；`flow`、`resumeOf`、`startedAt`、`endedAt`、`durationMs`；
+`phase`（`{ id, title }`，当前还开着的最后一个阶段，没有开着的取最近开过的）；`asking`（还没交卷的 `ask`：`{ callId, name, title, agentId }`）；
+`gates`（每个人闸：`state` 是 `waiting`、`allowed`、`denied`、`expired`、`mismatch`、`error`，加 `askedAt`、`decidedAt`、`agentId`（载体 agent，卡片挂在它上面）、`reason`）；
+`costUsd`（结束了取 `run.end.cost.totalUsd`，没结束是已结束的调用之和，一个都没有为 null）；`summary`、`stop`、`error`、`resume`（同 `run.end`，没结束时 `resume` 取最后一行 `resume` 事件）。
+没有事件文件时这些都是 null、空数组，`state` 照样给。
+
 规则：
 
 - **"活着"只看占位文件的修改时间。** pid 会被系统复用，一个同号的别的进程在，不能说明这次运行在。pid 只用来
