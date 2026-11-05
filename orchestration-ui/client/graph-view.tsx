@@ -1,6 +1,6 @@
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
-import { Pressable, Text, View, type ScrollView as NativeScrollView } from "react-native";
+import { Platform, Pressable, Text, View, type ScrollView as NativeScrollView } from "react-native";
 import { callMarks, fixingOf, fixingText, REUSED } from "../shared/fixes";
 import { formatShort } from "../shared/format";
 import {
@@ -15,6 +15,7 @@ import {
   type Wave,
 } from "../shared/graph";
 import type { CallState, RunState, RunStatus } from "../shared/run";
+import { attachDragScroll, type ScrollableNode } from "./drag-scroll";
 import { KIND_LOOK, NODE_LOOK, VISIT_LOOK } from "./looks";
 import { useUi, type Tone } from "./ui";
 
@@ -77,6 +78,13 @@ export function GraphView({ graph, run, status, selected, follow, onSelect }: Gr
   useEffect(() => {
     reveal();
   }, [reveal]);
+  // On the web the picture can also be pulled with the mouse (a phone scrolls by touch by itself). The scroll view of react-native-web
+  // gives its element, which is where the scrolling happens.
+  useEffect(() => {
+    if (Platform.OS !== "web") return;
+    const node = (scroll.current as unknown as { getScrollableNode?: () => ScrollableNode | null } | null)?.getScrollableNode?.();
+    return node ? attachDragScroll(node) : undefined;
+  }, []);
 
   const live = status === "running" || status === "starting";
   const ctx = useMemo<Ctx>(() => ({ run, status, clock: graph.clock, selected, onSelect }), [run, status, graph.clock, selected, onSelect]);
