@@ -1603,7 +1603,11 @@ async function runClaimed(target, options, taken) {
         // nothing the run writes may carry it (EventLog scrubs it wherever it turns up).
         if (typeof decision.input === "string" && input?.secret) log.addSecret(decision.input);
         const shown = typeof decision.input === "string" && input?.secret ? { ...decision, input: INPUT_REDACTED } : decision;
-        endCall(record, { ok: true, output: shown, error: null, ...(await settleAgent(record)) });
+        const settled = await settleAgent(record);
+        endCall(record, { ok: true, output: shown, error: null, ...settled });
+        // A card that was answered (yes, no, or it ran out) is not a place anyone needs to open any more: what it said and what the person
+        // answered are in the events. Its agent is archived so the tab goes; a refusal is a caveat and never fails the run.
+        if (carrier === "provider" && ["allowed", "denied", "expired"].includes(decision.outcome)) await archiveAfter(record, settled.agentId ?? decision.agentId);
         if (input === null && ["allowed", "denied"].includes(decision.outcome)) remember({ id: gateId, kind: "gate", state: "done", keyPrint: print, value: decision }, record.callId);
         return decision;
       } finally {

@@ -391,6 +391,7 @@ flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）�
 | `message` | string \| null | 没成时 CLI 的原话，一行，最长 200 字符。成了为 null |
 
 - 每个调用最多一条，在它的 `call.end` 之后、`run.end` 之前；没有 `archive: "after"` 的调用、失败的调用没有这条。
+- **批准卡也有这条**（2026-11-05）：用 provider 载体的 `$.gate` 被答完（`allowed` / `denied` / `expired`）之后，运行时同样试着归档那个载体 agent，卡上的内容和答复已经在 `call.start` / `call.end` 里，标签页留着没用。`call.start` 里没有 `archive` 字段，不用要求；没归成只记 caveat 和这条，不让运行失败。
 - **起这次运行的一方靠它认出"要求了归档、没归成"的 agent**，不必解析 `caveat` 的文字：`call.start.archive` 是 `"after"`、`call.end.ok` 为 true、`call.end.agentId` 有值，而没有 `ok: true` 的 `call.archive`——包括根本没有这条（进程在交卷和归档之间死了）——就是还没归档的。CLI 归档不了后台 workspace 里的 agent，所以带事项（`affair`）的运行里这是常态，归档由起运行的插件来做（reconcile：运行结束以后读事件文件，按 agent 的标签核对它是这次调用的 agent、没在跑，再用宿主的接口归档；见 `docs/affair-workspace.md`）。
 - 运行时自己不再试第二次，也不因为没归成让运行失败。
 

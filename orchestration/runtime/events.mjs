@@ -407,7 +407,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           bad(event, `callId ${JSON.stringify(event.callId)} has no call.start`);
           break;
         }
-        need(event, start.type === "ask" && start.archive === "after", 'call.archive for a call that did not ask for archive: "after"');
+        need(event, (start.type === "ask" && start.archive === "after") || start.type === "gate", 'call.archive for a call that did not ask for archive: "after" (a gate card is archived once answered, without asking)');
         need(event, endedOk.has(event.callId), "call.archive for a call that has no call.end, or whose call.end is not ok");
         need(event, !archived.has(event.callId), "second call.archive for this call");
         archived.add(event.callId);
