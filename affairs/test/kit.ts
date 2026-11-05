@@ -32,6 +32,7 @@ export function world(options: { policy?: Record<string, unknown> } = {}) {
   delete process.env.FAKE_PASEO_BUSY;
   delete process.env.FAKE_PASEO_LOGS;
   delete process.env.FAKE_PASEO_LABELS;
+  delete process.env.FAKE_PASEO_GATE;
   delete process.env.PASEO_AGENT_ID;
   delete process.env.AFFAIR_BY;
   let clock = T0;

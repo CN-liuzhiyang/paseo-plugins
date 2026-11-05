@@ -22,6 +22,8 @@ import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 type Ctx = ReturnType<typeof ops.makeCtx>;
 const DAY = 86_400_000;
 const TICK_MS = 60_000;
+/** While a run started for an affair is on, its status is asked this often (the minute loop alone would show a card waiting a minute late). */
+const FLOW_TICK_MS = 8000;
 
 export interface PaseoLike extends ChatPaseo {
   workspaces: { ref(id: string): { setTitle(title: string | null): Promise<unknown>; archive(): Promise<unknown>; agents: { create(options: Record<string, unknown>): Promise<{ id: string }> } } };
@@ -54,6 +56,7 @@ export function createEngine(deps: EngineDeps) {
   const queues = new Map<string, Promise<void>>();
   let watcher: FSWatcher | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  let flowTimer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
   const debounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** When each watched value was last read, and when each affair was last asked to look because of one. Not in the log: after a restart everything is read once. */
@@ -78,7 +81,7 @@ export function createEngine(deps: EngineDeps) {
     const now = ctx.now();
     const lc = linksOf(s);
     return {
-      rows: (rowsOf(s, now, ctx.policy) as Row[]).map((r) => { const parts = partsOf(r.text, lc); return parts ? { ...r, parts } : r; }),
+      rows: (rowsOf(s, now, ctx.policy, { flowNow: ctx.flowNow }) as Row[]).map((r) => { const parts = partsOf(r.text, lc); return parts ? { ...r, parts } : r; }),
       asks: s.asks.filter((a: { state: string }) => a.state === "open").map((a: { id: string; title: string; line: string; options: string[] }) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
     };
   }
@@ -99,7 +102,7 @@ export function createEngine(deps: EngineDeps) {
     const now = ctx.now();
     const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy) : { ok: true };
     const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? "这次没看成，过一会儿会再试" : "";
-    return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble });
+    return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble, flowNow: ctx.flowNow });
   }
 
   /** A file in the panel's materials, read so it can be drawn where it is listed (a picture as data, a text as its first part). */
@@ -163,9 +166,17 @@ export function createEngine(deps: EngineDeps) {
     }
   }
 
+  /** The affairs with a run that is not over: asked about every few seconds until it is. */
+  const following = new Set<string>();
+
   async function scanNow(id: string) {
     let s = state(id);
     if (!s.id) return;
+    // The runs started for this affair: what has happened to them is written down before anything is drawn from the log.
+    await ops.flowSync(ctx, id).catch((error: unknown) => log(`${id}: following the run: ${(error as Error).message}`));
+    s = state(id);
+    if (s.flows.some((f: { failed: string; outcome: string }) => !f.failed && !f.outcome)) following.add(id);
+    else following.delete(id);
     // Lines that do not follow from the one before were put in around the commands: said once, in red, and told to the person.
     if (s.chainBroken && !s.flags.some((f: { what: string }) => f.what === "chain")) {
       write(id, [{ kind: "flag", what: "chain", detail: `这件事的记录有被手动改过的痕迹（第 ${s.chainBroken} 条起对不上），看不出是谁改的，请核对一下。` }]);
@@ -372,6 +383,10 @@ export function createEngine(deps: EngineDeps) {
       void readPass();
     }, TICK_MS);
     timer.unref?.();
+    flowTimer = setInterval(() => {
+      for (const id of following) void scan(id);
+    }, FLOW_TICK_MS);
+    flowTimer.unref?.();
   }
 
   async function stop() {
@@ -379,6 +394,7 @@ export function createEngine(deps: EngineDeps) {
     watcher?.close();
     chats?.stop();
     if (timer) clearInterval(timer);
+    if (flowTimer) clearInterval(flowTimer);
     for (const t of debounce.values()) clearTimeout(t);
     for (const t of lookTimers) clearTimeout(t);
     lookTimers.clear();

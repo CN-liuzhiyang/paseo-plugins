@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import * as ops from "../server/lib/ops.mjs";
-import { eventsFile } from "../server/lib/flows.mjs";
-import { load, read } from "../server/lib/log.mjs";
+import { claimFile, eventsFile } from "../server/lib/flows.mjs";
+import { append, load, read } from "../server/lib/log.mjs";
 import { scratch, world } from "./kit";
 
 // `affair flow`: who may start a flow, what stops a second start, and what the started process is (its place, its
@@ -12,11 +14,24 @@ import { scratch, world } from "./kit";
 
 const HOUR = 3_600_000;
 
-/** What the stand-in runtime does with the command line it is started with, and what it leaves for the test to read. */
+const STATUS_MODULE = pathToFileURL(path.resolve(import.meta.dirname, "../../orchestration/runtime/status.mjs")).href;
+
+/**
+ * What the stand-in runtime does with the command line it is started with, and what it leaves for the test to read. `status` is
+ * the real runtime's own (runtime/status.mjs), reading the claim and events files the stand-in and the tests write.
+ */
 const FAKE_ORCH = `
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 const argv = process.argv.slice(2);
+if (argv[0] === "status") {
+  if (process.env.FAKE_ORCH_STATUS_BROKEN) { process.stderr.write("broken"); process.exit(1); }
+  const { runStatus } = await import(${JSON.stringify(STATUS_MODULE)});
+  const at = argv.indexOf("--spawned-at");
+  console.log(JSON.stringify(runStatus({ dir: process.env.ORCH_LOG_DIR, runId: argv[1], spawnedAt: at > 0 ? Number(argv[at + 1]) : null })));
+  process.exit(0);
+}
 const get = (k) => argv[argv.indexOf(k) + 1];
 const runId = get("--run-id");
 const file = (flag) => JSON.parse(readFileSync(get(flag).slice(1), "utf8"));
@@ -28,18 +43,32 @@ writeFileSync(path.join(process.env.FAKE_ORCH_OUT, runId + ".json"), JSON.string
 }));
 process.chdir(process.env.TEMP || "/tmp"); // the test removes the working directory when it ends; a process standing in it would hold it
 if (process.env.FAKE_ORCH_REFUSE) {
-  writeFileSync(path.join(logDir, "runs", runId + ".claim"), JSON.stringify({ pid: process.pid, refused: process.env.FAKE_ORCH_REFUSE }));
+  writeFileSync(path.join(logDir, "runs", runId + ".claim"), JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString(), refused: process.env.FAKE_ORCH_REFUSE }));
   process.exit(2);
 }
-writeFileSync(path.join(logDir, "runs", runId + ".jsonl"), JSON.stringify({ kind: "run.start", runId }) + "\\n");
+writeFileSync(path.join(logDir, "runs", runId + ".claim"), JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: new Date().toISOString() }));
+writeFileSync(path.join(logDir, "runs", runId + ".jsonl"), JSON.stringify({ v: 1, seq: 0, ts: new Date().toISOString(), runId, kind: "run.start", flow: { name: "do-it", phases: [{ id: "plan", title: "方案" }] } }) + "\\n");
 setTimeout(() => process.exit(0), 3000);
 `;
 
+/** The program that makes the input. FAKE_PREPARE_DELAY_MS holds it back; FAKE_PREPARE_SLOW_SECOND holds back only the second one to be asked. */
 const PREPARE = `
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync } from "node:fs";
+import path from "node:path";
 const { args } = JSON.parse(readFileSync(0, "utf8"));
 if (process.env.FAKE_PREPARE_FAIL) { process.stderr.write(process.env.FAKE_PREPARE_FAIL + "\\n"); process.exit(1); }
-process.stdout.write(JSON.stringify({ value: { itemNo: Number(args.ref), agentCwd: args.workdir }, summary: "ok" }));
+let wait = Number(process.env.FAKE_PREPARE_DELAY_MS || 0);
+if (process.env.FAKE_PREPARE_SLOW_SECOND) {
+  try { closeSync(openSync(path.join(process.env.FAKE_ORCH_OUT, "prepared-once"), "wx")); } catch { wait = Number(process.env.FAKE_PREPARE_SLOW_SECOND); }
+}
+const answer = () => process.stdout.write(JSON.stringify({ value: { itemNo: Number(args.ref), agentCwd: args.workdir }, summary: "ok" }));
+if (process.env.FAKE_PREPARE_HOLD) {
+  // Takes a number (hold-1, hold-2) and answers when the test puts go-<number> down.
+  const { existsSync } = await import("node:fs");
+  let n = 1;
+  for (;; n++) { try { closeSync(openSync(path.join(process.env.FAKE_ORCH_OUT, "hold-" + n), "wx")); break; } catch {} }
+  const timer = setInterval(() => { if (existsSync(path.join(process.env.FAKE_ORCH_OUT, "go-" + n))) { clearInterval(timer); answer(); } }, 20);
+} else setTimeout(answer, wait);
 `;
 
 function setup({ perDay = 3 }: { perDay?: number } = {}) {
@@ -56,6 +85,10 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
   Object.assign(process.env, { AFFAIR_NODE: process.execPath, ORCH_LOG_DIR: logDir, FAKE_ORCH_OUT: out });
   delete process.env.FAKE_ORCH_REFUSE;
   delete process.env.FAKE_PREPARE_FAIL;
+  delete process.env.FAKE_PREPARE_DELAY_MS;
+  delete process.env.FAKE_PREPARE_SLOW_SECOND;
+  delete process.env.FAKE_PREPARE_HOLD;
+  delete process.env.FAKE_ORCH_STATUS_BROKEN;
   const w = world({
     policy: {
       homes: { gcp: work },
@@ -187,7 +220,7 @@ test("not started twice: one still going refuses a second, and so does the same 
   assert.equal(load(w.root, id).flows.length, 2);
 });
 
-test("two starts at the same moment: one runs, the other steps back and is written down as not started", async () => {
+test("two starts at the same moment: one runs, the other is turned away before anything is written for it", async () => {
   const { w, ran } = setup();
   const id = await ticket(w);
   const [a, b] = await Promise.all([ops.flow(w.ctx, id, "do-it"), ops.flow(w.ctx, id, "do-it")]);
@@ -195,10 +228,9 @@ test("two starts at the same moment: one runs, the other steps back and is writt
   const loser = a.ok ? b : a;
   assert.match(loser.text, /已经在跑/);
   const state = load(w.root, id);
-  assert.equal(state.flows.length, 2);
-  assert.deepEqual(state.flows.map((f: { failed: string }) => Boolean(f.failed)).sort(), [false, true]);
-  const winner = (a.ok ? a : b).runId;
-  assert.ok(ran(winner), "only one process was made");
+  assert.equal(state.flows.length, 1, "the one that was turned away left no line");
+  assert.ok(ran((a.ok ? a : b).runId), "only one process was made");
+  assert.equal(readdirSync(path.join(w.root, id, "flows")).length, 2, "and only one run's files are left: the input and the affair of the winner");
 });
 
 test("a run the runtime turns away at once: said in his words, written as not started, and it does not count against asking again", async () => {
@@ -221,11 +253,11 @@ test("a run the runtime turns away at once: said in his words, written as not st
 test("when the item cannot be read nothing is written and nothing is started", async () => {
   const { w, out } = setup();
   const id = await ticket(w);
-  process.env.FAKE_PREPARE_FAIL = "易协作没登录或登录过期";
+  process.env.FAKE_PREPARE_FAIL = "工单系统没登录或登录过期";
   const result = await ops.flow(w.ctx, id, "do-it");
   delete process.env.FAKE_PREPARE_FAIL;
   assert.equal(result.ok, false);
-  assert.equal(result.text, "没起成：读不到单子：易协作没登录或登录过期");
+  assert.equal(result.text, "没起成：读不到单子：工单系统没登录或登录过期");
   assert.equal(load(w.root, id).flows.length, 0);
   assert.equal(existsSync(path.join(w.root, id, "flows")), false);
   assert.deepEqual(existsSync(out) && (await import("node:fs")).readdirSync(out), []);
@@ -264,8 +296,9 @@ test("the panel's 经过 has a row for the start, with his words, and none for o
   assert.equal((await ops.flow(chatOf(w, id), id, "do-it", { saidSeq: said })).ok, true);
   const [row] = rowsNow();
   assert.equal(rowsNow().length, 1);
-  assert.deepEqual([row.label, row.text], ["起了 do-it", "你说：「好，用 do-it 做 so go。启动」"]);
-  assert.doesNotMatch(`${row.label}${row.text}`, /叫醒|校验|记录|计划|读数|会话|agent/i);
+  assert.deepEqual([row.label, row.text], ["流程 · do-it", "在跑"]);
+  assert.deepEqual(row.children.map((k: { text: string }) => k.text), ["起了（你说：「好，用 do-it 做 so go。启动」）"], "what he said is the first step under the row");
+  assert.doesNotMatch(`${row.label}${row.text}${row.children[0].text}`, /叫醒|校验|记录|计划|读数|会话|agent/i);
 });
 
 test("the affair's label is what the runtime accepts: one line, nothing invisible, at most 120 characters, the number not said twice", async () => {
@@ -276,4 +309,164 @@ test("the affair's label is what the runtime accepts: one line, nothing invisibl
   const long = labelOf("700", "字".repeat(300));
   assert.equal([...long].length, 120);
   assert.ok(long.endsWith("…"));
+});
+
+// --- The boundaries of starting (the review of the first version): what was checked before the input was made is checked again ---
+
+const heard = async (w: ReturnType<typeof world>, id: string, text: string) => {
+  assert.equal((await ops.hear(w.ctx, id, text)).ok, true);
+  return load(w.root, id).said.at(-1)!.seq as number;
+};
+const startedCount = (out: string) => readdirSync(out).filter((n) => n.endsWith(".json")).length;
+
+test("a request that waited for its input is checked again: the first ended meanwhile, and the second still needs --again", async () => {
+  const { w, logDir, out } = setup();
+  const id = await ticket(w);
+  process.env.FAKE_PREPARE_HOLD = "1";
+  const both = [ops.flow(w.ctx, id, "do-it"), ops.flow(w.ctx, id, "do-it")];
+  const until = async (what: () => boolean) => { for (let i = 0; i < 300 && !what(); i++) await new Promise((r) => setTimeout(r, 20)); assert.ok(what()); };
+  // Both got past the first look (nothing was going) and are making their input; the first to finish starts, and ends.
+  await until(() => existsSync(path.join(out, "hold-1")) && existsSync(path.join(out, "hold-2")));
+  writeFileSync(path.join(out, "go-1"), "");
+  await until(() => load(w.root, id).flows.length === 1 && existsSync(eventsFile(logDir, load(w.root, id).flows[0].runId)));
+  finish(logDir, load(w.root, id).flows[0].runId);
+  writeFileSync(path.join(out, "go-2"), "");
+  const results = await Promise.all(both);
+  assert.deepEqual(results.map((r) => r.ok).sort(), [false, true], results.map((r) => r.text).join(" | "));
+  assert.match(results.find((r) => !r.ok)!.text, /跑过一次 do-it（做完了）。要再跑一次，加 --again/);
+  assert.equal(startedCount(out), 1);
+  assert.equal(load(w.root, id).flows.length, 1);
+});
+
+test("a request that waited for its input is checked again: the affair was stopped meanwhile", async () => {
+  const { w, out } = setup();
+  const id = await ticket(w);
+  process.env.FAKE_PREPARE_DELAY_MS = "600";
+  const pending = ops.flow(w.ctx, id, "do-it");
+  await new Promise((r) => setTimeout(r, 200));
+  await ops.stop(w.ctx, id);
+  const result = await pending;
+  assert.equal(result.ok, false, result.text);
+  assert.match(result.text, /不盯了，不起流程/);
+  assert.equal(startedCount(out), 0);
+  assert.equal(load(w.root, id).flows.length, 0);
+  assert.equal(existsSync(path.join(w.root, id, "flows")) ? readdirSync(path.join(w.root, id, "flows")).length : 0, 0, "the files made for it are taken away");
+});
+
+test("the day's number holds when different affairs ask at once", async () => {
+  const { w, out } = setup({ perDay: 1 });
+  const ids = [await ticket(w, "700"), await ticket(w, "701")];
+  process.env.FAKE_PREPARE_DELAY_MS = "300";
+  const results = await Promise.all(ids.map((id) => ops.flow(w.ctx, id, "do-it")));
+  assert.deepEqual(results.map((r) => r.ok).sort(), [false, true], results.map((r) => r.text).join(" | "));
+  assert.match(results.find((r) => !r.ok)!.text, /到一天的上限（1 次）了/);
+  assert.equal(startedCount(out), 1);
+  assert.equal(ids.reduce((n, id) => n + load(w.root, id).flows.length, 0), 1);
+});
+
+test("the word to go ahead is the latest thing he said, and it starts one run", async () => {
+  const { w, logDir, out } = setup();
+  const id = await ticket(w);
+  const chat = chatOf(w, id);
+  const go = await heard(w, id, "好，用 do-it 做");
+  const hold = await heard(w, id, "先别跑，告诉我现在的情况");
+  const old = await ops.flow(chat, id, "do-it", { saidSeq: go });
+  assert.equal(old.ok, false);
+  assert.match(old.text, new RegExp(`--said-seq ${go} 不是他最近的一句。他后来又说过话（#${hold}）`));
+  assert.equal(startedCount(out), 0);
+
+  const ready = await heard(w, id, "现在可以了，开始吧");
+  const first = await ops.flow(chat, id, "do-it", { saidSeq: ready });
+  assert.equal(first.ok, true, first.text);
+  finish(logDir, first.runId);
+  // The same sentence cannot start another, --again or not; a new sentence can.
+  const reuse = await ops.flow(chat, id, "do-it", { saidSeq: ready, again: true });
+  assert.equal(reuse.ok, false);
+  assert.match(reuse.text, new RegExp(`他那句话（#${ready}）已经起过一次 do-it 了`));
+  const next = await heard(w, id, "再跑一次");
+  assert.equal((await ops.flow(chat, id, "do-it", { saidSeq: next, again: true })).ok, true);
+  assert.equal(startedCount(out), 2);
+});
+
+test("a start the runtime turned away on the spot does not use up his sentence", async () => {
+  const { w } = setup();
+  const id = await ticket(w);
+  const chat = chatOf(w, id);
+  const said = await heard(w, id, "用 do-it 做");
+  process.env.FAKE_ORCH_REFUSE = "turned away";
+  assert.equal((await ops.flow(chat, id, "do-it", { saidSeq: said })).ok, false);
+  delete process.env.FAKE_ORCH_REFUSE;
+  assert.equal((await ops.flow(chat, id, "do-it", { saidSeq: said })).ok, true, "the same sentence, since nothing ran");
+});
+
+/** A run the stand-in did not start: a line in the log, and a claim of the given age in ms (null: none), optionally with events. */
+function plant(w: ReturnType<typeof world>, id: string, logDir: string, runId: string, { claim, events = false, refused = "", pid = process.pid }: { claim: number | null; events?: boolean; refused?: string; pid?: number }) {
+  mkdirSync(path.join(logDir, "runs"), { recursive: true });
+  append(w.root, id, [{ kind: "flow", flow: "do-it", runId, events: eventsFile(logDir, runId), timeoutMs: 30 * HOUR, by: "human" }], { now: w.now() - 6 * 60_000 });
+  if (claim !== null) {
+    const file = claimFile(logDir, runId);
+    writeFileSync(file, JSON.stringify({ pid, hostname: os.hostname(), startedAt: new Date(w.now() - 6 * 60_000).toISOString(), ...(refused ? { refused } : {}) }));
+    const at = new Date(Date.now() - claim);
+    utimesSync(file, at, at);
+  }
+  if (events) writeFileSync(eventsFile(logDir, runId), `${JSON.stringify({ v: 1, seq: 0, ts: new Date().toISOString(), runId, kind: "run.start", flow: { name: "do-it", phases: [] } })}\n`);
+}
+
+test("whether a run is still going is the runtime's word, not the time passed: a claim kept fresh holds, an abandoned one lets go", async () => {
+  const { w, logDir, out } = setup();
+  const id = await ticket(w);
+  // Started six minutes ago and still loading (a claim kept fresh, no events yet): not over, whatever --again says.
+  plant(w, id, logDir, "loading", { claim: 5_000 });
+  const held = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(held.ok, false);
+  assert.match(held.text, /^已经在跑：do-it/);
+  // The runtime cannot be asked: counted as going, not as gone.
+  process.env.FAKE_ORCH_STATUS_BROKEN = "1";
+  assert.match((await ops.flow(w.ctx, id, "do-it", { again: true })).text, /^已经在跑/);
+  delete process.env.FAKE_ORCH_STATUS_BROKEN;
+  assert.equal(startedCount(out), 0);
+  // Its claim has gone untouched for ten minutes and its process is gone: nothing is going, and --again may start another.
+  plant(w, id, logDir, "abandoned", { claim: 10 * 60_000, pid: 2_147_483_000 });
+  const { rmSync } = await import("node:fs");
+  rmSync(claimFile(logDir, "loading"));
+  writeFileSync(eventsFile(logDir, "loading"), `${JSON.stringify({ v: 1, seq: 0, ts: new Date().toISOString(), runId: "loading", kind: "run.end", outcome: "failed" })}\n`);
+  const freed = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(freed.ok, true, freed.text);
+});
+
+test("a run that began and whose claim is no longer kept is lost, and one the runtime refused never began; both let --again start another", async () => {
+  const { w, logDir } = setup();
+  const id = await ticket(w);
+  plant(w, id, logDir, "gone", { claim: 10 * 60_000, events: true });
+  const lost = await ops.flow(w.ctx, id, "do-it", { again: true });
+  assert.equal(lost.ok, true, lost.text);
+  assert.match(lost.text, /跑过一次 do-it（没了下文）/);
+  const second = setup();
+  const id2 = await ticket(second.w);
+  plant(second.w, id2, second.logDir, "turned", { claim: 1_000, refused: "no available provider" });
+  const refused = await ops.flow(second.w.ctx, id2, "do-it", { again: true });
+  assert.equal(refused.ok, true, refused.text);
+  assert.match(refused.text, /跑过一次 do-it（没起来）/);
+});
+
+test("just after Paseo starts, the card provider is not ready: said at once, in plain words, before anything is made", async () => {
+  const { w, out } = setup();
+  const id = await ticket(w);
+  for (const status of ["loading", "missing"]) {
+    process.env.FAKE_PASEO_GATE = status;
+    const result = await ops.flow(w.ctx, id, "do-it");
+    assert.equal(result.ok, false);
+    assert.equal(result.text, "Paseo 刚启动，过一两分钟再说一次。", status);
+  }
+  process.env.FAKE_PASEO_GATE = "unavailable";
+  assert.match((await ops.flow(w.ctx, id, "do-it")).text, /批准卡用的那个插件现在不能用（unavailable）/);
+  assert.equal(startedCount(out), 0);
+  assert.equal(load(w.root, id).flows.length, 0);
+  assert.equal(existsSync(path.join(w.root, id, "flows")), false, "nothing was made while it was not ready");
+  // When the list itself cannot be had the runtime is left to say.
+  delete process.env.FAKE_PASEO_GATE;
+  process.env.FAKE_PASEO_FAIL = "provider ls";
+  const through = await ops.flow(w.ctx, id, "do-it");
+  delete process.env.FAKE_PASEO_FAIL;
+  assert.equal(through.ok, true, through.text);
 });

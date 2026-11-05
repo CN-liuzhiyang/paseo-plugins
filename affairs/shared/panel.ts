@@ -59,12 +59,29 @@ export const eventSchema = text.extend({
   children: z.array(z.object({ when: z.string(), text: z.string() })).optional(),
 });
 
+/** The run started for this affair, as the block above the "现在" shows it. */
+const flowBlock = z.object({
+  name: z.string(),
+  /** One sentence: what it is doing, or what it is waiting for him to do, or how it ended. */
+  text: z.string(),
+  tone: z.enum(["normal", "red"]),
+  /** How long, and what it cost. */
+  meta: z.string(),
+  /** Open the card to answer (approve), or the run's own page (detail). */
+  action: z.object({ kind: z.enum(["approve", "detail"]), agentId: z.string().optional(), runId: z.string().optional() }).nullable(),
+  /** Runs started before this one. */
+  more: z.number(),
+  /** Said when the "现在" below it is older than the end of the run. */
+  stale: z.string(),
+});
+
 export const panelSchema = z.object({
   id: z.string(),
   title: z.string(),
   open: z.boolean(),
   mood: z.enum(["watching", "ask", "done", "error", "paused", "stopped"]),
   asks: z.array(ask),
+  flow: flowBlock.nullable(),
   waiting: text,
   now: text,
   next: text,

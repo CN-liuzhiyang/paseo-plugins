@@ -5,6 +5,7 @@ import { CLIP_CHARS, FULL_CHARS, clip } from "./clip.mjs";
 import { counts } from "./limits.mjs";
 import { cardOf, sentOf, stamp } from "./view.mjs";
 import { eventsOf, shownName, whenOf } from "./events.mjs";
+import { endedAfterNow, sentenceOf, spanText, usdText } from "./flows.mjs";
 import { listReaders } from "./readers.mjs";
 
 // What the "进展" panel beside an affair's conversation shows: four blocks (now, what happened, sources, materials), all drawn from the
@@ -199,8 +200,38 @@ export function moodOf(state, asked, trouble, held) {
   return held ? "paused" : "watching";
 }
 
+/** A run stays on the panel this long after it ended. */
+const FLOW_SHOWN_MS = 24 * 3_600_000;
+
+/**
+ * The block above the "现在": the latest run started for this affair while it is on, and for a day after it ended. What it is
+ * doing now comes from what the plugin last saw of it (`flowNow`); without that, from the steps the log holds.
+ */
+export function flowBlockOf(state, now, flowNow = new Map()) {
+  const runs = (state.flows ?? []).filter((f) => !f.failed);
+  const latest = runs[runs.length - 1];
+  if (!latest) return null;
+  const st = flowNow.get(latest.runId)?.st ?? null;
+  const sent = sentenceOf(latest, st, now);
+  const ended = latest.endedAt ? Date.parse(latest.endedAt) : 0;
+  if (sent.over && now - (ended || Date.parse(latest.at)) > FLOW_SHOWN_MS) return null;
+  const took = spanText((sent.over && ended ? ended : now) - Date.parse(latest.at));
+  const cost = usdText(sent.over ? latest.costUsd : st?.costUsd);
+  const late = sent.over ? endedAfterNow(state) : null;
+  return {
+    name: latest.flow,
+    text: sent.short,
+    tone: sent.tone,
+    meta: [took, cost].filter(Boolean).join(" · "),
+    action: sent.waiting && sent.agentId ? { kind: "approve", agentId: sent.agentId } : { kind: "detail", runId: latest.runId },
+    more: runs.length - 1,
+    // The "现在" is written by a look; until it has read the result it still says what was before.
+    stale: late ? (state.running ? "「现在」正在按结果更新" : "「现在」还是流程结束之前的，下一次看一眼会更新") : "",
+  };
+}
+
 /** The whole panel for one affair. */
-export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "" } = {}) {
+export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "", flowNow = new Map() } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
   const { labelOf } = namesOf(policy, state, lc);
   const happened = eventsOf(state, now, policy, lc, { labelOf, fileAt: (name) => { const f = fileIn(root, state.id, name); return f ? slashed(f) : null; } });
@@ -212,6 +243,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     open: card.open,
     mood: moodOf(state, asks.length > 0, Boolean(trouble), Boolean(budget)),
     asks: asks.map((a) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
+    flow: flowBlockOf(state, now, flowNow),
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),
     next: withParts(card.next, lc),

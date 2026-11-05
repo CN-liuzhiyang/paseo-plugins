@@ -84,4 +84,8 @@ else if (group === "schedule") {
   const pairs = args.flatMap((a, i) => (args[i - 1] === "--label" ? [a] : []));
   const mine = process.env.PASEO_AGENT_ID ?? "";
   if (mine && pairs.length && pairs.every((p) => labels[p.slice(0, p.indexOf("="))] === p.slice(p.indexOf("=") + 1))) console.log(mine.slice(0, 7));
+} else if (group === "provider" && action === "ls") {
+  // The card provider as the list shows it: "available" by default; FAKE_PASEO_GATE says another status, "missing" leaves it out.
+  const status = process.env.FAKE_PASEO_GATE ?? "available";
+  out(status === "missing" ? [{ provider: "claude", status: "available", enabled: "Enabled" }] : [{ provider: "claude", status: "available", enabled: "Enabled" }, { provider: "orch-gate", status, enabled: status === "disabled" ? "Disabled" : "Enabled" }]);
 } else die(`unknown: ${args.join(" ")}`);

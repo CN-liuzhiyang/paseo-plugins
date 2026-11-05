@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { dayStart, mayLook, tripped } from "./limits.mjs";
-import { eventsFile, flowsOf, labelOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, runEnv, runState, startRun } from "./flows.mjs";
+import { eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, marksOf, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
@@ -63,6 +63,10 @@ export function makeCtx(options = {}) {
     // `flow`: how long to wait for a started run to show itself, and how a process is made (a test puts its own).
     flowWaitMs: options.flowWaitMs ?? 8000,
     flowStart: options.flowStart,
+    // What the plugin last saw of each run it follows, by run id: { st, lostAt? }. The sentences on the chat and the panel are drawn from it.
+    flowNow: new Map(),
+    // A run that reads as lost is believed only if it still does this long after it first did (a machine that slept reads as lost for a moment).
+    lostConfirmMs: options.lostConfirmMs ?? 35_000,
   };
 }
 
@@ -558,14 +562,158 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
   return { ok: true, text: say.paused(s.title, speak(at, ctx.now(), ctx.policy.tz)) };
 }
 
+/**
+ * Whether a run of the affair is going, over (and how) or never started: the runtime's own word for it (`orch.mjs status`, which
+ * looks at the run's claim and whether its process is alive). Time passed is no evidence that a run will not go on: when the
+ * runtime cannot be asked, the run counts as going, so that nothing is started on top of it by mistake.
+ */
+async function flowStateOf(ctx, x, orch, logDir) {
+  if (x.outcome) return { state: "over", outcome: x.outcome };
+  const st = await readStatus({ orch, logDir, runId: x.runId, spawnedAt: Date.parse(x.at) });
+  return st ? liveOf(st) : { state: "going", outcome: "" };
+}
+
+/**
+ * The card provider the runtime asks him through is part of Paseo and comes up a little after the daemon does: until it has
+ * (its entry in `provider ls` is `loading`, or not there yet) a run is turned away at the start. The sentence to say when it is
+ * not ready, or "" (ready, or the list could not be had: the runtime will say if it is not).
+ */
+async function gateNotReady(ctx) {
+  const family = String(ctx.policy.flows?.gateProvider || "orch-gate");
+  let rows;
+  try {
+    rows = await json(ctx.run, ["provider", "ls"]);
+  } catch {
+    return "";
+  }
+  if (!Array.isArray(rows)) return "";
+  const row = rows.find((r) => r.provider === family);
+  if (row && row.status === "available" && row.enabled !== "Disabled") return "";
+  if (!row || row.status === "loading") return "Paseo 刚启动，过一两分钟再说一次。";
+  return `批准卡用的那个插件现在不能用（${row.enabled === "Disabled" ? "被关了" : row.status}），先在 Paseo 的插件设置里看一下，再起流程。`;
+}
+
+/**
+ * Looks at the runs of one affair that are not over, writes down what has happened to them since it last looked (a card waiting,
+ * a card answered, the end: each once), and when one has ended asks for a look at the affair, once, so that the "现在" is
+ * written by someone who read the result. A run the runtime turned away after the start is taken back (`flow.fail`).
+ * What it saw of each run stays in `ctx.flowNow` for the chat and the panel to draw. Returns whether the log changed.
+ */
+export async function flowSync(ctx, id) {
+  const first = state(ctx, id);
+  if (!first.id || first.flows.every((x) => x.failed || x.outcome)) return false;
+  const logDir = orchLogDir(ctx.policy);
+  const orch = orchCommand(ctx.policy, BIN);
+  if (!orch || !existsSync(orch)) return false;
+  let changed = false;
+  for (const f of first.flows) {
+    if (f.failed || f.outcome) continue;
+    const seen = await readStatus({ orch, logDir, runId: f.runId, spawnedAt: Date.parse(f.at) });
+    if (!seen) continue;
+    const now = ctx.now();
+    if (seen.state === "refused" || (seen.state === "absent" && now - Date.parse(f.at) > 5 * 60_000)) {
+      write(ctx, id, [{ kind: "flow.fail", runId: f.runId, why: seen.refused || "没起来" }]);
+      ctx.flowNow.delete(f.runId);
+      changed = true;
+      continue;
+    }
+    const lostLike = ["lost", "dead-before-start"].includes(seen.state);
+    const before = ctx.flowNow.get(f.runId);
+    const entry = { st: lostLike ? { ...seen, state: "lost" } : seen, lostAt: lostLike ? before?.lostAt ?? now : undefined };
+    ctx.flowNow.set(f.runId, entry);
+    if (lostLike && now - entry.lostAt < ctx.lostConfirmMs) continue;
+    const have = new Set(f.marks.map((m) => m.key));
+    const news = marksOf(entry.st).filter((m) => !have.has(m.key));
+    if (news.length === 0) continue;
+    write(ctx, id, news.map((m) => ({ kind: "flow.mark", runId: f.runId, ...m })));
+    changed = true;
+    if (news.some((m) => m.key === "end")) {
+      write(ctx, id, [{ kind: "ring", why: `flow:${f.runId}` }]);
+      await requestLook(ctx, id, "flow");
+    }
+  }
+  return changed;
+}
+
 const NTH = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
 
 /**
+ * One request at a time decides whether a run may be started and writes down that it will be (nothing else of any affair can be
+ * between the deciding and the writing): the count for the day is across all affairs, and a run just reserved has to be seen by
+ * the next request. A lock directory in the root, waited for; one left by a process that died is taken over after two minutes.
+ */
+async function withFlowLock(root, fn) {
+  mkdirSync(root, { recursive: true });
+  const lock = path.join(root, ".flow.lock");
+  const started = Date.now();
+  for (;;) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if (!["EEXIST", "EPERM", "EBUSY", "EACCES"].includes(error.code)) throw error;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > 2 * 60_000) rmSync(lock, { recursive: true, force: true });
+      } catch {
+        // released between the two calls
+      }
+      if (Date.now() - started > 90_000) return { fail: "别的流程正在起，等了一分半钟还没轮到。过一会儿再说一次。" };
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    rmSync(lock, { recursive: true, force: true, maxRetries: 10, retryDelay: 10 });
+  }
+}
+
+/**
+ * Everything that stands between a request and a run, read from the affair as it is now: it is still on, the request is his
+ * (a chat needs the latest thing he said, and one thing he said starts one run), nothing of this affair is going, a run of the
+ * same flow needs --again, and the day's count is not used up. Asked before the input is made, and again under the lock after.
+ * @returns {Promise<{ fail: string } | { said: number | null, same: any[], lastSame: any, lastOutcome: string }>}
+ */
+async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
+  if (!isOpen(s) || s.system) return { fail: `「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了，不起流程。` };
+  if (!s.workspaceId || !s.workdir) return { fail: `「${s.title}」的工作区或工作目录不在了，先找回来再起。` };
+  let said = null;
+  if (byChat(ctx)) {
+    if (saidSeq === "") return { fail: "要指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没点名要跑就别起，直接问他。" };
+    said = Number(saidSeq);
+    const his = s.said.filter((m) => !m.undone && m.by === "user" && m.via !== "chat-agent");
+    if (!his.find((m) => m.seq === said)) return { fail: `--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。` };
+    // The word to go ahead is the latest thing he said: after "先别跑" an older "用 XX 做" does not stand. And it starts one run.
+    if (his[his.length - 1].seq !== said) return { fail: `--said-seq ${saidSeq} 不是他最近的一句。他后来又说过话（#${his[his.length - 1].seq}），要按他最新的意思来：他点了名要跑，就指给那一句；没有就问他。` };
+    const used = s.flows.find((x) => !x.failed && x.said === said);
+    if (used) return { fail: `他那句话（#${said}）已经起过一次 ${used.flow} 了。要再起一次得他再说一句，不能拿同一句。` };
+  } else if (saidSeq !== "") return { fail: "--said-seq 只有对话的会话用；本人直接起就行。" };
+
+  const now = ctx.now();
+  const tz = ctx.policy.tz;
+  const earlier = s.flows.filter((x) => !x.failed);
+  const states = new Map();
+  for (const x of earlier) states.set(x.runId, await flowStateOf(ctx, x, orch, logDir));
+  const going = earlier.find((x) => states.get(x.runId).state === "going");
+  if (going) return { fail: `已经在跑：${going.flow}（${stamp(going.at, now, tz)} 起）。` };
+  const same = earlier.filter((x) => x.flow === name);
+  const lastSame = same[same.length - 1];
+  const lastOutcome = lastSame ? outcomeText(states.get(lastSame.runId).outcome) || "没起来" : "";
+  if (lastSame && !again) return { fail: `这件事 ${stamp(lastSame.at, now, tz)} 跑过一次 ${name}（${lastOutcome}）。要再跑一次，加 --again。` };
+  const since = dayStart(now, tz, ctx.policy.limits.dayStartHour);
+  const today = listIds(ctx.root).reduce((n, id) => n + state(ctx, id).flows.filter((x) => !x.failed && Date.parse(x.at) >= since).length, 0);
+  if (today >= perDayOf(ctx.policy)) return { fail: `今天已经起了 ${today} 次流程，到一天的上限（${perDayOf(ctx.policy)} 次）了。` };
+  return { said, same, lastSame, lastOutcome };
+}
+
+/**
  * `affair flow <编号> [<流程>]`: starts one of the flows policy allows for this kind of affair, in the affair's own workspace, so
- * that what it asks him (an approval) is asked where he is. From the person's side only: a chat session needs the line of his
- * that asked for it (--said-seq), a look cannot (it may only ask him). Without a flow name: which ones can be started.
- * The run is the runtime's, in a process of its own that outlives this command; it is told nothing of the session that asked
- * (orchestration/CONVENTIONS.md), and what it needs is made by the flow's prepare program, not typed by whoever asks.
+ * that what it asks him (an approval) is asked where he is. From the person's side only: a chat session needs the latest thing
+ * he said (--said-seq) and one thing he said starts one run; a look cannot start one (it may only ask him). Without a flow name:
+ * which ones can be started. The run is the runtime's, in a process of its own that outlives this command; it is told nothing of
+ * the session that asked (orchestration/CONVENTIONS.md), and what it needs is made by the flow's prepare program, not typed by
+ * whoever asks. Making the input takes a while, so what was checked before is checked again, under one lock for all affairs,
+ * and only then is the run written down and started; one that could not be started is taken back (`flow.fail`).
  * @returns {Promise<Result>}
  */
 export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false } = {}) {
@@ -580,31 +728,16 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   const f = flows[name];
   if (!f) return fail(`没有叫「${name}」的流程可起。${Object.keys(flows).length ? `能起的有：${Object.keys(flows).join("、")}。` : "现在一个都没配。"}`);
   if (!link || !f.kinds.includes(link.kind)) return fail(`${name} 管的是 ${f.kinds.join("、")} 的事，「${s.title}」不是，起不了。`);
-  if (!isOpen(s) || s.system) return fail(`「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了，不起流程。`);
-  if (!s.workspaceId || !s.workdir) return fail(`「${s.title}」的工作区或工作目录不在了，先找回来再起。`);
-  let said = null;
-  if (byChat(ctx)) {
-    if (saidSeq === "") return fail("要指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没点名要跑就别起，直接问他。");
-    said = Number(saidSeq);
-    if (!s.said.find((m) => m.seq === said && !m.undone && m.by === "user" && m.via !== "chat-agent")) return fail(`--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。`);
-  } else if (saidSeq !== "") return fail("--said-seq 只有对话的会话用；本人直接起就行。");
-
-  const now = ctx.now();
-  const tz = ctx.policy.tz;
-  const logDir = orchLogDir(ctx.policy);
-  const stateOf = (x) => runState({ events: x.events || eventsFile(logDir, x.runId), startedAt: Date.parse(x.at), timeoutMs: x.timeoutMs || undefined, now });
-  const earlier = s.flows.filter((x) => !x.failed);
-  const going = earlier.find((x) => stateOf(x).state === "going");
-  if (going) return fail(`已经在跑：${going.flow}（${stamp(going.at, now, tz)} 起）。`);
-  const same = earlier.filter((x) => x.flow === name);
-  const lastSame = same[same.length - 1];
-  if (lastSame && !again) return fail(`这件事 ${stamp(lastSame.at, now, tz)} 跑过一次 ${name}（${outcomeText(stateOf(lastSame).outcome) || "没起来"}）。要再跑一次，加 --again。`);
-  const since = dayStart(now, tz, ctx.policy.limits.dayStartHour);
-  const today = listIds(ctx.root).reduce((n, id) => n + state(ctx, id).flows.filter((x) => !x.failed && Date.parse(x.at) >= since).length, 0);
-  if (today >= perDayOf(ctx.policy)) return fail(`今天已经起了 ${today} 次流程，到一天的上限（${perDayOf(ctx.policy)} 次）了。`);
   if (!f.prepare || !existsSync(f.prepare)) return fail(`${name} 的准备脚本找不到：配置里 flows.${name}.prepare 要指到它。`);
+  const logDir = orchLogDir(ctx.policy);
   const orch = orchCommand(ctx.policy, BIN);
   if (!orch || !existsSync(orch)) return fail("找不到编排运行时（orchestration/runtime/orch.mjs）：配置里 flows.orch 要指到它。");
+
+  const first = await flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir });
+  if ("fail" in first) return fail(first.fail);
+  // Paseo has just been started: the card provider is not up yet, and the runtime would turn the run away on the spot.
+  const notReady = await gateNotReady(ctx);
+  if (notReady) return fail(notReady);
 
   let input;
   try {
@@ -621,21 +754,28 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   writeFileSync(inputFile, JSON.stringify(input));
   writeFileSync(affairFile, JSON.stringify({ label: labelOf(s.id, s.title), key: `affair:${s.id}`, workspace: s.workspaceId, ...(url ? { url } : {}) }));
 
-  // Written before the process is started, so that a second start sees it; if another start was first, this one steps back.
-  const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(said !== null ? { said } : {}), ...(again ? { again: true } : {}) }]);
-  const rival = state(ctx, s.id).flows.find((x) => x.seq < mark.seq && !x.failed && stateOf(x).state === "going");
-  if (rival) {
-    write(ctx, s.id, [{ kind: "flow.fail", runId, why: "另一次已经在跑" }]);
-    return fail(`已经在跑：${rival.flow}（${stamp(rival.at, now, tz)} 起）。`);
+  // The input took a while: the affair is looked at again as it is now, and the run is written down in the same breath, so a
+  // second request (of this affair or any other) sees it before it decides.
+  const reserved = await withFlowLock(ctx.root, async () => {
+    const now = state(ctx, s.id);
+    const again2 = await flowAllowed(ctx, now, name, { saidSeq, again, orch, logDir });
+    if ("fail" in again2) return again2;
+    const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(again2.said !== null ? { said: again2.said } : {}), ...(again ? { again: true } : {}) }]);
+    return { ...again2, mark };
+  });
+  if ("fail" in reserved) {
+    for (const file of [inputFile, affairFile]) rmSync(file, { force: true });
+    return fail(reserved.fail);
   }
+  const { same, lastSame, lastOutcome } = reserved;
   const args = [orch, "run", name, "--run-id", runId, "--input", `@${inputFile}`, "--affair", `@${affairFile}`, "--timeout", f.timeout];
   const started = await startRun({ args, cwd: s.workdir, env: runEnv(process.env, { paseoHome: ctx.paseoHome, logDir }), logDir, runId, waitMs: ctx.flowWaitMs, start: ctx.flowStart });
   if (!started.ok) {
     write(ctx, s.id, [{ kind: "flow.fail", runId, why: started.why }]);
     return fail(`没起成：${started.why}`);
   }
-  const first = `起了 ${name}${f.says ? `（${f.says}）` : ""}，要你批的时候这件事会亮。`;
-  const text = lastSame ? `${first}\n这件事 ${stamp(lastSame.at, now, tz)} 跑过一次 ${name}（${outcomeText(stateOf(lastSame).outcome) || "没起来"}），这是第${NTH[same.length + 1] ?? same.length + 1}次。` : first;
+  const head = `起了 ${name}${f.says ? `（${f.says}）` : ""}，要你批的时候这件事会亮。`;
+  const text = lastSame ? `${head}\n这件事 ${stamp(lastSame.at, ctx.now(), ctx.policy.tz)} 跑过一次 ${name}（${lastOutcome}），这是第${NTH[same.length + 1] ?? same.length + 1}次。` : head;
   return { ok: true, text, runId, pid: started.pid };
 }
 
@@ -731,6 +871,10 @@ export async function brief(ctx, ref, { chat = false } = {}) {
       const w = fresh.watches[ref2];
       return w ? `你盯着的「${w.label || w.tool}」变了：原来 ${JSON.stringify(w.prev?.value ?? null)}（${w.prev?.summary ?? ""}）→ 现在 ${JSON.stringify(w.value ?? null)}（${w.summary}）（watch:${w.id}）` : x;
     }
+    if (kind === "flow") {
+      const f = fresh.flows.find((x) => x.runId === ref2);
+      return f ? `你起的流程 ${f.flow} 结束了：${f.marks.find((m) => m.key === "end")?.text ?? "结局不明"}。读一下单子和它留下的东西，把「现在」和下次交回。` : x;
+    }
     if (kind === "watch-until") return `你要盯到的时间到了（盯 ${ref2}），盯着的读数已经撤了，看一眼最后的情况再定。`;
     return x;
   });
@@ -766,6 +910,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
           "",
         ]
       : []),
+    ...flowLines(s, now, tz),
     "## 记住的",
     ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
     "",
@@ -796,7 +941,21 @@ export async function brief(ctx, ref, { chat = false } = {}) {
 /** Under the "now" line of a brief: how old it is and how many notes came after it (nothing when none did). */
 function staleLine(s, now) {
   const stale = notesSinceNow(s, now);
-  return stale ? [`　↑ 这句是 ${stale.when}写的，之后记了 ${stale.n} 条，没有交回新的现在；有进展的话先用 report 交回。`] : [];
+  const out = stale ? [`　↑ 这句是 ${stale.when}写的，之后记了 ${stale.n} 条，没有交回新的现在；有进展的话先用 report 交回。`] : [];
+  const late = endedAfterNow(s);
+  if (late) out.push(`　↑ 流程 ${late.flow} ${ago(late.endedAt, now)}结束了，这句是在那之前写的；读一下结果，用 report 交回新的现在。`);
+  return out;
+}
+
+/** The runs started for this affair, newest last, as a brief shows them: how each stands and the steps seen. */
+function flowLines(s, now, tz) {
+  const shown = s.flows.filter((f) => !f.failed).slice(-3);
+  if (!shown.length) return [];
+  return [
+    "## 起过的流程",
+    ...shown.flatMap((f) => [`- ${f.flow}（${stamp(f.at, now, tz)} 起）：${sentenceOf(f, null, now).text}`, ...f.marks.slice(-4).map((m) => `　· ${stamp(m.at, now, tz)} ${m.text}`)]),
+    "",
+  ];
 }
 
 /** One line of the log as the chat session reads it: what was said, by whom, with the number it can point to. */
@@ -852,6 +1011,7 @@ async function briefChat(ctx, s) {
     "## 没答的问题",
     ...(asks.length ? asks.map((a) => `- ${a.id}：${a.title}（选项：${a.options.join("、") || "无"}）`) : ["- （没有）"]),
     "",
+    ...flowLines(s, now, tz),
     "## 记住的",
     ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
     "",

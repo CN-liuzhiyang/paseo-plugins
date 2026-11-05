@@ -34,7 +34,7 @@ export interface View {
 
 type Unsubscribe = (() => void) & { ready?: Promise<unknown> };
 export interface ChatHandle {
-  refresh(): Promise<{ agent: { status: string } } | null>;
+  refresh(): Promise<{ agent: { status: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
   archive(): Promise<unknown>;
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
@@ -66,6 +66,11 @@ interface Drawn {
 
 const askId = (qid: string) => `ask-${qid}`;
 
+/** An older chat is looked at for coming back to life this often (per affair), and only while it is this recent. */
+const REVIVED_EVERY_MS = 5 * 60_000;
+const REVIVED_WITHIN_MS = 3 * 86_400_000;
+const REVIVED_AT_MOST = 3;
+
 export function createChats(deps: ChatDeps) {
   const { ctx, paseo, log } = deps;
   const checked = new Set<string>();
@@ -74,6 +79,7 @@ export function createChats(deps: ChatDeps) {
   const notices = new Map<string, string>();
   /** Chats that were replaced and could not be put away yet (old chat id -> its affair): tried again on the next scan. */
   const toPutAway = new Map<string, string>();
+  const revivedAt = new Map<string, number>();
   let stopped = false;
 
   /** Archiving a session that is in the middle of a turn cuts the turn short, so a busy one is left alone and tried again later. */
@@ -112,6 +118,46 @@ export function createChats(deps: ChatDeps) {
     if (old) await putAway(id, old);
   }
 
+  /**
+   * An older chat of the affair that is no longer put away and has been spoken to since it was replaced is the one he is using
+   * (he went back to its tab, or a session it started called it): it becomes the chat again, and the empty one made in its place
+   * is put away by the usual rule. Any message to an archived session takes it out of the archive, so that and a time after the
+   * replacement is all there is to go by. Looked at every few minutes, not every scan.
+   */
+  async function recognizeRevived(id: string): Promise<boolean> {
+    const s = deps.state(id);
+    const now = ctx.now();
+    if (!isOpen(s) || !s.chatId || now - (revivedAt.get(id) ?? 0) < REVIVED_EVERY_MS) return false;
+    revivedAt.set(id, now);
+    // Each older chat with the moment it was left: the line of the chat that came after its last turn as the chat.
+    const left = new Map<string, string>();
+    s.chats.forEach((c: { agentId: string }, i: number) => {
+      const next = s.chats[i + 1];
+      if (next && next.agentId !== c.agentId) left.set(c.agentId, next.at);
+      else if (next) left.delete(c.agentId);
+    });
+    left.delete(s.chatId);
+    const candidates = [...left].filter(([agent, at]) => !toPutAway.has(agent) && now - Date.parse(at) < REVIVED_WITHIN_MS).reverse().slice(0, REVIVED_AT_MOST);
+    for (const [agent, at] of candidates) {
+      let seen;
+      try {
+        seen = (await paseo.agents.ref(agent).refresh())?.agent;
+      } catch {
+        continue;
+      }
+      if (!seen || seen.archivedAt || seen.status === "error") continue;
+      const touched = Math.max(Date.parse(seen.updatedAt ?? "") || 0, Date.parse(seen.lastUserMessageAt ?? "") || 0);
+      if (touched <= Date.parse(at)) continue;
+      const empty = s.chatId;
+      deps.write(id, [{ kind: "chat", agentId: agent, why: "revived" }]);
+      checked.add(agent);
+      // The one made in its place stays if anything was said in it.
+      if (!deps.state(id).lines.some((l: { kind: string; agentId?: string }) => l.kind === "chat.turn" && l.agentId === empty)) await putAway(id, empty);
+      return true;
+    }
+    return false;
+  }
+
   /** The chat exists, and is the right one: made, remade after a restart left it closed, replaced when long and cold. */
   async function ensure(id: string): Promise<void> {
     let s = deps.state(id);
@@ -131,6 +177,7 @@ export function createChats(deps: ChatDeps) {
       }
     }
     for (const [old, owner] of [...toPutAway]) if (owner === id) await putAway(id, old);
+    if (await recognizeRevived(id)) return;
     s = deps.state(id);
     const reason = isOpen(s) ? rotationReason(s, ctx.now(), ctx.policy) : "";
     // Not while the chat is in the middle of a turn: it may be working on what he just asked, and the new one would not know. The next scan asks again.

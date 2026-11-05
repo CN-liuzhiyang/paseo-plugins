@@ -108,6 +108,7 @@ export function eventsOf(state, now, policy, lc, helpers) {
   const out = [];
   const lastValue = new Map(); // source key -> fingerprint of the last reading
   const watching = new Map(); // watch id -> its tool and label
+  const flowRows = new Map(); // run id -> its row
   let wake = null; // the look in progress: what it was called for, what it read, its next time
   let lastError = null;
 
@@ -274,7 +275,20 @@ export function eventsOf(state, now, policy, lc, helpers) {
         // A flow he had started: one row, with the words that asked for it. One the runtime turned away at once never started.
         if (state.flows?.find((f) => f.seq === l.seq)?.failed) break;
         const asked = Number.isInteger(l.said) ? saidBy.get(l.said) : null;
-        add(l, { kind: "flow", label: `起了 ${l.flow}`, text: asked ? `你说：「${clip(String(asked.text).replace(/\s+/g, " ").trim(), 40)}」` : "" });
+        const began = asked ? `起了（你说：「${clip(String(asked.text).replace(/\s+/g, " ").trim(), 40)}」）` : "起了";
+        // One row for the whole run; its steps are under it. The row says how it stands: the latest step.
+        const row = add(l, { kind: "flow", label: `流程 · ${l.flow}`, text: "在跑", kids: [{ ms: Date.parse(l.at), text: began }] });
+        flowRows.set(l.runId, row);
+        break;
+      }
+      case "flow.mark": {
+        const row = flowRows.get(l.runId);
+        if (!row || row.kids.some((k) => k.key === l.key)) break;
+        row.kids.push({ ms: Date.parse(l.at), text: String(l.text ?? ""), key: l.key });
+        row.text = String(l.text ?? "");
+        row.tone = l.tone === "red" ? "red" : "normal";
+        row.changed = true;
+        if (l.key === "end") row.strong = true;
         break;
       }
       case "flag": {
@@ -348,6 +362,7 @@ function finish(e, state, now, tz) {
   if (e.meta) row.meta = e.meta;
   if (e.basis) row.basis = e.basis;
   if (ownNext) row.next = ownNext;
+  if (e.kids) row.children = e.kids.map((k) => ({ when: whenOf(k.ms, now, tz), text: k.text }));
   if (merged) row.children = [...e.members].reverse().map((m) => ({ when: whenOf(m.ms, now, tz), text: m.text }));
   return row;
 }

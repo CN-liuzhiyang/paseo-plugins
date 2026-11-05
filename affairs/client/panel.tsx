@@ -5,6 +5,7 @@ import { Pressable, ScrollView, View } from "react-native";
 import type { PanelData } from "../shared/panel";
 import { answerRpc, panelRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
+import { FlowBox } from "./flow";
 import { Materials, useFiles } from "./files";
 import { ChoiceButton, Heading, QuestionCard, Rule, StateBadge, Tag } from "./look";
 import { Timeline } from "./timeline";
@@ -64,6 +65,8 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, paddingBottom: 28 }}>
       <StateBadge mood={panel.mood} c={c} />
+      {panel.flow ? heading("流程") : null}
+      {panel.flow ? <FlowBox flow={panel.flow} c={c} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} /> : null}
       {heading("现在")}
       {panel.asks.map((a) => (
         <QuestionCard key={a.id} c={c} title={a.title} line={a.line}>

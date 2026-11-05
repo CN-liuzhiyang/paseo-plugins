@@ -1,3 +1,4 @@
+import { sentenceOf } from "./flows.mjs";
 import { localParts, speak } from "./time.mjs";
 
 // What a person reads: the words of the card, the rows under it and the replies to the commands. Nothing here says
@@ -65,7 +66,7 @@ export function cardOf(state, now, policy, { budget = "", trouble = "" } = {}) {
 }
 
 /** The lines under the card, oldest first. Each has a stable key so a line shown twice is one line. */
-export function rowsOf(state, now, policy, { withChat = false } = {}) {
+export function rowsOf(state, now, policy, { withChat = false, flowNow = new Map() } = {}) {
   const { tz } = policy;
   const rows = [];
   const add = (key, at, text, tone = "normal", detail = "", extra = {}) => rows.push({ key, at, text, tone, detail, own: key[0] === "s" || key[0] === "a", ...extra });
@@ -96,7 +97,12 @@ export function rowsOf(state, now, policy, { withChat = false } = {}) {
       // A flow started for this affair: one row, with the words that asked for it when there are some.
       const said = Number.isInteger(l.said) ? state.said.find((m) => m.seq === l.said) : null;
       const quote = said ? [...said.text.replace(/\s+/g, " ").trim()] : [];
-      add(`w${l.seq}`, l.at, `${time}  起了 ${l.flow}${quote.length ? `（你说：「${quote.length > 30 ? `${quote.slice(0, 29).join("")}…` : quote.join("")}」）` : ""}`);
+      const run = state.flows.find((f) => f.seq === l.seq);
+      if (run && (run.marks.length || flowNow.has(run.runId))) {
+        // Once it has something to say the row says how the run stands, in the same place (the row is put again under its key).
+        const now2 = sentenceOf(run, flowNow.get(run.runId)?.st ?? null, now);
+        add(`w${l.seq}`, l.at, `${time}  ${l.flow} · ${now2.text}`, now2.tone);
+      } else add(`w${l.seq}`, l.at, `${time}  起了 ${l.flow}${quote.length ? `（你说：「${quote.length > 30 ? `${quote.slice(0, 29).join("")}…` : quote.join("")}」）` : ""}`);
     } else if (l.kind === "flag" && l.what === "chain") {
       add(`f${l.seq}`, l.at, `${time}  ${l.detail}`, "red");
     } else if (l.kind === "next" && l.verdict === "appeal") {

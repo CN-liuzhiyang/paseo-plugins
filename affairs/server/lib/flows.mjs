@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -69,48 +69,6 @@ export function orchCommand(policy, bin) {
 
 export const eventsFile = (logDir, runId) => path.join(logDir, "runs", `${runId}.jsonl`);
 export const claimFile = (logDir, runId) => path.join(logDir, "runs", `${runId}.claim`);
-
-/** The last bytes of a file, as text (a run's last line is its end). */
-function tailOf(file, bytes = 16_384) {
-  const fd = openSync(file, "r");
-  try {
-    const size = statSync(file).size;
-    const length = Math.min(size, bytes);
-    const buf = Buffer.alloc(length);
-    readSync(fd, buf, 0, length, size - length);
-    return buf.toString("utf8");
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * Whether a run is over, and how: "over" with its outcome (a word from the runtime: done, stopped, failed, timeout), "going",
- * or "never" when it has no events and was started long enough ago that it is not just late. The line `run.end` is the last
- * line of a finished run (orchestration/EVENTS.md); a run whose process died leaves none, so one that has gone on longer than
- * its own time limit (and an hour) is taken as over too, lost, rather than blocking the affair for good.
- * @returns {{ state: "going" | "over" | "never", outcome: string }}
- */
-export function runState({ events, startedAt, timeoutMs, now }) {
-  let tail = "";
-  try {
-    tail = tailOf(events);
-  } catch {
-    // no events yet
-  }
-  for (const raw of tail.split("\n").reverse()) {
-    if (!raw.includes('"run.end"')) continue;
-    try {
-      const line = JSON.parse(raw);
-      if (line.kind === "run.end") return { state: "over", outcome: String(line.outcome ?? "") };
-    } catch {
-      // a half line
-    }
-  }
-  const age = now - startedAt;
-  if (!existsSync(events)) return age > 5 * 60_000 ? { state: "never", outcome: "" } : { state: "going", outcome: "" };
-  return age > (timeoutMs ?? 2 * 3_600_000) + 3_600_000 ? { state: "over", outcome: "lost" } : { state: "going", outcome: "" };
-}
 
 /** The words for how a run ended, as he reads them. */
 export const outcomeText = (outcome) => ({ done: "做完了", stopped: "停了", failed: "出错停了", timeout: "超时停了", lost: "没了下文", "": "" })[outcome] ?? outcome;
@@ -198,4 +156,134 @@ export async function startRun({ node = process.env.AFFAIR_NODE || "node", args,
   }
   // Neither events nor an exit within the wait: it is slow to load, not refused; the log has its id.
   return { ok: true, pid: child.pid };
+}
+
+// --- What `orch.mjs status` says, read for the person -----------------------------------------------------------------------
+
+/**
+ * The runtime's status of a run (`orch.mjs status <runId>`), or null when it cannot be had (the command is missing, it printed
+ * nothing that parses): the caller then takes the run as going, since it cannot tell it is not.
+ * @returns {Promise<any | null>}
+ */
+export function readStatus({ node = process.env.AFFAIR_NODE || "node", orch, logDir, runId, spawnedAt = null, timeoutMs = 20_000, env = process.env }) {
+  return new Promise((resolve) => {
+    if (!orch) return resolve(null);
+    const args = [orch, "status", runId, ...(spawnedAt ? ["--spawned-at", String(spawnedAt)] : [])];
+    const child = spawn(node, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, env: { ...env, ORCH_LOG_DIR: logDir } });
+    let out = "";
+    const timer = setTimeout(() => child.kill(), timeoutMs);
+    child.stdout.on("data", (d) => (out += d));
+    child.on("error", () => (clearTimeout(timer), resolve(null)));
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code !== 0) return resolve(null);
+      try {
+        const parsed = JSON.parse(out);
+        resolve(isObject(parsed) && typeof parsed.state === "string" ? parsed : null);
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+/** What the runtime's states come to for the affair: still on, over (with how), or never started. A lost run is over, not blocking. */
+export function liveOf(st) {
+  if (["running", "starting", "pending", "unreadable"].includes(st.state)) return { state: "going", outcome: "" };
+  if (st.state === "ended") return { state: "over", outcome: String(st.outcome ?? "") };
+  // A claim nobody has touched for two minutes: the runner is gone. One whose process still exists (stalled) is not known to be gone.
+  if (["lost", "dead-before-start"].includes(st.state)) return { state: "over", outcome: "lost" };
+  return { state: "never", outcome: "" };
+}
+
+const clip = (text, n) => {
+  const chars = [...String(text ?? "").replace(/\s+/g, " ").trim()];
+  return chars.length > n ? `${chars.slice(0, n - 1).join("")}…` : chars.join("");
+};
+
+/** "不到 1 分钟", "4 分钟", "2 小时 5 分", "1 天 3 小时". */
+export function spanText(ms) {
+  const min = Math.max(0, Math.floor(ms / 60_000));
+  if (min < 1) return "不到 1 分钟";
+  if (min < 60) return `${min} 分钟`;
+  if (min < 24 * 60) return `${Math.floor(min / 60)} 小时${min % 60 ? ` ${min % 60} 分` : ""}`;
+  return `${Math.floor(min / 1440)} 天${Math.floor((min % 1440) / 60) ? ` ${Math.floor((min % 1440) / 60)} 小时` : ""}`;
+}
+
+export const usdText = (usd) => (Number.isFinite(usd) ? `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(1)}` : "");
+
+/** What a card's answer comes to in a few words, for a step in the history of a run. */
+function gateWords(g) {
+  const t = clip(g.title, 24);
+  if (g.state === "waiting") return `等你批：${t}`;
+  if (g.state === "allowed") return `${t}：批了`;
+  if (g.state === "denied") return `${t}：没批${g.reason ? `，${clip(g.reason, 24)}` : ""}`;
+  if (g.state === "expired") return `${t}：没批，过期了`;
+  return `${t}：没批成`;
+}
+
+/** How a run ended, in words: [text, bad]. */
+export function endWords(st) {
+  const cost = usdText(st.costUsd);
+  const tail = cost ? ` · ${cost}` : "";
+  if (st.state === "lost") return ["没了下文，不知道做到哪了", true];
+  if (st.outcome === "done") return [`做完了${st.summary ? `：${clip(st.summary, 50)}` : ""}${tail}`, false];
+  if (st.outcome === "stopped") return [`停了${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
+  if (st.outcome === "timeout") return [`超时停了${tail}`, true];
+  return [`出错停了${st.error?.message ? `：${clip(st.error.message, 50)}` : ""}${tail}`, true];
+}
+
+/**
+ * The steps of a run the log should hold, from its status: a card waiting, a card answered (the waiting is held too if it was
+ * not seen), the end. Each has a key that is the same every time the same step is seen, so a step is written once.
+ * @returns {Array<{ key: string, text: string, tone: "normal" | "red", outcome?: string, summary?: string, costUsd?: number | null }>}
+ */
+export function marksOf(st) {
+  const out = [];
+  for (const g of st.gates ?? []) {
+    out.push({ key: `gate:${g.callId}:waiting`, text: gateWords({ ...g, state: "waiting" }), tone: "normal" });
+    if (g.state !== "waiting") out.push({ key: `gate:${g.callId}:${g.state}`, text: gateWords(g), tone: g.state === "allowed" ? "normal" : "red" });
+  }
+  const over = st.state === "ended" || st.state === "lost";
+  if (over) {
+    const [text, bad] = endWords(st);
+    const outcome = st.state === "lost" ? "lost" : String(st.outcome ?? "");
+    out.push({ key: "end", text, tone: bad ? "red" : "normal", outcome, summary: String(st.summary ?? ""), costUsd: Number.isFinite(st.costUsd) ? st.costUsd : null });
+  }
+  return out;
+}
+
+/**
+ * The sentence for a run as the chat and the panel say it. `st` is the live status when there is one; `f` is the run's entry
+ * in the log, which holds what was seen before (so a restart, or a run seen only after it ended, still reads right).
+ * `short` is the same without the time it has been going.
+ * @returns {{ text: string, short: string, tone: "normal" | "red", waiting: boolean, over: boolean, agentId: string | null }}
+ */
+export function sentenceOf(f, st, now) {
+  const marks = f.marks ?? [];
+  const last = marks[marks.length - 1];
+  const waitingGate = st ? (st.gates ?? []).find((g) => g.state === "waiting") : null;
+  if (f.outcome || (st && (st.state === "ended" || st.state === "lost"))) {
+    const text = f.outcome ? marks.find((m) => m.key === "end")?.text ?? "" : endWords(st)[0];
+    const bad = f.outcome ? f.outcome !== "done" : endWords(st)[1];
+    return { text, short: text, tone: bad ? "red" : "normal", waiting: false, over: true, agentId: null };
+  }
+  if (waitingGate) {
+    const text = `等你批：${clip(waitingGate.title, 24)}`;
+    return { text, short: text, tone: "normal", waiting: true, over: false, agentId: waitingGate.agentId ?? null };
+  }
+  if (!st) {
+    const waitingMark = last && /^等你批/.test(last.text) ? last : null;
+    const text = waitingMark ? waitingMark.text : last ? last.text : "刚起，在准备";
+    return { text, short: text, tone: "normal", waiting: Boolean(waitingMark), over: false, agentId: null };
+  }
+  const doing = st.phase?.title ? clip(st.phase.title, 16) : "在跑";
+  return { text: `${doing} · ${spanText(now - Date.parse(f.at))}`, short: doing, tone: "normal", waiting: false, over: false, agentId: null };
+}
+
+/** The latest run that ended after the "现在" was written, so the "现在" does not know of it yet; null when there is none. */
+export function endedAfterNow(s) {
+  const nowAt = s.nowAt ? Date.parse(s.nowAt) : 0;
+  const late = (s.flows ?? []).filter((f) => !f.failed && f.endedAt && Date.parse(f.endedAt) > nowAt);
+  return late.length ? late[late.length - 1] : null;
 }

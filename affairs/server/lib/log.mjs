@@ -332,8 +332,22 @@ export function fold(lines) {
       }
       case "flow":
         // A flow he had started for this affair (`affair flow`): which, the run it is, what he said that asked for it.
-        s.flows.push({ seq: l.seq, at: l.at, flow: String(l.flow ?? ""), runId: String(l.runId ?? ""), events: String(l.events ?? ""), timeoutMs: Number(l.timeoutMs) || 0, by: l.by ?? "chat", said: Number.isInteger(l.said) ? l.said : null, failed: "" });
+        s.flows.push({ seq: l.seq, at: l.at, flow: String(l.flow ?? ""), runId: String(l.runId ?? ""), events: String(l.events ?? ""), timeoutMs: Number(l.timeoutMs) || 0, by: l.by ?? "chat", said: Number.isInteger(l.said) ? l.said : null, failed: "", marks: [], outcome: "", summary: "", costUsd: null, endedAt: "" });
         break;
+      case "flow.mark": {
+        // A step of a run the plugin saw (a card waiting, answered, the end): written once for each (run, key), so the same
+        // sighting twice is one. The end also says how the run came out.
+        const f = s.flows.find((x) => x.runId === l.runId);
+        if (!f || !l.key || f.marks.some((m) => m.key === l.key)) break;
+        f.marks.push({ seq: l.seq, at: l.at, key: String(l.key), text: String(l.text ?? ""), tone: l.tone === "red" ? "red" : "normal" });
+        if (l.key === "end") {
+          f.outcome = String(l.outcome ?? "");
+          f.summary = String(l.summary ?? "");
+          f.costUsd = Number.isFinite(l.costUsd) ? l.costUsd : null;
+          f.endedAt = l.at;
+        }
+        break;
+      }
       case "flow.fail": {
         // The run did not start after all (the runtime turned it away, or another start was first): it counts for nothing.
         const f = s.flows.find((x) => x.runId === l.runId);

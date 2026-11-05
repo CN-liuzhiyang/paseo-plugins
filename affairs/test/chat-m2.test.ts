@@ -21,7 +21,7 @@ const MECHANISM = /叫醒|校验|记录|计划|读数|会话|agent/i;
 type Event = Record<string, unknown>;
 
 /** A Paseo with chats in it: what was made, archived, drawn, and the handlers the plugin listens with (called by the test as the session would). */
-function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unknown }>; archiveFails?: () => boolean } = {}) {
+function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unknown }>; archiveFails?: () => boolean; agent?: (id: string) => Record<string, unknown> } = {}) {
   const made: Array<Record<string, any>> = [];
   const archived: string[] = [];
   const drawn: Array<{ chat: string; item: any }> = [];
@@ -29,7 +29,7 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
   const paseo = {
     agents: {
       ref: (id: string) => ({
-        refresh: async () => ({ agent: { status: opts.status?.() ?? "idle" } }),
+        refresh: async () => ({ agent: { status: opts.status?.() ?? "idle", ...(opts.agent?.(id) ?? (archived.includes(id) ? { archivedAt: "2026-01-01T00:00:00.000Z" } : {})) } }),
         archive: async () => {
           if (opts.archiveFails?.()) throw new Error("Paseo said no");
           archived.push(id);
@@ -496,4 +496,54 @@ test("the chat's model: by default the look's, policy.chat.role names another fo
   assert.deepEqual([own.env.SOME, own.env.AFFAIR_ID], ["1", "D1"]);
   // the looks are not touched by any of it
   assert.equal(roleOf(policy({ chat: { role: "talk" } }, { talk: other }).policy, undefined).provider, look.provider);
+});
+
+// ---- an older chat that comes back -------------------------------------------------------------------------
+
+/** A chat replaced by a longer one; returns where the scan left things. */
+async function replacedOnce(opts: Parameters<typeof paseoWith>[0] = {}) {
+  const s = setup({}, opts);
+  const id = await start(s);
+  await s.engine.scan(id);
+  s.p.send("chat-1", turnDone(170_000));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).chatId, "chat-2");
+  assert.deepEqual(s.p.archived, ["chat-1"]);
+  return { s, id };
+}
+
+test("an older chat that is out of the archive again and has been spoken to since it was replaced is the chat again; the empty one made in its place is put away", async () => {
+  let revived = false;
+  const { s, id } = await replacedOnce({ agent: (agent) => (agent === "chat-1" && revived ? { archivedAt: null, updatedAt: "2099-01-01T00:00:00.000Z" } : { archivedAt: agent === "chat-1" ? "2026-01-01T00:00:00.000Z" : null, updatedAt: "2026-01-01T00:00:00.000Z" }) });
+  s.w.advance(10 * MIN);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).chatId, "chat-2", "still archived: nothing to recognize");
+  revived = true;
+  s.w.advance(10 * MIN);
+  await s.engine.scan(id);
+  const state = load(s.w.root, id);
+  assert.equal(state.chatId, "chat-1");
+  assert.deepEqual(state.chats.map((c: { why: string }) => c.why), ["first", "rotate:long", "revived"]);
+  assert.deepEqual(s.p.archived, ["chat-1", "chat-2"], "the new one had nobody in it and is put away");
+  assert.ok(s.p.handlers.has("chat-1") && !s.p.handlers.has("chat-2"), "what he types in it is heard again");
+  s.w.advance(10 * MIN);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 2, "and no third one is made for it");
+});
+
+test("a revived older chat does not push out a new one that has been talked in; and a chat nobody touched since it was replaced is not revived", async () => {
+  let revived = true;
+  const { s, id } = await replacedOnce({ agent: (agent) => (agent === "chat-1" && revived ? { archivedAt: null, updatedAt: "2099-01-01T00:00:00.000Z" } : { archivedAt: agent === "chat-1" ? "2026-01-01T00:00:00.000Z" : null, updatedAt: "2026-01-01T00:00:00.000Z" }) });
+  s.p.send("chat-2", turnDone(5_000, 0.01));
+  s.w.advance(10 * MIN);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).chatId, "chat-1");
+  assert.deepEqual(s.p.archived, ["chat-1"], "chat-2 has a turn of its own: it is left as it is");
+
+  revived = false;
+  const second = await replacedOnce({ agent: (agent) => ({ archivedAt: null, updatedAt: agent === "chat-1" ? "2000-01-01T00:00:00.000Z" : null }) });
+  second.s.w.advance(10 * MIN);
+  await second.s.engine.scan(second.id);
+  assert.equal(load(second.s.w.root, second.id).chatId, "chat-2", "not archived but not spoken to either (a put-away that failed): the new chat stays");
 });
