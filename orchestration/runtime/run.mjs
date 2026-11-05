@@ -658,6 +658,11 @@ async function runClaimed(target, options, taken) {
       } catch {
         // Not JSON: as it came.
       }
+      // Archived already (the person closed the tab first, or another call did): that is what was asked for, not a failure.
+      if (code === "AGENT_ALREADY_ARCHIVED" || /already archived/i.test(said)) {
+        written(true, null, null);
+        return;
+      }
       // Measured 2026-10-29 (fork CLI 1.4.1): `paseo archive` looks the agent up in a list that leaves out the agents of a background
       // workspace, and the affair's workspace is one: it says the agent is not found when it is there. Said so, that it is no mystery,
       // and that it is not left to nobody: the plugin that started the run archives it (it reads call.archive for the ones not done).

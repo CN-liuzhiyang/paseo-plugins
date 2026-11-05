@@ -52,6 +52,15 @@ test("a carrier that cannot be archived is a caveat, and the run still comes out
   assert.equal(result.caveats.filter((c) => c.startsWith("archive:")).length, 1);
 });
 
+test("a carrier that was archived already is not a failure: no caveat, and the event says it is archived", async () => {
+  const executor = fakeExecutor({ carrier: "approve", archiveFails: "already" });
+  const { result, events } = await run(executor);
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(result.caveats.filter((c) => c.startsWith("archive:")), []);
+  const [archive] = archives(events);
+  assert.deepEqual([archive.ok, archive.code], [true, null]);
+});
+
 test("a card nobody answered (the run is stopped under it) is not archived by this", async () => {
   const executor = fakeExecutor({ carrier: "hang" });
   const logDir = await tempDir("orch-gatearchive-");

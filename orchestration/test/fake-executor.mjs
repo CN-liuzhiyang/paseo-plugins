@@ -39,7 +39,7 @@
 // executor's listing and the start; `workspaceFlag: false` is a CLI that does not know
 // --workspace. A title is cut to 120 characters, by code point, as the real one is.
 // `archiveAgent` archives an agent (`archivedAgents` lists them, in order); like the CLI without --force it refuses one that is still
-// running, and `archiveFails` ("refuse": as for a running agent, "error": any other failure) makes it fail for every agent.
+// running, and `archiveFails` ("refuse": as for a running agent, "already": it was archived before, "error": any other failure) makes it fail for every agent.
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -292,6 +292,7 @@ export function fakeExecutor({
       const agent = agents.get(agentId);
       if (!agent) throw new Error(`no agent ${agentId}`);
       if (archiveFails === "error") throw new Error("fake failure of archive");
+      if (archiveFails === "already") throw new PaseoCliError("paseo archive failed", { argv: ["archive", agentId], exitCode: 1, stdout: "", stderr: JSON.stringify({ error: { code: "AGENT_ALREADY_ARCHIVED", message: `Agent ${agentId.slice(0, 7)} is already archived` } }) });
       if (archiveFails === "refuse" || agent.status === "running") {
         throw new PaseoCliError("paseo archive failed", { argv: ["archive", agentId], exitCode: 1, stdout: "", stderr: `Agent ${agentId} is still running; use --force to archive it
 ` });
