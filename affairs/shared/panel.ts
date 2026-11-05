@@ -64,6 +64,8 @@ const flowBlock = z.object({
   name: z.string(),
   /** One sentence: what it is doing, or what it is waiting for him to do, or how it ended. */
   text: z.string(),
+  /** What goes with it: the card he is asked to answer, the result of the run. */
+  detail: z.string(),
   tone: z.enum(["normal", "red"]),
   /** How long, and what it cost. */
   meta: z.string(),

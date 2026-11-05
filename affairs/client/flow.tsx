@@ -15,7 +15,7 @@ type Navigation = {
 // COMPAT(navigation.openPluginScreen): a fork-only way to open a screen of another plugin (the run's own page); without it there is no "看详情".
 export function FlowBox({ flow, c, navigation }: { flow: NonNullable<PanelData["flow"]>; c: Colors; navigation: Navigation }) {
   const waiting = flow.action?.kind === "approve";
-  const color = flow.tone === "red" ? c.statusDanger : waiting ? c.statusWarning : /^做完了/.test(flow.text) ? c.statusSuccess : c.accent;
+  const color = flow.tone === "red" ? c.statusDanger : waiting ? c.statusWarning : flow.text === "做完了" ? c.statusSuccess : c.accent;
   const open = (() => {
     const action = flow.action;
     if (!action) return null;
@@ -29,6 +29,7 @@ export function FlowBox({ flow, c, navigation }: { flow: NonNullable<PanelData["
         <Words style={{ color: c.foreground, fontSize: 13, fontWeight: "700", flexShrink: 0 }}>{flow.name}</Words>
         <Words style={{ color, fontSize: 14, lineHeight: 20, fontWeight: "600", flex: 1, minWidth: 0 }}>{flow.text}</Words>
       </View>
+      {flow.detail ? <Words style={{ color: c.foreground, fontSize: 13, lineHeight: 18 }}>{flow.detail}</Words> : null}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
         <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17, flex: 1, minWidth: 0 }}>{[flow.meta, flow.more ? `还有 ${flow.more} 次更早的` : ""].filter(Boolean).join("　")}</Words>
         {open ? (

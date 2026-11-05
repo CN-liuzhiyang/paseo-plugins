@@ -221,6 +221,7 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   return {
     name: latest.flow,
     text: sent.short,
+    detail: sent.rest,
     tone: sent.tone,
     meta: [took, cost].filter(Boolean).join(" · "),
     action: sent.waiting && sent.agentId ? { kind: "approve", agentId: sent.agentId } : { kind: "detail", runId: latest.runId },

@@ -256,9 +256,17 @@ export function marksOf(st) {
 /**
  * The sentence for a run as the chat and the panel say it. `st` is the live status when there is one; `f` is the run's entry
  * in the log, which holds what was seen before (so a restart, or a run seen only after it ended, still reads right).
- * `short` is the same without the time it has been going.
- * @returns {{ text: string, short: string, tone: "normal" | "red", waiting: boolean, over: boolean, agentId: string | null }}
+ * `short` is what it is doing in a word or two (the phase, 等你批, 做完了), `rest` what goes with it (the card, the result): the block on the
+ * panel gives them two lines, the chat one sentence.
+ * @returns {{ text: string, short: string, rest: string, tone: "normal" | "red", waiting: boolean, over: boolean, agentId: string | null }}
  */
+/** "做完了：提交了 r1 · $2.40" is ["做完了", "提交了 r1"]; a text with no "：" has nothing after it. */
+const splitText = (text) => {
+  const body = text.replace(/ · \$[\d.]+$/, "");
+  const at = body.indexOf("：");
+  return at < 0 ? [body, ""] : [body.slice(0, at), body.slice(at + 1)];
+};
+
 export function sentenceOf(f, st, now) {
   const marks = f.marks ?? [];
   const last = marks[marks.length - 1];
@@ -266,19 +274,21 @@ export function sentenceOf(f, st, now) {
   if (f.outcome || (st && (st.state === "ended" || st.state === "lost"))) {
     const text = f.outcome ? marks.find((m) => m.key === "end")?.text ?? "" : endWords(st)[0];
     const bad = f.outcome ? f.outcome !== "done" : endWords(st)[1];
-    return { text, short: text, tone: bad ? "red" : "normal", waiting: false, over: true, agentId: null };
+    const [short, rest] = splitText(text);
+    return { text, short, rest, tone: bad ? "red" : "normal", waiting: false, over: true, agentId: null };
   }
   if (waitingGate) {
     const text = `等你批：${clip(waitingGate.title, 24)}`;
-    return { text, short: text, tone: "normal", waiting: true, over: false, agentId: waitingGate.agentId ?? null };
+    return { text, short: "等你批", rest: clip(waitingGate.title, 40), tone: "normal", waiting: true, over: false, agentId: waitingGate.agentId ?? null };
   }
   if (!st) {
     const waitingMark = last && /^等你批/.test(last.text) ? last : null;
-    const text = waitingMark ? waitingMark.text : last ? last.text : "刚起，在准备";
-    return { text, short: text, tone: "normal", waiting: Boolean(waitingMark), over: false, agentId: null };
+    const text = waitingMark ? waitingMark.text : last ? "在跑" : "刚起，在准备";
+    const [short, rest] = splitText(text);
+    return { text, short, rest, tone: "normal", waiting: Boolean(waitingMark), over: false, agentId: null };
   }
   const doing = st.phase?.title ? clip(st.phase.title, 16) : "在跑";
-  return { text: `${doing} · ${spanText(now - Date.parse(f.at))}`, short: doing, tone: "normal", waiting: false, over: false, agentId: null };
+  return { text: `${doing} · ${spanText(now - Date.parse(f.at))}`, short: doing, rest: "", tone: "normal", waiting: false, over: false, agentId: null };
 }
 
 /** The latest run that ended after the "现在" was written, so the "现在" does not know of it yet; null when there is none. */

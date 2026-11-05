@@ -200,19 +200,22 @@ test("the panel: a block above 现在 while the run is on and for a day after, w
   events(logDir, [start(), gateStart(), gateAgent()]);
   await ops.flowSync(w.ctx, id);
   block = flowBlockOf(stateOf(w, id), w.now(), w.ctx.flowNow)!;
-  assert.match(block.text, /^等你批：/);
+  assert.equal(block.text, "等你批");
+  assert.match(block.detail, /修复方案/, "the card he is asked to answer is the line under it");
+  assert.ok([...block.text].length <= 20 && [...block.name].length <= 20);
   assert.deepEqual(block.action, { kind: "approve", agentId: "carrier-1" }, "the button opens the card");
 
   w.advance(5 * 60_000);
   events(logDir, [start(), gateStart(), gateAgent(), gateEnd("allowed"), runEnd("done", { summary: "做完了的结果" })], { claimAgeMs: 9_000_000 });
   await ops.flowSync(w.ctx, id);
   block = flowBlockOf(stateOf(w, id), w.now(), w.ctx.flowNow)!;
-  assert.match(block.text, /^做完了/);
+  assert.equal(block.text, "做完了");
+  assert.equal(block.detail, "做完了的结果");
   assert.equal(block.tone, "normal");
   assert.deepEqual(block.action, { kind: "detail", runId: RUN });
   assert.match(block.meta, /\$2\.40/);
   assert.match(block.stale, /「现在」还是流程结束之前的/, "the 现在 below has not been written since the run ended");
-  for (const text of [block.name, block.text, block.meta, block.stale]) assert.doesNotMatch(text, MECHANISM);
+  for (const text of [block.name, block.text, block.detail, block.meta, block.stale]) assert.doesNotMatch(text, MECHANISM);
 
   // A look reads the result and hands in a new 现在: the hint goes.
   append(w.root, id, [{ kind: "report", from: "look", verdict: "recorded", status: "新的现在", entry: "看过了" }], { now: w.now() });
