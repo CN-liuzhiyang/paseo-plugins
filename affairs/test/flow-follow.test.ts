@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import * as ops from "../server/lib/ops.mjs";
-import { claimFile, eventsFile, marksOf } from "../server/lib/flows.mjs";
+import { claimFile, eventsFile, marksOf, usdText } from "../server/lib/flows.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
 import { eventsOf } from "../server/lib/events.mjs";
 import { linkContext } from "../server/lib/links.mjs";
@@ -117,7 +117,9 @@ test("an answer seen only after it was given still leaves the waiting before it;
 test("how a run ends: stopped, failed and timed out are red and say why; a run whose keeper is gone is called lost only if it stays so", async () => {
   for (const [outcome, rest, pattern] of [
     ["stopped", { stop: { reason: "补丁没批", kind: "flow", step: null } }, /^停了：补丁没批 · \$2\.40$/],
-    ["failed", { error: { name: "Boom", message: "编译不过" } }, /^出错停了：编译不过/],
+    ["failed", { error: { name: "Boom", message: "compile failed: undefined is not a function" } }, /^出错停了 · \$2\.40$/],
+    ["failed", { error: { name: "Error", message: "paseo send failed: OUTPUT_SCHEMA_FAILED -- Timed out waiting for the agent" } }, /^出错停了：等回答超时 · \$2\.40$/],
+    ["failed", { error: { name: "Error", message: "paseo send failed: OUTPUT_SCHEMA_FAILED -- the answer is not an object" } }, /^出错停了：回答格式不对 · \$2\.40$/],
     ["timeout", { error: { name: "Timeout", message: "x" } }, /^超时停了/],
   ] as const) {
     const { w, logDir } = setup();
@@ -187,6 +189,20 @@ test("the chat has one line for the run, in the same place whatever happens to i
   // After a restart nothing is remembered but the log: the line still says how it came out.
   w.ctx.flowNow.clear();
   assert.match(rowOf().text, /do-it · 停了：方案没批/);
+});
+
+test("the runtime's own words about an error are not in the chat or on the panel, and a cost under a cent is not shown", async () => {
+  const { w, logDir } = setup();
+  const id = await ticket(w);
+  started(w, id, logDir);
+  const error = { name: "Error", message: "paseo send failed: OUTPUT_SCHEMA_FAILED -- Timed out" };
+  events(logDir, [start(), runEnd("failed", { error, cost: { totalUsd: 0.004, agentCount: 1, partial: "" } })], { claimAgeMs: 9_000_000 });
+  await ops.flowSync(w.ctx, id);
+  const end = marks(w, id).find((m) => m.key === "end")!;
+  assert.equal(end.text, "出错停了：等回答超时", "no \"$0.00\"");
+  assert.doesNotMatch(JSON.stringify([end, flowBlockOf(stateOf(w, id), w.now(), w.ctx.flowNow)]), /OUTPUT_SCHEMA|\$0|Timed/);
+  assert.equal(usdText(0.0099), "");
+  assert.equal(usdText(0.01), "$0.01");
 });
 
 test("the panel: a block above 现在 while the run is on and for a day after, with the button that fits", async () => {

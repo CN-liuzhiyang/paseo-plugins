@@ -1,7 +1,7 @@
 import * as pluginClient from "@getpaseo/plugin/client";
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
-import { useState } from "react";
+import { Fragment, useState, type ReactNode } from "react";
 import { Linking, type TextStyle } from "react-native";
 import { QuestionCard, ChoiceButton } from "./look";
 import { Words, only } from "./text";
@@ -15,9 +15,20 @@ export function openExternal(url: string): void {
   void (typeof open === "function" ? (open as (u: string) => Promise<void>)(url) : Linking.openURL(url)).catch(() => {});
 }
 
-/** Text in pieces: the pieces that have an address can be pressed to open it, in the host's link color; the rest is plain. */
-export function Pieces({ text, parts, color, style }: { text: string; parts?: Segment[]; color: string; style: TextStyle | TextStyle[] }) {
-  if (!parts?.some((p) => p.href)) return <Words style={style}>{text}</Words>;
+/** Text in pieces: the pieces that have an address can be pressed to open it, in the host's link color; the rest is plain. `strong` is a phrase set in bold wherever it stands in the plain text. */
+export function Pieces({ text, parts, color, style, strong }: { text: string; parts?: Segment[]; color: string; style: TextStyle | TextStyle[]; strong?: string }) {
+  const plain = (s: string, key: number): ReactNode => {
+    const at = strong ? s.indexOf(strong) : -1;
+    if (at < 0 || !strong) return s;
+    return (
+      <Fragment key={key}>
+        {s.slice(0, at)}
+        <Words style={{ fontWeight: "700" }}>{strong}</Words>
+        {s.slice(at + strong.length)}
+      </Fragment>
+    );
+  };
+  if (!parts?.some((p) => p.href)) return <Words style={style}>{plain(text, 0)}</Words>;
   return (
     <Words style={style}>
       {parts.map((p, i) =>
@@ -26,7 +37,7 @@ export function Pieces({ text, parts, color, style }: { text: string; parts?: Se
             {p.text}
           </Words>
         ) : (
-          p.text
+          plain(p.text, i)
         ),
       )}
     </Words>
@@ -37,7 +48,7 @@ export function Pieces({ text, parts, color, style }: { text: string; parts?: Se
 export function AffairLine({ item, theme }: PluginTimelineItemProps<Line>) {
   const c = theme.colors;
   const { text, tone, parts } = item.data;
-  return <Pieces text={text} parts={parts} color={c.accent} style={{ color: tone === "red" ? c.statusDanger : tone === "warn" ? c.statusWarning : c.foregroundMuted, fontSize: 14, lineHeight: 21, marginVertical: 4 }} />;
+  return <Pieces text={text} parts={parts} color={c.accent} strong={tone === "warn" ? "等你批" : undefined} style={{ color: tone === "red" ? c.statusDanger : tone === "warn" ? c.statusWarning : c.foregroundMuted, fontSize: 14, lineHeight: 21, marginVertical: 4 }} />;
 }
 
 /** A question for him, with its choices as buttons. Pressing one answers it; he can also just say it in the chat. */

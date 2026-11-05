@@ -210,7 +210,8 @@ export function spanText(ms) {
   return `${Math.floor(min / 1440)} 天${Math.floor((min % 1440) / 60) ? ` ${Math.floor((min % 1440) / 60)} 小时` : ""}`;
 }
 
-export const usdText = (usd) => (Number.isFinite(usd) ? `$${usd < 10 ? usd.toFixed(2) : usd.toFixed(1)}` : "");
+/** What a run cost, or nothing when it is under a cent: "$0.00" says nothing. */
+export const usdText = (usd) => (Number.isFinite(usd) && usd >= 0.01 ? "$" + (usd < 10 ? usd.toFixed(2) : usd.toFixed(1)) : "");
 
 /** What a card's answer comes to in a few words, for a step in the history of a run. */
 function gateWords(g) {
@@ -223,6 +224,17 @@ function gateWords(g) {
   return `没批成：${t}`;
 }
 
+/**
+ * What went wrong, for the few kinds that are known, in words ("：等回答超时"); anything else is just "出错停了": the runtime's own words
+ * are English and about its inside, and are kept in the run's details, not in the chat or on the panel.
+ */
+function errorWords(error) {
+  const said = `${error?.name ?? ""} ${error?.message ?? ""}`;
+  if (/time[ds]? ?out/i.test(said)) return "：等回答超时";
+  if (/OUTPUT_SCHEMA_FAILED/.test(said)) return "：回答格式不对";
+  return "";
+}
+
 /** How a run ended, in words: [text, bad]. */
 export function endWords(st) {
   const cost = usdText(st.costUsd);
@@ -231,7 +243,7 @@ export function endWords(st) {
   if (st.outcome === "done") return [`做完了${st.summary ? `：${clip(st.summary, 50)}` : ""}${tail}`, false];
   if (st.outcome === "stopped") return [`停了${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
   if (st.outcome === "timeout") return [`超时停了${tail}`, true];
-  return [`出错停了${st.error?.message ? `：${clip(st.error.message, 50)}` : ""}${tail}`, true];
+  return [`出错停了${errorWords(st.error)}${tail}`, true];
 }
 
 /**
