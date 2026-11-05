@@ -270,6 +270,13 @@ export function eventsOf(state, now, policy, lc, helpers) {
         else if (l.status === "watching" && l.seq > 1) add(l, { kind: "resumed", label: "接着盯", text: "" });
         break;
       }
+      case "flow": {
+        // A flow he had started: one row, with the words that asked for it. One the runtime turned away at once never started.
+        if (state.flows?.find((f) => f.seq === l.seq)?.failed) break;
+        const asked = Number.isInteger(l.said) ? saidBy.get(l.said) : null;
+        add(l, { kind: "flow", label: `起了 ${l.flow}`, text: asked ? `你说：「${clip(String(asked.text).replace(/\s+/g, " ").trim(), 40)}」` : "" });
+        break;
+      }
       case "flag": {
         if (l.what === "chain") trouble(l, "chain", String(l.detail ?? ""));
         else if (TROUBLE[l.what]) {

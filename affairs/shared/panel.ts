@@ -30,7 +30,7 @@ const basisRow = z.object({ name: z.string(), href: z.string().optional(), text:
 const file = z.object({ name: z.string(), shown: z.string(), image: z.boolean(), path: z.string() });
 
 // What kind of thing happened; the screen has a dot, a color and a title style for each (shared/look.ts).
-export const EVENT_KINDS = ["look", "reply", "said", "answered", "asked", "note", "next", "read", "done", "stopped", "resumed", "error"] as const;
+export const EVENT_KINDS = ["look", "reply", "said", "answered", "asked", "note", "next", "read", "done", "stopped", "resumed", "flow", "error"] as const;
 
 export const eventSchema = text.extend({
   key: z.string(),

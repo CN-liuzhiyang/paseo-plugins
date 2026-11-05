@@ -132,7 +132,7 @@ test("started from the person's side: the files, the place it runs in, and an en
     assert.equal(seen.argv[seen.argv.indexOf("--timeout") + 1], "30h");
 
     const state = load(w.root, id);
-    assert.deepEqual(seen.affair, { label: "#700 #700 某某闪退", key: "affair:700", workspace: state.workspaceId, url: "https://tickets.example/700" });
+    assert.deepEqual(seen.affair, { label: "#700 某某闪退", key: "affair:700", workspace: state.workspaceId, url: "https://tickets.example/700" });
     assert.deepEqual(seen.input, { itemNo: 700, agentCwd: work }, "what the prepare program printed, nothing typed");
     assert.equal(state.flows.length, 1);
     assert.deepEqual({ flow: state.flows[0].flow, runId: state.flows[0].runId, by: state.flows[0].by, failed: state.flows[0].failed }, { flow: "do-it", runId: result.runId, by: "human", failed: "" });
@@ -150,7 +150,7 @@ test("started from the person's side: the files, the place it runs in, and an en
 test("started from the chat: his line is the evidence, it is on the row of what happened, and the row says what he said", async () => {
   const { w } = setup();
   const id = await ticket(w);
-  await ops.hear(w.ctx, id, "好，用 do-it 做这个。启动");
+  await ops.hear(w.ctx, id, "好，用 do-it 做\n  so go。启动");
   const said = load(w.root, id).said.at(-1)!.seq;
   const result = await ops.flow(chatOf(w, id), id, "do-it", { saidSeq: said });
   assert.equal(result.ok, true, result.text);
@@ -160,7 +160,7 @@ test("started from the chat: his line is the evidence, it is on the row of what 
   const rows = rowsOf({ ...state, lines: read(w.root, id) }, w.now(), w.ctx.policy);
   const row = rows.find((r: { text: string }) => /起了 do-it/.test(r.text));
   assert.ok(row, "one row for the start");
-  assert.match(row.text, /起了 do-it（你说：「好，用 do-it 做这个。启动」）/);
+  assert.match(row.text, /起了 do-it（你说：「好，用 do-it 做 so go。启动」）/);
   assert.doesNotMatch(row.text, /叫醒|校验|记录|计划|读数|会话|agent/i);
 });
 
@@ -244,4 +244,36 @@ test("a day has a number of starts, counted over all affairs and not by those th
   assert.match(third.text, /今天已经起了 2 次流程，到一天的上限（2 次）了/);
   w.advance(24 * HOUR);
   assert.equal((await ops.flow(w.ctx, ids[2], "do-it")).ok, true, "the next day it is allowed again");
+});
+
+test("the panel's 经过 has a row for the start, with his words, and none for one that never started", async () => {
+  const { w } = setup();
+  const id = await ticket(w);
+  await ops.hear(w.ctx, id, "好，用 do-it 做\n  so go。启动");
+  const said = load(w.root, id).said.at(-1)!.seq;
+  process.env.FAKE_ORCH_REFUSE = "turned away";
+  assert.equal((await ops.flow(chatOf(w, id), id, "do-it", { saidSeq: said })).ok, false);
+  delete process.env.FAKE_ORCH_REFUSE;
+  const { eventsOf } = await import("../server/lib/events.mjs");
+  const { linkContext } = await import("../server/lib/links.mjs");
+  const rowsNow = () => {
+    const s = { ...load(w.root, id), lines: read(w.root, id) };
+    return eventsOf(s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, s.link), { labelOf: (tool: string) => ({ name: tool }) }).items.filter((r: { kind: string }) => r.kind === "flow");
+  };
+  assert.equal(rowsNow().length, 0, "it was turned away: nothing started");
+  assert.equal((await ops.flow(chatOf(w, id), id, "do-it", { saidSeq: said })).ok, true);
+  const [row] = rowsNow();
+  assert.equal(rowsNow().length, 1);
+  assert.deepEqual([row.label, row.text], ["起了 do-it", "你说：「好，用 do-it 做 so go。启动」"]);
+  assert.doesNotMatch(`${row.label}${row.text}`, /叫醒|校验|记录|计划|读数|会话|agent/i);
+});
+
+test("the affair's label is what the runtime accepts: one line, nothing invisible, at most 120 characters, the number not said twice", async () => {
+  const { labelOf } = await import("../server/lib/flows.mjs");
+  assert.equal(labelOf("700", "#700 某某闪退"), "#700 某某闪退");
+  assert.equal(labelOf("700", "某某闪退"), "#700 某某闪退");
+  assert.equal(labelOf("700", "两行\n的\u200b标题\u3164"), "#700 两行 的 标题");
+  const long = labelOf("700", "字".repeat(300));
+  assert.equal([...long].length, 120);
+  assert.ok(long.endsWith("…"));
 });

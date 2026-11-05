@@ -126,7 +126,9 @@ export function runEnv(base, { paseoHome = "", logDir = "" } = {}) {
 
 /** The affair's label as the runtime takes it: one line, no control or invisible characters, at most 120 characters. */
 export function labelOf(id, title) {
-  const clean = `#${id} ${title}`.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}͏ᅟᅠ᠎⠀ㅤﾠ]/gu, " ").replace(/\s+/g, " ").trim();
+  // An affair is usually titled with its own number already ("#1234 …"): not said twice.
+  const named = title.trimStart().startsWith(`#${id}`) ? title : `#${id} ${title}`;
+  const clean = named.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u034F\u115F\u1160\u180E\u2800\u3164\uFFA0]/gu, " ").replace(/\s+/g, " ").trim();
   const chars = [...clean];
   return chars.length > 120 ? `${chars.slice(0, 119).join("")}…` : clean;
 }

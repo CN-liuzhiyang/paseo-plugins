@@ -47,6 +47,7 @@ export const KINDS: Record<PanelEvent["kind"], EventStyle> = {
   done: { dot: "solid", color: (c) => c.statusSuccess, title: (c) => c.statusSuccess },
   stopped: { dot: "solid", color: (c) => c.foregroundMuted, title: (c) => c.foregroundMuted },
   resumed: { dot: "solid", color: (c) => c.accent, title: (c) => c.foreground },
+  flow: { dot: "solid", color: (c) => c.accent, title: (c) => c.foreground },
   error: { dot: "solid", color: (c) => c.statusDanger, title: (c) => c.statusDanger },
 };
 
