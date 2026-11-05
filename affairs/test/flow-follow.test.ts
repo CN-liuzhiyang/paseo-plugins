@@ -85,7 +85,7 @@ test("a card waiting, the answer and the end are each written down once, however
   await ops.flowSync(w.ctx, id);
   await ops.flowSync(w.ctx, id);
   assert.deepEqual(marks(w, id).map((m) => m.key), ["gate:c2:waiting", "gate:c2:allowed"]);
-  assert.match(marks(w, id)[1].text, /：批了$/);
+  assert.match(marks(w, id)[1].text, /^批了：批准 #700 的修复方案，开始出补丁$/, "the question mark of the card is dropped");
   assert.equal(looks(w), 0, "a card answered is no reason for a look");
 
   events(logDir, [start(), gateStart(), gateAgent(), gateEnd("allowed"), runEnd("done", { summary: "提交了 r123，单子已回填" })], { claimAgeMs: 9_000_000 });
@@ -106,12 +106,12 @@ test("an answer seen only after it was given still leaves the waiting before it;
   events(logDir, [start(), gateStart(), gateAgent(), gateEnd("denied", { reason: "方案太大" })]);
   await ops.flowSync(w.ctx, id);
   assert.deepEqual(marks(w, id).map((m) => [m.key, m.tone]), [["gate:c2:waiting", "normal"], ["gate:c2:denied", "red"]]);
-  assert.match(marks(w, id)[1].text, /：没批，方案太大$/);
+  assert.match(marks(w, id)[1].text, /^没批：.*（方案太大）$/);
   const words = (state: string) => marksOf({ state: "running", gates: [{ callId: "c9", title: "批准补丁", state }] }).at(-1)!.text;
-  assert.equal(words("expired"), "批准补丁：没批，过期了");
-  assert.equal(words("mismatch"), "批准补丁：没批成");
-  assert.equal(words("error"), "批准补丁：没批成");
-  assert.equal(words("allowed"), "批准补丁：批了");
+  assert.equal(words("expired"), "没批，过期了：批准补丁");
+  assert.equal(words("mismatch"), "没批成：批准补丁");
+  assert.equal(words("error"), "没批成：批准补丁");
+  assert.equal(words("allowed"), "批了：批准补丁");
 });
 
 test("how a run ends: stopped, failed and timed out are red and say why; a run whose keeper is gone is called lost only if it stays so", async () => {

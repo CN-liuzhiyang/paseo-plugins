@@ -214,12 +214,13 @@ export const usdText = (usd) => (Number.isFinite(usd) ? `$${usd < 10 ? usd.toFix
 
 /** What a card's answer comes to in a few words, for a step in the history of a run. */
 function gateWords(g) {
-  const t = clip(g.title, 24);
+  // The card is a question ("…，开始出补丁？"): said after the answer, the question mark goes.
+  const t = clip(g.title, 24).replace(/[？?]$/, "");
   if (g.state === "waiting") return `等你批：${t}`;
-  if (g.state === "allowed") return `${t}：批了`;
-  if (g.state === "denied") return `${t}：没批${g.reason ? `，${clip(g.reason, 24)}` : ""}`;
-  if (g.state === "expired") return `${t}：没批，过期了`;
-  return `${t}：没批成`;
+  if (g.state === "allowed") return `批了：${t}`;
+  if (g.state === "denied") return `没批：${t}${g.reason ? `（${clip(g.reason, 24)}）` : ""}`;
+  if (g.state === "expired") return `没批，过期了：${t}`;
+  return `没批成：${t}`;
 }
 
 /** How a run ended, in words: [text, bad]. */
