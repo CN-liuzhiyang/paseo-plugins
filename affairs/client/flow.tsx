@@ -13,14 +13,15 @@ type Navigation = {
 } | undefined;
 
 // COMPAT(navigation.openPluginScreen): a fork-only way to open a screen of another plugin (the run's own page); without it there is no "看详情".
-export function FlowBox({ flow, c, navigation }: { flow: NonNullable<PanelData["flow"]>; c: Colors; navigation: Navigation }) {
+// The workspace goes along: the run's page, given one, shows the run in that workspace's 流程 tab and does not stay on the page of its own.
+export function FlowBox({ flow, c, navigation, workspaceId }: { flow: NonNullable<PanelData["flow"]>; c: Colors; navigation: Navigation; workspaceId?: string }) {
   const waiting = flow.action?.kind === "approve";
   const color = flow.tone === "red" ? c.statusDanger : waiting ? c.statusWarning : flow.text === "做完了" ? c.statusSuccess : c.accent;
   const open = (() => {
     const action = flow.action;
     if (!action) return null;
     if (action.kind === "approve" && action.agentId && navigation?.openAgent) return { label: "去批准", primary: true, press: () => navigation.openAgent!({ agentId: action.agentId! }) };
-    if (action.kind === "detail" && action.runId && navigation?.openPluginScreen) return { label: "看详情", primary: false, press: () => navigation.openPluginScreen!("orchestration-ui", "runs", { run: action.runId! }) };
+    if (action.kind === "detail" && action.runId && navigation?.openPluginScreen) return { label: "看详情", primary: false, press: () => navigation.openPluginScreen!("orchestration-ui", "runs", { run: action.runId!, ...(workspaceId ? { workspace: workspaceId } : {}) }) };
     return null;
   })();
   return (

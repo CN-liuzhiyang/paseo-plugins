@@ -1,5 +1,6 @@
 import type { PluginClientContext, PluginScreenProps, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
+import { useState } from "react";
 import { CARD_KIND, CARD_VERSION, runCardSchema } from "./shared/card";
 import { makeFlowBar } from "./client/flow-bar";
 import { createFocusStore } from "./client/focus";
@@ -7,6 +8,7 @@ import { makeRunCard } from "./client/run-card";
 import { makeRunsPanel } from "./client/run-panel";
 import { OrchestrationSettings } from "./client/settings-screen";
 import { RunsSurface, SCREEN_ID, type SurfaceActions } from "./client/surface";
+import { ToWorkspace } from "./client/to-workspace";
 
 const PANEL_ID = "runs";
 const BAR_ID = "flow-bar";
@@ -30,7 +32,16 @@ export default function contribute(client: PluginClientContext) {
     openInWorkspace,
     paseo: client.paseo,
   };
-  const Screen = (props: PluginScreenProps) => <RunsSurface {...props} actions={actions} />;
+  // Asked for with a workspace (from that workspace's own panel), a run is shown in the workspace's 流程 tab, not on this page.
+  const Screen = (props: PluginScreenProps) => {
+    const [stayed, setStayed] = useState(false);
+    const workspaceId = props.params.workspace ?? null;
+    const runId = props.params.run ?? null;
+    if (workspaceId && runId && !stayed) {
+      return <ToWorkspace props={props} workspaceId={workspaceId} runId={runId} node={props.params.node ?? null} open={openInWorkspace} stay={() => setStayed(true)} />;
+    }
+    return <RunsSurface {...props} actions={actions} />;
+  };
   const cleanups = [
     client.addScreen({ id: SCREEN_ID, title: "流程", Component: Screen }),
     client.addSidebarHeaderItem({

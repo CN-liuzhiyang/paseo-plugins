@@ -66,7 +66,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, paddingBottom: 28 }}>
       <StateBadge mood={panel.mood} c={c} />
       {panel.flow ? heading("流程") : null}
-      {panel.flow ? <FlowBox flow={panel.flow} c={c} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} /> : null}
+      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} /> : null}
       {heading("现在")}
       {panel.asks.map((a) => (
         <QuestionCard key={a.id} c={c} title={a.title} line={a.line}>
