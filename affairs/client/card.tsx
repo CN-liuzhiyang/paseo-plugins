@@ -37,7 +37,7 @@ export function Pieces({ text, parts, color, style }: { text: string; parts?: Se
 export function AffairLine({ item, theme }: PluginTimelineItemProps<Line>) {
   const c = theme.colors;
   const { text, tone, parts } = item.data;
-  return <Pieces text={text} parts={parts} color={c.accent} style={{ color: tone === "red" ? c.statusDanger : c.foregroundMuted, fontSize: 14, lineHeight: 21, marginVertical: 4 }} />;
+  return <Pieces text={text} parts={parts} color={c.accent} style={{ color: tone === "red" ? c.statusDanger : tone === "warn" ? c.statusWarning : c.foregroundMuted, fontSize: 14, lineHeight: 21, marginVertical: 4 }} />;
 }
 
 /** A question for him, with its choices as buttons. Pressing one answers it; he can also just say it in the chat. */

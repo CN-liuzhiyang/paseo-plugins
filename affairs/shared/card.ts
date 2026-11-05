@@ -13,7 +13,7 @@ export const LINE_VERSION = 1;
 
 export const lineSchema = z.object({
   text: z.string(),
-  tone: z.enum(["normal", "red"]),
+  tone: z.enum(["normal", "red", "warn"]),
   detail: z.string(),
   parts: z.array(segmentSchema).optional(),
 });

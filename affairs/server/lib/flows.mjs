@@ -258,7 +258,7 @@ export function marksOf(st) {
  * in the log, which holds what was seen before (so a restart, or a run seen only after it ended, still reads right).
  * `short` is what it is doing in a word or two (the phase, 等你批, 做完了), `rest` what goes with it (the card, the result): the block on the
  * panel gives them two lines, the chat one sentence.
- * @returns {{ text: string, short: string, rest: string, tone: "normal" | "red", waiting: boolean, over: boolean, agentId: string | null }}
+ * @returns {{ text: string, short: string, rest: string, tone: "normal" | "warn" | "red", waiting: boolean, over: boolean, agentId: string | null }}
  */
 /** "做完了：提交了 r1 · $2.40" is ["做完了", "提交了 r1"]; a text with no "：" has nothing after it. */
 const splitText = (text) => {
@@ -279,13 +279,13 @@ export function sentenceOf(f, st, now) {
   }
   if (waitingGate) {
     const text = `等你批：${clip(waitingGate.title, 24)}`;
-    return { text, short: "等你批", rest: clip(waitingGate.title, 40), tone: "normal", waiting: true, over: false, agentId: waitingGate.agentId ?? null };
+    return { text, short: "等你批", rest: clip(waitingGate.title, 40), tone: "warn", waiting: true, over: false, agentId: waitingGate.agentId ?? null };
   }
   if (!st) {
     const waitingMark = last && /^等你批/.test(last.text) ? last : null;
     const text = waitingMark ? waitingMark.text : last ? "在跑" : "刚起，在准备";
     const [short, rest] = splitText(text);
-    return { text, short, rest, tone: "normal", waiting: Boolean(waitingMark), over: false, agentId: null };
+    return { text, short, rest, tone: waitingMark ? "warn" : "normal", waiting: Boolean(waitingMark), over: false, agentId: null };
   }
   const doing = st.phase?.title ? clip(st.phase.title, 16) : "在跑";
   return { text: `${doing} · ${spanText(now - Date.parse(f.at))}`, short: doing, rest: "", tone: "normal", waiting: false, over: false, agentId: null };

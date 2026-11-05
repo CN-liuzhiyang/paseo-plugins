@@ -222,7 +222,7 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
     name: latest.flow,
     text: sent.short,
     detail: sent.rest,
-    tone: sent.tone,
+    tone: sent.tone === "red" ? "red" : "normal",
     meta: [took, cost].filter(Boolean).join(" · "),
     action: sent.waiting && sent.agentId ? { kind: "approve", agentId: sent.agentId } : { kind: "detail", runId: latest.runId },
     more: runs.length - 1,

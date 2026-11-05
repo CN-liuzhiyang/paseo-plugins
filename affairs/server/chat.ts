@@ -273,7 +273,7 @@ export function createChats(deps: ChatDeps) {
         // The answer to a question takes the question's place, drawn before or not (a card from before a reload is replaced too).
         const itemId = r.ask ? askId(r.ask) : `row-${r.key}`;
         if (r.ask) d.asks.delete(r.ask);
-        await put(chatId, itemId, LINE_KIND, LINE_VERSION, { text: r.text, tone: r.tone === "red" ? "red" : "normal", detail: r.detail, ...(r.parts ? { parts: r.parts } : {}) });
+        await put(chatId, itemId, LINE_KIND, LINE_VERSION, { text: r.text, tone: r.tone === "red" || r.tone === "warn" ? r.tone : "normal", detail: r.detail, ...(r.parts ? { parts: r.parts } : {}) });
       }
       for (const a of view.asks) {
         if (d.asks.has(a.id)) continue;

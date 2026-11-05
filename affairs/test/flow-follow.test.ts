@@ -172,6 +172,7 @@ test("the chat has one line for the run, in the same place whatever happens to i
   events(logDir, [start(), ev("phase.start", { phase: "plan" }), gateStart(), gateAgent()]);
   await ops.flowSync(w.ctx, id);
   assert.match(rowOf().text, /do-it · 等你批：批准 #700 的修复方案/);
+  assert.equal(rowOf().tone, "warn", "he is asked to do something: the line is drawn in the warm color");
 
   events(logDir, [start(), gateStart(), gateAgent(), gateEnd("denied")]);
   await ops.flowSync(w.ctx, id);
