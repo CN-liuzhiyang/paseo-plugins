@@ -166,7 +166,7 @@ export function fold(lines) {
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
-    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
+    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, flows: [], appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
   };
   const undone = new Set(lines.filter((l) => l.kind === "undo").map((l) => l.target));
   for (const l of lines) {
@@ -328,6 +328,16 @@ export function fold(lines) {
       case "ask.drop": {
         const q = s.asks.find((a) => a.id === l.id);
         if (q && q.state === "open") q.state = "dropped";
+        break;
+      }
+      case "flow":
+        // A flow he had started for this affair (`affair flow`): which, the run it is, what he said that asked for it.
+        s.flows.push({ seq: l.seq, at: l.at, flow: String(l.flow ?? ""), runId: String(l.runId ?? ""), events: String(l.events ?? ""), timeoutMs: Number(l.timeoutMs) || 0, by: l.by ?? "chat", said: Number.isInteger(l.said) ? l.said : null, failed: "" });
+        break;
+      case "flow.fail": {
+        // The run did not start after all (the runtime turned it away, or another start was first): it counts for nothing.
+        const f = s.flows.find((x) => x.runId === l.runId);
+        if (f) f.failed = String(l.why ?? "没起成");
         break;
       }
       case "status":

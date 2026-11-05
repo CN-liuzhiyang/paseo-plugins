@@ -92,6 +92,11 @@ export function rowsOf(state, now, policy, { withChat = false } = {}) {
       add(`d${l.seq}`, l.at, `${time}  不盯了。`);
     } else if (l.kind === "status" && l.status === "watching" && l.seq > 1) {
       add(`d${l.seq}`, l.at, `${time}  接着盯。`);
+    } else if (l.kind === "flow" && !state.flows?.find((f) => f.seq === l.seq)?.failed) {
+      // A flow started for this affair: one row, with the words that asked for it when there are some.
+      const said = Number.isInteger(l.said) ? state.said.find((m) => m.seq === l.said) : null;
+      const quote = said ? [...said.text.replace(/s+/g, " ").trim()] : [];
+      add(`w${l.seq}`, l.at, `${time}  起了 ${l.flow}${quote.length ? `（你说：「${quote.length > 30 ? `${quote.slice(0, 29).join("")}…` : quote.join("")}」）` : ""}`);
     } else if (l.kind === "flag" && l.what === "chain") {
       add(`f${l.seq}`, l.at, `${time}  ${l.detail}`, "red");
     } else if (l.kind === "next" && l.verdict === "appeal") {

@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
-import { mayLook, tripped } from "./limits.mjs";
+import { dayStart, mayLook, tripped } from "./limits.mjs";
+import { eventsFile, flowsOf, labelOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, runEnv, runState, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
@@ -11,7 +13,7 @@ import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
 import { ago, attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
 import { clampMax, findTurns, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
-import { linkContext, usableTemplates } from "./links.mjs";
+import { hrefOf, linkContext, parseLink, usableTemplates } from "./links.mjs";
 import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
@@ -58,6 +60,9 @@ export function makeCtx(options = {}) {
     by: options.by ?? "human",
     // For a chat session: the one affair it is the chat of (it can touch no other).
     chatFor: options.chatFor ?? "",
+    // `flow`: how long to wait for a started run to show itself, and how a process is made (a test puts its own).
+    flowWaitMs: options.flowWaitMs ?? 8000,
+    flowStart: options.flowStart,
   };
 }
 
@@ -551,6 +556,87 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
   write(ctx, s.id, [{ kind: "next", next: isoLocal(at, policy.tz), waitingFor, why: "你说先放一放", earlyIf: [], verdict: backed ? "recorded" : result.verdict, source: byChat(ctx) && evidence.length === 0 ? "chat" : "user", detail: evidence.length ? "他说的，原话在记录里" : "" }]);
   await syncPlan(ctx, s.id);
   return { ok: true, text: say.paused(s.title, speak(at, ctx.now(), ctx.policy.tz)) };
+}
+
+const NTH = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];
+
+/**
+ * `affair flow <编号> [<流程>]`: starts one of the flows policy allows for this kind of affair, in the affair's own workspace, so
+ * that what it asks him (an approval) is asked where he is. From the person's side only: a chat session needs the line of his
+ * that asked for it (--said-seq), a look cannot (it may only ask him). Without a flow name: which ones can be started.
+ * The run is the runtime's, in a process of its own that outlives this command; it is told nothing of the session that asked
+ * (orchestration/CONVENTIONS.md), and what it needs is made by the flow's prepare program, not typed by whoever asks.
+ * @returns {Promise<Result>}
+ */
+export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false } = {}) {
+  if (byLook(ctx)) return lookRefused("起流程");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const { s } = r;
+  const flows = flowsOf(ctx.policy);
+  const link = parseLink(s.link);
+  const mine = Object.entries(flows).filter(([, f]) => link && f.kinds.includes(link.kind));
+  if (!name) return { ok: true, text: mine.length ? `「${s.title}」能起的流程：\n${mine.map(([n, f]) => `- ${n}${f.says ? `（${f.says}）` : ""}`).join("\n")}` : `「${s.title}」没有能起的流程。` };
+  const f = flows[name];
+  if (!f) return fail(`没有叫「${name}」的流程可起。${Object.keys(flows).length ? `能起的有：${Object.keys(flows).join("、")}。` : "现在一个都没配。"}`);
+  if (!link || !f.kinds.includes(link.kind)) return fail(`${name} 管的是 ${f.kinds.join("、")} 的事，「${s.title}」不是，起不了。`);
+  if (!isOpen(s) || s.system) return fail(`「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了，不起流程。`);
+  if (!s.workspaceId || !s.workdir) return fail(`「${s.title}」的工作区或工作目录不在了，先找回来再起。`);
+  let said = null;
+  if (byChat(ctx)) {
+    if (saidSeq === "") return fail("要指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没点名要跑就别起，直接问他。");
+    said = Number(saidSeq);
+    if (!s.said.find((m) => m.seq === said && !m.undone && m.by === "user" && m.via !== "chat-agent")) return fail(`--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。`);
+  } else if (saidSeq !== "") return fail("--said-seq 只有对话的会话用；本人直接起就行。");
+
+  const now = ctx.now();
+  const tz = ctx.policy.tz;
+  const logDir = orchLogDir(ctx.policy);
+  const stateOf = (x) => runState({ events: x.events || eventsFile(logDir, x.runId), startedAt: Date.parse(x.at), timeoutMs: x.timeoutMs || undefined, now });
+  const earlier = s.flows.filter((x) => !x.failed);
+  const going = earlier.find((x) => stateOf(x).state === "going");
+  if (going) return fail(`已经在跑：${going.flow}（${stamp(going.at, now, tz)} 起）。`);
+  const same = earlier.filter((x) => x.flow === name);
+  const lastSame = same[same.length - 1];
+  if (lastSame && !again) return fail(`这件事 ${stamp(lastSame.at, now, tz)} 跑过一次 ${name}（${outcomeText(stateOf(lastSame).outcome) || "没起来"}）。要再跑一次，加 --again。`);
+  const since = dayStart(now, tz, ctx.policy.limits.dayStartHour);
+  const today = listIds(ctx.root).reduce((n, id) => n + state(ctx, id).flows.filter((x) => !x.failed && Date.parse(x.at) >= since).length, 0);
+  if (today >= perDayOf(ctx.policy)) return fail(`今天已经起了 ${today} 次流程，到一天的上限（${perDayOf(ctx.policy)} 次）了。`);
+  if (!f.prepare || !existsSync(f.prepare)) return fail(`${name} 的准备脚本找不到：配置里 flows.${name}.prepare 要指到它。`);
+  const orch = orchCommand(ctx.policy, BIN);
+  if (!orch || !existsSync(orch)) return fail("找不到编排运行时（orchestration/runtime/orch.mjs）：配置里 flows.orch 要指到它。");
+
+  let input;
+  try {
+    input = await prepareInput(f.prepare, { ref: link.ref, workdir: s.workdir });
+  } catch (error) {
+    return fail(`没起成：${error.message}`);
+  }
+  const runId = randomUUID();
+  const dir = path.join(ctx.root, s.id, "flows");
+  mkdirSync(dir, { recursive: true });
+  const inputFile = path.join(dir, `${runId}.input.json`);
+  const affairFile = path.join(dir, `${runId}.affair.json`);
+  const url = hrefOf(usableTemplates(ctx.policy.links), link.kind, link.ref);
+  writeFileSync(inputFile, JSON.stringify(input));
+  writeFileSync(affairFile, JSON.stringify({ label: labelOf(s.id, s.title), key: `affair:${s.id}`, workspace: s.workspaceId, ...(url ? { url } : {}) }));
+
+  // Written before the process is started, so that a second start sees it; if another start was first, this one steps back.
+  const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(said !== null ? { said } : {}), ...(again ? { again: true } : {}) }]);
+  const rival = state(ctx, s.id).flows.find((x) => x.seq < mark.seq && !x.failed && stateOf(x).state === "going");
+  if (rival) {
+    write(ctx, s.id, [{ kind: "flow.fail", runId, why: "另一次已经在跑" }]);
+    return fail(`已经在跑：${rival.flow}（${stamp(rival.at, now, tz)} 起）。`);
+  }
+  const args = [orch, "run", name, "--run-id", runId, "--input", `@${inputFile}`, "--affair", `@${affairFile}`, "--timeout", f.timeout];
+  const started = await startRun({ args, cwd: s.workdir, env: runEnv(process.env, { paseoHome: ctx.paseoHome, logDir }), logDir, runId, waitMs: ctx.flowWaitMs, start: ctx.flowStart });
+  if (!started.ok) {
+    write(ctx, s.id, [{ kind: "flow.fail", runId, why: started.why }]);
+    return fail(`没起成：${started.why}`);
+  }
+  const first = `起了 ${name}${f.says ? `（${f.says}）` : ""}，要你批的时候这件事会亮。`;
+  const text = lastSame ? `${first}\n这件事 ${stamp(lastSame.at, now, tz)} 跑过一次 ${name}（${outcomeText(stateOf(lastSame).outcome) || "没起来"}），这是第${NTH[same.length + 1] ?? same.length + 1}次。` : first;
+  return { ok: true, text, runId, pid: started.pid };
 }
 
 /** @returns {Result} */

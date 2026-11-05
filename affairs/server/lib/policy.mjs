@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { flowProblems } from "./flows.mjs";
 import { linkProblems } from "./links.mjs";
 
 // The thresholds live in policy.json under the affairs root, so tuning them is a file edit, not a code change.
@@ -65,6 +66,8 @@ export const DEFAULT_POLICY = {
     // At most this many reads in one pass of the loop; the rest wait for the next minute.
     perPass: 10,
   },
+  // Flows the chat may start for an affair (`affair flow`): { perDay: 3, "<name>": { kinds, prepare, timeout, says } }; see lib/flows.mjs.
+  flows: { perDay: 3 },
   role: "glance",
   // The chat session of an affair. It is kept as long as it is cheap to keep: warm (spoken to within the cache's lifetime) it is
   // never replaced; cold and long, or very long, or left over the night, it is replaced by a new one that reads the brief.
@@ -108,6 +111,7 @@ export function policyProblems(policy) {
   need("readers.publicDir", Boolean(policy.readers?.publicDir) && existsSync(policy.readers.publicDir), "readers.publicDir 要写成公开读取工具目录（readers/）的完整路径，目录要在");
   need("handbooksDir", Boolean(policy.handbooksDir) && existsSync(policy.handbooksDir), "handbooksDir 要写成私有手册目录，目录要在");
   out.push(...linkProblems(policy));
+  out.push(...flowProblems(policy));
   need("roles", Object.values(policy.roles ?? {}).every((r) => typeof r?.provider === "string" && r.provider), "roles 里每一档要写 provider");
   return out;
 }

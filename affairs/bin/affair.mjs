@@ -12,6 +12,7 @@ const USAGE = `affair <命令> ...
   new --title T [--goal G] [--said S] [--link kind:ref] [--domain personal|family] [--deadline "YYYY-MM-DD HH:mm"] [--no-wait]
   find <词>                    note <编号|名字> --said S [--deadline T]    answer <问题编号> --said S（对话的会话用 --said-seq N）
   （对话的会话）note <编号> --mine --said S [--said-seq N]   report <编号> --from chat --file F.json   brief <编号> --chat   history <编号> [--q 词] [--pick N] [--max 字数]
+  flow <编号> [<流程>] [--said-seq N] [--again]   起一个流程（不写流程名：列出这件事能起哪些）
   stop <编号|名字>             pause <编号|名字> --until "YYYY-MM-DD HH:mm" [--said-seq N]  resume <编号|名字>   undo <编号|名字>
   show <编号|名字> [--log]     ls    stats    doctor（逐项自检）
   pause-all（回退用：停掉全部计划并记下）   resume-all（放开）
@@ -22,7 +23,7 @@ const USAGE = `affair <命令> ...
 function parse(argv) {
   const flags = {};
   const rest = [];
-  const bool = new Set(["log", "json", "stdin", "no-wait", "force", "mine", "chat"]);
+  const bool = new Set(["log", "json", "stdin", "no-wait", "force", "mine", "chat", "again"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -76,6 +77,9 @@ async function main() {
       break;
     case "undo":
       result = ops.undo(ctx, need(arg, "编号"));
+      break;
+    case "flow":
+      result = await ops.flow(ctx, need(arg, "编号"), rest[2] ?? "", { saidSeq: flags["said-seq"] ?? "", again: flags.again === true });
       break;
     case "show":
       result = ops.show(ctx, need(arg, "编号"), { log: flags.log });
