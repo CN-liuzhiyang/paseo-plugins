@@ -154,6 +154,7 @@ node runtime/orch.mjs wake-lost             # 各补发一次
 node runtime/orch.mjs resume <上一段的 runId> [--timeout 30h] [--run-id <新的 id>] [--affair <json | @file>] [--expect <指纹>] [--redo <步骤>]
 node runtime/orch.mjs steps <runId>                                  # 这条线的日志里记了什么
 node runtime/orch.mjs status <runId>                                 # 这次运行现在怎么样：活着没有、在哪个阶段、哪些闸在等人、花了多少
+node runtime/orch.mjs gate-carrier                                    # 人闸的卡由谁答：gate 角色的 provider，是 Paseo 的插件还是模型（起运行的插件用它判断要等哪个 provider）
 node runtime/orch.mjs settle <runId> <步骤> --done '<值的 JSON>' | --not-done   # 了结一个"可能做了也可能没做"的步骤
 ```
 

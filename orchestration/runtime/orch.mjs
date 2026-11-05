@@ -11,6 +11,7 @@
 //   node runtime/orch.mjs steps <runId>
 //   node runtime/orch.mjs status <runId> [--spawned-at <ms>]
 //   node runtime/orch.mjs check <flow.mjs | name>
+//   node runtime/orch.mjs gate-carrier
 //   node runtime/orch.mjs list
 //
 // `resume` carries on a run that stopped, failed, timed out or was cut off, from the resume point its flow declared
@@ -67,7 +68,7 @@ import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { loadFlow, checkFlow } from "./flow.mjs";
-import { runFlow, jsonSafe, takeRunId, settleRefusal } from "./run.mjs";
+import { runFlow, jsonSafe, takeRunId, settleRefusal, GATE_ROLE } from "./run.mjs";
 import { resolveFlowFile, resolveTarget } from "./resolve.mjs";
 import { listFlows } from "./catalog.mjs";
 import { logDir as configuredLogDir } from "./config.mjs";
@@ -79,7 +80,8 @@ import { readRunState } from "./state.mjs";
 import { runStatus } from "./status.mjs";
 import { PRINT_SHAPE, pointPrint } from "./resume-point.mjs";
 import { AGENT_ID, wakeLost } from "./wake.mjs";
-import { loadRoster } from "./roster.mjs";
+import { loadRoster, bindRole } from "./roster.mjs";
+import { carrierKind } from "./gate.mjs";
 import { paseoExecutor } from "./executor.mjs";
 import { loadConfig } from "./config.mjs";
 
@@ -93,6 +95,7 @@ const USAGE = [
   "  node runtime/orch.mjs steps <runId>",
   "  node runtime/orch.mjs status <runId> [--spawned-at <ms>]",
   "  node runtime/orch.mjs check <flow.mjs | name>",
+  "  node runtime/orch.mjs gate-carrier",
   "  node runtime/orch.mjs list",
 ].join("\n");
 
@@ -530,6 +533,19 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   if (command === "list" && target === undefined) {
     try {
       print({ flows: await listFlows() });
+      process.exit(0);
+    } catch (error) {
+      console.error(`${error.name}: ${error.message}`);
+      process.exit(2);
+    }
+  }
+
+  // Who answers a gate's card: the `gate` role's provider, and whether it is a provider of Paseo (the orchestration-gate plugin's) or a
+  // model. A plugin that starts runs asks this before starting one, to know which provider has to be up.
+  if (command === "gate-carrier" && target === undefined) {
+    try {
+      const bound = bindRole(await loadRoster(), { role: GATE_ROLE });
+      print({ role: GATE_ROLE, provider: bound.provider, carrier: carrierKind(bound.provider), family: bound.provider.split("/")[0] });
       process.exit(0);
     } catch (error) {
       console.error(`${error.name}: ${error.message}`);
