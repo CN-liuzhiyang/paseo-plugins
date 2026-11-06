@@ -113,7 +113,7 @@ test("what he reads has none of the inner words", () => {
 // ---- every place a person reads ----
 
 const link = "gcp:555001";
-const started = async (w: ReturnType<typeof world>) => (await ops.create(w.ctx, { title: "引擎外放 #555001", goal: "盯 #555001", said: "盯一下 #555001 这张单", link, noWait: true })).id as string;
+const started = async (w: ReturnType<typeof world>) => (await ops.create(w.ctx, { id: "dental", title: "引擎外放 #555001", goal: "盯 #555001", said: "盯一下 #555001 这张单", link, noWait: true })).id as string;
 
 test("the panel: the sentences carry pieces where a ticket is; a panel with none is as it was", async () => {
   const w = world({ policy });
@@ -245,7 +245,7 @@ test("the CLI's reason is the whole of what it said: a JSON error read as its me
 
 test("Paseo still counts the last look as running for a moment: the look is asked again and happens, with nothing written about it", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-2", title: "洗牙", noWait: true });
   w.advance(10 * 60_000);
   process.env.FAKE_PASEO_BUSY = "2";
   const before = runs(w);
@@ -258,7 +258,7 @@ test("Paseo still counts the last look as running for a moment: the look is aske
 
 test("still running after the tries: left for the look that is on, and one line says it was tried", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-3", title: "洗牙", noWait: true });
   w.advance(10 * 60_000);
   process.env.FAKE_PASEO_BUSY = "99";
   const before = runs(w);
@@ -274,7 +274,7 @@ test("still running after the tries: left for the look that is on, and one line 
 
 test("another failure is not retried: one try, written down as it was", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-4", title: "洗牙", noWait: true });
   w.advance(10 * 60_000);
   process.env.FAKE_PASEO_FAIL = "run-once";
   const before = runs(w);

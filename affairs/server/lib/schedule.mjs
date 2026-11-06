@@ -39,6 +39,10 @@ export const resume = (run, scheduleId) => json(run, ["schedule", "resume", sche
 // run-once does not return until the look has ended; it is started, and its failure within a few seconds is heard.
 export const runOnce = (run, scheduleId) => json(run, ["schedule", "run-once", scheduleId], { detachAfterMs: 5000 });
 export const remove = (run, scheduleId) => json(run, ["schedule", "delete", scheduleId]);
+export function changeRole(run, scheduleId, policy, name) {
+  const role = roleOf(policy, name);
+  return json(run, ["schedule", "update", scheduleId, "--provider", role.provider, ...(role.thinking ? ["--thinking", role.thinking] : []), ...(role.mode ? ["--mode", role.mode] : [])]);
+}
 export const inspect = (run, scheduleId) => json(run, ["schedule", "inspect", scheduleId]);
 
 /**

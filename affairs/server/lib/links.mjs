@@ -19,9 +19,15 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 export function parseLink(link) {
   const m = /^([\w-]+):(.+)$/.exec(String(link ?? "").trim());
   if (!m) return null;
-  const ref = m[2].trim().replace(/^#/, "").split(/[\/\s]/)[0];
+  const ref = m[1] === "github" ? m[2].trim().toLowerCase() : m[2].trim().replace(/^#/, "").split(/[\/\s]/)[0];
   return ref ? { kind: m[1], ref } : null;
 }
+
+export const primaryLink = (s) => Array.isArray(s.links) ? s.links[0] ?? null : s.link ?? null;
+export const normalizedLink = (value) => {
+  const link = parseLink(value);
+  return link ? `${link.kind}:${link.ref}` : "";
+};
 
 /** Templates that can be used: an http(s) address with {ref} in it. Anything else is dropped, never half-used. */
 export function usableTemplates(links) {
@@ -41,7 +47,8 @@ export function linkProblems(policy) {
 /** The address of one reference, or null when its kind has no template. */
 export function hrefOf(templates, kind, ref) {
   const template = templates[kind];
-  return template ? template.replace("{ref}", encodeURIComponent(ref)) : null;
+  const value = kind === "github" ? ref.split("/").map(encodeURIComponent).join("/").replace(/%23(\d+)$/, "/issues/$1") : encodeURIComponent(ref);
+  return template ? template.replace("{ref}", value) : null;
 }
 
 /** @returns {LinkContext} */
@@ -70,7 +77,7 @@ export function linkify(text, ctx) {
     take(new RegExp(`(?<![\\w#&/])#(?<ref>${esc(ref)})(?![\\w])`, "g"), () => kind);
     if (ref.length >= 5) take(new RegExp(`(?<![\\w.#&/:-])(?<ref>${esc(ref)})(?![\\w]|[.-]\\w)`, "g"), () => kind);
   }
-  for (const kind of Object.keys(ctx.templates)) take(new RegExp(`(?<![\\w#&/:.-])${esc(kind)}:#?(?<ref>[A-Za-z0-9][\\w-]{2,})(?![\\w])`, "g"), () => kind);
+  for (const kind of Object.keys(ctx.templates)) take(new RegExp(`(?<![\\w#&/:.-])${esc(kind)}:#?(?<ref>${kind === "github" ? "[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\\d+" : "[A-Za-z0-9][\\w-]{2,}"})(?![\\w])`, "g"), () => kind);
   // Left to right; of two that overlap the earlier, then the longer, stays.
   found.sort((a, b) => a.start - b.start || b.end - a.end);
   const segments = [];

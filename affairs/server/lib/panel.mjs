@@ -1,6 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
+import { primaryLink, hrefOf, linkify, parseLink, partsOf } from "./links.mjs";
 import { CLIP_CHARS, FULL_CHARS, clip } from "./clip.mjs";
 import { counts } from "./limits.mjs";
 import { cardOf, sentOf, stamp } from "./view.mjs";
@@ -71,7 +71,7 @@ const KIND_NAME = { gcp: "易协作", "feishu-task": "飞书任务", doc: "文�
 
 /** @returns {{ label: string, href: string | null } | null} the affair's own link, as one source */
 function mainSource(state, lc) {
-  const own = parseLink(state.link);
+  const own = parseLink(primaryLink(state));
   if (!own) return null;
   const href = hrefOf(lc.templates, own.kind, own.ref);
   const name = KIND_NAME[own.kind] ?? own.kind;
@@ -90,7 +90,7 @@ const TOOL_NAME = { "feishu-task": "飞书任务", "http-json": "网页数据" }
 export function namesOf(policy, state, lc) {
   const labels = new Map(listReaders(policy).map((r) => [r.name, r.label]));
   const toolName = (tool) => labels.get(tool) || TOOL_NAME[tool] || tool;
-  const own = parseLink(state.link);
+  const own = parseLink(primaryLink(state));
   const labelOf = (tool, args) => {
     const name = toolName(tool);
     const ref = String(args?.id ?? args?.itemNo ?? "");

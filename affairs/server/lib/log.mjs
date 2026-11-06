@@ -3,6 +3,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync
 import path from "node:path";
 import { stepFields } from "./steps.mjs";
 import { isoLocal } from "./time.mjs";
+import { normalizedLink } from "./links.mjs";
 
 // One log.jsonl per affair, append only: nothing here opens it for writing from the start. The commands and the plugin
 // both write through append(), under a lock directory, and the plugin watches the root: the log is the only interface.
@@ -13,7 +14,7 @@ const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 
 
 export const affairDir = (root, id) => path.join(root, id);
 export const logFile = (root, id) => path.join(affairDir(root, id), "log.jsonl");
-export const ID = /^(?:D\d{1,6}|\d{3,9})$/;
+export const ID = /^(?:D\d{1,6}|\d{3,9}|[a-z][a-z0-9-]{1,39})$/;
 
 function withLock(dir, fn) {
   const lock = path.join(dir, ".lock");
@@ -162,7 +163,7 @@ const last = (list) => list[list.length - 1] ?? null;
  */
 export function fold(lines) {
   const s = {
-    id: "", title: "", goal: "", domain: "work", link: null, workdir: "", createdAt: null,
+    id: "", title: "", goal: "", domain: "work", link: null, links: [], projects: [], attached: [], workdir: "", createdAt: null,
     status: "watching", statusAt: null, doneEvidence: "",
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
@@ -176,6 +177,19 @@ export function fold(lines) {
     switch (l.kind) {
       case "created":
         Object.assign(s, { id: l.id, title: l.title, goal: l.goal ?? "", domain: l.domain ?? "work", link: l.link ?? null, workdir: l.workdir ?? "", createdAt: l.at, paseoHome: l.paseoHome ?? "", roleName: l.role ?? "", system: l.system === true });
+        s.links = [...new Set((l.links ?? (l.link ? [l.link] : [])).map(normalizedLink).filter(Boolean))];
+        s.projects = l.projects ?? [];
+        s.roleExplicit = l.roleExplicit;
+        break;
+      case "link":
+        s.links = l.action === "rm" ? s.links.filter((v) => v !== l.link) : [...new Set([...s.links, l.link])];
+        if (l.role !== undefined) s.roleName = l.role;
+        break;
+      case "project":
+        s.projects = l.action === "rm" ? s.projects.filter((v) => v !== l.project) : [...new Set([...s.projects, l.project])];
+        break;
+      case "attached":
+        if (l.agentId && !s.attached.includes(l.agentId)) s.attached.push(l.agentId);
         break;
       case "workspace":
         if (l.archived) Object.assign(s, { archived: true, workspaceId: null, conversationId: null, chatId: null, scheduleId: null });
