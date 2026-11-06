@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { json } from "./paseo.mjs";
 import { localParts } from "./time.mjs";
+import { localPathOf } from "./projects.mjs";
 
 // Every affair gets a workspace of its own, all under one project named 事项 whose directory is the affairs root. The
 // workspace's directory is wherever the affair's sessions have to work (a private matter: its own folder; a ticket:
@@ -53,8 +54,10 @@ export function titleOf(state, now, policy) {
   return base;
 }
 
-/** Where an affair's sessions work: the home its link kind names in policy.homes, otherwise its own folder under the root. */
-export function workdirOf(root, id, link, policy) {
-  const kind = link?.split(":")[0];
-  return (kind && policy.homes[kind]) || path.join(root, id);
+/** The first project's local checkout, otherwise the affair's own folder. */
+export async function workdirOf(root, id, projects, policy) {
+  if (!projects.length) return policy.workDir ? path.join(policy.workDir, id) : path.join(root, id);
+  const dir = await localPathOf(projects[0], policy);
+  if (!dir) throw new Error(`这台机器上没检出 ${projects[0]}`);
+  return dir;
 }
