@@ -10,11 +10,21 @@ export function commandCard(command = "affair", id = "<编号>") {
     `${command} history ${id} [--q 词]：找以前的一问一答。`,
     `${command} save ${id} [--msg-file F]：保存 README 和同文件夹的文档。`,
     `${command} here [--cwd D] / attach ${id}：从项目进来接手一件事。`,
+    `${command} mode ${id} watch|drive --said-seq N：按他的原话切换盯或推。`,
+    `${command} budget ${id} USD [--until YYYY-MM-DD] --said-seq N：记他批的额度。`,
+    `${command} ask ${id} --file F.json：带选项、推荐和理由请他拍板。`,
+    `${command} dispatch ${id} --contract F --provider P：额度内派活。`,
+    `${command} env ${id} [--remove]：搭建或拆掉代码环境。`,
     `${command} help [命令]：命令卡或完整用法。`,
   ].join("\n");
 }
 
 const usage = {
+  mode: "mode <编号> watch|drive --said-seq N：只有他说过的原话能切换。推的事不排看一眼，切回盯才恢复。",
+  budget: "budget <编号> <美元> [--until YYYY-MM-DD] --said-seq N：数字、截止日必须在他那句原话里；额度是累计上限，重新批不会清零花费。",
+  ask: 'ask <编号> --file F.json：{title,line,options:[选项,...],recommend:选项,why:理由,push?:true}。只有当前主对话和 attach 过的会话能开；看一眼走 report。',
+  dispatch: "dispatch <编号> --contract F --provider p/model [--thinking T] [--mode M] [--title T] [--cwd D]：只有当前主对话可派，先批额度。指定目录时先建工作区。当前宿主未开放真交卷接口，需按推进手册跟到最终交卷。",
+  env: "env <编号> [--remove]：每个 git 项目在主检出同级建 affair/<编号> 工作树，联接已有依赖，不安装；svn 副本问他。拆时先拆目录联接，未合并分支保留。",
   new: "new --title T [--id short-name] [--goal G] [--said -|--file F] [--link kind:ref（可多次）] [--project key（可多次）] [--domain personal|family] [--deadline T] [--role R] [--no-wait]\n没有单号关联时必须给 --id：2–40 个小写字母、数字或连字符，字母开头。",
   note: "note <编号|名字> --said -|--file F [--deadline T]\nnote <编号> --mine --said -|--file F [--said-seq N]\n对话和 attach 的会话用 --mine，≤120 字；这是自己的结论，不是他说的话，也不改现在。",
   answer: "answer <问题编号> [--said -|--file F] [--said-seq N]\n本人给原话；主对话默认取这一轮最新原话，必须在问题出现以后，不能替他编答案。",
@@ -31,7 +41,7 @@ const usage = {
   project: "project <编号> add|rm <remote:host/path|svn:host/path|path:hostname:absolute-path>：记涉及的项目。",
   save: "save <编号> [--msg-file F]：只提交这件事的文件夹并推送；README 建议 ≤4 KB，status ≤2 KB，对话手册合计 ≤4 KB。",
   here: "here [--cwd D]：列出这个项目上在进行的事。",
-  attach: "attach <编号>：打印 status 和 README，绑定调用方；之后可 note --mine，其他写命令不开放。看一眼不能 attach。",
+  attach: "attach <编号>：打印 status 和 README，绑定调用方；之后可 note --mine 和 ask，不能派活或批额度。看一眼不能 attach。",
   find: "find <词|kind:ref>：按编号、标题或关联定位在盯的事。",
   show: "show <编号|名字> [--log]：看进展或完整经过。",
   ls: "ls：列出在盯的事。", stats: "stats：查看花费。", doctor: "doctor：检查实际 policy、环境、文档大小和推送故障。",

@@ -57,6 +57,9 @@ async function main() {
     case "budget":
       result = await ops.budget(ctx, need(arg, "编号"), need(rest[2], "美元"), { saidSeq: flags["said-seq"], until: flags.until });
       break;
+    case "ask":
+      result = await ops.ask(ctx, need(arg, "编号"), JSON.parse(readFileSync(need(flags.file, "--file"), "utf8")));
+      break;
     case "new":
       result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
       break;

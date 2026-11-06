@@ -14,7 +14,8 @@
     "readers/",
     "handbook.md",
     "agent-usage.md",
-    "handbook.chat.md"
+    "handbook.chat.md",
+    "drive.chat.md"
   ],
   "bin": {
     "affair": "bin/affair.mjs"

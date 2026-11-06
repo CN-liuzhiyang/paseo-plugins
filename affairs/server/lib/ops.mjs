@@ -193,6 +193,23 @@ export async function budget(ctx, ref, amount, { saidSeq = "", until = "" } = {}
   return { ok: true, text: `已记下他批的 $${usd}${until ? `，到 ${until}` : ""}。` };
 }
 
+export async function ask(ctx, ref, data) {
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const s = r.s;
+  const caller = await callerInfo(ctx);
+  const agentId = process.env.PASEO_AGENT_ID || "";
+  const main = caller.by === "chat" && caller.chatFor === s.id && agentId === s.chatId;
+  if (caller.by === "look" || (!main && !s.attached.includes(agentId))) return fail("只有这件事的主对话或接手过的对话能开问题卡。");
+  if (!isOpen(s)) return fail("这件事已经办完，不能再开问题卡。");
+  if (!data || typeof data.title !== "string" || !data.title.trim() || typeof data.line !== "string" || !Array.isArray(data.options) || data.options.length < 2 || data.options.some((o) => typeof o !== "string" || !o.trim()) || !data.options.includes(data.recommend) || typeof data.why !== "string" || !data.why.trim()) return fail("问题要有 title、line、至少两个 options、其中一项 recommend 和理由 why。");
+  const secret = refuseSecret(JSON.stringify(data));
+  if (secret) return secret;
+  const qid = `${s.id}-${s.asks.length + 1}`;
+  write(ctx, s.id, [{ kind: "asked", id: qid, ...askFields(data), line: `${data.line}\n推荐：${data.recommend}。${data.why}`, recommend: data.recommend, why: data.why, push: data.push === true }]);
+  return { ok: true, id: qid, text: "已请他拍板；先做不依赖答案的步骤。" };
+}
+
 export function currentSaid(s) {
   const turn = s.lines?.filter((l) => l.kind === "chat.turn" && l.agentId === s.chatId).at(-1);
   return s.said.filter((m) => !m.undone && m.by === "user" && m.via === "chat-session" &&
