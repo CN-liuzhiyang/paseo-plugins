@@ -430,7 +430,7 @@ export async function create(ctx, input) {
     if (modeOf(s, policy) === "watch") {
       const look = await ringNow(ctx, s, "created");
       if (!look.ok && look.text) write(ctx, id, [{ kind: "flag", what: "first-look", detail: look.text }]);
-    }
+    } else write(ctx, id, [{ kind: "drive.ready", reason: "created" }]);
   } catch (error) {
     await rollbackCreate(ctx, id, error);
     return fail(`没建成「${title}」：${error.message}。什么都没留下，再说一次就行。`);
@@ -612,6 +612,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     if (amount) write(ctx, s.id, [{ kind: "budget", usd: Number(amount[1]), until: s.budget?.until || "", answer: qid }]);
     if (text.trim() === "先停") write(ctx, s.id, [{ kind: "hold", on: true }]);
   }
+  if (modeOf(s, ctx.policy) === "drive") write(ctx, s.id, [{ kind: "drive.ready", reason: "answered", question: qid }]);
   if (q.runs?.[text.trim()]) return flow(ctx, s.id, q.runs[text.trim()], { saidSeq: byChat(ctx) ? saidSeq : "" });
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
@@ -669,6 +670,7 @@ export async function resume(ctx, ref) {
   }
   await syncPlan(ctx, s.id);
   if (modeOf(s, ctx.policy) === "drive") {
+    write(ctx, s.id, [{ kind: "drive.ready", reason: "resume" }]);
     return { ok: true, text: `好，接着推「${s.title}」。` };
   }
   const look = await ringNow(ctx, state(ctx, s.id), "resume");

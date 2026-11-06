@@ -6,6 +6,9 @@ import * as ops from "./lib/ops.mjs";
 import { handoffTurns } from "./lib/history.mjs";
 import { flowFinishedMessage, flowMessageId, orchCommand, orchLogDir } from "./lib/flows.mjs";
 import { ASK_KIND, ASK_VERSION, LINE_KIND, LINE_VERSION, type Segment } from "../shared/card";
+import { modeOf } from "./lib/mode.mjs";
+import { localParts } from "./lib/time.mjs";
+import { costIncrement } from "./lib/drive.mjs";
 
 // The chat of an affair is a real session of the model (made in the affair's workspace, here). This file keeps it:
 // makes it when there is none (or replaces one that has failed, or is too long and cold), listens to it so that what he
@@ -301,10 +304,11 @@ export function createChats(deps: ChatDeps) {
     if (await adopt(id)) return;
     if (!checked.has(s.chatId)) {
       checked.add(s.chatId);
-      const status = (await paseo.agents.ref(s.chatId).refresh())?.agent.status;
+      const seen = (await paseo.agents.ref(s.chatId).refresh())?.agent;
+      const status = seen?.status;
       // A chat is a real session: after a restart it is only "closed", and the next thing he types wakes it where it was (checked
       // by hand). Only one that has failed is replaced.
-      if (status === "error") {
+      if (!seen || seen.archivedAt || status === "error") {
         await replace(id, "failed", s.chatId);
         return;
       }
@@ -330,14 +334,12 @@ export function createChats(deps: ChatDeps) {
       if (e.type === "timeline") void hearItem(id, chatId, e.item, asText(event.timestamp ?? e.timestamp)).then(() => {
         if (e.item?.type === "user_message") deps.changed(id);
       });
-      else if (e.type === "turn_completed" && e.usage) {
+      else if (e.type === "turn_completed") {
         // The session reports what it has cost in all, not what this turn cost: this turn's part is the step up from last time
         // (a total that went down is a session that began again, and counts whole). Nothing is lost while the plugin was not listening: the step is bigger.
-        const total = Number(e.usage.totalCostUsd) || 0;
-        const before = deps.state(id).chatTurn;
-        const last = before ? Number(before.usdTotal) || 0 : 0;
-        const usd = total >= last ? total - last : total;
-        deps.write(id, [{ kind: "chat.turn", agentId: chatId, tokens: Number(e.usage.contextWindowUsedTokens) || 0, usd, usdTotal: total }]);
+        const before = deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId && Number.isFinite(l.usdTotal));
+        deps.write(id, [{ kind: "chat.turn", agentId: chatId, tokens: Number(e.usage?.contextWindowUsedTokens) || 0, ...costIncrement(e.usage, before?.usdTotal) }]);
+        deps.changed(id);
       }
     } catch (error) {
       log(`${id}: chat event failed: ${(error as Error).message}`);
@@ -466,6 +468,32 @@ export function createChats(deps: ChatDeps) {
     }
   }
 
+  async function tellDrive(id: string): Promise<void> {
+    const s = deps.state(id);
+    if (!isOpen(s) || s.held || s.system || modeOf(s, ctx.policy) !== "drive" || !s.chatId) return;
+    const latestReady = s.lines.findLast((l: any) => l.kind === "drive.ready");
+    const ready = latestReady && !s.lines.some((t: any) => t.kind === "drive.told" && t.key === `ready:${latestReady.seq}`) ? latestReady : null;
+    const waiting = s.asks.some((q: any) => q.state === "open");
+    const day = localParts(ctx.now(), ctx.policy.tz).date;
+    if (waiting && !ready && ctx.now() - Date.parse(s.asks.findLast((q: any) => q.state === "open").at) < 24 * 3_600_000) return;
+    let key = ready ? `ready:${ready.seq}` : waiting ? `remind:${day}` : "";
+    if (!key) {
+      // Until the daemon exposes its finish-follow decision, an unacknowledged dispatch remains pending.
+      if (s.dispatched.length) return;
+      for (const f of s.flows.filter((f: any) => !f.failed)) if ((await ops.flowStateOf(ctx, f, orchCommand(ctx.policy, ops.BIN), orchLogDir(ctx.policy))).state === "going") return;
+      const last = s.lines.at(-1);
+      if (!last || ctx.now() - Date.parse(last.at) < (ctx.policy.drive?.idleHours ?? 12) * 3_600_000) return;
+      key = `idle:${last.seq}`;
+    }
+    if (!ready && s.lines.some((l: any) => l.kind === "drive.told" && l.key === key)) return;
+    const handle = paseo.agents.ref(s.chatId);
+    const seen = (await handle.refresh())?.agent;
+    if (!seen || seen.archivedAt || ["running", "initializing"].includes(seen.status)) return;
+    const text = waiting && !ready ? `提醒他：${s.title}还有问题待答。用一两句话提醒，不重复整张卡；先做不依赖答案的步骤。` : `接着推「${s.title}」：先看 README 的步骤，做下一步；做不了就用 affair ask 请他拍板。${ready?.reason === "answered" ? "他刚答了问题，先读新的答案。" : ready?.reason === "created" ? "先写步骤和估算，请他批额度。" : ""}`;
+    await handle.send(text, { messageId: `affair-chat:${id}:${key}`, activeTurnBehavior: "steer" });
+    deps.write(id, [{ kind: "drive.told", key, agentId: s.chatId }]);
+  }
+
   async function stop() {
     stopped = true;
     for (const w of watching.values()) w.stop();
@@ -473,5 +501,5 @@ export function createChats(deps: ChatDeps) {
     if (listing) await (await listing).subscription?.release();
   }
 
-  return { sync, ensure, draw, listen, tellFinished, stop };
+  return { sync, ensure, draw, listen, tellFinished, tellDrive, stop };
 }
