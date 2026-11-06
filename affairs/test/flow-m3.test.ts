@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import * as ops from "../server/lib/ops.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
-import { canResume, claimFile, eventsFile, readStatus } from "../server/lib/flows.mjs";
+import { canResume, claimFile, eventsFile, flowFinishedMessage, readStatus } from "../server/lib/flows.mjs";
 import { flowBlockOf } from "../server/lib/panel.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { createChats, type ChatPaseo } from "../server/chat";
@@ -70,6 +70,98 @@ test("flow end bypasses the affair's spent budget at request, panel and brief; t
   other.put([{ kind: "chat.turn", usd: 0.97 }]);
   assert.equal((await ops.requestLook(other.w.ctx, other.id, "time")).ok, false);
   assert.equal((await ops.brief({ ...other.w.ctx, by: "look" }, other.id)).ok, false);
+});
+
+test("flow end still stops at the global limit", async () => {
+  const s = await setup({ perAffairUsdPerDay: 0.5, totalUsdPerDay: 0.8 });
+  s.put([{ kind: "chat.turn", usd: 0.97 }]);
+  await ops.flowSync(s.w.ctx, s.id);
+  assert.equal(read(s.w.root, s.id).find((l: any) => l.kind === "flow.look").ok, false);
+  assert.equal((await ops.brief({ ...s.w.ctx, by: "look" }, s.id)).ok, false);
+});
+
+test("flow end can also exceed the affair's look count, while a time look cannot", async () => {
+  const s = await setup({ perAffairPerDay: 0 });
+  assert.equal((await ops.requestLook(s.w.ctx, s.id, "time")).ok, false);
+  await ops.flowSync(s.w.ctx, s.id);
+  assert.equal(read(s.w.root, s.id).find((l: any) => l.kind === "flow.look").ok, true);
+  s.w.advance(11 * 60_000);
+  assert.equal((await ops.brief({ ...s.w.ctx, by: "look" }, s.id)).ok, true);
+});
+
+function chats(s: Awaited<ReturnType<typeof setup>>) {
+  let state = "idle";
+  let missing = false;
+  let archived = false;
+  const sent: Array<{ id: string; text: string; options: any }> = [];
+  let hear: (e: any) => void = () => {};
+  const paseo = { agents: { ref: (id: string) => ({
+    refresh: async () => missing ? null : { agent: { status: state, archivedAt: archived ? "yes" : null } },
+    send: async (text: string, options: any) => { sent.push({ id, text, options }); hear({ event: { type: "timeline", item: { type: "user_message", text, messageId: options.messageId } } }); },
+    archive: async () => {}, timeline: { append: async () => {}, refetch: async () => ({ entries: [] }), subscribe: (h: any) => { hear = h; return Object.assign(() => {}, { ready: Promise.resolve() }); } },
+  }) }, workspaces: { ref: () => ({ agents: { create: async () => ({ id: "chat" }) } }) } } as ChatPaseo;
+  const make = () => createChats({ ctx: s.w.ctx, paseo, state: () => ({ ...load(s.w.root, s.id), lines: read(s.w.root, s.id) }), write: (_id, entries) => void s.put(entries), view: () => ({ rows: [], asks: [] }), log() {} });
+  s.put([{ kind: "chat", agentId: "current-chat" }]);
+  return { make, sent, busy: (v: string) => state = v, missing: () => missing = true, archived: () => archived = true };
+}
+
+test("tell the current chat once after the look reports, across repeated scans and restart; template cannot authorize a flow", async () => {
+  const s = await setup();
+  const c = chats(s);
+  const chat = c.make();
+  await chat.listen(s.id);
+  await ops.flowSync(s.w.ctx, s.id);
+  await chat.tellFinished(s.id);
+  assert.equal(c.sent.length, 0, "the look has not updated now yet");
+  s.put([{ kind: "wake", why: [`ring:flow:${s.run}`] }, { kind: "report", status: "补丁没批，等反馈", entry: "方案已写好", verdict: "pass" }]);
+  await chat.tellFinished(s.id);
+  await chat.tellFinished(s.id);
+  await c.make().tellFinished(s.id);
+  assert.equal(c.sent.length, 1);
+  assert.equal(c.sent[0].id, "current-chat");
+  for (const text of ["停了", "$0.030", "运行目录", "可以接着跑", "不要再起任何东西"]) assert.ok(c.sent[0].text.includes(text), text);
+  assert.equal(load(s.w.root, s.id).said.length, 0, "a plugin notification is never his word");
+  assert.equal(read(s.w.root, s.id).filter((l: any) => l.kind === "flow.told").length, 1);
+  chat.stop();
+});
+
+test("blocked look still tells; a busy chat waits; missing and archived chats are recorded as not sent", async () => {
+  for (const absent of ["busy", "missing", "archived"] as const) {
+    const s = await setup({ totalUsdPerDay: 0 });
+    s.ended(null);
+    const c = chats(s);
+    await ops.flowSync(s.w.ctx, s.id);
+    const chat = c.make();
+    if (absent === "busy") c.busy("running"); else c[absent]();
+    await chat.tellFinished(s.id);
+    assert.equal(c.sent.length, 0);
+    if (absent === "busy") {
+      assert.equal(read(s.w.root, s.id).filter((l: any) => l.kind === "flow.told").length, 0);
+      c.busy("idle");
+      await chat.tellFinished(s.id);
+      assert.equal(c.sent.length, 1);
+      assert.match(c.sent[0].text, /不能接着跑.*--again/);
+    } else assert.equal(read(s.w.root, s.id).find((l: any) => l.kind === "flow.told").ok, false);
+  }
+});
+
+test("a failed look still tells the chat its run ended", async () => {
+  for (const readBrief of [true, false]) {
+    const s = await setup(); const c = chats(s);
+    await ops.flowSync(s.w.ctx, s.id);
+    if (readBrief) s.put([{ kind: "wake", why: [`ring:flow:${s.run}`] }]);
+    s.put([{ kind: "wake.end", state: "failed" }]);
+    await c.make().tellFinished(s.id);
+    assert.equal(c.sent.length, 1, "even a failure before reading brief must be reported");
+  }
+});
+
+test("an unavailable runtime status is not reported as a missing resume point", async () => {
+  const s = await setup(); await ops.flowSync(s.w.ctx, s.id);
+  const state = load(s.w.root, s.id);
+  const text = flowFinishedMessage(s.w.ctx, state, state.flows[0], null);
+  assert.match(text, /没拿到能否接着跑的状态/);
+  assert.doesNotMatch(text, /没有能接着做的位置/);
 });
 
 test("resume button requires an explicit unsuccessful end and a declared point; it survives a restart", async () => {

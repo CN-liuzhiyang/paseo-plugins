@@ -620,13 +620,21 @@ async function gateNotReady(ctx) {
  */
 export async function flowSync(ctx, id) {
   const first = state(ctx, id);
-  if (!first.id || first.flows.every((x) => x.failed || x.outcome)) return false;
+  if (!first.id) return false;
   const logDir = orchLogDir(ctx.policy);
   const orch = orchCommand(ctx.policy, BIN);
   if (!orch || !existsSync(orch)) return false;
   let changed = false;
   for (const f of first.flows) {
-    if (f.failed || f.outcome) continue;
+    if (f.failed) continue;
+    if (f.outcome) {
+      if (!ctx.flowNow.has(f.runId)) {
+        const st = await readStatus({ orch, logDir: logDirOf(f, logDir), runId: f.runId, spawnedAt: Date.parse(f.at) });
+        if (st) ctx.flowNow.set(f.runId, { st });
+      }
+      await lookAfterFlow(ctx, id, f);
+      continue;
+    }
     // Where the run's files are is what its entry says, not what this process works out for itself (the command line and the daemon may differ).
     const seen = await readStatus({ orch, logDir: logDirOf(f, logDir), runId: f.runId, spawnedAt: Date.parse(f.at) });
     if (!seen) continue;
@@ -648,11 +656,18 @@ export async function flowSync(ctx, id) {
     write(ctx, id, news.map((m) => ({ kind: "flow.mark", runId: f.runId, ...m })));
     changed = true;
     if (news.some((m) => m.key === "end")) {
-      write(ctx, id, [{ kind: "ring", why: `flow:${f.runId}` }]);
-      await requestLook(ctx, id, "flow");
+      await lookAfterFlow(ctx, id, f);
     }
   }
   return changed;
+}
+
+async function lookAfterFlow(ctx, id, f) {
+  const s = state(ctx, id);
+  if (s.lines.some((l) => l.kind === "flow.look" && l.runId === f.runId)) return;
+  if (!s.lines.some((l) => l.kind === "ring" && l.why === `flow:${f.runId}`)) write(ctx, id, [{ kind: "ring", why: `flow:${f.runId}` }]);
+  const result = await requestLook(ctx, id, `flow:${f.runId}`);
+  write(ctx, id, [{ kind: "flow.look", runId: f.runId, ok: result.ok, queued: result.queued === true }]);
 }
 
 const NTH = ["", "一", "二", "三", "四", "五", "六", "七", "八", "九", "十"];

@@ -200,6 +200,7 @@ export function createEngine(deps: EngineDeps) {
     }
     // The chat: made, listened to, and shown what the log says.
     if (ws && chats) await chats.sync(id).catch((error: unknown) => log(`${id}: the chat: ${(error as Error).message}`));
+    if (chats) await chats.tellFinished(id).catch((error: unknown) => log(`${id}: telling the chat: ${(error as Error).message}`));
     await pushes(id);
   }
 

@@ -1,7 +1,7 @@
 import { chatCreateOptions, noticeFor, rotationReason } from "./lib/chat.mjs";
 import { isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
-import { orchCommand, orchLogDir } from "./lib/flows.mjs";
+import { flowFinishedMessage, flowMessageId, orchCommand, orchLogDir } from "./lib/flows.mjs";
 import { ASK_KIND, ASK_VERSION, LINE_KIND, LINE_VERSION, type Segment } from "../shared/card";
 
 // The chat of an affair is a real session of the model (made in the affair's workspace, here). This file keeps it:
@@ -35,6 +35,7 @@ export interface View {
 
 type Unsubscribe = (() => void) & { ready?: Promise<unknown> };
 export interface ChatHandle {
+  send(text: string, options: { messageId: string; activeTurnBehavior: "steer" }): Promise<void>;
   refresh(): Promise<{ agent: { status: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
   archive(): Promise<unknown>;
   timeline: {
@@ -214,6 +215,7 @@ export function createChats(deps: ChatDeps) {
   function hearItem(id: string, item: any, at = "") {
     if (!item) return;
     if (item.type === "user_message") {
+      if (asText(item.messageId ?? item.clientMessageId).startsWith("affair-flow:")) return;
       const text = asText(item.text).trim();
       if (text) void ops.hear(ctx, id, text, { messageId: asText(item.messageId) || asText(item.clientMessageId), at }).catch((error: unknown) => log(`${id}: could not note what he typed: ${(error as Error).message}`));
     } else if (item.type === "tool_call" && (item.name === "agent_message" || item.agentMessage)) {
@@ -305,11 +307,37 @@ export function createChats(deps: ChatDeps) {
     await draw(id);
   }
 
+  /** Wait for the result's look first. A blocked or failed look must not hide the run's end from the person. */
+  async function tellFinished(id: string): Promise<void> {
+    const s = deps.state(id);
+    for (const f of s.flows) {
+      if (!f.outcome || s.lines.some((l: any) => l.kind === "flow.told" && l.runId === f.runId)) continue;
+      const end = f.marks.find((m: any) => m.key === "end");
+      const look = s.lines.find((l: any) => l.kind === "flow.look" && l.runId === f.runId);
+      if (!look || !end) continue;
+      const wake = s.wakes.find((w: any) => w.seq > end.seq && w.why.includes(`ring:flow:${f.runId}`));
+      const failed = s.lines.some((l: any) => l.kind === "wake.end" && l.seq > look.seq && l.state === "failed");
+      if (look.ok && !failed && !(wake && (wake.reported || s.lines.some((l: any) => l.kind === "wake.end" && l.seq > wake.seq)))) continue;
+      const record = (ok: boolean, why = "") => deps.write(id, [{ kind: "flow.told", runId: f.runId, agentId: s.chatId, ok, ...(why ? { why } : {}) }]);
+      if (!s.chatId) { record(false, "聊天不存在，没发"); continue; }
+      const handle = paseo.agents.ref(s.chatId);
+      let seen;
+      try { seen = (await handle.refresh())?.agent; }
+      catch (error) {
+        if (!/not found|does not exist/i.test((error as Error).message)) throw error;
+      }
+      if (!seen || seen.archivedAt) { record(false, "聊天不存在或已归档，没发"); continue; }
+      if (["running", "initializing"].includes(seen.status)) continue;
+      await handle.send(flowFinishedMessage(ctx, s, f, ctx.flowNow.get(f.runId)?.st), { messageId: flowMessageId(f.runId), activeTurnBehavior: "steer" });
+      record(true);
+    }
+  }
+
   function stop() {
     stopped = true;
     for (const w of watching.values()) w.stop();
     watching.clear();
   }
 
-  return { sync, ensure, draw, listen, stop };
+  return { sync, ensure, draw, listen, tellFinished, stop };
 }

@@ -161,7 +161,7 @@ test("in the chat: a line with a ticket is drawn with pieces the client can open
   const chats = createChats({
     ctx: w.ctx,
     paseo: {
-      agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined, timeline: { append: async (i: any) => void appended.push(i), subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
+      agents: { ref: () => ({ send: async () => {}, refresh: async () => null, archive: async () => undefined, timeline: { append: async (i: any) => void appended.push(i), subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
       workspaces: { ref: () => ({ agents: { create: async () => ({ id: "c1" }) } }) },
     },
     state: (i: string) => ({ ...load(w.root, i), chatId: "c1", workspaceId: "w1", lines: read(w.root, i) }),

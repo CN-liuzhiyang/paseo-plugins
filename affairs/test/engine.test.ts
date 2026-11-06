@@ -20,7 +20,7 @@ function setup(policyOver: Record<string, unknown> = {}) {
   const paseo = {
     agents: {
       ref: (id: string) => ({
-        refresh: async () => ({ agent: { status: status.value } }),
+        send: async () => {}, refresh: async () => ({ agent: { status: status.value } }),
         archive: async () => void calls.woken.push(id),
         timeline: {
           append: async (item: any) => void calls.appended.push({ chat: id, item }),
@@ -282,7 +282,7 @@ test("a chat that has failed is replaced by a new one, and the old is put away",
   const again = createEngine({
     ctx: s.w.ctx,
     paseo: {
-      agents: { ref: (a: string) => ({ refresh: async () => ({ agent: { status: s.status.value } }), archive: async () => void archived.push(a), timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
+      agents: { ref: (a: string) => ({ send: async () => {}, refresh: async () => ({ agent: { status: s.status.value } }), archive: async () => void archived.push(a), timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
       workspaces: { ref: () => ({ setTitle: async () => {}, archive: async () => {}, agents: { create: async () => (created.push("new"), { id: "agent-new" }) } }) },
     },
     deliver: null, log: () => {},
@@ -366,7 +366,7 @@ test("a line put in around the commands is flagged once, shown in red and told t
 test("a policy.json with something missing says so on a card of its own, once; when it is right the card is put away", async () => {
   const w = world();
   const logs: string[] = [];
-  const paseo = { agents: { ref: () => ({ refresh: async () => null, archive: async () => undefined, timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) }, workspaces: { ref: () => ({ setTitle: async () => undefined, archive: async () => undefined, agents: { create: async () => ({ id: "agent-9" }) } }) } };
+  const paseo = { agents: { ref: () => ({ send: async () => {}, refresh: async () => null, archive: async () => undefined, timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) }, workspaces: { ref: () => ({ setTitle: async () => undefined, archive: async () => undefined, agents: { create: async () => ({ id: "agent-9" }) } }) } };
   const run = async (ctx: typeof w.ctx) => {
     const e = createEngine({ ctx, paseo, deliver: null, log: (m) => void logs.push(m), checkSetup: true });
     await e.start();
