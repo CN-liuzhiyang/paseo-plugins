@@ -4,6 +4,7 @@ import { hrefOf } from "./links.mjs";
 import { clip } from "./clip.mjs";
 import { attachSummary } from "./view.mjs";
 import { localParts, speak } from "./time.mjs";
+import { quietLooks } from "./looks.mjs";
 
 // What happened to an affair, as rows a person reads: worked out from its log alone, the same way each time, so the screen
 // only draws them. A row says who did it (the dot, in the screen), what it was (the small title), and the result in one
@@ -99,6 +100,7 @@ export function eventsOf(state, now, policy, lc, helpers) {
   const { labelOf, fileAt = () => null } = helpers;
   const tz = policy.tz;
   const lines = state.lines ?? [];
+  const quiet = quietLooks(lines);
   const saidBy = new Map((state.said ?? []).map((m) => [m.seq, m]));
   const askBy = new Map((state.asks ?? []).map((a) => [a.id, a]));
   const firstSaid = (state.said ?? []).find((m) => m.by === "user")?.seq ?? -1;
@@ -209,6 +211,7 @@ export function eventsOf(state, now, policy, lc, helpers) {
         if (!first) {
           if (compared.some((r) => r.seen === "changed")) changed = true;
           else if (compared.length > 0 && fresh === 0) changed = false;
+          else if (quiet.get(l.seq)?.noChange) changed = false;
         }
         const calledBy = (wake?.why ?? []).map((w) => /^said:(\d+)$/.exec(w)).filter(Boolean).map((m) => Number(m[1])).filter((n) => n !== firstSaid && saidBy.has(n));
         const asked = calledBy.length ? saidBy.get(calledBy[calledBy.length - 1]) : null;
@@ -222,7 +225,7 @@ export function eventsOf(state, now, policy, lc, helpers) {
           strong: first || changed === true,
           calm: changed === false,
           changed: first || changed === true,
-          noChange: !first && changed === false,
+          noChange: quiet.get(l.seq)?.noChange === true,
           basis: {
             rows: reads.map((r, i) => {
               const href = names[i].kind && names[i].ref ? hrefOf(lc.templates, names[i].kind, names[i].ref) : null;
@@ -341,7 +344,7 @@ function finish(e, state, now, tz) {
   const sub = merged === "looks" ? "都没变化" : merged === "errors" ? `连着 ${e.count} 次` : e.sub;
   // a range that began on an earlier day says which
   const began = localParts(firstMs, tz).date === localParts(e.ms, tz).date ? "" : dayWord(firstMs, now, tz);
-  const when = merged ? `${began}${clock(firstMs, tz)}–${clock(e.ms, tz)}` : whenOf(e.ms, now, tz);
+  const when = merged === "looks" ? `最近 ${clock(e.ms, tz)}` : merged ? `${began}${clock(firstMs, tz)}–${clock(e.ms, tz)}` : whenOf(e.ms, now, tz);
   const row = {
     key: `e${merged ? e.members[0].key.slice(1) : e.key.slice(1)}`,
     kind: e.kind,

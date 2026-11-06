@@ -1,5 +1,6 @@
 import { sentenceOf } from "./flows.mjs";
 import { localParts, speak } from "./time.mjs";
+import { quietLooks } from "./looks.mjs";
 
 // What a person reads: the words of the card, the rows under it and the replies to the commands. Nothing here says
 // 叫醒, 校验, 记录, 计划, 读数, 会话 or agent (a test holds it to that).
@@ -71,9 +72,11 @@ export function rowsOf(state, now, policy, { withChat = false, flowNow = new Map
   const rows = [];
   const add = (key, at, text, tone = "normal", detail = "", extra = {}) => rows.push({ key, at, text, tone, detail, own: key[0] === "s" || key[0] === "a", ...extra });
   const lines = state.lines ?? [];
+  const quiet = quietLooks(lines);
   for (const l of lines) {
     const time = stamp(l.at, now, tz);
     if (l.kind === "report" && l.verdict !== "rejected" && l.entry && l.from !== "chat") {
+      if (quiet.get(l.seq)?.noChange && quiet.get(l.seq)?.scheduled) continue;
       const costs = l.detail ?? "";
       // A look's sentence is the result only now; in the conversation it needs saying who looked.
       add(`r${l.seq}`, l.at, `${time}  ${/^\s*我看了一眼/.test(l.entry) ? l.entry : `看了一眼：${l.entry}`}`, "normal", costs);
