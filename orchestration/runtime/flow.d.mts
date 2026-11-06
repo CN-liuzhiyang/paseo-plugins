@@ -290,13 +290,15 @@ export interface Dollar<PhaseId extends string> {
   readonly ctx: RunContext;
 }
 
-export interface Flow<I extends Fields, R> {
+type FlowInput<I extends Fields, O extends keyof I> = Omit<Shape<I>, O> & Partial<Pick<Shape<I>, O>>;
+
+export interface Flow<I extends Fields, R, O extends keyof I = never> {
   readonly name: string;
   readonly description: string;
   readonly phases: readonly Phase[];
   readonly inputs: object;
   readonly grants: readonly Grant[];
-  run(input: Shape<I>, $: Dollar<string>): Promise<R>;
+  run(input: FlowInput<I, O>, $: Dollar<string>): Promise<R>;
   readonly summarize: Summarize | null;
   readonly resume: "auto" | null;
   readonly wake: "problems" | null;
@@ -308,13 +310,15 @@ export interface Flow<I extends Fields, R> {
  */
 export type Summarize = (value: any, info: { outcome: "done" | "stopped" }) => string;
 
-export function flow<I extends Fields, const P extends readonly Phase[], R>(definition: {
+export function flow<I extends Fields, const P extends readonly Phase[], R, O extends keyof I = never>(definition: {
   name: string;
   description: string;
   phases: P;
   inputs: I;
+  /** Only flow inputs: absent keys stay absent, with no injected default. Agent answer schemas remain fully required. */
+  optionalInputs?: readonly O[];
   grants: readonly Grant[];
-  run(input: Shape<I>, $: Dollar<P[number]["id"]>): Promise<R>;
+  run(input: FlowInput<I, O>, $: Dollar<P[number]["id"]>): Promise<R>;
   summarize?: Summarize;
   /**
    * "auto": a run that does not come to its end is carried on by running this flow again with the same input; what the earlier runs did is
@@ -326,7 +330,7 @@ export function flow<I extends Fields, const P extends readonly Phase[], R>(defi
    * Left out, it is told of every run. A session that asked to be told (`--notify`, a `--detach`ed run) is told either way.
    */
   wake?: "problems";
-}): Flow<I, R>;
+}): Flow<I, R, O>;
 
 export function isFlow(value: unknown): value is Flow<Fields, unknown>;
 export function describeFlow(flow: Flow<Fields, unknown>): object;

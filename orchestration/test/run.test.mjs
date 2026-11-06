@@ -57,6 +57,25 @@ const kinds = (events) =>
 
 const COMMITTEE_INPUT = { question: "Why does the cache miss?", committee: "cheap", rounds: 3, assessor: "worker" };
 
+test("optional flow inputs: omission stays absent, provided values are checked; agent outputs remain required", async () => {
+  const definition = { name: "input-mode", description: "an optional mode", phases: [], inputs: { question: text(), mode: choice(["preview"]) }, optionalInputs: ["mode"], grants: [], run: async (input) => input };
+  const f = flow(definition);
+  const omitted = await run(f, { input: { question: "q" }, executor: fakeExecutor() });
+  assert.equal(omitted.outcome, "done");
+  assert.deepEqual(omitted.value, { question: "q" });
+  const provided = await run(f, { input: { question: "q", mode: "preview" }, executor: fakeExecutor() });
+  assert.deepEqual(provided.value, { question: "q", mode: "preview" });
+  await assert.rejects(run(f, { input: { question: "q", mode: "wrong" }, executor: fakeExecutor() }), /not one of preview/);
+  await assert.rejects(run(f, { input: { mode: "preview" }, executor: fakeExecutor() }), /question: missing/);
+  await assert.rejects(run(f, { input: { question: "q", extra: true }, executor: fakeExecutor() }), /not declared/);
+  const required = flow({ ...definition, optionalInputs: [] });
+  await assert.rejects(run(required, { input: { question: "q" }, executor: fakeExecutor() }), /mode: missing/);
+  assert.throws(() => flow({ ...definition, optionalInputs: ["unknown"] }), /optionalInputs must name declared inputs/);
+  assert.throws(() => flow({ ...definition, optionalInputs: "mode" }), /optionalInputs must name declared inputs/);
+  const step = define({ name: "answer-mode", effects: "none", returns: { mode: text() }, prompt: () => "answer" });
+  assert.deepEqual(step.schema.required, ["mode"]);
+});
+
 test("committee: two rounds, converges, every event in the contract", async () => {
   const executor = fakeExecutor({ answer: committeeAnswers({ convergeAt: 2 }), delayMs: 60 });
   const result = await run(committee, { input: COMMITTEE_INPUT, executor });

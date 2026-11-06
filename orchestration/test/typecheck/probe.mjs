@@ -14,6 +14,21 @@ const analyze = define({
   prompt: ({ question }) => question,
 });
 
+flow({
+  name: "optional-mode",
+  description: "d",
+  phases: [],
+  inputs: { question: text(), mode: choice(["preview"]) },
+  optionalInputs: ["mode"],
+  grants: [],
+  async run({ question, mode }) {
+    question.toUpperCase();
+    // @ts-expect-error an optional input may be absent
+    mode.toUpperCase();
+    if (mode !== undefined) mode.toUpperCase();
+  },
+});
+
 // @ts-expect-error effects is required
 define({ name: "x", returns: { a: text() }, prompt: () => "p" });
 

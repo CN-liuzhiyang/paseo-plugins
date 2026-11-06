@@ -49,16 +49,17 @@ node runtime/orch.mjs run flows/probe.mjs --question "..."  # 跑
 五个键加 `run` 全部必填，"没有阶段""没有额外权限"写 `[]`，"没有输入"写 `{}`——和 R2 同一个理由：
 缺省值会让两个读者对同一个 flow 有不同的理解。
 
-**`summarize(value, { outcome })` 是唯一可选的键**，因为它不改变运行，只给人一句话：运行以 `done` 或
+**`summarize(value, { outcome })` 可选**，因为它不改变运行，只给人一句话：运行以 `done` 或
 `stopped` 结束时调用一次，`value` 是 `run.end` 记下的那个值（`stopped` 时是 `$.stop` 给的部分结果），
 返回的字符串进 `run.end.summary`，节点图的结论条显示它。超过 200 字符会被截断。它抛错、返回非字符串，
 都只是一条 warn 加 `summary: null`，结局不变——所以不必为它写防御代码，但也别在里面做事情，它是同步调用、
 不 await 的。committee 的写法可以照抄：收敛了说第几轮、结论是什么，没收敛说分歧是什么。
 
-另两个可选键（`resume`，见「接着跑」；`wake: "problems"`，见「跑完叫醒」）同样不改变运行本身，只改变别人怎么对待它。
+`resume`（见「接着跑」）和 `wake: "problems"`（见「跑完叫醒」）也可选，只改变别人怎么对待运行。
 
-**`inputs` 用 step 的字段构造器写**（`text`/`count`/`flag`/`choice`/`list`/`group`），同样全字段必填、
-不能有别的 JSON Schema 关键字（`default` 之类直接报错）。运行器在**第一笔花费之前**按它校验输入，
+**`inputs` 用 step 的字段构造器写**（`text`/`count`/`flag`/`choice`/`list`/`group`），默认全字段必填；
+入口可用 `optionalInputs: ["mode"]` 列出可省略的字段（见 R2），不影响 agent 回答的 schema。
+字段不能有别的 JSON Schema 关键字（`default` 之类直接报错）。运行器在**第一笔花费之前**按它校验输入，
 不合就拒绝运行、不产生事件文件。命令行上每个输入是一个 kebab-case 的 flag（`hotfixVersion` →
 `--hotfix-version`），按类型解析：`text`/`choice` 是字符串，`count` 是数字，`flag` 是 `--x` / `--no-x`，
 `list(text())` 重复写 flag；`group` 只能经 `--input <json 或 @文件>` 给。以 `-` 开头的值（写成列表的问题、
@@ -322,7 +323,11 @@ Paseo 的 Codex provider 会递归改写你的 schema
 在 Claude 上可能缺**，脚本分支会在其中一家上拿到 `undefined` 然后静默走错。
 
 真的"可能没有内容"时，用字段自己的词汇表达，而不是让字段消失：空字符串、空数组、
-枚举里加一个 `"none"`。flow 的 `inputs` 用同一套规则。
+枚举里加一个 `"none"`。
+
+流程入口 `flow({ inputs, optionalInputs: ["mode"] })` 可以单独声明可省略的输入；这些输入只在运行时本地校验，
+不作为 agent 的回答 schema 传给 provider。字段仍在 `inputs` 里声明类型，缺席时不注入默认值，
+给了值仍按声明校验。没有 `optionalInputs` 时照旧全必填；`define().returns` 仍一律全必填。
 
 ## R3. description 是写给模型的指令
 

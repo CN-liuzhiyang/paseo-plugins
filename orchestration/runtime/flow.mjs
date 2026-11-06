@@ -57,20 +57,20 @@ function fail(name, message) {
  *
  * @template T
  * @param {{ name: string, description: string, phases: { id: string, title: string }[],
- *           inputs: Record<string, object>, grants: string[],
+ *           inputs: Record<string, object>, optionalInputs?: string[], grants: string[],
  *           run: (input: object, $: object) => Promise<T>,
  *           summarize?: (value: unknown, info: { outcome: "done" | "stopped" }) => string }} definition
  */
 export function flow(definition) {
   if (!definition || typeof definition !== "object") throw new TypeError("flow() needs a definition object");
-  const { name, description, phases, inputs, grants, run, summarize, resume, wake } = definition;
+  const { name, description, phases, inputs, optionalInputs = [], grants, run, summarize, resume, wake } = definition;
 
-  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "grants", "run", "summarize", "resume", "wake"].includes(key));
+  const unknown = Object.keys(definition).filter((key) => !["name", "description", "phases", "inputs", "optionalInputs", "grants", "run", "summarize", "resume", "wake"].includes(key));
   if (unknown.length > 0) fail(name, `unknown key ${unknown.join(", ")}`);
   if (typeof name !== "string" || !ID.test(name)) fail(name, `name must match ${ID}`);
   if (typeof description !== "string" || description.trim() === "") fail(name, "description is required");
 
-  // Every key is required, like every schema field (R2): a flow that means
+  // Structural keys are required: a flow that means
   // "no phases" or "no extra grants" says [] rather than leaving it out.
   if (!Array.isArray(phases)) fail(name, "phases is required: a list of { id, title }, [] for none");
   const ids = new Set();
@@ -97,6 +97,10 @@ export function flow(definition) {
     }
   }
 
+  if (!Array.isArray(optionalInputs) || optionalInputs.some((key) => typeof key !== "string" || !Object.hasOwn(inputs, key))) fail(name, "optionalInputs must name declared inputs");
+  const inputSchema = objectSchema(inputs, { allowEmpty: true });
+  inputSchema.required = inputSchema.required.filter((key) => !optionalInputs.includes(key));
+
   if (!Array.isArray(grants)) fail(name, "grants is required: extra grants beyond the defaults, [] for none");
   for (const grant of grants) {
     if (grant === "gate:allow") fail(name, "gate:allow is never granted: answering a gate is a person's decision");
@@ -105,7 +109,7 @@ export function flow(definition) {
   }
 
   if (typeof run !== "function") fail(name, "run must be an async function (input, $) => value");
-  // The one optional key: it changes nothing about the run, only the line a
+  // The summary changes nothing about the run, only the line a
   // person reads about it. It is code, so run.start does not carry it.
   if (summarize !== undefined && typeof summarize !== "function") {
     fail(name, "summarize must be a function (value, { outcome }) => string");
@@ -121,7 +125,7 @@ export function flow(definition) {
     name,
     description,
     phases: Object.freeze(phases.map((p) => Object.freeze({ id: p.id, title: p.title }))),
-    inputs: objectSchema(inputs, { allowEmpty: true }),
+    inputs: inputSchema,
     grants: Object.freeze([...grants]),
     run,
     summarize: summarize ?? null,
