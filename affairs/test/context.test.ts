@@ -251,3 +251,16 @@ test("CLI Chinese file input: new, note and answer never need shell-quoted text"
   assert.equal(cli("answer", "file-job-1", "--file", file).status, 0);
   assert.equal(load(w.root, "file-job").answers["file-job-1"], "原话在文件里");
 });
+
+test("M4: the entry session's project gets the whole INDEX, other projects keep their own short list", async () => {
+  const w = stored(); const entry = repo(path.join(w.dir, "entry")); git(entry, "remote", "add", "origin", "https://github.com/team/notes.git");
+  const request = { config: { cwd: entry, systemPrompt: "BASE" }, env: {} };
+  assert.equal(await injectProject(w.ctx.policy, request), undefined);
+  refreshWork(w.ctx, load(w.root, "build-tool"));
+  w.ctx.policy.indexProjects = ["remote:github.com/team/notes"];
+  const prompt = (await injectProject(w.ctx.policy, request)).config.systemPrompt;
+  assert.match(prompt, /BASE\n\n# 在进行的事[\s\S]*build-tool[\s\S]*要接手某件：affair attach/);
+  const other = repo(path.join(w.dir, "other")); git(other, "remote", "add", "origin", "https://github.com/team/elsewhere.git");
+  assert.equal(await injectProject(w.ctx.policy, { ...request, config: { cwd: other, systemPrompt: "BASE" } }), undefined);
+  assert.equal(await injectProject(w.ctx.policy, { ...request, env: { AFFAIR_ID: "build-tool" } }), undefined);
+});

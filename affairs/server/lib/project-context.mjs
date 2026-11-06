@@ -3,9 +3,9 @@ import path from "node:path";
 import { ID } from "./log.mjs";
 import { keyOfDir, matchesProject } from "./projects.mjs";
 
-export async function projectList(policy, cwd, limit = 5) {
+export async function projectList(policy, cwd, limit = 5, key) {
   if (!policy.workDir || !existsSync(policy.workDir)) return "";
-  const key = await keyOfDir(cwd, policy);
+  key ??= await keyOfDir(cwd, policy);
   const hits = [];
   for (const item of readdirSync(policy.workDir, { withFileTypes: true })) {
     if (!item.isDirectory() || !ID.test(item.name)) continue;
@@ -27,7 +27,12 @@ export async function projectList(policy, cwd, limit = 5) {
 
 export async function injectProject(policy, request) {
   if (request.env?.AFFAIR_ID || request.labels?.["paseo.schedule-id"] || !request.config.cwd) return;
-  const text = await projectList(policy, request.config.cwd);
+  const key = await keyOfDir(request.config.cwd, policy);
+  // The entry session's project (policy.indexProjects) carries every open affair, not just its own.
+  const index = policy.workDir && path.join(policy.workDir, "INDEX.md");
+  const text = (policy.indexProjects ?? []).some((p) => matchesProject(key, p)) && existsSync(index)
+    ? `${readFileSync(index, "utf8").trim()}\n要接手某件：affair attach <编号>`
+    : await projectList(policy, request.config.cwd, 5, key);
   if (!text) return;
   return { ...request, config: { ...request.config, systemPrompt: [request.config.systemPrompt, text].filter(Boolean).join("\n\n") } };
 }
