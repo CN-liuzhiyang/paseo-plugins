@@ -1,6 +1,6 @@
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import path from "node:path";
-import { dayStart, mayLook } from "./lib/limits.mjs";
+import { dayStart, flowLook, mayLook } from "./lib/limits.mjs";
 import { secretIn } from "./lib/check.mjs";
 import { ID, append, isOpen, listIds, load, read } from "./lib/log.mjs";
 import { policyProblems } from "./lib/policy.mjs";
@@ -100,7 +100,7 @@ export function createEngine(deps: EngineDeps) {
     if (!found) return null;
     const s = state(found.id);
     const now = ctx.now();
-    const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy) : { ok: true };
+    const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy, { force: flowLook(s.running ? s.wakes.at(-1)?.why ?? [] : s.pending) }) : { ok: true };
     const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? "这次没看成，过一会儿会再试" : "";
     return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble, flowNow: ctx.flowNow });
   }

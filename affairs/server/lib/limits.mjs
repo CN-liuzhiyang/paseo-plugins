@@ -5,6 +5,9 @@ import { localParts, parseLocal } from "./time.mjs";
 
 const HOUR = 3_600_000;
 
+/** A run's end is one extra look, until that reason is taken up by a look. */
+export const flowLook = (reasons) => reasons.some((why) => /^ring:flow:/.test(why));
+
 /** The start of the current counting day: the last dayStartHour o'clock local. */
 /** @returns {number} */
 export function dayStart(now, tz, hour) {

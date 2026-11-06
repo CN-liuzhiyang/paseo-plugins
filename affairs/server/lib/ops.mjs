@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
-import { dayStart, mayLook, tripped } from "./limits.mjs";
+import { dayStart, flowLook, mayLook, tripped } from "./limits.mjs";
 import { canResume, resumeRefusal, eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
@@ -183,6 +183,7 @@ function resolveAny(ctx, ref, { closed = false } = {}) {
 
 /** @returns {Promise<Result>} */
 async function ringNow(ctx, s, why, { force = false } = {}) {
+  force ||= why.startsWith("flow:") || flowLook(s.pending);
   if (!isOpen(s) || s.system) return { ok: false, text: "" };
   if (s.breaker) return { ok: false, text: say.stoppedByBreaker(s.title) };
   const now = ctx.now();
@@ -890,7 +891,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
     // A look somebody asked for was checked when it was asked; one the schedule starts is checked here. Both count.
     const cleared = s.cleared && now - Date.parse(s.cleared.at) < CLEARED_MS;
     if (!cleared) {
-      const gate = mayLook(ctx.root, s.id, now, ctx.policy);
+      const gate = mayLook(ctx.root, s.id, now, ctx.policy, { force: flowLook(reasons) });
       if (!gate.ok) {
         write(ctx, s.id, [
           { kind: "budget", blocked: gate.text, until: isoLocal(gate.until, tz) },
@@ -924,7 +925,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
   const facts = buildFacts(fresh, now, ctx.policy);
   const why = reasons.map((x) => {
     if (x === "time") return "时间到了";
-    const [kind, ref2] = x.split(/:(.+)/);
+    const [kind, ref2] = x.replace(/^ring:flow:/, "flow:").split(/:(.+)/);
     if (kind === "said") {
       const m = fresh.said.find((x) => String(x.seq) === ref2);
       const sent = sentHere(m?.attachments ?? []);
@@ -950,7 +951,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
     handbooks.push(path.join(dir, "affair.md"), path.join(dir, (kind && ctx.policy.handbookByKind[kind]) || "asked.md"));
   }
   const recent = s.lines.slice(-10).map((l) => `- #${l.seq} ${stamp(l.at, now, tz)} ${l.kind}${l.entry ? `：${l.entry}` : l.text ? `：${l.text}` : l.status ? `：${l.status}` : ""}`);
-  const gate = mayLook(ctx.root, s.id, now, ctx.policy);
+  const gate = mayLook(ctx.root, s.id, now, ctx.policy, { force: flowLook(reasons) });
   const tools = readers.listReaders(ctx.policy);
   const newSeqs = new Set(reasons.filter((x) => x.startsWith("said:")).map((x) => Number(x.slice(5))));
   const sentList = sentHere(sentOf(fresh));

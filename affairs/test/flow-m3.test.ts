@@ -53,6 +53,25 @@ async function setup(limits = {}) {
   return { w, id, put, run, logs, orch, ended, readSt, launched };
 }
 
+test("flow end bypasses the affair's spent budget at request, panel and brief; time still stops", async () => {
+  const s = await setup({ perAffairUsdPerDay: 0.5 });
+  s.put([{ kind: "chat.turn", usd: 0.97 }]);
+  const before = s.w.calls().filter((a) => a[1] === "run-once").length;
+  await ops.flowSync(s.w.ctx, s.id);
+  assert.equal(s.w.calls().filter((a) => a[1] === "run-once").length, before + 1);
+  const engine = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log() {} });
+  assert.doesNotMatch(engine.panel(load(s.w.root, s.id).workspaceId)!.next.text, /今天花到上限/);
+  s.w.advance(11 * 60_000); // the earlier clearance has expired: brief has to check for itself
+  const brief = await ops.brief({ ...s.w.ctx, by: "look" }, s.id);
+  assert.equal(brief.ok, true, brief.text);
+  assert.match(brief.text, /流程 do-it 结束了/);
+  assert.match(brief.text, /限额：还能看/);
+  const other = await setup({ perAffairUsdPerDay: 0.5 });
+  other.put([{ kind: "chat.turn", usd: 0.97 }]);
+  assert.equal((await ops.requestLook(other.w.ctx, other.id, "time")).ok, false);
+  assert.equal((await ops.brief({ ...other.w.ctx, by: "look" }, other.id)).ok, false);
+});
+
 test("resume button requires an explicit unsuccessful end and a declared point; it survives a restart", async () => {
   const s = await setup();
   await ops.flowSync(s.w.ctx, s.id);
