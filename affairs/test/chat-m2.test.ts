@@ -13,7 +13,7 @@ import { panelOf, MATERIALS_SHOWN, SOURCES_SHOWN } from "../server/lib/panel.mjs
 import { linkContext } from "../server/lib/links.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { titleOf } from "../server/lib/workspace.mjs";
-import { world } from "./kit";
+import { emptyDirectory, world } from "./kit";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -29,6 +29,7 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
   const handlers = new Map<string, (e: Event) => void>();
   const paseo = {
     agents: {
+      list: emptyDirectory,
       ref: (id: string) => ({
         refresh: async () => ({ agent: { status: opts.status?.() ?? "idle", ...(opts.agent?.(id) ?? (archived.includes(id) ? { archivedAt: "2026-01-01T00:00:00.000Z" } : {})) } }),
         archive: async () => {

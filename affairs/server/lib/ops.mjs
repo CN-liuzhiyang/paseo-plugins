@@ -128,6 +128,9 @@ export async function callerInfo(ctx) {
     const plans = [...new Set(ids.map((id) => loadState(ctx.root, id).scheduleId).filter(Boolean))];
     const looks = await Promise.all(plans.map((p) => has(`paseo.schedule-id=${p}`)));
     if (looks.some(Boolean)) return { by: "look", chatFor: "" };
+    // Adopted chats were created without our labels; their binding is in the same log as the chats we made.
+    const bound = ids.find((id) => loadState(ctx.root, id).chats.some((chat) => chat.agentId === agentId));
+    if (bound) return { by: "chat", chatFor: bound };
     // The chat session of an affair is labelled by the plugin that made it; the label also says which affair it is the chat of.
     const first = process.env.AFFAIR_ID && ids.includes(process.env.AFFAIR_ID) ? [process.env.AFFAIR_ID] : [];
     const rest = ids.filter((id) => !first.includes(id)).slice(-60);

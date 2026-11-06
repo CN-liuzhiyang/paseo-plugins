@@ -1,4 +1,4 @@
-import { chatCreateOptions, noticeFor, rotationReason } from "./lib/chat.mjs";
+import { chatCreateOptions, chatPrompt, noticeFor, rotationReason } from "./lib/chat.mjs";
 import { isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
 import { handoffTurns } from "./lib/history.mjs";
@@ -35,9 +35,27 @@ export interface View {
 }
 
 type Unsubscribe = (() => void) & { ready?: Promise<unknown> };
+export interface ChatAgent {
+  id: string;
+  workspaceId?: string;
+  createdAt?: string;
+  status: string;
+  archivedAt?: string | null;
+  labels?: Record<string, string>;
+  parentAgentId?: string | null;
+  internal?: boolean;
+  providerUnavailable?: boolean;
+}
+interface ChatDirectory {
+  entries: Array<{ agent: ChatAgent }>;
+  subscription?: {
+    subscribe(observer: { snapshot(value: ChatDirectory): void; update(message: any): void; error(error: unknown): void }): () => void;
+    release(): Promise<void>;
+  };
+}
 export interface ChatHandle {
   send(text: string, options: { messageId: string; activeTurnBehavior: "steer" }): Promise<void>;
-  refresh(): Promise<{ agent: { status: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
+  refresh(): Promise<{ agent: { status: string; createdAt?: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
   archive(): Promise<unknown>;
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
@@ -46,7 +64,10 @@ export interface ChatHandle {
   };
 }
 export interface ChatPaseo {
-  agents: { ref(id: string): ChatHandle };
+  agents: {
+    ref(id: string): ChatHandle;
+    list(options: { subscribe: {}; sort: Array<{ key: "created_at"; direction: "desc" }>; page: { limit: number } }): Promise<ChatDirectory>;
+  };
   workspaces: { ref(id: string): { agents: { create(options: Record<string, unknown>): Promise<{ id: string }> } } };
 }
 
@@ -57,6 +78,7 @@ export interface ChatDeps {
   write(id: string, entries: Array<Record<string, unknown>>): void;
   view(id: string): View | null;
   log(message: string): void;
+  changed(id: string): void;
 }
 
 interface Drawn {
@@ -83,7 +105,92 @@ export function createChats(deps: ChatDeps) {
   /** Chats that were replaced and could not be put away yet (old chat id -> its affair): tried again on the next scan. */
   const toPutAway = new Map<string, string>();
   const revivedAt = new Map<string, number>();
+  const directory = new Map<string, ChatAgent>();
+  const owners = new Map<string, string>();
+  const heard = new Set<string>();
+  let listing: Promise<ChatDirectory> | null = null;
   let stopped = false;
+
+  function changed(workspaceId?: string) {
+    for (const [id, ws] of owners) if (!workspaceId || ws === workspaceId) deps.changed(id);
+  }
+
+  async function observe(id: string, s: any) {
+    if (!isOpen(s)) {
+      owners.delete(id);
+      if (!owners.size && listing) {
+        await (await listing).subscription?.release();
+        listing = null;
+        directory.clear();
+      }
+      return;
+    }
+    owners.set(id, s.workspaceId);
+    if (!listing) {
+      // The SDK streams the agent directory globally; workspaceId is checked locally before anything is read or adopted.
+      listing = paseo.agents.list({ subscribe: {}, sort: [{ key: "created_at", direction: "desc" }], page: { limit: 200 } });
+      try {
+        const result = await listing;
+        if (!result.subscription) throw new Error("Paseo did not subscribe to the agent directory");
+        let first = true;
+        result.subscription.subscribe({
+          snapshot: (value) => {
+            directory.clear();
+            for (const { agent } of value.entries) directory.set(agent.id, agent);
+            if (!first) changed();
+            first = false;
+          },
+          update: (message) => {
+            if (message.type !== "agent_update") return;
+            const update = message.payload;
+            if (update.kind === "upsert") {
+              directory.set(update.agent.id, update.agent);
+              changed(update.agent.workspaceId);
+            } else directory.delete(update.agentId);
+          },
+          error: (error) => log(`following new chats failed: ${(error as Error).message}`),
+        });
+      } catch (error) {
+        listing = null;
+        throw error;
+      }
+    }
+    await listing;
+  }
+
+  async function adopt(id: string): Promise<boolean> {
+    const s = deps.state(id);
+    if (!isOpen(s) || !s.chatId) return false;
+    const current = directory.get(s.chatId) ?? (await paseo.agents.ref(s.chatId).refresh())?.agent;
+    const created = Date.parse(current?.createdAt ?? "");
+    if (!Number.isFinite(created)) return false;
+    // A return to an older chat must not make an unchosen tab from before that return look new again.
+    const since = Math.max(created, Date.parse(s.chats.at(-1).at));
+    const candidate = [...directory.values()].filter((a) =>
+      a.workspaceId === s.workspaceId && !s.chats.some((c: any) => c.agentId === a.id) &&
+      ["initializing", "idle", "running", "closed"].includes(a.status) && !a.archivedAt && !a.internal && !a.providerUnavailable &&
+      !a.parentAgentId && !Object.keys(a.labels ?? {}).some((key) => key.startsWith("affairs.") || key.startsWith("orch-") || key === "paseo.parent-agent-id" || key === "paseo.schedule-id") &&
+      Date.parse(a.createdAt ?? "") > since
+    ).sort((a, b) => Date.parse(b.createdAt!) - Date.parse(a.createdAt!))[0];
+    if (!candidate) return false;
+    deps.write(id, [{ kind: "chat", agentId: candidate.id, why: "adopted" }]);
+    checked.add(candidate.id);
+    await instruct(id);
+    return true;
+  }
+
+  async function instruct(id: string) {
+    const s = deps.state(id);
+    if (!isOpen(s) || s.chats.at(-1)?.why !== "adopted" || s.lines.some((l: any) => l.kind === "chat.prompt" && l.agentId === s.chatId)) return;
+    // Hear the words already there before the injected instruction can ask the chat to read its brief.
+    await listen(id);
+    const handle = paseo.agents.ref(s.chatId);
+    // Creation announces an idle session before its initial prompt starts. Wait for his first words so our send cannot replace them.
+    if (!heard.has(s.chatId)) return;
+    await handle.send(`这是事项 ${s.id}「${s.title}」的对话，先照下面做，再回答他刚才说的。\n${chatPrompt(ctx, s)}`, { messageId: `affair-chat:adopted:${s.chatId}`, activeTurnBehavior: "steer" });
+    deps.write(id, [{ kind: "chat.prompt", agentId: s.chatId }]);
+    await putAway(id, s.chats.at(-2).agentId);
+  }
 
   /** Archiving a session that is in the middle of a turn cuts the turn short, so a busy one is left alone and tried again later. */
   const busy = async (chatId: string): Promise<boolean> => {
@@ -180,10 +287,14 @@ export function createChats(deps: ChatDeps) {
   async function ensure(id: string): Promise<void> {
     let s = deps.state(id);
     if (!s.id || !s.workspaceId) return;
+    await observe(id, s);
+    await instruct(id);
     if (!s.chatId) {
       await replace(id, s.conversationId ? "migrate" : "first", s.conversationId);
       return;
     }
+    for (const [old, owner] of [...toPutAway]) if (owner === id) await putAway(id, old);
+    if (await adopt(id)) return;
     if (!checked.has(s.chatId)) {
       checked.add(s.chatId);
       const status = (await paseo.agents.ref(s.chatId).refresh())?.agent.status;
@@ -194,7 +305,6 @@ export function createChats(deps: ChatDeps) {
         return;
       }
     }
-    for (const [old, owner] of [...toPutAway]) if (owner === id) await putAway(id, old);
     if (await recognizeRevived(id)) return;
     s = deps.state(id);
     let flowRunning = false;
@@ -213,7 +323,9 @@ export function createChats(deps: ChatDeps) {
     const e = event?.event;
     if (!e) return;
     try {
-      if (e.type === "timeline") hearItem(id, e.item, asText(event.timestamp ?? e.timestamp));
+      if (e.type === "timeline") void hearItem(id, chatId, e.item, asText(event.timestamp ?? e.timestamp)).then(() => {
+        if (e.item?.type === "user_message") deps.changed(id);
+      });
       else if (e.type === "turn_completed" && e.usage) {
         // The session reports what it has cost in all, not what this turn cost: this turn's part is the step up from last time
         // (a total that went down is a session that began again, and counts whole). Nothing is lost while the plugin was not listening: the step is bigger.
@@ -228,12 +340,13 @@ export function createChats(deps: ChatDeps) {
     }
   }
 
-  function hearItem(id: string, item: any, at = "") {
+  async function hearItem(id: string, chatId: string, item: any, at = "") {
     if (!item) return;
     if (item.type === "user_message") {
-      if (asText(item.messageId ?? item.clientMessageId).startsWith("affair-flow:")) return;
+      if (["affair-flow:", "affair-chat:"].some((prefix) => asText(item.messageId ?? item.clientMessageId).startsWith(prefix))) return;
       const text = asText(item.text).trim();
-      if (text) void ops.hear(ctx, id, text, { messageId: asText(item.messageId) || asText(item.clientMessageId), at }).catch((error: unknown) => log(`${id}: could not note what he typed: ${(error as Error).message}`));
+      if (text) heard.add(chatId);
+      if (text) await ops.hear(ctx, id, text, { messageId: asText(item.messageId) || asText(item.clientMessageId), at }).catch((error: unknown) => log(`${id}: could not note what he typed: ${(error as Error).message}`));
     } else if (item.type === "tool_call" && (item.name === "agent_message" || item.agentMessage)) {
       // Sent into the chat by another session: put down, but not as his word.
       const text = asText(item.agentMessage?.text ?? item.detail?.text).trim();
@@ -257,7 +370,7 @@ export function createChats(deps: ChatDeps) {
     try {
       await sub.ready;
       const tail = await handle.timeline.refetch({ limit: 40 });
-      for (const entry of tail.entries ?? []) hearItem(id, entry.item, asText((entry as { timestamp?: unknown }).timestamp));
+      for (const entry of tail.entries ?? []) await hearItem(id, chatId, entry.item, asText((entry as { timestamp?: unknown }).timestamp));
     } catch (error) {
       log(`${id}: listening to the chat failed: ${(error as Error).message}`);
     }
@@ -349,10 +462,11 @@ export function createChats(deps: ChatDeps) {
     }
   }
 
-  function stop() {
+  async function stop() {
     stopped = true;
     for (const w of watching.values()) w.stop();
     watching.clear();
+    if (listing) await (await listing).subscription?.release();
   }
 
   return { sync, ensure, draw, listen, tellFinished, stop };

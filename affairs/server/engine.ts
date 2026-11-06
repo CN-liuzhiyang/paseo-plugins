@@ -70,7 +70,15 @@ export function createEngine(deps: EngineDeps) {
 
   const state = (id: string) => ({ ...load(ctx.root, id), lines: read(ctx.root, id) });
   const write = (id: string, entries: Array<Record<string, unknown>>) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
-  const chats = deps.paseo ? createChats({ ctx, paseo: deps.paseo, state, write: (id, entries) => void write(id, entries), view: (id) => view(id), log }) : null;
+  const chats = deps.paseo ? createChats({ ctx, paseo: deps.paseo, state, write: (id, entries) => void write(id, entries), view: (id) => view(id), log, changed: scanSoon }) : null;
+
+  function scanSoon(id: string) {
+    if (stopped || debounce.has(id)) return;
+    debounce.set(id, setTimeout(() => {
+      debounce.delete(id);
+      void scan(id);
+    }, 150));
+  }
 
   /** The links in what he reads: a reference (a ticket number) comes with where it leads. */
   const linksOf = (s: { link: string | null }) => linkContext(ctx.policy, s.link);
@@ -369,11 +377,7 @@ export function createEngine(deps: EngineDeps) {
     try {
       watcher = watch(ctx.root, { recursive: true }, (_event, name) => {
         const id = idOfWatch(name);
-        if (!id || debounce.has(id)) return;
-        debounce.set(id, setTimeout(() => {
-          debounce.delete(id);
-          void scan(id);
-        }, 150));
+        if (id) scanSoon(id);
       });
       watcher.on("error", (error) => log(`watching ${ctx.root} failed: ${error.message}`));
     } catch (error) {
@@ -394,7 +398,6 @@ export function createEngine(deps: EngineDeps) {
   async function stop() {
     stopped = true;
     watcher?.close();
-    chats?.stop();
     if (timer) clearInterval(timer);
     if (flowTimer) clearInterval(flowTimer);
     for (const t of debounce.values()) clearTimeout(t);
@@ -402,6 +405,7 @@ export function createEngine(deps: EngineDeps) {
     lookTimers.clear();
     lookWork.clear();
     await Promise.all(queues.values());
+    await chats?.stop();
   }
 
   return {

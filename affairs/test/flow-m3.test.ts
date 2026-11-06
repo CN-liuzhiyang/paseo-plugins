@@ -13,7 +13,7 @@ import { createChats, type ChatPaseo } from "../server/chat";
 import { createEngine } from "../server/engine";
 import { rotationReason } from "../server/lib/chat.mjs";
 import { checkReport, buildFacts } from "../server/lib/check.mjs";
-import { world } from "./kit";
+import { emptyDirectory, world } from "./kit";
 
 const POINT = { flow: "do-it", input: { version: 1 }, from: "从补丁接着做", spends: "maybe" };
 const statusModule = pathToFileURL(path.resolve(import.meta.dirname, "../../orchestration/runtime/status.mjs")).href;
@@ -95,12 +95,12 @@ function chats(s: Awaited<ReturnType<typeof setup>>) {
   let archived = false;
   const sent: Array<{ id: string; text: string; options: any }> = [];
   let hear: (e: any) => void = () => {};
-  const paseo = { agents: { ref: (id: string) => ({
+  const paseo = { agents: { list: emptyDirectory, ref: (id: string) => ({
     refresh: async () => missing ? null : { agent: { status: state, archivedAt: archived ? "yes" : null } },
     send: async (text: string, options: any) => { sent.push({ id, text, options }); hear({ event: { type: "timeline", item: { type: "user_message", text, messageId: options.messageId } } }); },
     archive: async () => {}, timeline: { append: async () => {}, refetch: async () => ({ entries: [] }), subscribe: (h: any) => { hear = h; return Object.assign(() => {}, { ready: Promise.resolve() }); } },
   }) }, workspaces: { ref: () => ({ agents: { create: async () => ({ id: "chat" }) } }) } } as ChatPaseo;
-  const make = () => createChats({ ctx: s.w.ctx, paseo, state: () => ({ ...load(s.w.root, s.id), lines: read(s.w.root, s.id) }), write: (_id, entries) => void s.put(entries), view: () => ({ rows: [], asks: [] }), log() {} });
+  const make = () => createChats({ ctx: s.w.ctx, paseo, state: () => ({ ...load(s.w.root, s.id), lines: read(s.w.root, s.id) }), write: (_id, entries) => void s.put(entries), view: () => ({ rows: [], asks: [] }), log() {}, changed() {} });
   s.put([{ kind: "chat", agentId: "current-chat" }]);
   return { make, sent, busy: (v: string) => state = v, missing: () => missing = true, archived: () => archived = true };
 }

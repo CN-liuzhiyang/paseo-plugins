@@ -10,6 +10,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 export const FAKE = path.join(HERE, "fake-paseo.mjs");
 
 const made: string[] = [];
+export async function emptyDirectory() {
+  return { entries: [], subscription: { subscribe: (observer: any) => { observer.snapshot({ entries: [] }); return () => {}; }, release: async () => {} } };
+}
 process.on("exit", () => {
   for (const dir of made) rmSync(dir, { recursive: true, force: true, maxRetries: 3 });
 });

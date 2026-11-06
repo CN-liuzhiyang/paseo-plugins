@@ -11,7 +11,7 @@ import * as ops from "../server/lib/ops.mjs";
 import { DEFAULT_POLICY, policyProblems } from "../server/lib/policy.mjs";
 import { whyOf } from "../server/lib/paseo.mjs";
 import { rowsOf } from "../server/lib/view.mjs";
-import { world } from "./kit";
+import { emptyDirectory, world } from "./kit";
 
 const GCP = "https://pm.example.invalid/issues/{ref}";
 const FEISHU = "https://tasks.example.invalid/detail?guid={ref}";
@@ -161,13 +161,14 @@ test("in the chat: a line with a ticket is drawn with pieces the client can open
   const chats = createChats({
     ctx: w.ctx,
     paseo: {
-      agents: { ref: () => ({ send: async () => {}, refresh: async () => null, archive: async () => undefined, timeline: { append: async (i: any) => void appended.push(i), subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
+      agents: { list: emptyDirectory, ref: () => ({ send: async () => {}, refresh: async () => null, archive: async () => undefined, timeline: { append: async (i: any) => void appended.push(i), subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }) },
       workspaces: { ref: () => ({ agents: { create: async () => ({ id: "c1" }) } }) },
     },
     state: (i: string) => ({ ...load(w.root, i), chatId: "c1", workspaceId: "w1", lines: read(w.root, i) }),
     write: () => {},
     view: () => view,
     log: () => {},
+    changed: () => {},
   });
   await chats.draw(id);
   const byId = (i: string) => appended.find((a) => a.id === i)!;
