@@ -236,6 +236,18 @@ test("idle drive reminders wait 12 hours, wait for a busy main and survive resta
   assert.match(f.sent[0].text, /接着推/);await f.restart().tellDrive(f.id);assert.equal(f.sent.length, 1);
 });
 
+test("dispatch idle fallback waits for twelve quiet hours and blocks running workers and pending permissions", async () => {
+  const f = chatsFixture();f.put([{ kind: "dispatched", agentId: "worker" }]);
+  f.w.advance(11 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(2 * 3_600_000);f.worker.status = "running";await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.worker.status = "initializing";await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.worker.status = "idle";f.worker.pendingPermissions = [{ id: "permission" }];await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.worker.pendingPermissions = [];f.put([{ kind: "note", text: "有了新动静" }]);
+  await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(12 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  await f.restart().tellDrive(f.id);assert.equal(f.sent.length, 1);
+});
+
 test("an active flow blocks idle progress using runtime status; its proven end permits a later reminder", async () => {
   const f = chatsFixture();const runtime = path.join(f.w.dir, "runtime.mjs");writeFileSync(runtime, 'console.log(JSON.stringify({state:"running"}));');f.w.ctx.policy.flows = { ...f.w.ctx.policy.flows, orch: runtime };
   f.put([{ kind: "flow", flow: "build", runId: "running-flow" }]);f.w.advance(13 * 3_600_000);

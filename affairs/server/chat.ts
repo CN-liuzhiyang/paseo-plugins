@@ -60,7 +60,7 @@ interface ChatDirectory {
 }
 export interface ChatHandle {
   send(text: string, options: { messageId: string; activeTurnBehavior: "steer" }): Promise<void>;
-  refresh(): Promise<{ agent: { status: string; createdAt?: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
+  refresh(): Promise<{ agent: { status: string; pendingPermissions?: unknown[]; createdAt?: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
   archive(): Promise<unknown>;
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
@@ -478,11 +478,14 @@ export function createChats(deps: ChatDeps) {
     if (waiting && !ready && ctx.now() - Date.parse(s.asks.findLast((q: any) => q.state === "open").at) < 24 * 3_600_000) return;
     let key = ready ? `ready:${ready.seq}` : waiting ? `remind:${day}` : "";
     if (!key) {
-      // Until the daemon exposes its finish-follow decision, an unacknowledged dispatch remains pending.
-      if (s.dispatched.length) return;
-      for (const f of s.flows.filter((f: any) => !f.failed)) if ((await ops.flowStateOf(ctx, f, orchCommand(ctx.policy, ops.BIN), orchLogDir(ctx.policy))).state === "going") return;
       const last = s.lines.at(-1);
       if (!last || ctx.now() - Date.parse(last.at) < (ctx.policy.drive?.idleHours ?? 12) * 3_600_000) return;
+      // This is an idle fallback after twelve quiet hours; daemon finish subscriptions own prompt hand-in notifications.
+      for (const d of s.dispatched) {
+        const worker = (await paseo.agents.ref(d.agentId).refresh())?.agent;
+        if (!worker || ["running", "initializing"].includes(worker.status) || worker.pendingPermissions?.length) return;
+      }
+      for (const f of s.flows.filter((f: any) => !f.failed)) if ((await ops.flowStateOf(ctx, f, orchCommand(ctx.policy, ops.BIN), orchLogDir(ctx.policy))).state === "going") return;
       key = `idle:${last.seq}`;
     }
     if (!ready && s.lines.some((l: any) => l.kind === "drive.told" && l.key === key)) return;
