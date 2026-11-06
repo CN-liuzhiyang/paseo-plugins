@@ -68,7 +68,7 @@ test("what counts as a change is the value: the order of its keys does not matte
 test("affair read: prints what it read; with --for it is written down and its reference is evidence a report accepts", async () => {
   const w = world({ policy: policy() });
   const src = source(w, { mode: "ok", value: { 提现状态: "审核中" }, summary: "提现审核中" });
-  const made = await ops.create(w.ctx, { title: "提现", said: "帮我盯一下提现", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "提现", said: "帮我盯一下提现", noWait: true });
   const plain = await ops.readTool(w.ctx, "fake", { file: src.file });
   assert.equal(plain.ok, true);
   assert.equal(read(w.root, made.id).filter((l: { kind: string }) => l.kind === "read").length, 0, "without --for nothing is written");
@@ -88,7 +88,7 @@ test("affair read: prints what it read; with --for it is written down and its re
 test("a read that failed is written down with its reason when it is for an affair; a value with a token in it is not written at all", async () => {
   const w = world({ policy: policy() });
   const src = source(w, { mode: "down" });
-  const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-2", title: "洗牙", noWait: true });
   const failed = await ops.readTool(w.ctx, "fake", { file: src.file }, { forId: made.id });
   assert.equal(failed.ok, false);
   assert.match(failed.text, /VPN/);
@@ -103,7 +103,7 @@ test("a read that failed is written down with its reason when it is for an affai
 test("the brief lists the tools and what is watched; a watch needs a tool that exists", async () => {
   const w = world({ policy: policy() });
   const src = source(w, { mode: "ok", value: { n: 1 }, summary: "一" });
-  const made = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-3", title: "洗牙", noWait: true });
   await ops.brief(w.ctx, made.id);
   const bad = await ops.report(w.ctx, made.id, { status: "等", entry: "等。", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] }, watches: [{ id: "w1", tool: "no-such-tool", args: {} }] });
   assert.equal(bad.ok, false);
@@ -128,7 +128,7 @@ async function watching(over: Record<string, unknown> = {}) {
   const engine = createEngine({
     ctx: w.ctx, paseo: null, deliver: null, log: () => {},
   });
-  const made = await ops.create(w.ctx, { title: "引擎上车", said: "帮我盯一下引擎", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-4", title: "引擎上车", said: "帮我盯一下引擎", noWait: true });
   const id = made.id as string;
   await ops.brief(w.ctx, id);
   const r = await ops.report(w.ctx, id, {
@@ -241,7 +241,7 @@ test("one pass reads only so many; the loop sweeps lost runs through the hook it
   const src = source(w, { mode: "ok", value: { n: 1 }, summary: "一" });
   let swept = 0;
   const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log: () => {}, wakeLost: async () => void (swept += 1) });
-  const made = await ops.create(w.ctx, { title: "多", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-5", title: "多", noWait: true });
   await ops.brief(w.ctx, made.id);
   const r = await ops.report(w.ctx, made.id, {
     status: "等", entry: "等。", facts: [], next: { at: "2026-11-09 09:30", waitingFor: "等引擎进外网", why: "还没进外网", earlyIf: [] },

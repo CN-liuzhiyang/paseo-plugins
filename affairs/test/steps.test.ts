@@ -32,7 +32,7 @@ function reader() {
 
 test("steps survive the real reader and log, and both briefs show only now and next", async () => {
   const { w, file } = reader();
-  const made = await ops.create(w.ctx, { title: "预约", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "预约", noWait: true });
   const id = made.id!;
   assert.equal((await ops.readTool(w.ctx, "sample", { file }, { forId: id })).ok, true);
   const saved = load(w.root, id);
@@ -54,7 +54,7 @@ test("no steps leaves both briefs and the folded reading metadata unchanged", as
   set({});
   assert.deepEqual(await readOnce(w.ctx.policy, "sample", { file }), { ok: true, value: { ready: true }, summary: "可以确认" });
   assert.deepEqual(stepLines({}, w.now()), []);
-  const made = await ops.create(w.ctx, { title: "预约", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-2", title: "预约", noWait: true });
   await ops.readTool(w.ctx, "sample", { file }, { forId: made.id });
   assert.equal("stepRead" in load(w.root, made.id), false);
   for (const chat of [false, true]) {
@@ -86,7 +86,7 @@ test("reader rejects malformed steps and does not log secrets in their notes", a
     set(extra);
     assert.equal((await readOnce(w.ctx.policy, "sample", { file })).ok, false);
   }
-  const made = await ops.create(w.ctx, { title: "预约", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-3", title: "预约", noWait: true });
   set({ steps: [{ ...steps[0], note: "sk-abcdefghijklmnopqrstuvwxyz0123" }] });
   assert.equal((await ops.readTool(w.ctx, "sample", { file }, { forId: made.id })).ok, false);
   assert.equal(read(w.root, made.id).some((l: any) => l.kind === "read"), false);
@@ -94,7 +94,7 @@ test("reader rejects malformed steps and does not log secrets in their notes", a
 
 test("watched steps refresh even with the same value; changed steps wake a look", async () => {
   const { w, file, set } = reader();
-  const made = await ops.create(w.ctx, { title: "预约", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-4", title: "预约", noWait: true });
   const id = made.id!;
   append(w.root, id, [{ kind: "watch", id: "w1", watch: { tool: "sample", args: { file }, every: 5 } }], { now: w.now() });
   const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log() {} });
@@ -113,23 +113,19 @@ test("watched steps refresh even with the same value; changed steps wake a look"
   assert.equal(load(w.root, id).stepRead.validUntil, "2026-11-04T10:00:00+08:00");
 });
 
-test("chat prompt reads the matching private section and tells the chat to lead the next step", () => {
+test("chat prompt embeds the matching private chat handbook and the next-step rule", () => {
   const w = world();
-  const dir = path.join(w.dir, "books");
-  mkdirSync(dir);
-  for (const name of ["public.md", "affair.md", "appointments.md", "asked.md"]) writeFileSync(path.join(dir, name), "## 你是这件事的对话\n按约定推进");
-  w.ctx.policy.handbookPath = path.join(dir, "public.md");
+  const dir = path.join(w.dir, "books"); mkdirSync(dir);
+  for (const name of ["handbook.chat.md", "affair.chat.md", "appointments.chat.md", "asked.chat.md"]) writeFileSync(path.join(dir, name), `embedded ${name}`);
+  w.ctx.policy.handbookPath = path.join(dir, "handbook.md");
   w.ctx.policy.handbooksDir = dir;
-  w.ctx.policy.handbookByKind = { appointment: "appointments.md" };
-  const s = { id: "sample", title: "预约", link: "appointment:sample" };
+  w.ctx.policy.chatHandbookByKind = { appointment: "appointments.chat.md" };
+  const s = { ...load(w.root, "sample"), id: "sample", title: "预约", links: ["appointment:sample"] };
   const text = chatPrompt(w.ctx, s);
-  for (const name of ["public.md", "affair.md", "appointments.md"]) assert.ok(text.includes(path.join(dir, name)));
-  assert.doesNotMatch(text, /asked\.md/);
-  assert.match(text, /只看里面「你是这件事的对话」一节/);
-  assert.match(text, /走到哪一步.*主动做.*主动提醒他/);
-  assert.ok(chatPrompt(w.ctx, { ...s, link: null }).includes(path.join(dir, "asked.md")));
-  w.ctx.policy.handbookByKind = { appointment: "missing.md" };
-  assert.doesNotMatch(chatPrompt(w.ctx, s), /missing\.md/);
-  w.ctx.policy.handbooksDir = path.join(dir, "absent");
-  assert.ok(!chatPrompt(w.ctx, s).includes(w.ctx.policy.handbooksDir));
+  for (const name of ["handbook.chat.md", "affair.chat.md", "appointments.chat.md"]) assert.ok(text.includes(`embedded ${name}`));
+  assert.doesNotMatch(text, /asked\.chat\.md|只看里面/);
+  assert.match(text, /按步骤主动说走到哪里、下一步谁做/);
+  assert.ok(chatPrompt(w.ctx, { ...s, links: [] }).includes("embedded asked.chat.md"));
+  w.ctx.policy.chatHandbookByKind = { appointment: "missing.chat.md" };
+  assert.doesNotMatch(chatPrompt(w.ctx, s), /missing\.chat\.md/);
 });

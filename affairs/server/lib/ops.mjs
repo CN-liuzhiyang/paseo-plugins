@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { askFields, buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { dayStart, flowLook, mayLook, tripped } from "./limits.mjs";
 import { canResume, resumeRefusal, eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
-import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
+import { append, ID, isOpen, listIds, load as loadState, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
@@ -14,7 +14,10 @@ import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
 import { ago, attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
 import { clampMax, findTurns, handoffSection, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
-import { hrefOf, linkContext, parseLink, usableTemplates } from "./links.mjs";
+import { hrefOf, normalizedLink, primaryLink, parseLink, usableTemplates } from "./links.mjs";
+import { finishWork, refreshWork, restoreWork, saveWork, sizeWarnings, workTexts } from "./workdir-git.mjs";
+import { projectList } from "./project-context.mjs";
+import { chatHandbooks } from "./chat.mjs";
 import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
@@ -61,6 +64,7 @@ export function makeCtx(options = {}) {
     by: options.by ?? "human",
     // For a chat session: the one affair it is the chat of (it can touch no other).
     chatFor: options.chatFor ?? "",
+    agentId: options.agentId ?? "",
     // `flow`: how long to wait for a started run to show itself, and how a process is made (a test puts its own).
     flowWaitMs: options.flowWaitMs ?? 8000,
     flowStart: options.flowStart,
@@ -81,7 +85,11 @@ function loadStateWithLines(root, id) {
   return { ...loadState(root, id), lines };
 }
 
-const write = (ctx, id, entries) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
+const write = (ctx, id, entries) => {
+  const lines = append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
+  if (entries.some((e) => ["created", "report", "answered", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id));
+  return lines;
+};
 /** @returns {Result} */
 const fail = (text) => ({ ok: false, text });
 
@@ -115,7 +123,7 @@ export function writeProgress(ctx, s) {
  */
 export async function callerInfo(ctx) {
   const agentId = process.env.PASEO_AGENT_ID;
-  if (!agentId) return { by: "human", chatFor: "" };
+  if (!agentId) return { by: "human", chatFor: "", agentId: "" };
   // `paseo agent inspect` does not print labels, but `paseo ls --label key=value` filters by them: ask whether this session is among
   // the ones carrying a given label. An exact value is needed, so the candidates are the plans and affairs this root knows.
   const has = async (pair) => {
@@ -139,15 +147,75 @@ export async function callerInfo(ctx) {
       const at = hits.findIndex(Boolean);
       if (at >= 0) return { by: "chat", chatFor: group[at] };
     }
-    return { by: "human", chatFor: "" };
+    const attached = ids.some((id) => loadState(ctx.root, id).attached.includes(agentId));
+    return { by: attached ? "attached" : "human", chatFor: "", agentId };
   } catch {
     return { by: "look", chatFor: "" };
   }
 }
 export const callerOf = async (ctx) => (await callerInfo(ctx)).by;
 
-const byLook = (ctx) => ctx.by === "look";
+const byLook = (ctx) => ctx.by === "look" || ctx.by === "attached";
 const byChat = (ctx) => ctx.by === "chat";
+export function currentSaid(s) {
+  const turn = s.lines?.filter((l) => l.kind === "chat.turn" && l.agentId === s.chatId).at(-1);
+  return s.said.filter((m) => !m.undone && m.by === "user" && m.via === "chat-session" &&
+    (turn ? m.seq > turn.seq : !s.chatTurn || Date.parse(m.at) > Date.parse(s.chatTurn.at))).at(-1);
+}
+
+export async function link(ctx, ref, action, value) {
+  if (byLook(ctx)) return lookRefused("改关联");
+  if (byChat(ctx)) return chatRefused("改关联");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const link = normalizedLink(value);
+  if (!link || link.startsWith("svn:") || !["add", "rm"].includes(action)) return fail("用法：affair link <编号> add|rm <kind:ref>，关联只挂管事的系统。");
+  const duplicate = action === "add" && listIds(ctx.root).map((id) => loadState(ctx.root, id)).find((s) => s.id !== r.s.id && isOpen(s) && s.links.includes(link));
+  if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」。`);
+  const links = action === "rm" ? r.s.links.filter((l) => l !== link) : [...new Set([...r.s.links, link])];
+  const role = r.s.roleExplicit === false ? ctx.policy.roleByKind?.[primaryLink({ links })?.split(":")[0]] || "" : r.s.roleName;
+  if (role !== r.s.roleName && r.s.scheduleId) await schedule.changeRole(ctx.run, r.s.scheduleId, ctx.policy, role || undefined);
+  write(ctx, r.s.id, [{ kind: "link", action, link, role }]);
+  return { ok: true, text: "关联已更新。" };
+}
+
+export async function project(ctx, ref, action, key) {
+  if (byLook(ctx)) return lookRefused("改项目");
+  if (byChat(ctx)) return chatRefused("改项目");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  if (!["add", "rm"].includes(action) || !/^(remote|svn|path):.+/.test(key ?? "")) return fail("用法：affair project <编号> add|rm <key>");
+  write(ctx, r.s.id, [{ kind: "project", action, project: key }]);
+  return { ok: true, text: "项目已更新。" };
+}
+
+export async function save(ctx, ref, message = "") {
+  if (byLook(ctx)) return lookRefused("保存事项文档");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  if (!isOpen(r.s)) return fail("这件事已经办完，要继续写先 resume。");
+  refreshWork(ctx, r.s);
+  const result = await saveWork(ctx, r.s.id, message);
+  const warnings = sizeWarnings(ctx, r.s, chatHandbooks(ctx, r.s));
+  return { ...result, text: [result.text.split("\n")[0], ...warnings].join("\n") };
+}
+
+export async function here(ctx, cwd = process.cwd()) {
+  return { ok: true, text: await projectList(ctx.policy, cwd, Infinity) || "本项目没有在进行的事。" };
+}
+
+export async function attach(ctx, ref) {
+  if (ctx.by === "look") return lookRefused("接手事项");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const caller = await callerInfo(ctx);
+  const agentId = caller.agentId || (caller.by === "chat" ? process.env.PASEO_AGENT_ID : "");
+  if (caller.by === "look") return lookRefused("接手事项");
+  if (!agentId) return fail("要在 Paseo 的对话里 attach，才能把结论记到这件事上。");
+  write(ctx, r.s.id, [{ kind: "attached", agentId }]);
+  const texts = workTexts(ctx, r.s);
+  return { ok: true, text: `${texts.status}\n${texts.readme}` };
+}
 /** Only what is really in this affair's files/ is handed to a look, whatever a line of the log says. */
 const sentIn = (ctx, id) => {
   const dir = path.resolve(ctx.root, id, "files");
@@ -163,7 +231,7 @@ const chatRefused = (what) => fail(`这是对话的会话，不能${what}。`);
 export function find(ctx, word, { closed = false } = {}) {
   const open = listIds(ctx.root).map((id) => loadState(ctx.root, id)).filter((s) => !s.system && (closed || isOpen(s)));
   const w = word.trim().toLowerCase().replace(/^#/, "");
-  const hits = open.filter((s) => s.id.toLowerCase() === w || s.title.toLowerCase().includes(w) || (w && s.title.toLowerCase().replace(/^#/, "").includes(w)));
+  const hits = open.filter((s) => s.id.toLowerCase() === w || s.links.some((l) => l.toLowerCase() === w) || s.title.toLowerCase().includes(w) || (w && s.title.toLowerCase().replace(/^#/, "").includes(w)));
   return { hits, names: open.map((s) => s.title) };
 }
 
@@ -178,7 +246,7 @@ export function resolve(ctx, ref, { closed = false } = {}) {
 
 /** @returns {{ s?: any, text?: string }} */
 function resolveAny(ctx, ref, { closed = false } = {}) {
-  if (/^(?:D\d+|\d{3,9})$/.test(ref) && existsSync(path.join(ctx.root, ref))) return { s: state(ctx, ref) };
+  if (ID.test(ref) && existsSync(path.join(ctx.root, ref))) return { s: state(ctx, ref) };
   let { hits, names } = find(ctx, ref);
   if (hits.length === 0 && closed) hits = find(ctx, ref, { closed: true }).hits;
   if (hits.length === 1) return { s: state(ctx, hits[0].id) };
@@ -242,51 +310,49 @@ async function stopForBreaker(ctx, id, trip) {
 
 export const requestLook = (ctx, id, why, options) => ringNow(ctx, state(ctx, id), why, options);
 
-function claudeMd(ctx, s) {
-  return [
-    `# ${s.title}`,
-    "",
-    `这是他让我盯着的一件事（编号 ${s.id}）。这个目录里：log.jsonl 是经过（只往后加，别手改）、progress.md 是进展、files/ 放他发来的东西。`,
-    `要改什么都用命令，不要直接改文件：${ctx.command} show ${s.id}（看进展）、note（记他说的话）、report（看一眼的结果）。`,
-    "他发来的图片和文件在 files/ 里（路径在 progress.md 和 brief 里）。图片用 Read 工具看，文件按需读；别把内容原样抄进记录，里面的密码、令牌、证件号看到了也不要写。",
-    "只碰这一件事的目录。不要写密码、令牌、配对链接。",
-    "",
-  ].join("\n");
-}
-
 /** @returns {Promise<Result>} */
 export async function create(ctx, input) {
   if (byLook(ctx)) return lookRefused("新建事项");
   if (byChat(ctx)) return chatRefused("新建事项");
-  const { title, goal = "", said = "", link = null, domain = "work", deadline = null, deadlineQuote = "", noWait = false } = input;
+  const { title, goal = "", said = "", domain = "work", deadline = null, deadlineQuote = "", noWait = false } = input;
+  const links = [...new Set((Array.isArray(input.link) ? input.link : input.link ? [input.link] : []).map(normalizedLink))];
+  if (links.some((l) => !l || l.startsWith("svn:"))) return fail("关联要写成管事的系统的 kind:ref。");
+  const link = links[0] ?? null;
   const secret = refuseSecret(`${title} ${goal} ${said}`);
   if (secret) return secret;
   const policy = ctx.policy;
   const now = ctx.now();
   const kind = link?.split(":")[0];
   // Only a plain number after the kind names a ticket ("gcp:#700", "gcp:700/字段"); other digits in a link are not its number.
-  const ref = /^#?(\d{3,9})(?:[\/\s].*)?$/.exec(link?.split(":").slice(1).join(":") ?? "")?.[1] ?? "";
+  const ref = links.map((l) => /^(\d{3,9})$/.exec(parseLink(l)?.ref ?? "")?.[1]).find(Boolean) ?? "";
   const role = input.role ?? (kind && policy.roleByKind?.[kind]) ?? undefined;
   const open = listIds(ctx.root).map((x) => loadState(ctx.root, x)).filter((s) => isOpen(s) && !s.system);
-  const id = kind && /^\d{3,9}$/.test(ref) ? ref : nextId(ctx.root);
+  if (input.id !== undefined && !/^[a-z][a-z0-9-]{1,39}$/.test(input.id)) return fail("--id 要用 2–40 个小写字母、数字或连字符，字母开头。");
+  let id = ref || input.id;
+  if (!id) return fail("没有单号，请用 --id 给这件事起一个短名（小写字母、数字、连字符）。");
+  const duplicate = open.find((s) => s.id !== id && links.some((l) => s.links.includes(l)));
+  if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」，请用这件事。`);
   const existing = open.find((s) => s.id === id);
   if (existing) return { ok: true, text: say.already(existing.title, existing.next ? speak(Date.parse(existing.next.at), now, policy.tz) : "稍后", linkTextOf(ctx, existing)), id };
   if (!title?.trim()) return fail("要有一个名字：--title");
   // A ticket that was watched before and is over (or never got made): the person asked again, so it is watched again.
-  const before = kind && existsSync(path.join(ctx.root, id)) ? loadState(ctx.root, id) : null;
+  const before = listIds(ctx.root).map((key) => loadState(ctx.root, key)).find((s) => !isOpen(s) && links.some((link) => s.links.includes(link))) ?? (existsSync(path.join(ctx.root, id)) ? loadState(ctx.root, id) : null);
   if (before?.id && !isOpen(before)) {
+    id = before.id;
     if (open.length >= policy.limits.maxActive) return fail(say.tooMany(open.length));
     if (said) write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
     const again = await resume(ctx, id);
     return { ...again, id, text: again.ok ? say.restarted(before.title, before.status) : again.text };
   }
   if (open.length >= policy.limits.maxActive) return fail(say.tooMany(open.length));
-  const workdir = workspace.workdirOf(ctx.root, id, link, policy);
+  const projects = input.projects ?? policy.projectsByKind?.[kind] ?? [];
+  let workdir;
+  try { workdir = await workspace.workdirOf(ctx.root, id, projects, policy); }
+  catch (error) { return fail(error.message); }
   const dir = path.join(ctx.root, id);
   mkdirSync(path.join(dir, "files"), { recursive: true });
-  write(ctx, id, [{ kind: "created", id, title: title.trim(), goal, domain, link, workdir, paseoHome: ctx.paseoHome, role: role ?? "" }]);
+  write(ctx, id, [{ kind: "created", id, title: title.trim(), goal, domain, links, projects, workdir, paseoHome: ctx.paseoHome, role: role ?? "", roleExplicit: input.role != null }]);
   let s = state(ctx, id);
-  writeFileSync(path.join(dir, "CLAUDE.md"), claudeMd(ctx, s));
   writeProgress(ctx, s);
   if (said) {
     const [line] = write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
@@ -324,6 +390,7 @@ async function rollbackCreate(ctx, id, error) {
     write(ctx, id, [{ kind: "workspace", archived: true }]);
   }
   write(ctx, id, [{ kind: "flag", what: "setup", detail: error.message }, { kind: "status", status: "stopped", evidence: "没建成", by: "system" }]);
+  await finishWork(ctx, state(ctx, id));
 }
 
 async function waitForConversation(ctx, id) {
@@ -404,11 +471,16 @@ export async function hear(ctx, ref, text, { messageId = "", at = "", fromAgent 
 
 /** @returns {Promise<Result>} */
 export async function note(ctx, ref, input) {
+  if (ctx.by === "attached" && !input.mine) return lookRefused("替他说话（接手后只能 note --mine 记结论）");
   if (byChat(ctx)) {
     if (!input.mine) return chatRefused("以他的名义记话（他在对话里说的话已经记了）；记自己的结论用 note --mine");
     return noteMine(ctx, ref, input);
   }
-  if (input.mine) return fail("--mine 只有对话的会话用。");
+  if (input.mine) {
+    const r = resolve(ctx, ref);
+    if (ctx.by !== "look" && r.s?.attached.includes(ctx.agentId)) return noteMine(ctx, ref, input);
+    return fail("--mine 只有对话的会话或已经 attach 的会话用。");
+  }
   const text = String(input.said ?? "");
   const sending = Array.isArray(input.attachments) ? input.attachments : [];
   if (!text.trim() && sending.length === 0) return fail("没有话可记：--said 后面要有内容。");
@@ -456,13 +528,13 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
   // button (the plugin does that) or a line of his that the plugin recorded after the question came (--said-seq).
   if (byChat(ctx)) {
     if (String(text ?? "").trim()) return fail("对话里别用 --said 带他的答案：他点的按钮由插件记，他说的话已经记了，用 --said-seq 指给他说的那一行。");
-    if (saidSeq === "") return fail("要替他答，得指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没说就别答，直接问他。");
   } else if (saidSeq !== "") return fail("--said-seq 只有对话的会话用；本人用 --said。");
   if (!byChat(ctx) && !String(text ?? "").trim()) return fail("没有答案可记：--said 后面要有内容。");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
   const q = s.asks.find((a) => a.id === qid);
+  if (byChat(ctx) && saidSeq === "") saidSeq = currentSaid(s)?.seq ?? "";
   if (!byChat(ctx)) {
     const secret = refuseSecret(text);
     if (secret) return secret;
@@ -500,6 +572,7 @@ export async function stop(ctx, id, { evidence = "", done = false } = {}) {
   if (byLook(ctx)) return lookRefused("替他说不用盯了");
   const s = state(ctx, id);
   write(ctx, id, [{ kind: "status", status: done ? "done" : "stopped", evidence, by: byChat(ctx) ? "chat" : "user" }]);
+  await finishWork(ctx, state(ctx, id));
   await syncPlan(ctx, id);
   return { ok: true, text: say.stopped(s.title) };
 }
@@ -510,7 +583,11 @@ export async function resume(ctx, ref) {
   const r = resolve(ctx, ref, { closed: true });
   if (!r.s) return fail(r.text);
   const { s } = r;
+  const duplicate = listIds(ctx.root).map((id) => loadState(ctx.root, id)).find((other) => other.id !== s.id && isOpen(other) && s.links.some((link) => other.links.includes(link)));
+  if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」。`);
   write(ctx, s.id, [{ kind: "status", status: "watching", evidence: "" }, ...(s.held ? [{ kind: "hold", on: false }] : [])]);
+  await restoreWork(ctx, state(ctx, s.id));
+  refreshWork(ctx, state(ctx, s.id));
   // Archived since it ended: the same folder gets a new workspace and plan, and the old ones stay in the archive.
   if (!s.workspaceId) {
     try {
@@ -541,6 +618,7 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   let { s } = r;
+  if (byChat(ctx) && saidSeq === "") saidSeq = currentSaid(s)?.seq ?? "";
   const policy = ctx.policy;
   const now = ctx.now();
   const at = parseLocal(until, policy.tz);
@@ -719,6 +797,7 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
   if (!s.workspaceId || !s.workdir) return { fail: `「${s.title}」的工作区或工作目录不在了，先找回来再起。` };
   let said = null;
   if (byChat(ctx)) {
+    if (saidSeq === "") saidSeq = currentSaid(s)?.seq ?? "";
     if (saidSeq === "") return { fail: "要指给他说的那一行：--said-seq <编号>（brief 的经过里有）。他没点名要跑就别起，直接问他。" };
     said = Number(saidSeq);
     const his = s.said.filter((m) => !m.undone && m.by === "user" && m.via !== "chat-agent");
@@ -726,7 +805,8 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
     // The word to go ahead is what he said in this turn of the chat: one from before the turn the chat last finished is old news (he
     // may have changed his mind since), and the chat has to ask again. Something more he adds in the same turn ("quick") changes nothing.
     const asked = s.said.find((m) => m.seq === said);
-    if (s.chatTurn && Date.parse(s.chatTurn.at) > Date.parse(asked.at)) return { fail: `--said-seq ${saidSeq}是之前那几轮说的，那之后你已经回过他了。要起就请他再明确说一次要跑，再用他新说的那一句的编号。` };
+    const lastTurn = s.lines.filter((l) => l.kind === "chat.turn" && l.agentId === s.chatId).at(-1);
+    if ((lastTurn && asked.seq < lastTurn.seq) || (s.chatTurn && Date.parse(s.chatTurn.at) > Date.parse(asked.at))) return { fail: `--said-seq ${saidSeq}是之前那几轮说的，那之后你已经回过他了。要起就请他再明确说一次要跑，再用他新说的那一句的编号。` };
     const used = s.flows.find((x) => !x.failed && x.said === said);
     if (used) return { fail: `他那句话（#${said}）已经起过一次 ${used.flow} 了。要再起一次得他再说一句，不能拿同一句。` };
   } else if (saidSeq !== "") return { fail: "--said-seq 只有对话的会话用；本人直接起就行。" };
@@ -767,7 +847,7 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   if (!r.s) return fail(r.text);
   const { s } = r;
   const flows = flowsOf(ctx.policy);
-  const link = parseLink(s.link);
+  const link = parseLink(primaryLink(s));
   const mine = Object.entries(flows).filter(([, f]) => link && f.kinds.includes(link.kind));
   if (!name) return { ok: true, text: [mine.length ? `「${s.title}」能起的流程：\n${mine.map(([n, f]) => `- ${n}${f.says ? `（${f.says}）` : ""}`).join("\n")}` : `「${s.title}」没有能起的流程。`, ...await resumableLines(ctx, s)].join("\n") };
   const f = flows[name];
@@ -803,7 +883,7 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   // second request (of this affair or any other) sees it before it decides.
   const reserved = await withFlowLock(ctx.root, async () => {
     const now = state(ctx, s.id);
-    const again2 = await flowAllowed(ctx, now, name, { saidSeq, again, orch, logDir });
+    const again2 = await flowAllowed(ctx, now, name, { saidSeq: first.said ?? saidSeq, again, orch, logDir });
     if ("fail" in again2) return again2;
     const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(again2.said !== null ? { said: again2.said } : {}), ...(again ? { again: true } : {}), ...(trial ? { trial: true } : {}) }]);
     return { ...again2, mark };
@@ -969,7 +1049,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
   const handbooks = [ctx.policy.handbookPath || path.join(HERE, "..", "..", "handbook.md")];
   const dir = ctx.policy.handbooksDir;
   if (dir) {
-    const kind = s.link?.split(":")[0];
+    const kind = primaryLink(s)?.split(":")[0];
     handbooks.push(path.join(dir, "affair.md"), path.join(dir, (kind && ctx.policy.handbookByKind[kind]) || "asked.md"));
   }
   const recent = s.lines.slice(-10).map((l) => `- #${l.seq} ${stamp(l.at, now, tz)} ${l.kind}${l.entry ? `：${l.entry}` : l.text ? `：${l.text}` : l.status ? `：${l.status}` : ""}`);
@@ -1081,63 +1161,18 @@ async function briefChat(ctx, s) {
     else if (l.kind === "wake.end" && l.state === "failed") news.push(`- #${l.seq} ${stamp(l.at, now, tz)} 这次没看成：${String(l.error ?? "没有说明").slice(0, 80)}`);
   }
   const asks = s.asks.filter((a) => a.state === "open");
-  const notes = s.notes.slice(-10).map((n) => `- #${n.seq} ${stamp(n.at, now, tz)} ${n.text}${n.said !== null ? `（出自他说的 #${n.said}）` : ""}`);
-  const recent = s.lines.slice(-10).map((l) => lineForChat(l, now, tz)).filter(Boolean);
-  const current = process.env.PASEO_AGENT_ID || s.chatId || "";
-  const before = [...new Map(s.chats.filter((c) => c.agentId !== current).map((c) => [c.agentId, c])).values()];
-  const earliest = before[0] ? mdhm(before[0].at, tz).slice(0, 5) : "";
-  const templates = usableTemplates(ctx.policy.links);
-  const own = linkContext(ctx.policy, s.link).registered[0];
-  const mine = own && templates[own.kind] ? templates[own.kind].replace("{ref}", encodeURIComponent(own.ref)) : "";
-  const text = [
-    `# 事项 ${s.id}：${s.title}${isOpen(s) ? "" : `（已经${s.status === "done" ? "办完" : "不盯"}了；他要接着盯就跑 ${ctx.command} resume ${s.id}）`}`,
-    `目标：${s.goal || s.title}`,
-    `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next && isOpen(s) ? `　下次看：${localParts(Date.parse(s.next.at), tz).text}` : ""}${s.next?.remind ? `　约好要提醒他：${s.next.remind}` : ""}`,
-    ...staleLine(s, now),
-    ...stepLines(s, now),
-    "",
-    "## 上次读完以后新的",
-    ...(news.length ? news : ["- 没有新的"]),
-    "",
-    ...handoffs.flatMap(handoffSection),
-    "## 没答的问题",
-    ...(asks.length ? asks.map((a) => `- ${a.id}：${a.title}（选项：${a.options.join("、") || "无"}）`) : ["- （没有）"]),
-    "",
-    ...flowLines(s, now, tz),
-    ...await resumableLines(ctx, s),
-    "## 记住的",
-    ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
-    "",
-    "## 最近记下的（你用 note --mine 记的）",
-    ...(notes.length ? notes : ["- （还没有）"]),
-    "",
-    "## 最近 10 行经过（带编号，他说的话可以用编号指给命令）",
-    ...(recent.length ? recent : ["- （还没有）"]),
-    `更早的：${ctx.command} show ${s.id} --log`,
-    "",
-    "## 引用怎么写",
-    ...(Object.keys(templates).length
-      ? [
-          "回答里提到外部的单子、任务，写成 markdown 链接，地址照下面抄，别自己猜：",
-          ...(mine ? [`- 这件事自己的单子：[#${own.ref}](${mine})`] : []),
-          ...Object.entries(templates).map(([kind, template]) => `- ${kind}：[<号>](${template})`),
-        ]
-      : ["没有配地址：提到单号就照原样写，不要猜地址。"]),
-    "",
-    "## 以前的对话",
-    before.length
-      ? `${before.length} 段（最早 ${earliest}）。大部分情况不用查：结论在「记住的」和「最近记下的」里，他说过的话都在记录里（这里只带最近 10 行，更早的用 ${ctx.command} show ${s.id} --log）。\n只有你想不起之前聊过什么、上面又都没有时，才用 ${ctx.command} history ${s.id} --q <词> 找那一问一答，别去读整段旧对话。`
-      : "没有（这是这件事的第一段对话）。",
-    "",
-    "## 怎么记、怎么交",
-    `- 记一句不会改「现在」。每个里程碑（提交了、对方系统里状态变了、他拍板了、产物出来了）当场用 report 交回新的 status，记住的旧的用 drop 删；回他话之前拿上面的「现在」对一下刚做完的事，不一致先补交。`,
-    `- 得出一个结论、他做了一个决定，当场记一句（≤${NOTE_MAX} 字，别攒到最后，换新随时会发生）：${ctx.command} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
-    `- 要让后面看一眼用上他发给你的图：把要点（不抄密码、令牌、证件号）用 note --mine 记成文字；图本身只在这个对话里，看一眼拿不到。`,
-    `- 状态、记住的（facts 新增、drop 删旧的）、下次、问题、办完：${ctx.command} report ${s.id} --from chat --file <json>（每项都可以不写）`,
-    `- 他在对话里用话答了问题：${ctx.command} answer <问题编号> --said-seq <他说的那一行的编号>（答案就是他那一行的原话；他点按钮的由界面记，你不用管）；改时间：pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
-    `- 他提到「上次」「之前说的」而这里找不到：先查（history），查不到就问他，别猜。`,
-    "",
-  ].join("\n");
+  const latest = s.lines.filter((l) => l.seq > cut && l.kind === "said" && l.by === "user" && l.via === "chat-session").map((l) => lineForChat(l, now, tz)).filter(Boolean);
+  const content = [...news, ...latest, ...handoffs.flatMap(handoffSection)];
+  const freshSteps = s.lines.some((l) => l.seq > cut && ["read", "watch.read"].includes(l.kind) && l.steps);
+  const freshWarning = s.notes.some((n) => n.seq > cut) && staleLine(s, now).length > 0;
+  const text = content.length || freshSteps || freshWarning ? [
+    `# 事项 ${s.id}：${s.title}`,
+    `现在：${s.nowText || "还没看过"}　在等：${s.next?.waitingFor || "还没定"}`,
+    ...staleLine(s, now), ...stepLines(s, now),
+    "## 上次读完以后新的", ...content,
+    ...(asks.some((q) => q.seq > cut) ? ["## 没答的问题", ...asks.map((q) => `- ${q.id} ${q.title}（${q.options.join("、")}）`)] : []),
+    ...flowLines(s, now, tz), ...await resumableLines(ctx, s),
+  ].join("\n") : "没有新的。";
   write(ctx, s.id, [{ kind: "brief", for: "chat", seen: s.lastSeq }]);
   return { ok: true, text };
 }
@@ -1215,6 +1250,7 @@ async function reportFromChat(ctx, s, data) {
   }
   write(ctx, s.id, entries);
   writeProgress(ctx, state(ctx, s.id));
+  if (finishing) await finishWork(ctx, state(ctx, s.id));
   if (planChanged) await syncPlan(ctx, s.id);
   const after = state(ctx, s.id);
   const when = after.next && isOpen(after) ? `下次 ${localParts(Date.parse(after.next.at), policy.tz).text.slice(5)} 看` : "";
@@ -1290,6 +1326,7 @@ function dropBadFields(merged, problems) {
 /** What a look hands back. Rejected: nothing is taken, and only the fields that did not pass are asked for again. */
 /** @returns {Promise<Result>} */
 export async function report(ctx, ref, data, { from = "" } = {}) {
+  if (ctx.by === "attached") return lookRefused("交回状态（接手后只能 note --mine 记结论）");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
@@ -1374,6 +1411,7 @@ export async function report(ctx, ref, data, { from = "" } = {}) {
   }
   write(ctx, s.id, entries);
   writeProgress(ctx, state(ctx, s.id));
+  if (finishing) await finishWork(ctx, state(ctx, s.id));
   await syncPlan(ctx, s.id);
   const after = state(ctx, s.id);
   const when = after.next && isOpen(after) ? `下次 ${localParts(Date.parse(after.next.at), policy.tz).text.slice(5)} 看` : "";

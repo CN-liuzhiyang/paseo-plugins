@@ -19,7 +19,7 @@ const lookReport = (over: Record<string, unknown> = {}) => ({
 
 async function setup() {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   assert.equal(made.ok, true, made.text);
   const id = made.id as string;
   assert.equal((await ops.brief(lookOf(w), id)).ok, true);
@@ -48,7 +48,7 @@ test("note --mine: the receipt says how old the 'now' is when a note comes after
 
 test("note --mine: no reminder when the 'now' was never written, and a hand-in that carries the old text along does not renew it", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-2", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   const id = made.id as string;
   const plain = await mine(w, id, "先记一句");
   assert.equal(plain.text, "记下了。", "nothing written as the 'now' yet: the receipt is as before");
@@ -80,7 +80,7 @@ test("brief --chat: a line under the 'now' when notes came after it; nothing whe
   const at = lines.findIndex((l) => l.startsWith("现在："));
   assert.equal(lines[at + 1], "　↑ 这句是 2 小时前写的，之后记了 2 条，没有交回新的现在；有进展的话先用 report 交回。");
   // The rule itself is in the "how to note / how to hand in" part.
-  assert.match(text, /记一句不会改「现在」/);
+  assert.doesNotMatch(text, /怎么记、怎么交/);
 
   // Handed in: the line goes away.
   await ops.report(chatOf(w, id), id, { status: "代码提交了，他选了第二种。" }, { from: "chat" });
@@ -91,6 +91,6 @@ test("the chat's starting words carry the rule that a note does not change the '
   const { chatPrompt } = await import("../server/lib/chat.mjs");
   const { w, id } = await setup();
   const text = chatPrompt({ ...w.ctx, command: "affair" }, load(w.root, id));
-  assert.match(text, /note 只往经过里加一行，不会改卡片上的「现在」/);
-  assert.match(text, /当场用 report 交回新的 status，记住的旧的用 drop 删/);
+  assert.match(text, /note 只加结论，不改现在/);
+  assert.match(text, /里程碑当场 report 新的 status，facts 新增、drop 删旧/);
 });

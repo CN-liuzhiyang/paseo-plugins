@@ -101,7 +101,7 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
   delete process.env.FAKE_GATE_CARRIER;
   const w = world({
     policy: {
-      homes: { gcp: work },
+      projectsByKind: { gcp: [`path:${os.hostname()}:${work}`] },
       links: { gcp: "https://tickets.example/{ref}" },
       flows: { perDay, orch, "do-it": { kinds: ["gcp"], prepare, timeout: "30h", says: "读单 → 方案 → 提交" }, "other-job": { kinds: ["feishu-task"], prepare, timeout: "1h" } },
     },
@@ -112,7 +112,7 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
 }
 
 async function ticket(w: ReturnType<typeof world>, number = "700", title = "某某闪退") {
-  const made = await ops.create(w.ctx, { title: `#${number} ${title}`, link: `gcp:#${number}`, said: `帮我盯一下 #${number}`, noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: `#${number} ${title}`, link: `gcp:#${number}`, said: `帮我盯一下 #${number}`, noWait: true });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -163,7 +163,7 @@ test("refused: a flow that is not allowed, one for another kind of reference, an
   const id = await ticket(w);
   assert.match((await ops.flow(w.ctx, id, "no-such")).text, /没有叫「no-such」的流程可起。能起的有：do-it、other-job/);
   assert.match((await ops.flow(w.ctx, id, "other-job")).text, /管的是 feishu-task 的事/);
-  const plain = await ops.create(w.ctx, { title: "洗牙", noWait: true });
+  const plain = await ops.create(w.ctx, { id: "other-2", title: "洗牙", noWait: true });
   assert.match((await ops.flow(w.ctx, plain.id, "do-it")).text, /管的是 gcp 的事/);
 
   const chat = chatOf(w, id);
@@ -405,6 +405,24 @@ test("the day's number holds when different affairs ask at once", async () => {
 /** The chat finished a turn (the session answered): what the log holds once a chat's turn is over. */
 const turnEnded = (w: ReturnType<typeof world>, id: string) => append(w.root, id, [{ kind: "chat.turn", agentId: load(w.root, id).chatId, tokens: 1000, usd: 0.01, usdTotal: 0.01 }], { now: w.now() });
 const chatMade = (w: ReturnType<typeof world>, id: string) => append(w.root, id, [{ kind: "chat", agentId: "chat-1", why: "made" }], { now: w.now() });
+
+test("default --said-seq uses this turn's newest line, refuses an earlier turn and never reuses a sentence", async () => {
+  const { w, logDir } = setup();
+  const id = await ticket(w); chatMade(w, id);
+  await heard(w, id, "用 do-it 做");
+  turnEnded(w, id);
+  const chat = chatOf(w, id);
+  assert.equal((await ops.flow(chat, id, "do-it")).ok, false, "the previous turn cannot authorize a default");
+  await heard(w, id, "现在开始");
+  w.advance(1000);
+  const latest = await heard(w, id, "快点开始");
+  const started = await ops.flow(chat, id, "do-it");
+  assert.equal(started.ok, true, started.text);
+  assert.equal(load(w.root, id).flows[0].said, latest);
+  finish(logDir, started.runId);
+  const again = await ops.flow(chat, id, "do-it", { again: true });
+  assert.equal(again.ok, false); assert.match(again.text, /已经起过一次/);
+});
 
 test("the word to go ahead is what he said in this turn of the chat, it starts one run, and what he adds in the same turn changes nothing", async () => {
   const { w, logDir, out } = setup();

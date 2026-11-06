@@ -4,21 +4,12 @@ import { makeCtx } from "../server/lib/ops.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { doctor } from "../server/lib/doctor.mjs";
 import { defaultRoot, loadPolicy } from "../server/lib/policy.mjs";
+import { help } from "../server/lib/commands.mjs";
 
 // The command for agents and for tracing a fault; a person never types it. Exit 0: done. 1: refused or sent back, the
 // reason on stdout (what to fix, in words). 2: used wrongly.
 
-const USAGE = `affair <命令> ...
-  new --title T [--goal G] [--said S] [--link kind:ref] [--domain personal|family] [--deadline "YYYY-MM-DD HH:mm"] [--no-wait]
-  find <词>                    note <编号|名字> --said S [--deadline T]    answer <问题编号> --said S（对话的会话用 --said-seq N）
-  （对话的会话）note <编号> --mine --said S [--said-seq N]   report <编号> --from chat --file F.json   brief <编号> --chat   history <编号> [--q 词] [--pick N] [--max 字数]
-  flow <编号> [<流程>] [--said-seq N] [--again] [--resume | --trial]   起一个流程或接着跑（不写流程名：列出能起和能续的）
-  stop <编号|名字>             pause <编号|名字> --until "YYYY-MM-DD HH:mm" [--said-seq N]  resume <编号|名字>   undo <编号|名字>
-  show <编号|名字> [--log]     ls    stats    doctor（逐项自检）
-  pause-all（回退用：停掉全部计划并记下）   resume-all（放开）
-  brief <编号>                 report <编号> --file F.json | --stdin
-  read <工具> [--args '<json>' | --args -] [--for <编号>]   现读一次；加 --for 会登记，打印的 reader:r编号 能当证据
-全局：--root <事项根目录>  --paseo-home <daemon 的 home>  --policy <policy.json 的路径，不写就用根目录里那份>  --json`;
+const USAGE = help().text;
 
 function parse(argv) {
   const flags = {};
@@ -28,7 +19,9 @@ function parse(argv) {
     const a = argv[i];
     if (a.startsWith("--")) {
       const key = a.slice(2);
-      flags[key] = bool.has(key) ? true : argv[++i];
+      const value = bool.has(key) ? true : argv[++i];
+      if (["link", "project"].includes(key)) flags[key] = [...(flags[key] ?? []), value];
+      else flags[key] = value;
     } else rest.push(a);
   }
   return { flags, rest };
@@ -39,6 +32,12 @@ const readStdin = () => readFileSync(0, "utf8");
 async function main() {
   const { flags, rest } = parse(process.argv.slice(2));
   const [cmd, arg] = rest;
+  if (cmd === "help") {
+    const result = help(arg);
+    process.stdout.write(`${result.text}\n`);
+    process.exitCode = result.ok ? 0 : 1;
+    return;
+  }
   const root = flags.root ?? defaultRoot();
   const ctx = makeCtx({ root: flags.root, paseoHome: flags["paseo-home"], policy: loadPolicy(root, flags.policy) });
   // Whose command this is comes from the session it runs in, never from what the caller says.
@@ -48,12 +47,27 @@ async function main() {
     return value;
   };
   // --said - : the words are on stdin, so Chinese never passes through a shell's quoting.
-  const said = () => (flags.said === "-" ? readStdin().trim() : need(flags.said, "--said"));
-  const saidIfAny = () => (flags.said === "-" ? readStdin().trim() : flags.said ?? "");
+  const said = () => flags.file ? readFileSync(flags.file, "utf8").trim() : (flags.said === "-" ? readStdin().trim() : need(flags.said, "--said 或 --file"));
+  const saidIfAny = () => flags.file ? said() : (flags.said === "-" ? readStdin().trim() : flags.said ?? "");
   let result;
   switch (cmd) {
     case "new":
-      result = await ops.create(ctx, { title: need(flags.title, "--title"), goal: flags.goal, said: flags.said === "-" ? readStdin().trim() : flags.said, link: flags.link, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
+      result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
+      break;
+    case "link":
+      result = await ops.link(ctx, need(arg, "编号"), rest[2], rest[3]);
+      break;
+    case "project":
+      result = await ops.project(ctx, need(arg, "编号"), rest[2], rest[3]);
+      break;
+    case "save":
+      result = await ops.save(ctx, need(arg, "编号"), flags["msg-file"] ? readFileSync(flags["msg-file"], "utf8").trim() : "");
+      break;
+    case "here":
+      result = await ops.here(ctx, flags.cwd);
+      break;
+    case "attach":
+      result = await ops.attach(ctx, need(arg, "编号"));
       break;
     case "find": {
       const { hits, names } = ops.find(ctx, need(arg, "要找的词"));

@@ -25,12 +25,12 @@ function setup() {
   mkdirSync(path.join(logDir, "runs"), { recursive: true });
   process.env.ORCH_LOG_DIR = logDir;
   process.env.AFFAIR_NODE = process.execPath;
-  const w = world({ policy: { homes: { gcp: home }, links: { gcp: "https://tickets.example/{ref}" }, flows: { orch: path.join(import.meta.dirname, "orch-status.mjs"), "do-it": { kinds: ["gcp"], prepare: path.join(import.meta.dirname, "orch-status.mjs"), timeout: "30h" } } } });
+  const w = world({ policy: { projectsByKind: { gcp: [`path:${os.hostname()}:${home}`] }, links: { gcp: "https://tickets.example/{ref}" }, flows: { orch: path.join(import.meta.dirname, "orch-status.mjs"), "do-it": { kinds: ["gcp"], prepare: path.join(import.meta.dirname, "orch-status.mjs"), timeout: "30h" } } } });
   return { w, logDir, home };
 }
 
 async function ticket(w: ReturnType<typeof world>) {
-  const made = await ops.create(w.ctx, { title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
   assert.equal(made.ok, true, made.text);
   FIRST.set(w, w.calls().filter((c) => c[0] === "schedule" && c[1] === "run-once").length);
   return made.id as string;

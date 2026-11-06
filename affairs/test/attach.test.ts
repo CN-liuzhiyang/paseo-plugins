@@ -14,7 +14,7 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 const png = (name?: string) => ({ type: "image", data: PNG.toString("base64"), mimeType: "image/png", ...(name ? { name } : {}) });
 
 async function started(w: ReturnType<typeof world>) {
-  const made = await ops.create(w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -156,9 +156,9 @@ test("an image with no name is named for its type; a name without an extension g
 
 test("only into the affair that was meant: another affair's folder is not touched, and a look cannot send things", async () => {
   const { w, id } = await world_();
-  await ops.create(w.ctx, { title: "牙冠", noWait: true });
+  await ops.create(w.ctx, { id: "other-2", title: "牙冠", noWait: true });
   await ops.note(w.ctx, id, { said: "", via: "workspace", attachments: [png("one.png")] });
-  assert.deepEqual(filesOf(w, "D2"), []);
+  assert.deepEqual(filesOf(w, "other-2"), []);
   const looks = { ...w.ctx, by: "look" };
   const files = filesOf(w, id);
   const r = await ops.note(looks, id, { said: "我看到了", attachments: [png("two.png")] });
@@ -237,9 +237,7 @@ test("the brief lists only what is really in this affair's files/, whatever a li
 
 test("a new affair's folder note and the handbook tell the look how to treat what he sent", async () => {
   const { w, id } = await world_();
-  const claude = readFileSync(path.join(w.root, id, "CLAUDE.md"), "utf8");
-  assert.match(claude, /图片用 Read 工具看，文件按需读；别把内容原样抄进记录/);
-  assert.match(claude, /密码、令牌、证件号看到了也不要写/);
+  assert.equal(existsSync(path.join(w.root, id, "CLAUDE.md")), false);
   const handbook = readFileSync(path.join(import.meta.dirname, "..", "handbook.md"), "utf8");
   assert.match(handbook, /图片用 Read 工具/);
   assert.match(handbook, /看到了也不要写/);
