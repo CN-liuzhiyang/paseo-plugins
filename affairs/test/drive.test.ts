@@ -277,3 +277,16 @@ test("drive opening includes its short handbook and configured pointer, watch do
   const watch = chatPrompt(f.w.ctx, { ...f.state(), mode: "watch", modeExplicit: true });assert.doesNotMatch(watch, /必须问他的|private-drive-handbook.md/);
   assert.ok(Buffer.byteLength(readFileSync("drive.chat.md", "utf8")) <= 2048);
 });
+
+test("a budget card opened by the main chat is granted by his click on the option with the amount", async () => {
+  const f = fixture();const main = f.main();
+  assert.equal((await ops.ask(main, f.id, { title: "批额度", line: "三步", options: ["批准", "先不"], recommend: "批准", why: "范围小", budget: true })).ok, false);
+  const plain = await ops.ask(main, f.id, { title: "部署吗", line: "好了", options: ["部署 $3 那版", "先停"], recommend: "先停", why: "等窗口" });
+  assert.ok((await ops.answer(f.w.ctx, f.id, plain.id, "部署 $3 那版", "panel")).ok);
+  assert.equal(f.state().budget, null);
+  const card = await ops.ask(main, f.id, { title: "批额度", line: "三步", options: ["批准，额度 $3", "先不"], recommend: "批准，额度 $3", why: "范围小", budget: true });
+  assert.ok(card.ok, card.text);
+  assert.ok((await ops.answer(f.w.ctx, f.id, card.id, "批准，额度 $3", "panel")).ok);
+  assert.equal(f.state().budget.usd, 3);
+  assert.equal(budgetGate(f.w.ctx, f.state()), "");
+});

@@ -193,6 +193,8 @@ export async function budget(ctx, ref, amount, { saidSeq = "", until = "" } = {}
   return { ok: true, text: `已记下他批的 $${usd}${until ? `，到 ${until}` : ""}。` };
 }
 
+const AMOUNT = /\$(\d+(?:\.\d+)?)/;
+
 export async function ask(ctx, ref, data) {
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
@@ -205,8 +207,10 @@ export async function ask(ctx, ref, data) {
   if (!data || typeof data.title !== "string" || !data.title.trim() || typeof data.line !== "string" || !Array.isArray(data.options) || data.options.length < 2 || data.options.some((o) => typeof o !== "string" || !o.trim()) || !data.options.includes(data.recommend) || typeof data.why !== "string" || !data.why.trim()) return fail("问题要有 title、line、至少两个 options、其中一项 recommend 和理由 why。");
   const secret = refuseSecret(JSON.stringify(data));
   if (secret) return secret;
+  // A budget card is granted by his click on an option carrying the amount, as surely as by his typed words.
+  if (data.budget === true && !data.options.some((o) => AMOUNT.test(o))) return fail("额度卡至少要有一个写明金额的选项，例如「批准，额度 $3」。");
   const qid = `${s.id}-${s.asks.length + 1}`;
-  write(ctx, s.id, [{ kind: "asked", id: qid, ...askFields(data), line: `${data.line}\n推荐：${data.recommend}。${data.why}`, recommend: data.recommend, why: data.why, push: data.push === true }]);
+  write(ctx, s.id, [{ kind: "asked", id: qid, ...askFields(data), ...(data.budget === true ? { for: "budget:ask" } : {}), line: `${data.line}\n推荐：${data.recommend}。${data.why}`, recommend: data.recommend, why: data.why, push: data.push === true }]);
   return { ok: true, id: qid, text: "已请他拍板；先做不依赖答案的步骤。" };
 }
 
@@ -608,7 +612,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
   }
   write(ctx, s.id, [{ kind: "answered", id: qid, answer: text, via }]);
   if (q.for.startsWith("budget:") && q.options.includes(text.trim())) {
-    const amount = /^加到 \$(\d+(?:\.\d+)?)$/.exec(text.trim());
+    const amount = AMOUNT.exec(text);
     if (amount) write(ctx, s.id, [{ kind: "budget", usd: Number(amount[1]), until: s.budget?.until || "", answer: qid }]);
     if (text.trim() === "先停") write(ctx, s.id, [{ kind: "hold", on: true }]);
   }

@@ -25,7 +25,7 @@ export function statusText(s, policy = { watchKinds: ["gcp"] }) {
   const head = { id: s.id, title: s.title, state: s.status === "watching" ? "open" : s.status, mode: modeOf(s, policy), links: s.links, projects: s.projects };
   return ["---", ...Object.entries(head).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), "---",
     `方式：${modeText(s, policy)}`, `现在：${s.nowText || "还没看过"}${s.nowAt ? `（${s.nowAt.slice(5, 16).replace("T", " ")}）` : ""}`,
-    `在等：${s.next?.waitingFor || "还没定"}`, "记住的：", ...s.facts.map((f) => `- ${f}`), ...s.notes.slice(-10).map((n) => `- ${n.text}（${n.at.slice(5, 16).replace("T", " ")}）`),
+    `在等：${s.next?.waitingFor || "还没定"}`, "记住的：", ...s.facts.map((f) => `- ${f}`), ...s.notes.slice(-5).map((n) => `- ${n.text}（${n.at.slice(5, 16).replace("T", " ")}）`),
     "没答的问题：", ...s.asks.filter((q) => q.state === "open").map((q) => `- ${q.id} ${q.title}：${q.line}（${q.options.join("、")}）`), ""].join("\n");
 }
 
