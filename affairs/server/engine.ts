@@ -190,7 +190,7 @@ export function createEngine(deps: EngineDeps) {
     refreshWork(ctx, s);
     // The runs started for this affair: what has happened to them is written down before anything is drawn from the log.
     await ops.flowSync(ctx, id).catch((error: unknown) => log(`${id}: following the run: ${(error as Error).message}`));
-    if (deps.paseo && s.dispatched.length) await dispatchCosts(ctx, id, deps.paseo);
+    if (deps.paseo && modeOf(s, ctx.policy) === "drive") await dispatchCosts(ctx, id, deps.paseo);
     s = state(id);
     const question = budgetQuestion(ctx, s);
     if (question) { write(id, [question]); s = state(id); }

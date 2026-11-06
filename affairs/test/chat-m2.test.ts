@@ -91,7 +91,7 @@ test("a new affair's chat has the model of its looks, a long cache, its label an
   assert.equal(o!.config.thinkingOptionId, "high");
   assert.equal(o!.env.CLAUDE_CODE_PROMPT_CACHE_TTL, "1h");
   assert.equal(o!.env.AFFAIR_ID, id);
-  assert.deepEqual(o!.labels, { "affairs.chat": id, "affairs.affair": id });
+  assert.deepEqual(o!.labels, { "affairs.chat": id });
   assert.equal(o!.prompt, undefined);
   for (const word of ["brief", "note", "--mine", "report", "--from chat", "answer", "history"]) assert.ok(o!.config.systemPrompt.includes(word), word);
   assert.equal(load(s.w.root, id).chatId, "chat-1");

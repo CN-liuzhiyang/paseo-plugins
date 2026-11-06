@@ -92,7 +92,7 @@ export function chatCreateOptions(ctx, s) {
     },
     // The cache lifetime is a Claude Code setting; a role that runs another provider says its own env (or none) and leaves this out.
     env: { AFFAIR_ID: s.id, ...(role.env ?? { CLAUDE_CODE_PROMPT_CACHE_TTL: ctx.policy.chat.cacheTtl }) },
-    labels: { "affairs.chat": s.id, "affairs.affair": s.id },
+    labels: { "affairs.chat": s.id },
   };
 }
 
