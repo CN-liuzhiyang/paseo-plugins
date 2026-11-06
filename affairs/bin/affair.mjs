@@ -5,6 +5,7 @@ import * as ops from "../server/lib/ops.mjs";
 import { doctor } from "../server/lib/doctor.mjs";
 import { defaultRoot, loadPolicy } from "../server/lib/policy.mjs";
 import { help } from "../server/lib/commands.mjs";
+import { dispatch } from "../server/lib/dispatch.mjs";
 
 // The command for agents and for tracing a fault; a person never types it. Exit 0: done. 1: refused or sent back, the
 // reason on stdout (what to fix, in words). 2: used wrongly.
@@ -59,6 +60,9 @@ async function main() {
       break;
     case "ask":
       result = await ops.ask(ctx, need(arg, "编号"), JSON.parse(readFileSync(need(flags.file, "--file"), "utf8")));
+      break;
+    case "dispatch":
+      result = await dispatch(ctx, need(arg, "编号"), { contract: flags.contract, provider: flags.provider, thinking: flags.thinking, mode: flags.mode, title: flags.title, cwd: flags.cwd });
       break;
     case "new":
       result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
