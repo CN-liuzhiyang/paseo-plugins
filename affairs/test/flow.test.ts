@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFile
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import * as ops from "../server/lib/ops.mjs";
 import { claimFile, eventsFile } from "../server/lib/flows.mjs";
@@ -62,6 +63,8 @@ const PREPARE = `
 import { closeSync, openSync, readFileSync } from "node:fs";
 import path from "node:path";
 const { args } = JSON.parse(readFileSync(0, "utf8"));
+const { writeFileSync } = await import("node:fs");
+writeFileSync(path.join(process.env.FAKE_ORCH_OUT, "..", "prepared-args.json"), JSON.stringify(args));
 if (process.env.FAKE_PREPARE_FAIL) { process.stderr.write(process.env.FAKE_PREPARE_FAIL + "\\n"); process.exit(1); }
 let wait = Number(process.env.FAKE_PREPARE_DELAY_MS || 0);
 if (process.env.FAKE_PREPARE_SLOW_SECOND) {
@@ -116,6 +119,31 @@ async function ticket(w: ReturnType<typeof world>, number = "700", title = "某�
 
 const finish = (logDir: string, runId: string, outcome = "done") => writeFileSync(eventsFile(logDir, runId), `${JSON.stringify({ kind: "run.start", runId })}\n${JSON.stringify({ kind: "run.end", runId, outcome })}\n`);
 const chatOf = (w: ReturnType<typeof world>, id: string) => ({ ...w.ctx, by: "chat", chatFor: id });
+
+test("trial flag: the CLI passes true to a starter that may ignore it, and the log retains it", async () => {
+  const { w, out, work, ran } = setup();
+  const id = await ticket(w);
+  const policyFile = path.join(w.dir, "policy.json");
+  writeFileSync(policyFile, JSON.stringify(w.ctx.policy));
+  const result = spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../bin/affair.mjs"), "flow", id, "do-it", "--trial", "--json", "--root", w.root, "--policy", policyFile], { encoding: "utf8", env: { ...process.env } });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  const started = JSON.parse(result.stdout);
+  assert.equal(started.ok, true, started.text);
+  assert.deepEqual(JSON.parse(readFileSync(path.join(out, "..", "prepared-args.json"), "utf8")), { ref: "700", workdir: work, trial: true });
+  assert.deepEqual(ran(started.runId).input, { itemNo: 700, agentCwd: work }, "a starter that ignores the flag still works");
+  assert.equal(read(w.root, id).find((l: any) => l.kind === "flow").trial, true);
+  assert.equal(load(w.root, id).flows[0].trial, true);
+});
+
+test("trial flag: only a new named flow can select the mode", async () => {
+  const { w } = setup();
+  const id = await ticket(w);
+  const conflict = await ops.flow(w.ctx, id, "do-it", { trial: true, resume: true });
+  assert.equal(conflict.ok, false);
+  assert.match(conflict.text, /试跑只在新起流程时选/);
+  assert.equal((await ops.flow(w.ctx, id, "", { trial: true })).ok, false);
+  assert.equal(load(w.root, id).flows.length, 0);
+});
 
 test("flow with no name lists what this kind of affair can start; a look cannot start one", async () => {
   const { w } = setup();
@@ -175,6 +203,8 @@ test("started from the person's side: the files, the place it runs in, and an en
     const state = load(w.root, id);
     assert.deepEqual(seen.affair, { label: "#700 某某闪退", key: "affair:700", workspace: state.workspaceId, url: "https://tickets.example/700" });
     assert.deepEqual(seen.input, { itemNo: 700, agentCwd: work }, "what the prepare program printed, nothing typed");
+    assert.deepEqual(JSON.parse(readFileSync(path.join(path.dirname(logDir), "prepared-args.json"), "utf8")), { ref: "700", workdir: work });
+    assert.equal(Object.hasOwn(state.flows[0], "trial"), false);
     assert.equal(state.flows.length, 1);
     assert.deepEqual({ flow: state.flows[0].flow, runId: state.flows[0].runId, by: state.flows[0].by, failed: state.flows[0].failed }, { flow: "do-it", runId: result.runId, by: "human", failed: "" });
     assert.equal(state.flows[0].events, eventsFile(logDir, result.runId));

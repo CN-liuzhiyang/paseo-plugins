@@ -466,6 +466,8 @@ test("the prompt a chat is made with lets it know its affair and where the handb
   const text = chatPrompt(s.w.ctx, load(s.w.root, id));
   assert.match(text, new RegExp(`事项 ${id}`));
   assert.match(text, /note .*--mine/);
+  assert.match(text, /「试跑」「测一下流程」「不要真提交」.*--trial/);
+  assert.match(text, /没这么说就别加/);
   assert.match(text, /别抄密码/, "pictures: only the points, as words, and nothing secret");
 });
 

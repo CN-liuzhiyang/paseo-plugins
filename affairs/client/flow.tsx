@@ -31,6 +31,7 @@ export function FlowBox({ flow, c, navigation, workspaceId, resume, busy, hideSt
     <View testID="flow-box" style={{ borderWidth: 1, borderColor: c.border, borderLeftWidth: 3, borderLeftColor: color, borderRadius: 8, padding: 10, backgroundColor: waiting ? tint(c.statusWarning, "1f", c.surface1) : c.surface1, gap: 4 }}>
       <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8 }}>
         <Words style={{ color: c.foreground, fontSize: 13, fontWeight: "700", flexShrink: 0 }}>{flow.name}</Words>
+        {flow.trial ? <Words style={{ color: c.foregroundMuted, fontSize: 11, flexShrink: 0 }}>试跑</Words> : null}
         <Words style={{ color, fontSize: 14, lineHeight: 20, fontWeight: "600", flex: 1, minWidth: 0 }}>{flow.text}</Words>
       </View>
       {flow.detail ? <Words style={{ color: c.foreground, fontSize: 13, lineHeight: 18 }}>{flow.detail}</Words> : null}

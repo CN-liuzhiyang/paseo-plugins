@@ -18,7 +18,7 @@ import { world } from "./kit";
 const POINT = { flow: "do-it", input: { version: 1 }, from: "从补丁接着做", spends: "maybe" };
 const statusModule = pathToFileURL(path.resolve(import.meta.dirname, "../../orchestration/runtime/status.mjs")).href;
 
-async function setup(limits = {}) {
+async function setup(limits = {}, trial = false) {
   const w = world();
   const logs = path.join(w.dir, "logs");
   mkdirSync(path.join(logs, "runs"), { recursive: true });
@@ -33,7 +33,7 @@ async function setup(limits = {}) {
   const put = (entries: any[]) => append(w.root, id, entries, { now: w.now(), tz: w.ctx.policy.tz });
   put([{ kind: "cleared", void: true }]);
   const run = "previous";
-  put([{ kind: "flow", flow: "do-it", runId: run, events: eventsFile(logs, run), timeoutMs: 10000, by: "human" }]);
+  put([{ kind: "flow", flow: "do-it", runId: run, events: eventsFile(logs, run), timeoutMs: 10000, by: "human", ...(trial ? { trial: true } : {}) }]);
   const event = (kind: string, extra = {}) => ({ v: 1, ts: new Date().toISOString(), runId: run, kind, ...extra });
   const ended = (resume: any = POINT, outcome = "stopped") => writeFileSync(eventsFile(logs, run), [event("run.start", { flow: { name: "do-it", phases: [] } }), event("run.end", { outcome, resume, stop: { reason: "补丁没批" }, cost: { totalUsd: 0.03 }, summary: "方案已写好" })].map((e, seq) => JSON.stringify({ ...e, seq })).join("\n") + "\n");
   ended();
@@ -164,6 +164,21 @@ test("an unavailable runtime status is not reported as a missing resume point", 
   const text = flowFinishedMessage(s.w.ctx, state, state.flows[0], null);
   assert.match(text, /没拿到能否接着跑的状态/);
   assert.doesNotMatch(text, /没有能接着做的位置/);
+});
+
+test("trial flag: the panel and notification show the mode, and a resume preserves it", async () => {
+  const s = await setup({}, true);
+  await ops.flowSync(s.w.ctx, s.id);
+  const state = load(s.w.root, s.id);
+  const latest = state.flows.at(-1);
+  assert.equal(flowBlockOf(state, s.w.now())!.trial, true);
+  assert.match(flowFinishedMessage(s.w.ctx, state, latest, await s.readSt()), /这是试跑，没有提交/);
+  const { trial, ...ordinary } = latest;
+  assert.equal(Object.hasOwn(flowBlockOf({ ...state, flows: [ordinary] }, s.w.now())!, "trial"), false);
+  assert.doesNotMatch(flowFinishedMessage(s.w.ctx, state, ordinary, await s.readSt()), /试跑/);
+  const resumed = await ops.resumeFlow(s.w.ctx, s.id);
+  assert.equal(resumed.ok, true, resumed.text);
+  assert.equal(load(s.w.root, s.id).flows.at(-1).trial, true);
 });
 
 test("finished notifications identify which attempt and its local start time without paths", async () => {

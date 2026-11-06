@@ -755,8 +755,10 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
  * and only then is the run written down and started; one that could not be started is taken back (`flow.fail`).
  * @returns {Promise<Result>}
  */
-export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false, resume = false } = {}) {
+export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false, resume = false, trial = false } = {}) {
   if (byLook(ctx)) return lookRefused("起流程");
+  if (trial && resume) return fail("试跑只在新起流程时选；接着跑会沿用原来的模式，别同时加 --trial 和 --resume。");
+  if (trial && !name) return fail("试跑要写流程名；先不加 --trial 查看能起哪些流程。");
   if (resume) return resumeFlow(ctx, ref, { saidSeq });
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
@@ -781,7 +783,7 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
 
   let input;
   try {
-    input = await prepareInput(f.prepare, { ref: link.ref, workdir: s.workdir });
+    input = await prepareInput(f.prepare, { ref: link.ref, workdir: s.workdir, ...(trial ? { trial: true } : {}) });
   } catch (error) {
     return fail(`没起成：${error.message}`);
   }
@@ -800,7 +802,7 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
     const now = state(ctx, s.id);
     const again2 = await flowAllowed(ctx, now, name, { saidSeq, again, orch, logDir });
     if ("fail" in again2) return again2;
-    const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(again2.said !== null ? { said: again2.said } : {}), ...(again ? { again: true } : {}) }]);
+    const [mark] = write(ctx, s.id, [{ kind: "flow", flow: name, runId, events: eventsFile(logDir, runId), timeoutMs: parseDuration(f.timeout) ?? 0, by: ctx.by, ...(again2.said !== null ? { said: again2.said } : {}), ...(again ? { again: true } : {}), ...(trial ? { trial: true } : {}) }]);
     return { ...again2, mark };
   });
   if ("fail" in reserved) {
@@ -837,7 +839,7 @@ export async function resumeFlow(ctx, ref, { runId = "", expect = "", saidSeq = 
   const reserved = await withFlowLock(ctx.root, async () => {
     const allowed = await flowAllowed(ctx, state(ctx, s.id), st.resume.flow, { saidSeq, again: true, orch, logDir });
     if ("fail" in allowed) return allowed;
-    write(ctx, s.id, [{ kind: "flow", flow: st.resume.flow, runId: next, events: eventsFile(logDir, next), timeoutMs: f.timeoutMs, by: ctx.by, resumeOf: f.runId, ...(allowed.said !== null ? { said: allowed.said } : {}) }]);
+    write(ctx, s.id, [{ kind: "flow", flow: st.resume.flow, runId: next, events: eventsFile(logDir, next), timeoutMs: f.timeoutMs, by: ctx.by, resumeOf: f.runId, ...(allowed.said !== null ? { said: allowed.said } : {}), ...(f.trial ? { trial: true } : {}) }]);
     return allowed;
   });
   if ("fail" in reserved) return fail(reserved.fail);

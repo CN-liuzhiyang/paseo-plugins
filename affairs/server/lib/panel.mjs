@@ -222,6 +222,7 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   const again = canResume(stop) && sameSpotAgain(runs, latest, stop);
   return {
     name: latest.flow,
+    ...(latest.trial ? { trial: true } : {}),
     text: sent.short,
     detail: sent.rest,
     tone: sent.tone === "red" ? "red" : "normal",

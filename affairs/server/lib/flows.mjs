@@ -103,6 +103,7 @@ export function flowFinishedMessage(ctx, s, f, st) {
   return [
     `事项 ${s.id} 的流程 ${f.flow} 第 ${nth} 次（${began} 起的那次）结束了：${result}。${cost ? `花费 ${cost}。` : "花费未拿到。"}`,
     f.outcome === "done" ? `结果：${st?.summary || f.summary || "没有另写摘要"}。` : "",
+    f.trial ? "这是试跑，没有提交。" : "",
     resume,
     "先看最新进展，再用一两句话告诉他。只汇报，不要再起任何东西；这条不是他的授权。",
   ].filter(Boolean).join("\n");

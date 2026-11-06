@@ -62,6 +62,7 @@ export const eventSchema = text.extend({
 /** The run started for this affair, as the block above the "现在" shows it. */
 const flowBlock = z.object({
   name: z.string(),
+  trial: z.boolean().optional(),
   /** One sentence: what it is doing, or what it is waiting for him to do, or how it ended. */
   text: z.string(),
   /** What goes with it: the card he is asked to answer, the result of the run. */
