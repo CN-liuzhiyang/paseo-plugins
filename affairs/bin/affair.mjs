@@ -6,6 +6,7 @@ import { doctor } from "../server/lib/doctor.mjs";
 import { defaultRoot, loadPolicy } from "../server/lib/policy.mjs";
 import { help } from "../server/lib/commands.mjs";
 import { dispatch } from "../server/lib/dispatch.mjs";
+import { env } from "../server/lib/env.mjs";
 
 // The command for agents and for tracing a fault; a person never types it. Exit 0: done. 1: refused or sent back, the
 // reason on stdout (what to fix, in words). 2: used wrongly.
@@ -52,6 +53,9 @@ async function main() {
   const saidIfAny = () => flags.file ? said() : (flags.said === "-" ? readStdin().trim() : flags.said ?? "");
   let result;
   switch (cmd) {
+    case "env":
+      result = await env(ctx, need(arg, "编号"), { remove: flags.remove === true });
+      break;
     case "mode":
       result = await ops.mode(ctx, need(arg, "编号"), rest[2], { saidSeq: flags["said-seq"] });
       break;
