@@ -142,7 +142,7 @@ test("blocked look still tells; a busy chat waits; missing and archived chats ar
       c.busy("idle");
       await chat.tellFinished(s.id);
       assert.equal(c.sent.length, 1);
-      assert.match(c.sent[0].text, /不能接着跑.*--again/);
+      assert.match(c.sent[0].text, /不能接着跑.*从头新起/);
     } else assert.equal(read(s.w.root, s.id).find((l: any) => l.kind === "flow.told").ok, false);
   }
 });
@@ -164,6 +164,20 @@ test("an unavailable runtime status is not reported as a missing resume point", 
   const text = flowFinishedMessage(s.w.ctx, state, state.flows[0], null);
   assert.match(text, /没拿到能否接着跑的状态/);
   assert.doesNotMatch(text, /没有能接着做的位置/);
+});
+
+test("finished notifications identify which attempt and its local start time without paths", async () => {
+  const s = await setup();
+  await ops.flowSync(s.w.ctx, s.id);
+  const state = load(s.w.root, s.id);
+  const first = state.flows[0];
+  const second = { ...first, seq: first.seq + 2, runId: "second", at: "2026-11-05T11:36:00Z" };
+  const failed = { ...first, seq: first.seq + 1, runId: "refused", failed: "没起来" };
+  const other = { ...first, seq: first.seq + 1, flow: "other", runId: "other" };
+  const text = flowFinishedMessage(s.w.ctx, { ...state, flows: [first, failed, other, second] }, second, null);
+  assert.match(text, /流程 do-it 第 2 次（11-05 19:36 起的那次）结束了/);
+  assert.match(flowFinishedMessage(s.w.ctx, state, first, null), /第 1 次/);
+  assert.doesNotMatch(text, /[A-Za-z]:[\\/]|runs[\\/]|\.jsonl|affair\.mjs|--root|--resume|--again|brief|said-seq/);
 });
 
 test("resume button requires an explicit unsuccessful end and a declared point; it survives a restart", async () => {

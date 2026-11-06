@@ -3,6 +3,7 @@ import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { localParts } from "./time.mjs";
 
 // Starting a flow for an affair (`affair flow`): which flows policy allows, where the run's files are, whether the last run
 // is over, how the process is started. Nothing here writes the log; the command does, around these.
@@ -93,15 +94,17 @@ export const wakeLostRuns = ({ orch, logDir, paseoHome }) => promisify(execFile)
 
 /** A fixed message, rather than a second model's interpretation of the result. */
 export function flowFinishedMessage(ctx, s, f, st) {
+  const nth = (s.flows ?? []).filter((x) => x.flow === f.flow && !x.failed && x.seq <= f.seq).length;
+  const began = localParts(Date.parse(f.at), ctx.policy.tz).text.slice(5);
   const cost = Number.isFinite(st?.costUsd ?? f.costUsd) ? `$${(st?.costUsd ?? f.costUsd).toFixed(3)}` : "";
   const result = f.marks.find((m) => m.key === "end")?.text ?? outcomeText(f.outcome);
   const again = sameSpotAgain(s.flows ?? [], f, st);
-  const resume = canResume(st) && !again ? `可以接着跑：${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}；只在他说要之后才用 flow ${s.id} --resume --said-seq N。` : again ? "刚接着跑过一次，同一处又停了，先别再接着跑。" : f.outcome === "done" ? "" : f.outcome === "lost" ? "不能直接接着跑，先由负责的人确认做到哪了。" : !st ? "没拿到能否接着跑的状态，先查 flow，别猜。" : "没有能接着做的位置，不能接着跑；要重来用 --again（从头，约 $0.5）。";
+  const resume = canResume(st) && !again ? `可以接着跑：${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}；只在他说要之后才接着跑。` : again ? "刚接着跑过一次，同一处又停了，先别再接着跑。" : f.outcome === "done" ? "" : f.outcome === "lost" ? "不能直接接着跑，先由负责的人确认做到哪了。" : !st ? "没拿到能否接着跑的状态，先查清楚，别猜。" : "没有能接着做的位置，不能接着跑；要重来得从头新起（约 $0.5）。";
   return [
-    `事项 ${s.id} 的流程 ${f.flow} 结束了：${result}。${cost ? `花费 ${cost}。` : "花费未拿到。"}`,
+    `事项 ${s.id} 的流程 ${f.flow} 第 ${nth} 次（${began} 起的那次）结束了：${result}。${cost ? `花费 ${cost}。` : "花费未拿到。"}`,
     f.outcome === "done" ? `结果：${st?.summary || f.summary || "没有另写摘要"}。` : "",
     resume,
-    "先读 brief，再用一两句话告诉他。只汇报，不要再起任何东西；这条不是他的授权。",
+    "先看最新进展，再用一两句话告诉他。只汇报，不要再起任何东西；这条不是他的授权。",
   ].filter(Boolean).join("\n");
 }
 
