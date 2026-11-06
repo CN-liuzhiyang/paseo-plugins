@@ -12,7 +12,6 @@ import { flow, define, text } from "../runtime/flow.mjs";
 import { readEvents, checkEvents } from "../runtime/events.mjs";
 import { paseoExecutor } from "../runtime/executor.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
-import itemGlance from "../flows/item-glance.mjs";
 import { fakeExecutor } from "./fake-executor.mjs";
 import { tempDir } from "./temp.mjs";
 
@@ -153,48 +152,25 @@ test("parallel asks: each archives its own agent", async () => {
   assert.deepEqual([...executor.archivedAgents].sort(), ["fake-agent-1", "fake-agent-3"], "the one without the option is left");
 });
 
-// ---- the look ("item-glance") -----------------------------------------------------------------------------------------
+// ---- an affair run ----
 
-const INPUT = {
-  id: "D3",
-  title: "年度体检",
-  said: "帮我盯一下体检，月底前要约上",
-  domain: "personal",
-  n: 1,
-  why: "first",
-  now: "2026-10-28 周三 17:47",
-  tz: "Asia/Shanghai",
-  status: "",
-  log: [],
-  askQuestion: "",
-  askOptions: [],
-  askAt: "",
-  answers: [],
-  notes: [],
-  minLookMinutes: 60,
-  maxLookDays: 14,
-  hint: "",
-  workdir: "",
-};
-const PROPOSAL = { status: "任务没完成", looked: "读了任务", nextLook: "2026-11-02 18:30", nextWhy: "过几天", question: "", options: [], finished: "no", finishedWhy: "" };
-
-test("a look that came out well is archived, in the matter's workspace: that is the one place its agent would otherwise pile up", async () => {
+test("a call that came out well is archived, in the matter's workspace: that is the one place its agent would otherwise pile up", async () => {
   const workspaces = [];
-  const executor = fakeExecutor({ answer: () => PROPOSAL, workspaces });
-  const result = await run(itemGlance, executor, { input: INPUT, affair: AFFAIR });
+  const executor = fakeExecutor({ answer: () => ({ said: "hi" }), workspaces });
+  const result = await run(asking({ archive: "after" }), executor, { affair: AFFAIR });
   assert.equal(result.outcome, "done");
   assert.equal(workspaces.length, 1);
   assert.equal(executor.requests[0].workspace, workspaces[0].workspaceId);
   assert.deepEqual(executor.archivedAgents, ["fake-agent-1"]);
 });
 
-test("a look that failed is not archived", async () => {
+test("a call that failed is not archived", async () => {
   const executor = fakeExecutor({
     answer: () => {
       throw new Error("the look failed");
     },
   });
-  const result = await run(itemGlance, executor, { input: INPUT, affair: AFFAIR });
+  const result = await run(asking({ archive: "after" }), executor, { affair: AFFAIR });
   assert.equal(result.outcome, "failed");
   assert.deepEqual(executor.archivedAgents, []);
 });

@@ -52,7 +52,7 @@ export function pointProblems(point) {
 /** The point as it is recorded: the four keys, in this order, nothing else. */
 export const pointOf = (point) => ({ flow: point.flow, input: point.input, from: point.from, spends: point.spends });
 
-/** Keys in the order of their names, at every depth: the same value however it was written. (The same as reconcile's `canonical`; EVENTS.md says what it is.) */
+/** Keys in the order of their names, at every depth: the same value however it was written. (EVENTS.md says what it is.) */
 export function canonical(value) {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {

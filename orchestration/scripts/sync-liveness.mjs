@@ -14,7 +14,7 @@ const runtime = path.resolve(here, "..", "runtime");
 
 /** The files that are copied, and the plugins' shared/ directories they go to. */
 export const SOURCES = ["liveness.mjs", "liveness.d.mts"];
-export const TARGETS = [path.resolve(here, "..", "..", "orchestration-ui", "shared"), path.resolve(here, "..", "..", "reconcile", "shared")];
+export const TARGETS = [path.resolve(here, "..", "..", "orchestration-ui", "shared")];
 
 /** What the copy of a file reads: the header, a blank line, then the file as it is. */
 export const copyOf = (name, text) => `// 由运行时复制，别手改。来源：orchestration/runtime/${name}。要改就改那份，再在 orchestration/ 里跑 \`npm run sync:liveness\`。\n\n${text}`;

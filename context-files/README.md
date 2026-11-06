@@ -15,7 +15,7 @@ Codex and pi agents have no `CLAUDE.md` to import from, so the plugin carries th
   `<!-- context-files: <path> -->` ... `<!-- /context-files: <path> -->`. All three model providers
   append the text to their own prompt rather than replacing it. The prompt is stored with the agent, so it
   is still there when a session is resumed, and the hook is not run again then.
-- A provider without a model (`orch-gate`, `reconcile`) is never touched, even if listed.
+- A provider without a model (`orch-gate`) is never touched, even if listed.
 - Claude agents read their own `CLAUDE.md`, so by default they are skipped. If the create request turns
   `CLAUDE.md` loading off (`CLAUDE_CODE_DISABLE_CLAUDE_MDS` in its environment) and
   `claudeWhenClaudeMdDisabled` is on, the files are added after all.

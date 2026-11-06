@@ -172,7 +172,7 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
 
     // `workspace ls --json` rows are { workspaceId, project, name, isolation, cwd, background }.
     // `--background` includes hidden ones, and the affair's workspace is one: `create` is given `--background` (2026-10-29), because the
-    // place a person follows an affair is its page in the reconcile plugin, not a workspace in the sidebar that grows by one for every
+    // place a person follows an affair is its page in the affair-tracking plugin, not a workspace in the sidebar that grows by one for every
     // matter. Hiding only keeps it out of the sidebar and the default lists: the permission requests of the agents in it still raise
     // the app's notifications, and its links and Ctrl+K still open it. Which it is, is decided when it is made and cannot be changed.
     // Neither is for another host: runs with --host keep their agents where Paseo puts them (workspaces.mjs).

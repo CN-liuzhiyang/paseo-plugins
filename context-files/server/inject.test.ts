@@ -45,9 +45,8 @@ test("claude gets the files only when CLAUDE.md loading is off for the session",
 });
 
 test("providers without a model are never injected, even when listed", () => {
-  const s = settings({ providers: ["codex", "orch-gate", "reconcile"] });
+  const s = settings({ providers: ["codex", "orch-gate"] });
   assert.equal(wantsFiles(s, input({ provider: "orch-gate" })), false);
-  assert.equal(wantsFiles(s, input({ provider: "reconcile" })), false);
 });
 
 test("cwdPrefixes limit injection to agents inside those directories", () => {

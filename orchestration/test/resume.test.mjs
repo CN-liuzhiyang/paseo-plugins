@@ -386,7 +386,7 @@ test("claimResumption: a holder whose claim went stale before run.start frees th
 });
 
 test("resume --expect: what a person was shown is what is carried on; a point that says another flow or input now is refused before anything is taken", async () => {
-  // The fingerprint is of the flow and the input, whatever order the keys were written in; reconcile computes the same (its flows-resume test has this vector).
+  // The fingerprint is of the flow and the input, whatever order the keys were written in. (The affair-tracking plugin computes the same.)
   assert.equal(pointPrint({ flow: "rs-part-two", input: { b: 1, a: [1, { d: 2, c: 3 }], s: "中文" }, from: "x", spends: "nothing" }), "92645a244d9b3d69");
   assert.equal(pointPrint({ input: { s: "中文", a: [1, { c: 3, d: 2 }], b: 1 }, flow: "rs-part-two", from: "another line", spends: "maybe" }), "92645a244d9b3d69");
   await assert.rejects(parseResumeArgs(["--expect", "not-a-print"]), /--expect is the 16 hex digits/);

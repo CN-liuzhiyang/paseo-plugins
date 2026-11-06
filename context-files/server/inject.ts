@@ -2,7 +2,7 @@ import { isAbsolute } from "node:path";
 import type { Settings } from "../shared/settings";
 
 /** Providers that run no model: nothing to read a system prompt, so nothing is injected. */
-export const NO_MODEL_PROVIDERS: ReadonlySet<string> = new Set(["orch-gate", "reconcile"]);
+export const NO_MODEL_PROVIDERS: ReadonlySet<string> = new Set(["orch-gate"]);
 
 export const DISABLE_CLAUDE_MDS = "CLAUDE_CODE_DISABLE_CLAUDE_MDS";
 

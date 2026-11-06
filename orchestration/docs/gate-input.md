@@ -175,7 +175,7 @@ provider 的顺序：值文件 → 应答记录 → 回执。任何一步失败�
 
 要加的话是下面这些，**没做**，因为现有机制够：
 
-- `$.do(name, fn, { timeout })`，写进 `call.start`，让"可能卡住"的底线自动抬高。要改 `orchestration-ui` 和 `reconcile`
+- `$.do(name, fn, { timeout })`，写进 `call.start`，让"可能卡住"的底线自动抬高。要改 `orchestration-ui` 和事项追踪插件
   两处读 `call.ask?.timeout ?? call.gate?.timeout` 的地方，三处一起动，不值得为这一个用法。
 - 总超时由 flow 声明。
 

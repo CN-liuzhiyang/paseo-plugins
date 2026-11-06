@@ -181,7 +181,7 @@ workspace 归档掉，第二次 ask 被 Paseo 以 `WORKSPACE_NOT_FOUND` 拒绝�
 
 事项的 workspace 建成**后台**（`workspace create --background`），不进侧边栏。原先带 `--no-background`，理由是"调用方自己的
 workspace 是后台的时候，事项的也要看得见"，前提是"workspace 是人看事项进展的地方"；2026-10-28 起看进展的地方是事项追踪的
-事项页（`reconcile` 插件），这个前提没了，再让每件事在侧边栏多长一个项目、一个 workspace，就成了人要躲开的东西。
+事项页（事项追踪插件），这个前提没了，再让每件事在侧边栏多长一个项目、一个 workspace，就成了人要躲开的东西。
 
 后台藏的只是侧边栏、默认的 workspace 和 agent 列表、History 页；不藏的：权限请求进来时 App 的系统通知和手机推送（不看 workspace
 是不是后台），Ctrl+K 的搜索，设置 › 项目，以及所有链接（事项页上的"去批准""看这次流程"、运行卡片）。**后台与否只能在建的时候定**，
@@ -212,7 +212,7 @@ workspace 的 agent，于是 agent 明明在（`inspect` 能看到、`ls -a -g` 
 
 - 运行时每次试都写一条 `call.archive` 事件（`EVENTS.md`：`ok`、CLI 的 `code` 和原话），`call.start` 里有 `archive: "after"`；起运行的一方不用解析 caveat 的文字，
   就能认出"要求了归档、调用成功、没归成"的 agent。caveat 的文字也改了，说明这是后台 workspace 的缘故，留给起它的插件。
-- reconcile 在它起的运行**结束以后**（journal 里记了 `flow.ended`，不管怎么结束）读这次运行的事件文件，对每个这样的调用：核对 agent 的标签是
+- 事项追踪插件在它起的运行**结束以后**（journal 里记了 `flow.ended`，不管怎么结束）读这次运行的事件文件，对每个这样的调用：核对 agent 的标签是
   这次调用的（`orch-run`、`orch-call` 和事件里的一样），没在跑，再用 `server.paseo.agents.ref(id).archive()` 归档——这个接口对后台 workspace 里的 agent 是好用的，
   卡片载体就是这样归档的。成了记一条账（ledger，`archive:<runId>:<callId>`）；没成只记日志，隔一阵下一轮再试，最多试 5 次，之后放弃（agent 留着，
   由人归档）。这一步排在每轮检查的最后，试不成不影响任何事项的判断。
@@ -265,9 +265,9 @@ workspace 本身仍然不自动归档、不自动删：它是后台的，不占�
 
 ## 已解决
 
-- **事项追踪（reconcile）传的 affair 按阶段拆开**：已解决。`reconcile/server/flows.ts` 的 `affairOf` 现在给 `--affair` 带 `key`，
+- **事项追踪插件传的 affair 按阶段拆开**：已解决。它的 `affairOf` 现在给 `--affair` 带 `key`，
   来源是 `FlowRec.caseId`（`<来源>:<编号>`，事项本身的 id，不含阶段、轮次；阶段在 `stage`，运行身份另算）。
   长度不超过 256 个字符（码点）就原样用；超过就取前 223 个字符 + `~` + 完整 `caseId` 的 SHA-256 前 32 位，
   总长 256，所以只在 256 个字符之后才不同的两个长 id 仍是两个 key（评审 F5：以前截断后会撞）。链接里的
-  `params.case` 仍按旧办法截到 256，它是用来跳回页面的，不是身份。key 不进界面：reconcile 只读 link 的
+  `params.case` 仍按旧办法截到 256，它是用来跳回页面的，不是身份。key 不进界面：它只读 link 的
   plugin、screen、case、stage，orchestration-ui 只取 label、url、link。

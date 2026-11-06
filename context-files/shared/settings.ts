@@ -10,8 +10,8 @@ export const settingsDefinition = defineSettings({
     // read at the moment the agent is created, so editing one takes effect for the next agent
     // without reloading the plugin.
     files: z.array(z.string()).default([]),
-    // Providers that get the files. Providers without a model (the orchestration gate, the
-    // reconcile inbox) never get them, whatever is listed here.
+    // Providers that get the files. Providers without a model (the orchestration gate)
+    // never get them, whatever is listed here.
     providers: z.array(z.string()).default(["codex", "pi"]),
     // A Claude agent normally reads its own CLAUDE.md files, so the files are not added to it.
     // When CLAUDE.md loading is switched off for the session (CLAUDE_CODE_DISABLE_CLAUDE_MDS in

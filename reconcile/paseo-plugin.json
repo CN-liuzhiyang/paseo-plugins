@@ -1,8 +1,0 @@
-{
-  "id": "reconcile",
-  "description": "事项追踪：定期检查外部系统里的事项，照私有配置判断每个事项卡在哪，到点在 Paseo 卡片上问你",
-  "requirements": {
-    "paseo": ">=0.11.0"
-  },
-  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
-}
