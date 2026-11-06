@@ -41,7 +41,11 @@ export const DEFAULT_POLICY = {
   links: {},
   // The kind a bare "#12345" (five digits or more) means; empty: such a number is left as text.
   linkHash: "",
-  homes: {},
+  projectsByKind: {},
+  projects: { searchDirs: [] },
+  workDir: "",
+  areaByKind: {},
+  chatHandbookByKind: {},
   handbooksDir: "",
   // The handbook to read after affair.md for an affair whose link is of that kind (otherwise asked.md): { "<kind>": "<file>.md" }.
   handbookByKind: {},
@@ -129,11 +133,21 @@ export const defaultRoot = () => process.env.AFFAIRS_HOME || path.join(os.homedi
 
 /** policy.json is optional; a file that cannot be read is an error, not a silent default. A file named on purpose (--policy) has to be there. */
 export function loadPolicy(root, named = "") {
-  const file = named || path.join(root, "policy.json");
+  let file = named || path.join(root, "policy.json");
   if (named && !existsSync(file)) throw new Error(`policy 文件不存在：${file}`);
   if (!existsSync(file)) return DEFAULT_POLICY;
   try {
-    return merge(DEFAULT_POLICY, JSON.parse(readFileSync(file, "utf8")));
+    let data = JSON.parse(readFileSync(file, "utf8"));
+    if (data.use) {
+      if (!path.isAbsolute(data.use)) throw new Error("use 要写绝对路径");
+      file = data.use;
+      data = JSON.parse(readFileSync(file, "utf8"));
+      if (data.use) throw new Error("use 只能跟一次");
+    }
+    const policy = merge(DEFAULT_POLICY, data);
+    delete policy.homes;
+    Object.defineProperty(policy, "sourcePath", { value: file, enumerable: false });
+    return policy;
   } catch (error) {
     throw new Error(`policy.json 读不了（${file}）：${error.message}`);
   }

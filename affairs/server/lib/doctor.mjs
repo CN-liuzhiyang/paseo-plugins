@@ -6,6 +6,9 @@ import { listIds, load } from "./log.mjs";
 import { json } from "./paseo.mjs";
 import { policyProblems } from "./policy.mjs";
 import { listReaders } from "./readers.mjs";
+import { chatHandbooks } from "./chat.mjs";
+import { sizeWarnings } from "./workdir-git.mjs";
+import { read } from "./log.mjs";
 
 // `affair doctor`: everything the plugin and the commands need from the machine, one line each, ✓ or ✗ with what to do.
 // Nothing here changes anything.
@@ -30,6 +33,14 @@ export async function doctor(ctx) {
   const policy = ctx.policy;
   const items = [];
   const add = (ok, label, detail) => items.push({ ok, label, detail });
+  add(true, "实际 policy", policy.sourcePath || "默认配置");
+  for (const id of listIds(ctx.root)) {
+    const s = load(ctx.root, id);
+    for (const warning of sizeWarnings(ctx, s, chatHandbooks(ctx, s))) add(false, id, warning);
+    const lines = read(ctx.root, id);
+    const synced = lines.filter((l) => l.kind === "work.synced").at(-1)?.seq || 0;
+    for (const flag of s.flags.filter((f) => f.what === "work-git" && f.seq > synced)) add(false, `${id} 文档推送`, flag.detail);
+  }
 
   const problems = policyProblems(policy);
   if (problems.length === 0) add(true, "policy.json", "必填的都有，路径都在");
