@@ -10,10 +10,11 @@ import { stepFields } from "./lib/steps.mjs";
 import { localParts } from "./lib/time.mjs";
 import { linkOf, rowsOf, say } from "./lib/view.mjs";
 import { materialFile, panelOf } from "./lib/panel.mjs";
-import { linkContext, partsOf, withUrls } from "./lib/links.mjs";
+import { primaryLink, linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
 import { createChats, type ChatPaseo, type Row, type View } from "./chat";
+import { flushWork, refreshWork } from "./lib/workdir-git.mjs";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
 // world agree with it -- its chat exists, the sidebar title is right, the chat shows what the log
@@ -59,6 +60,7 @@ export function createEngine(deps: EngineDeps) {
   let timer: ReturnType<typeof setInterval> | null = null;
   let flowTimer: ReturnType<typeof setInterval> | null = null;
   let stopped = false;
+  let saving: Promise<void> | null = null;
   const debounce = new Map<string, ReturnType<typeof setTimeout>>();
   /** When each watched value was last read, and when each affair was last asked to look because of one. Not in the log: after a restart everything is read once. */
   const readAt = new Map<string, number>();
@@ -81,7 +83,7 @@ export function createEngine(deps: EngineDeps) {
   }
 
   /** The links in what he reads: a reference (a ticket number) comes with where it leads. */
-  const linksOf = (s: { link: string | null }) => linkContext(ctx.policy, s.link);
+  const linksOf = (s: { link: string | null }) => linkContext(ctx.policy, primaryLink(s));
 
   /** What the chat is drawn from: the lines (oldest first) and the questions waiting. */
   function view(id: string): View | null {
@@ -165,7 +167,7 @@ export function createEngine(deps: EngineDeps) {
       if (!deps.deliver || !ctx.policy.push.to) return;
       if (quietNow(s.domain) || pushedToday() >= ctx.policy.push.perDay) return;
       try {
-        await deps.deliver("popo", { to: ctx.policy.push.to, idempotencyKey: `${id}:${c.key}`, title: s.title, text: withUrls(c.text, linkContext(ctx.policy, s.link)), status: "succeeded" });
+        await deps.deliver("popo", { to: ctx.policy.push.to, idempotencyKey: `${id}:${c.key}`, title: s.title, text: withUrls(c.text, linkContext(ctx.policy, primaryLink(s))), status: "succeeded" });
         write(id, [{ kind: "push", for: c.key, ok: true }]);
       } catch (error) {
         // Once, not on every scan: a channel that is down must not turn into a stream of retries.
@@ -181,6 +183,7 @@ export function createEngine(deps: EngineDeps) {
   async function scanNow(id: string) {
     let s = state(id);
     if (!s.id) return;
+    refreshWork(ctx, s);
     // The runs started for this affair: what has happened to them is written down before anything is drawn from the log.
     await ops.flowSync(ctx, id).catch((error: unknown) => log(`${id}: following the run: ${(error as Error).message}`));
     s = state(id);
@@ -387,6 +390,7 @@ export function createEngine(deps: EngineDeps) {
     timer = setInterval(() => {
       void scanAll();
       void readPass();
+      saving ??= flushWork(ctx).catch((error: unknown) => log(`saving work: ${String(error)}`)).finally(() => { saving = null; });
     }, TICK_MS);
     timer.unref?.();
     flowTimer = setInterval(() => {
@@ -405,6 +409,7 @@ export function createEngine(deps: EngineDeps) {
     lookTimers.clear();
     lookWork.clear();
     await Promise.all(queues.values());
+    await saving;
     await chats?.stop();
   }
 

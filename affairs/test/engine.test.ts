@@ -51,7 +51,7 @@ function setup(policyOver: Record<string, unknown> = {}) {
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
-  const made = await ops.create(s.w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙", noWait: true, ...extra });
+  const made = await ops.create(s.w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙", noWait: true, ...extra });
   await s.engine.scan(made.id);
   return made.id as string;
 };
@@ -97,7 +97,7 @@ test("the sidebar title follows the log: a day when the next look is days away, 
 test("only an affair that ended is archived, and only after three days; a resumed one is not", async () => {
   const s = setup();
   const quiet = await start(s);
-  await ops.create(s.w.ctx, { title: "牙冠", noWait: true });
+  await ops.create(s.w.ctx, { id: "other-2", title: "牙冠", noWait: true });
   await s.engine.scanAll();
   s.w.advance(40 * DAY);
   await s.engine.scanAll();
@@ -129,8 +129,8 @@ test("a question is pushed once, with its number; answered before the push it is
   await s.engine.scan(id);
   await s.engine.scan(id);
   assert.equal(s.calls.pushed.length, 1);
-  assert.match(s.calls.pushed[0]!.text, /洗牙约上了吗？[\s\S]*1 约好了 {2}2 还没约 {2}3 不用盯了[\s\S]*（D1）/);
-  const second = await ops.create(s.w.ctx, { title: "体检", noWait: true });
+  assert.match(s.calls.pushed[0]!.text, /洗牙约上了吗？[\s\S]*1 约好了 {2}2 还没约 {2}3 不用盯了[\s\S]*（dental）/);
+  const second = await ops.create(s.w.ctx, { id: "other-3", title: "体检", noWait: true });
   await report(s, second.id, { ask: { title: "体检约了吗？", options: ["约了"] } }, false);
   await ops.answer(s.w.ctx, second.id, `${second.id}-1`, "约了");
   await s.engine.scan(second.id);
@@ -141,7 +141,7 @@ test("at most five pushes a day; the rest wait for the next day", async () => {
   const s = setup();
   const ids: string[] = [];
   for (let i = 0; i < 7; i++) {
-    const made = await ops.create(s.w.ctx, { title: `事${i}`, noWait: true });
+    const made = await ops.create(s.w.ctx, { id: `thing-${i}`, title: `事${i}`, noWait: true });
     ids.push(made.id);
   }
   for (const id of ids) {
@@ -186,7 +186,7 @@ test("finished by the look: one push that says what shows it and how to take it 
   await s.engine.scan(id);
   assert.equal(s.calls.pushed.length, 1);
   assert.match(s.calls.pushed[0]!.text, /洗牙办完了 ✓ 飞书任务 11-11 勾掉了。不对就回「还没完」/);
-  const other = await ops.create(s.w.ctx, { title: "体检", noWait: true });
+  const other = await ops.create(s.w.ctx, { id: "other-5", title: "体检", noWait: true });
   await ops.stop(s.w.ctx, other.id);
   await s.engine.scan(other.id);
   assert.equal(s.calls.pushed.length, 1);
@@ -266,10 +266,10 @@ test("the panel of an affair that ended says why it ended, not what it last saw"
 });
 
 test("the watcher's names: the id is the folder beside the log, whatever is cut off in front", () => {
-  assert.equal(idOfWatch("D1\\log.jsonl"), "D1");
-  assert.equal(idOfWatch("s\\D1\\log.jsonl"), "D1");
+  assert.equal(idOfWatch("dental\\log.jsonl"), "dental");
+  assert.equal(idOfWatch("s\\dental\\log.jsonl"), "dental");
   assert.equal(idOfWatch("700/log.jsonl"), "700");
-  assert.equal(idOfWatch("D1\\.lock"), null);
+  assert.equal(idOfWatch("dental\\.lock"), null);
   assert.equal(idOfWatch("project.json"), null);
 });
 
