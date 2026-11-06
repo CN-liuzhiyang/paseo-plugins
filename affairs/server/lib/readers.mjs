@@ -3,12 +3,14 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { stepFields, stepProblem } from "./steps.mjs";
 
 // Reading tools: one file per tool, <name>.mjs, in a private directory (policy.readers.dirs, searched first) or in the
 // public one beside the command. A tool reads stdin {"args": {...}} and prints {"value": <JSON, up to 1 KB>, "summary":
 // "one sentence"}; when it cannot read it exits non-zero and says why in one line on stderr. The first line of the file
 // is a comment saying what it reads; that is what `affair brief` lists. A line `// label: 外网版本` in the first few lines is the
 // name a person reads for it in the panel.
+// Optional top-level steps describe the checklist (see handbook.md); validUntil is its ISO expiry, otherwise 24 hours.
 
 const HERE = (() => {
   try {
@@ -57,7 +59,7 @@ export const hashOf = (value) => createHash("sha1").update(JSON.stringify(canon(
 
 /**
  * Runs a tool once.
- * @returns {Promise<{ ok: true, value: any, summary: string } | { ok: false, reason: string, missing?: boolean }>}
+ * @returns {Promise<{ ok: true, value: any, summary: string, steps?: any[], validUntil?: string } | { ok: false, reason: string, missing?: boolean }>}
  */
 export function readOnce(policy, name, args = {}) {
   const file = findReader(policy, name);
@@ -90,7 +92,9 @@ export function readOnce(policy, name, args = {}) {
       }
       if (!parsed || typeof parsed !== "object" || !("value" in parsed) || typeof parsed.summary !== "string" || !parsed.summary.trim()) return done({ ok: false, reason: "输出要是 {value, summary}，summary 是一句话" });
       if (JSON.stringify(parsed.value ?? null).length > MAX_VALUE) return done({ ok: false, reason: `value 超过 ${MAX_VALUE} 字节：只放有意义的值（版本号、状态、比例），别放时间戳和整份数据` });
-      done({ ok: true, value: parsed.value, summary: parsed.summary.trim().slice(0, 200) });
+      const problem = stepProblem(parsed);
+      if (problem) return done({ ok: false, reason: problem });
+      done({ ok: true, value: parsed.value, summary: parsed.summary.trim().slice(0, 200), ...stepFields(parsed) });
     });
     child.stdin.on("error", () => {});
     child.stdin.end(JSON.stringify({ args }));

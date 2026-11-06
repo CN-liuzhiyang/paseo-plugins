@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
+import { stepFields } from "./steps.mjs";
 import { isoLocal } from "./time.mjs";
 
 // One log.jsonl per affair, append only: nothing here opens it for writing from the start. The commands and the plugin
@@ -288,7 +289,8 @@ export function fold(lines) {
         else s.watches[l.id] = { ...s.watches[l.id], ...l.watch, id: l.id };
         break;
       case "read":
-        s.reads.push({ id: `r${l.seq}`, seq: l.seq, at: l.at, tool: l.tool, args: l.args ?? {}, ok: l.ok !== false, value: l.value ?? null, summary: l.summary ?? "", reason: l.reason ?? "" });
+        s.reads.push({ id: `r${l.seq}`, seq: l.seq, at: l.at, tool: l.tool, args: l.args ?? {}, ok: l.ok !== false, value: l.value ?? null, summary: l.summary ?? "", reason: l.reason ?? "", ...stepFields(l) });
+        if (l.ok !== false && l.steps !== undefined) s.stepRead = { at: l.at, ...stepFields(l) };
         if (s.reads.length > 20) s.reads.shift();
         break;
       case "watch.read": {
@@ -302,12 +304,13 @@ export function fold(lines) {
         } else if (l.ok === false) {
           Object.assign(w, { failures: (w.failures ?? 0) + 1, lastError: l.reason ?? "", failedAt: l.at });
         } else {
+          if (l.steps !== undefined) s.stepRead = { at: l.at, ...stepFields(l) };
           if (l.changed) {
             w.prev = { value: w.value ?? null, summary: w.summary ?? "" };
             w.changedAt = l.at;
             s.pending.push(`watch:${l.id}`);
           }
-          Object.assign(w, { value: l.value ?? null, summary: l.summary ?? "", hash: l.hash ?? null, failures: 0, downAsked: false, lastError: "", readAt: l.at });
+          Object.assign(w, { value: l.value ?? null, summary: l.summary ?? "", hash: l.hash ?? null, failures: 0, downAsked: false, lastError: "", readAt: l.at, ...stepFields(l) });
         }
         break;
       }

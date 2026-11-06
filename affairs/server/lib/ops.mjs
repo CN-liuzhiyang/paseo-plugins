@@ -9,6 +9,7 @@ import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
+import { stepFields, stepLines } from "./steps.mjs";
 import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
 import { ago, attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
@@ -976,6 +977,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
     `目标：${s.goal || s.title}`,
     `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next?.remind ? `　上次约好要提醒他：${s.next.remind}` : ""}`,
     ...staleLine(s, ctx.now()),
+    ...stepLines(s, now),
     "",
     "## 这次为什么来",
     ...why.map((w) => `- ${w}`),
@@ -1086,6 +1088,7 @@ async function briefChat(ctx, s) {
     `目标：${s.goal || s.title}`,
     `现在：${s.nowText || "（还没看过）"}　在等：${s.next?.waitingFor || "（还没定）"}${s.next && isOpen(s) ? `　下次看：${localParts(Date.parse(s.next.at), tz).text}` : ""}${s.next?.remind ? `　约好要提醒他：${s.next.remind}` : ""}`,
     ...staleLine(s, now),
+    ...stepLines(s, now),
     "",
     "## 上次读完以后新的",
     ...(news.length ? news : ["- 没有新的"]),
@@ -1385,11 +1388,11 @@ export async function readTool(ctx, tool, args = {}, { forId = "" } = {}) {
     if (id && !got.missing) write(ctx, id, [{ kind: "read", tool, args, ok: false, reason: got.reason }]);
     return fail(`读不到：${got.reason}`);
   }
-  const secret = secretIn(`${JSON.stringify(got.value)} ${got.summary}`);
+  const secret = secretIn(`${JSON.stringify(got.value)} ${got.summary} ${JSON.stringify(stepFields(got))}`);
   if (secret) return fail(`读到的东西${secret}，不记、不打印。`);
   let cite = "";
   if (id) {
-    const [line] = write(ctx, id, [{ kind: "read", tool, args, ok: true, value: got.value, summary: got.summary }]);
+    const [line] = write(ctx, id, [{ kind: "read", tool, args, ok: true, value: got.value, summary: got.summary, ...stepFields(got) }]);
     cite = `
 出处：reader:r${line.seq}`;
   }

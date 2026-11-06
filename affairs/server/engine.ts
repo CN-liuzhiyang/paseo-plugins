@@ -6,6 +6,7 @@ import { ID, append, isOpen, listIds, load, read } from "./lib/log.mjs";
 import { policyProblems } from "./lib/policy.mjs";
 import * as ops from "./lib/ops.mjs";
 import * as readers from "./lib/readers.mjs";
+import { stepFields } from "./lib/steps.mjs";
 import { localParts } from "./lib/time.mjs";
 import { linkOf, rowsOf, say } from "./lib/view.mjs";
 import { materialFile, panelOf } from "./lib/panel.mjs";
@@ -205,10 +206,10 @@ export function createEngine(deps: EngineDeps) {
   }
 
   /** One watched value: read it; a different value is written down (and looks at the affair); a read that fails is written down a few times, and asks the person once. */
-  async function readWatch(id: string, w: { id: string; tool: string; args: Record<string, unknown>; hash: string | null; failures?: number; downAsked?: boolean; lastError?: string; label?: string }) {
+  async function readWatch(id: string, w: { id: string; tool: string; args: Record<string, unknown>; hash: string | null; failures?: number; downAsked?: boolean; lastError?: string; label?: string; steps?: any[] }) {
     let got: Awaited<ReturnType<typeof readers.readOnce>> = await readers.readOnce(ctx.policy, w.tool, w.args);
     // Nothing that looks like a secret is written into an affair's folder, whatever a tool printed.
-    if (got.ok && secretIn(`${JSON.stringify(got.value)} ${got.summary}`)) got = { ok: false, reason: "读到的东西像密码或令牌，没有记" };
+    if (got.ok && secretIn(`${JSON.stringify(got.value)} ${got.summary} ${JSON.stringify(stepFields(got))}`)) got = { ok: false, reason: "读到的东西像密码或令牌，没有记" };
     const limit = ctx.policy.readers.failuresBeforeAsk;
     if (!got.ok) {
       const failures = (w.failures ?? 0) + 1;
@@ -221,10 +222,10 @@ export function createEngine(deps: EngineDeps) {
       return;
     }
     const hash = readers.hashOf(got.value);
-    const entry = { kind: "watch.read", id: w.id, ok: true, value: got.value, summary: got.summary, hash };
+    const entry = { kind: "watch.read", id: w.id, ok: true, value: got.value, summary: got.summary, hash, ...stepFields(got) };
     if (w.hash == null) write(id, [{ ...entry, changed: false, baseline: true }]);
-    else if (hash !== w.hash) write(id, [{ ...entry, changed: true }]);
-    else if (w.failures || w.downAsked || w.lastError) write(id, [{ ...entry, changed: false }]);
+    else if (hash !== w.hash || (got.steps !== undefined && readers.hashOf(got.steps) !== readers.hashOf(w.steps))) write(id, [{ ...entry, changed: true }]);
+    else if (got.steps !== undefined || w.failures || w.downAsked || w.lastError) write(id, [{ ...entry, changed: false }]);
   }
 
   /**
