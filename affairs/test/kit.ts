@@ -2,7 +2,7 @@ import { readFileSync, existsSync, rmSync, writeFileSync, mkdtempSync } from "no
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { makeCtx } from "../server/lib/ops.mjs";
+import { makeCtx, create } from "../server/lib/ops.mjs";
 import { makeRun } from "../server/lib/paseo.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 
@@ -24,6 +24,9 @@ export function scratch(prefix: string): string {
 }
 
 export const T0 = Date.parse("2026-11-02T10:00:00+08:00");
+
+/** The older look tests need a watched reference; an unlinked affair now defaults to driving. */
+export const createWatch = (ctx: ReturnType<typeof makeCtx>, input: any) => create(ctx, { ...input, link: input.link ?? `gcp:${input.id || "example"}` });
 
 /** A root on disk, a fake paseo and a clock that only moves when told to. */
 export function world(options: { policy?: Record<string, unknown> } = {}) {

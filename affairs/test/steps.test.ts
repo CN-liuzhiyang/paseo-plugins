@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -32,7 +33,7 @@ function reader() {
 
 test("steps survive the real reader and log, and both briefs show only now and next", async () => {
   const { w, file } = reader();
-  const made = await ops.create(w.ctx, { id: "dental", title: "预约", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "预约", noWait: true });
   const id = made.id!;
   assert.equal((await ops.readTool(w.ctx, "sample", { file }, { forId: id })).ok, true);
   const saved = load(w.root, id);
@@ -54,7 +55,7 @@ test("no steps leaves both briefs and the folded reading metadata unchanged", as
   set({});
   assert.deepEqual(await readOnce(w.ctx.policy, "sample", { file }), { ok: true, value: { ready: true }, summary: "可以确认" });
   assert.deepEqual(stepLines({}, w.now()), []);
-  const made = await ops.create(w.ctx, { id: "other-2", title: "预约", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-2", title: "预约", noWait: true });
   await ops.readTool(w.ctx, "sample", { file }, { forId: made.id });
   assert.equal("stepRead" in load(w.root, made.id), false);
   for (const chat of [false, true]) {
@@ -86,7 +87,7 @@ test("reader rejects malformed steps and does not log secrets in their notes", a
     set(extra);
     assert.equal((await readOnce(w.ctx.policy, "sample", { file })).ok, false);
   }
-  const made = await ops.create(w.ctx, { id: "other-3", title: "预约", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-3", title: "预约", noWait: true });
   set({ steps: [{ ...steps[0], note: "sk-abcdefghijklmnopqrstuvwxyz0123" }] });
   assert.equal((await ops.readTool(w.ctx, "sample", { file }, { forId: made.id })).ok, false);
   assert.equal(read(w.root, made.id).some((l: any) => l.kind === "read"), false);
@@ -94,7 +95,7 @@ test("reader rejects malformed steps and does not log secrets in their notes", a
 
 test("watched steps refresh even with the same value; changed steps wake a look", async () => {
   const { w, file, set } = reader();
-  const made = await ops.create(w.ctx, { id: "other-4", title: "预约", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-4", title: "预约", noWait: true });
   const id = made.id!;
   append(w.root, id, [{ kind: "watch", id: "w1", watch: { tool: "sample", args: { file }, every: 5 } }], { now: w.now() });
   const engine = createEngine({ ctx: w.ctx, paseo: null, deliver: null, log() {} });
@@ -120,7 +121,7 @@ test("chat prompt embeds the matching private chat handbook and the next-step ru
   w.ctx.policy.handbookPath = path.join(dir, "handbook.md");
   w.ctx.policy.handbooksDir = dir;
   w.ctx.policy.chatHandbookByKind = { appointment: "appointments.chat.md" };
-  const s = { ...load(w.root, "sample"), id: "sample", title: "预约", links: ["appointment:sample"] };
+  const s = { ...load(w.root, "sample"), id: "sample", title: "预约", mode: "watch", modeExplicit: true, links: ["appointment:sample"] };
   const text = chatPrompt(w.ctx, s);
   for (const name of ["handbook.chat.md", "affair.chat.md", "appointments.chat.md"]) assert.ok(text.includes(`embedded ${name}`));
   assert.doesNotMatch(text, /asked\.chat\.md|只看里面/);

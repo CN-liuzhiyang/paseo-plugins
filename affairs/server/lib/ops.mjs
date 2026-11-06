@@ -21,6 +21,7 @@ import { chatHandbooks } from "./chat.mjs";
 import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
+import { modeOf, modeText } from "./mode.mjs";
 
 // The operations behind the `affair` command and the plugin. Every one reads the log, appends to it and then makes
 // Paseo (schedule, workspace) agree; the replies are the sentences a person may read.
@@ -78,16 +79,16 @@ export function makeCtx(options = {}) {
 }
 
 /** @returns {any} */
-const state = (ctx, id) => loadStateWithLines(ctx.root, id);
+const state = (ctx, id) => loadStateWithLines(ctx.root, id, ctx.policy);
 
-function loadStateWithLines(root, id) {
+function loadStateWithLines(root, id, policy) {
   const lines = read(root, id);
-  return { ...loadState(root, id), lines };
+  return { ...loadState(root, id, policy), lines };
 }
 
 const write = (ctx, id, entries) => {
   const lines = append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
-  if (entries.some((e) => ["created", "report", "answered", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id));
+  if (entries.some((e) => ["created", "mode", "budget", "asked", "report", "answered", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id, ctx.policy));
   return lines;
 };
 /** @returns {Result} */
@@ -157,6 +158,26 @@ export const callerOf = async (ctx) => (await callerInfo(ctx)).by;
 
 const byLook = (ctx) => ctx.by === "look" || ctx.by === "attached";
 const byChat = (ctx) => ctx.by === "chat";
+export function hisSaid(s, saidSeq) {
+  return s.said.find((m) => m.seq === Number(saidSeq) && !m.undone && m.by === "user" && m.via !== "chat-agent");
+}
+
+export async function mode(ctx, ref, value, { saidSeq = "" } = {}) {
+  if (byLook(ctx)) return lookRefused("切换推进方式");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  if (!["watch", "drive"].includes(value)) return fail("用法：affair mode <编号> watch|drive --said-seq N");
+  const from = hisSaid(r.s, saidSeq || currentSaid(r.s)?.seq);
+  if (!from) return fail("要用 --said-seq 指向他说过的原话，不能替他切换。");
+  write(ctx, r.s.id, [{ kind: "mode", mode: value, said: from.seq }]);
+  if (value === "watch" && !r.s.scheduleId) {
+    const scheduleId = await schedule.create(ctx.run, { id: r.s.id, policy: ctx.policy, workspaceId: r.s.workspaceId, atMs: ctx.now() + ctx.policy.fallbackMinutes * 60_000, command: ctx.command, role: r.s.roleName || undefined });
+    write(ctx, r.s.id, [{ kind: "schedule", scheduleId }]);
+  }
+  await syncPlan(ctx, r.s.id);
+  return { ok: true, text: `已改成${value === "drive" ? "我来推" : "我盯着"}。` };
+}
+
 export function currentSaid(s) {
   const turn = s.lines?.filter((l) => l.kind === "chat.turn" && l.agentId === s.chatId).at(-1);
   return s.said.filter((m) => !m.undone && m.by === "user" && m.via === "chat-session" &&
@@ -257,6 +278,7 @@ function resolveAny(ctx, ref, { closed = false } = {}) {
 async function ringNow(ctx, s, why, { force = false } = {}) {
   force ||= why.startsWith("flow:") || flowLook(s.pending);
   if (!isOpen(s) || s.system) return { ok: false, text: "" };
+  if (modeOf(s, ctx.policy) === "drive") return { ok: false, text: "这件事由主对话接着推，不排看一眼。" };
   if (s.breaker) return { ok: false, text: say.stoppedByBreaker(s.title) };
   const now = ctx.now();
   const gate = mayLook(ctx.root, s.id, now, ctx.policy, { force });
@@ -333,7 +355,7 @@ export async function create(ctx, input) {
   const duplicate = open.find((s) => s.id !== id && links.some((l) => s.links.includes(l)));
   if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」，请用这件事。`);
   const existing = open.find((s) => s.id === id);
-  if (existing) return { ok: true, text: say.already(existing.title, existing.next ? speak(Date.parse(existing.next.at), now, policy.tz) : "稍后", linkTextOf(ctx, existing)), id };
+  if (existing) return { ok: true, text: modeOf(existing, policy) === "drive" ? `「${existing.title}」已经由我来推。${linkTextOf(ctx, existing)}` : say.already(existing.title, existing.next ? speak(Date.parse(existing.next.at), now, policy.tz) : "稍后", linkTextOf(ctx, existing)), id };
   if (!title?.trim()) return fail("要有一个名字：--title");
   // A ticket that was watched before and is over (or never got made): the person asked again, so it is watched again.
   const before = listIds(ctx.root).map((key) => loadState(ctx.root, key)).find((s) => !isOpen(s) && links.some((link) => s.links.includes(link))) ?? (existsSync(path.join(ctx.root, id)) ? loadState(ctx.root, id) : null);
@@ -363,22 +385,27 @@ export async function create(ctx, input) {
     }
   }
   try {
+    write(ctx, id, [{ kind: "mode", mode: modeOf(s, policy), source: "default" }]);
     const projectId = await workspace.ensureProject(ctx.run, ctx.root);
     const workspaceId = await workspace.createWorkspace(ctx.run, { projectId, workdir, title: title.trim() });
     write(ctx, id, [{ kind: "workspace", workspaceId, projectId, title: title.trim() }]);
     // Until the first look reports, the plan is a day away so a look that never comes back is still looked for.
-    const scheduleId = await schedule.create(ctx.run, { id, policy, workspaceId, atMs: now + policy.fallbackMinutes * 60_000, command: ctx.command, role });
-    write(ctx, id, [{ kind: "schedule", scheduleId }]);
+    if (modeOf(s, policy) === "watch") {
+      const scheduleId = await schedule.create(ctx.run, { id, policy, workspaceId, atMs: now + policy.fallbackMinutes * 60_000, command: ctx.command, role });
+      write(ctx, id, [{ kind: "schedule", scheduleId }]);
+    }
     s = state(ctx, id);
-    const look = await ringNow(ctx, s, "created");
-    if (!look.ok && look.text) write(ctx, id, [{ kind: "flag", what: "first-look", detail: look.text }]);
+    if (modeOf(s, policy) === "watch") {
+      const look = await ringNow(ctx, s, "created");
+      if (!look.ok && look.text) write(ctx, id, [{ kind: "flag", what: "first-look", detail: look.text }]);
+    }
   } catch (error) {
     await rollbackCreate(ctx, id, error);
     return fail(`没建成「${title}」：${error.message}。什么都没留下，再说一次就行。`);
   }
   if (!noWait) await waitForConversation(ctx, id);
   s = state(ctx, id);
-  return { ok: true, id, text: say.started(s.title, linkTextOf(ctx, s)) };
+  return { ok: true, id, text: modeOf(s, policy) === "drive" ? `好，我来推「${s.title}」。先写步骤和估算，请他批额度。${linkTextOf(ctx, s)}` : say.started(s.title, linkTextOf(ctx, s)) };
 }
 
 /** A half-made affair is taken apart: what was made in Paseo is put away, and the affair is over, so it blocks nothing. */
@@ -548,6 +575,11 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     text = from.text;
   }
   write(ctx, s.id, [{ kind: "answered", id: qid, answer: text, via }]);
+  if (q.for.startsWith("budget:") && q.options.includes(text.trim())) {
+    const amount = /^加到 \$(\d+(?:\.\d+)?)$/.exec(text.trim());
+    if (amount) write(ctx, s.id, [{ kind: "budget", usd: Number(amount[1]), until: s.budget?.until || "", answer: qid }]);
+    if (text.trim() === "先停") write(ctx, s.id, [{ kind: "hold", on: true }]);
+  }
   if (q.runs?.[text.trim()]) return flow(ctx, s.id, q.runs[text.trim()], { saidSeq: byChat(ctx) ? saidSeq : "" });
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
@@ -563,6 +595,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     await syncPlan(ctx, s.id);
     return { ok: true, text: say.paused(s.title, speak(at, ctx.now(), ctx.policy.tz)) };
   }
+  if (modeOf(s, ctx.policy) === "drive") return { ok: true, text: "收到，接着推。" };
   const look = await ringNow(ctx, s, `answered:${qid}`);
   return { ok: true, text: look.text || `收到。` };
 }
@@ -594,13 +627,18 @@ export async function resume(ctx, ref) {
       const projectId = await workspace.ensureProject(ctx.run, ctx.root);
       const workspaceId = await workspace.createWorkspace(ctx.run, { projectId, workdir: s.workdir || path.join(ctx.root, s.id), title: s.title });
       write(ctx, s.id, [{ kind: "workspace", workspaceId, projectId, title: s.title }]);
-      const scheduleId = await schedule.create(ctx.run, { id: s.id, policy: ctx.policy, workspaceId, atMs: ctx.now() + ctx.policy.fallbackMinutes * 60_000, command: ctx.command, role: s.roleName || undefined });
-      write(ctx, s.id, [{ kind: "schedule", scheduleId }]);
+      if (modeOf(s, ctx.policy) === "watch") {
+        const scheduleId = await schedule.create(ctx.run, { id: s.id, policy: ctx.policy, workspaceId, atMs: ctx.now() + ctx.policy.fallbackMinutes * 60_000, command: ctx.command, role: s.roleName || undefined });
+        write(ctx, s.id, [{ kind: "schedule", scheduleId }]);
+      }
     } catch (error) {
       return fail(`没能接着盯「${s.title}」：${error.message}`);
     }
   }
   await syncPlan(ctx, s.id);
+  if (modeOf(s, ctx.policy) === "drive") {
+    return { ok: true, text: `好，接着推「${s.title}」。` };
+  }
   const look = await ringNow(ctx, state(ctx, s.id), "resume");
   return { ok: true, text: look.text ? `${say.resumed(s.title)}\n${look.text}` : say.resumed(s.title) };
 }
@@ -627,7 +665,7 @@ export async function pause(ctx, ref, until, said = "", { saidSeq = /** @type {s
   const evidence = [];
   if (byChat(ctx) && saidSeq !== "") {
     const n = Number(saidSeq);
-    const from = s.said.find((m) => m.seq === n && !m.undone && m.by === "user");
+    const from = hisSaid(s, n);
     if (!from) return fail(`--said-seq ${saidSeq} 不是他说的话：要指向记录里他说过的一行（brief 的经过里有编号），不能是你自己记的。`);
     // He has to have said the day (or the month, or how long from now): any line of his would hold up any time otherwise.
     if (at > now + policy.check.softDays * DAY && !mentionsDay(from.text, at, now, policy.tz)) return fail(`他那一行（#${from.seq}）里没有说到 ${localParts(at, policy.tz).date} 这个日子。这么远的时间要他说一个日期，或者在 report 里写成提议，让他点按钮。`);
@@ -1168,7 +1206,7 @@ async function briefChat(ctx, s) {
   const text = content.length || freshSteps || freshWarning ? [
     `# 事项 ${s.id}：${s.title}`,
     `现在：${s.nowText || "还没看过"}　在等：${s.next?.waitingFor || "还没定"}`,
-    ...staleLine(s, now), ...stepLines(s, now),
+    ...staleLine(s, now), ...stepLines(s, now, ctx.policy),
     "## 上次读完以后新的", ...content,
     ...(asks.some((q) => q.seq > cut) ? ["## 没答的问题", ...asks.map((q) => `- ${q.id} ${q.title}（${q.options.join("、")}）`)] : []),
     ...flowLines(s, now, tz), ...await resumableLines(ctx, s),
@@ -1451,7 +1489,7 @@ export function show(ctx, ref, { log = false } = {}) {
   if (!r.s) return fail(r.text);
   const s = r.s;
   const now = ctx.now();
-  const head = [`${s.id} 「${s.title}」 ${s.status}${s.next && isOpen(s) ? `，下次 ${localParts(Date.parse(s.next.at), ctx.policy.tz).text}（${s.next.waitingFor}）` : ""}`, `现在：${s.nowText}`, ...s.facts.map((f) => `- ${f}`)];
+  const head = [`${s.id} 「${s.title}」 ${s.status} · ${modeText(s, ctx.policy)}${s.next && isOpen(s) && modeOf(s, ctx.policy) === "watch" ? `，下次 ${localParts(Date.parse(s.next.at), ctx.policy.tz).text}（${s.next.waitingFor}）` : ""}`, `现在：${s.nowText}`, ...s.facts.map((f) => `- ${f}`)];
   if (!log) return { ok: true, text: head.join("\n") };
   return { ok: true, text: [...head, "", ...s.lines.map((l) => `#${l.seq} ${stamp(l.at, now, ctx.policy.tz)} ${l.kind} ${JSON.stringify({ ...l, seq: undefined, at: undefined, kind: undefined, data: undefined })}`)].join("\n") };
 }
@@ -1459,7 +1497,7 @@ export function show(ctx, ref, { log = false } = {}) {
 /** @returns {Result} */
 export function ls(ctx) {
   const rows = listIds(ctx.root).map((id) => loadState(ctx.root, id)).filter((s) => !s.system);
-  return { ok: true, text: rows.map((s) => `${s.id}\t${s.status}\t${s.title}\t${s.next ? s.next.at : ""}`).join("\n") || "（没有事项）" };
+  return { ok: true, text: rows.map((s) => `${s.id}\t${s.status}\t${s.title}\t${modeText(s, ctx.policy)}\t${s.next ? s.next.at : ""}`).join("\n") || "（没有事项）" };
 }
 
 /**

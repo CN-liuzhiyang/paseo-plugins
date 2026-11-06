@@ -15,6 +15,7 @@ import * as schedule from "./lib/schedule.mjs";
 import { ensureProject, titleOf } from "./lib/workspace.mjs";
 import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 import { flushWork, refreshWork } from "./lib/workdir-git.mjs";
+import { modeOf } from "./lib/mode.mjs";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
 // world agree with it -- its chat exists, the sidebar title is right, the chat shows what the log
@@ -70,7 +71,7 @@ export function createEngine(deps: EngineDeps) {
   const lookTimers = new Set<ReturnType<typeof setTimeout>>();
   const lookWork = new Set<Promise<void>>();
 
-  const state = (id: string) => ({ ...load(ctx.root, id), lines: read(ctx.root, id) });
+  const state = (id: string) => ({ ...load(ctx.root, id, ctx.policy), lines: read(ctx.root, id) });
   const write = (id: string, entries: Array<Record<string, unknown>>) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
   const chats = deps.paseo ? createChats({ ctx, paseo: deps.paseo, state, write: (id, entries) => void write(id, entries), view: (id) => view(id), log, changed: scanSoon }) : null;
 
@@ -127,6 +128,7 @@ export function createEngine(deps: EngineDeps) {
     const link = linkOf(ops.paseoUrl(ctx, s), ctx.policy);
     const out: Candidate[] = [];
     for (const a of s.asks) {
+      if (a.push === false) continue;
       const choices = a.options.map((o: string, i: number) => `${i + 1} ${o}`).join("  ");
       out.push({ key: `asked:${a.seq}`, live: a.state === "open", text: `${a.title}${a.line ? `\n${a.line}` : ""}${choices ? `\n${choices}` : ""}\n（${s.id}）${link}` });
     }
@@ -270,7 +272,7 @@ export function createEngine(deps: EngineDeps) {
   async function lookAtPending(id: string) {
     const s = state(id);
     const now = ctx.now();
-    if (!isOpen(s) || s.system || s.pending.length === 0 || s.pending.every((p: string) => p.startsWith("watch"))) return;
+    if (!isOpen(s) || s.system || modeOf(s, ctx.policy) === "drive" || s.pending.length === 0 || s.pending.every((p: string) => p.startsWith("watch"))) return;
     if (s.running && now - Date.parse(s.runningSince) < 45 * 60_000) return;
     const ended = s.lastEnd ? Date.parse(s.lastEnd.at) : 0;
     if (now - ended < 2 * 60_000 || now - (triedAt.get(id) ?? 0) < 2 * 60_000) return;
@@ -281,7 +283,7 @@ export function createEngine(deps: EngineDeps) {
   /** What came of a change, if a look could not be made at once: tried again, but not more than once in a while. */
   async function lookAtChanges(id: string) {
     const s = state(id);
-    if (!isOpen(s) || s.running || !s.pending.some((p: string) => p.startsWith("watch"))) return;
+    if (!isOpen(s) || modeOf(s, ctx.policy) === "drive" || s.running || !s.pending.some((p: string) => p.startsWith("watch"))) return;
     const gap = ctx.policy.readers.minLookGapMinutes * 60_000;
     const now = ctx.now();
     const last = s.wakes[s.wakes.length - 1];
@@ -297,7 +299,7 @@ export function createEngine(deps: EngineDeps) {
     try {
       let left = ctx.policy.readers.perPass;
       for (const id of listIds(ctx.root)) {
-        if (!isOpen(state(id))) continue;
+        if (!isOpen(state(id)) || modeOf(state(id), ctx.policy) === "drive") continue;
         for (const w of Object.values(state(id).watches) as Array<any>) {
           const now = ctx.now();
           if (w.until && now >= Date.parse(w.until)) {
@@ -349,7 +351,7 @@ export function createEngine(deps: EngineDeps) {
     const now = ctx.now();
     for (const id of listIds(ctx.root)) {
       const s = state(id);
-      if (!isOpen(s) || s.system) continue;
+      if (!isOpen(s) || s.system || modeOf(s, ctx.policy) === "drive") continue;
       // Made halfway (the process stopped in the middle of `new`): nobody is waiting for it any more.
       if (!s.scheduleId && now - Date.parse(s.createdAt) > 10 * 60_000) {
         write(id, [{ kind: "status", status: "stopped", evidence: "没建成", by: "system" }]);

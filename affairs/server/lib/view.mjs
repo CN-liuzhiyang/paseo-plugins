@@ -1,6 +1,7 @@
 import { sentenceOf } from "./flows.mjs";
 import { localParts, speak } from "./time.mjs";
 import { quietLooks } from "./looks.mjs";
+import { modeOf } from "./mode.mjs";
 
 // What a person reads: the words of the card, the rows under it and the replies to the commands. Nothing here says
 // 叫醒, 校验, 记录, 计划, 读数, 会话 or agent (a test holds it to that).
@@ -58,7 +59,7 @@ export function cardOf(state, now, policy, { budget = "", trouble = "" } = {}) {
   }
   return {
     title: state.title,
-    waiting: over ? (state.status === "done" ? "办完了 ✓" : "不盯了") : next?.waitingFor || "刚交代，马上看",
+    waiting: over ? (state.status === "done" ? "办完了 ✓" : "不盯了") : next?.waitingFor || (modeOf(state, policy) === "drive" ? "先写步骤和估算，请你批" : "刚交代，马上看"),
     // An affair that ended says why, not what it last saw while it was still open.
     now: trouble || (state.status === "done" ? state.lines?.findLast((l) => l.kind === "status" && l.status === "done")?.evidence : "") || state.nowText || state.goal,
     next: nextText,

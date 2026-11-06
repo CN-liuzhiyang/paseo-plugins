@@ -1,5 +1,6 @@
 import { json } from "./paseo.mjs";
 import { cronOf, parseLocal } from "./time.mjs";
+import { modeOf } from "./mode.mjs";
 
 // One Paseo schedule per affair, named affair:<id>, running in the affair's own workspace and delivering each finished
 // run to this plugin. The log decides when it looks next; the schedule is made to agree with it (sync).
@@ -50,7 +51,7 @@ export const inspect = (run, scheduleId) => json(run, ["schedule", "inspect", sc
  * A plan that is gone or ended is not made again here (the workspace it ran in may be archived): that is told, not fixed.
  */
 export async function sync(run, state, policy, now = Date.now) {
-  if (!state.scheduleId) return { changed: [], problem: "还没有计划" };
+  if (!state.scheduleId) return { changed: [], problem: modeOf(state, policy) === "drive" ? "" : "还没有计划" };
   let plan;
   try {
     plan = await inspect(run, state.scheduleId);
@@ -60,7 +61,7 @@ export async function sync(run, state, policy, now = Date.now) {
   if (plan.status === "completed" || plan.status === "ended") return { changed: [], problem: "计划已经结束了" };
   const changed = [];
   // Over, held (all plans paused by hand) or stopped by the breaker: the plan stays paused whatever the log says about the next time.
-  const wantPaused = state.status !== "watching" || state.held || state.breaker;
+  const wantPaused = state.status !== "watching" || state.held || state.breaker || modeOf(state, policy) === "drive";
   if (wantPaused && plan.status === "active") {
     await pause(run, state.scheduleId);
     changed.push("paused");

@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import os from "node:os";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -30,7 +31,7 @@ async function setup(limits = {}, trial = false) {
   process.env.AFFAIR_NODE = process.execPath;
   delete process.env.ORCH_LOG_DIR;
   w.ctx.policy = { ...w.ctx.policy, projectsByKind: { gcp: [`path:${os.hostname()}:${w.dir}`] }, limits: { ...DEFAULT_POLICY.limits, ...limits }, flows: { orch, logDir: logs, "do-it": { kinds: ["gcp"], prepare, timeout: "30h" } } };
-  const id = (await ops.create(w.ctx, { id: "dental", title: "示例修复", link: "gcp:700", noWait: true })).id as string;
+  const id = (await createWatch(w.ctx, { id: "dental", title: "示例修复", link: "gcp:700", noWait: true })).id as string;
   const put = (entries: any[]) => append(w.root, id, entries, { now: w.now(), tz: w.ctx.policy.tz });
   put([{ kind: "cleared", void: true }]);
   const run = "previous";

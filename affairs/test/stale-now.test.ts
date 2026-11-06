@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import * as ops from "../server/lib/ops.mjs";
@@ -19,7 +20,7 @@ const lookReport = (over: Record<string, unknown> = {}) => ({
 
 async function setup() {
   const w = world();
-  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   assert.equal(made.ok, true, made.text);
   const id = made.id as string;
   assert.equal((await ops.brief(lookOf(w), id)).ok, true);
@@ -48,7 +49,7 @@ test("note --mine: the receipt says how old the 'now' is when a note comes after
 
 test("note --mine: no reminder when the 'now' was never written, and a hand-in that carries the old text along does not renew it", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { id: "other-2", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-2", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   const id = made.id as string;
   const plain = await mine(w, id, "先记一句");
   assert.equal(plain.text, "记下了。", "nothing written as the 'now' yet: the receipt is as before");

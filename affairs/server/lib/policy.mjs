@@ -42,6 +42,9 @@ export const DEFAULT_POLICY = {
   // The kind a bare "#12345" (five digits or more) means; empty: such a number is left as text.
   linkHash: "",
   projectsByKind: {},
+  watchKinds: ["gcp"],
+  drive: { idleHours: 12 },
+  driveHandbook: "",
   projects: { searchDirs: [] },
   workDir: "",
   areaByKind: {},

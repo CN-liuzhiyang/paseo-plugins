@@ -14,7 +14,7 @@ const USAGE = help().text;
 function parse(argv) {
   const flags = {};
   const rest = [];
-  const bool = new Set(["log", "json", "stdin", "no-wait", "force", "mine", "chat", "again", "resume", "trial"]);
+  const bool = new Set(["log", "json", "stdin", "no-wait", "force", "mine", "chat", "again", "resume", "trial", "remove"]);
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a.startsWith("--")) {
@@ -51,6 +51,9 @@ async function main() {
   const saidIfAny = () => flags.file ? said() : (flags.said === "-" ? readStdin().trim() : flags.said ?? "");
   let result;
   switch (cmd) {
+    case "mode":
+      result = await ops.mode(ctx, need(arg, "编号"), rest[2], { saidSeq: flags["said-seq"] });
+      break;
     case "new":
       result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
       break;

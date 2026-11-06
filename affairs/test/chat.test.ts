@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -17,7 +18,7 @@ const lookOf = (w: W) => ({ ...w.ctx, by: "look" });
 const runs = (w: W) => w.calls().filter((c) => c[1] === "run-once").length;
 
 async function started(w: W, extra: Record<string, unknown> = {}) {
-  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
+  const made = await createWatch(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -85,11 +86,11 @@ test("the chat session is told by its label, which says which affair it is the c
 test("the chat of one affair touches no other, and cannot start, stop-all, or run a look's brief", async () => {
   const w = world();
   const id = await started(w);
-  const other = (await ops.create(w.ctx, { id: "other-2", title: "体检", noWait: true })).id as string;
+  const other = (await createWatch(w.ctx, { id: "other-2", title: "体检", noWait: true })).id as string;
   const c = chatOf(w, id);
   assert.match((await ops.note(c, other, { said: "x", mine: true })).text, /只管 dental/);
   assert.match((await ops.show(c, other)).text, /只管 dental/);
-  assert.equal((await ops.create(c, { id: "other-3", title: "新的", noWait: true })).ok, false);
+  assert.equal((await createWatch(c, { id: "other-3", title: "新的", noWait: true })).ok, false);
   assert.equal((await ops.pauseAll(c)).ok, false);
   assert.equal((await ops.resumeAll(c)).ok, false);
   const b = await ops.brief(c, id);

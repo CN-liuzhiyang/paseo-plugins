@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -24,7 +25,7 @@ const DAY = 24 * HOUR;
 
 type W = ReturnType<typeof world>;
 const started = async (w: W, title = "洗牙") => {
-  const made = await ops.create(w.ctx, { id: title === "洗牙" ? "dental" : `job-${title.slice(0, 1)}`, title, goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await createWatch(w.ctx, { id: title === "洗牙" ? "dental" : `job-${title.slice(0, 1)}`, title, goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 };
@@ -279,30 +280,30 @@ test("F-08: a field of the wrong shape on the third try is left out and said so;
 test("F-09: a half-made affair is taken apart, blocks nothing and can be asked for again; a finished ticket is watched again", async () => {
   const w = world();
   process.env.FAKE_PASEO_FAIL = "schedule create";
-  const first = await ops.create(w.ctx, { id: "other-2", title: "洗牙", said: "帮我盯一下洗牙", noWait: true });
+  const first = await createWatch(w.ctx, { id: "other-2", title: "洗牙", said: "帮我盯一下洗牙", noWait: true });
   delete process.env.FAKE_PASEO_FAIL;
   assert.equal(first.ok, false);
   assert.match(first.text, /什么都没留下/);
   assert.equal(load(w.root, "other-2").status, "stopped");
   assert.ok(w.calls().some((c) => c[0] === "workspace" && c[1] === "archive"), "the workspace that was made is put away");
   assert.equal(ops.ls(w.ctx).text.split("\n").filter((l) => l.includes("watching")).length, 0, "nothing is left watching");
-  const again = await ops.create(w.ctx, { id: "other-3", title: "洗牙", said: "帮我盯一下洗牙", noWait: true });
+  const again = await createWatch(w.ctx, { id: "other-3", title: "洗牙", said: "帮我盯一下洗牙", noWait: true });
   assert.equal(again.ok, true, again.text);
   assert.equal(load(w.root, again.id as string).status, "watching");
   // A ticket: finished, then asked for again.
-  const t = await ops.create(w.ctx, { id: "other-4", title: "#700 闪退", link: "gcp:#700", said: "盯一下 #700", noWait: true });
+  const t = await createWatch(w.ctx, { id: "other-4", title: "#700 闪退", link: "gcp:#700", said: "盯一下 #700", noWait: true });
   await ops.stop(w.ctx, t.id as string, { done: true, evidence: "办完了" });
-  const re = await ops.create(w.ctx, { id: "other-5", title: "#700 闪退", link: "gcp:#700", said: "再盯一下 #700", noWait: true });
+  const re = await createWatch(w.ctx, { id: "other-5", title: "#700 闪退", link: "gcp:#700", said: "再盯一下 #700", noWait: true });
   assert.equal(re.ok, true, re.text);
   assert.match(re.text, /之前办完了，这次重新盯/);
   assert.equal(load(w.root, "700").status, "watching");
   assert.deepEqual(w.paseo().schedules.filter((p: { name: string }) => p.name === "affair:700").map((p: { status: string }) => p.status), ["active"], "its plan is going again (the workspace had not been put away yet)");
   // A ticket that never got made, asked for again.
   process.env.FAKE_PASEO_FAIL = "workspace create";
-  const broken = await ops.create(w.ctx, { id: "other-6", title: "#701 卡死", link: "gcp:#701", said: "盯一下 #701", noWait: true });
+  const broken = await createWatch(w.ctx, { id: "other-6", title: "#701 卡死", link: "gcp:#701", said: "盯一下 #701", noWait: true });
   delete process.env.FAKE_PASEO_FAIL;
   assert.equal(broken.ok, false);
-  const retry = await ops.create(w.ctx, { id: "other-7", title: "#701 卡死", link: "gcp:#701", said: "盯一下 #701", noWait: true });
+  const retry = await createWatch(w.ctx, { id: "other-7", title: "#701 卡死", link: "gcp:#701", said: "盯一下 #701", noWait: true });
   assert.equal(retry.ok, true, retry.text);
   assert.equal(load(w.root, "701").status, "watching");
 });
@@ -482,15 +483,15 @@ test("F-20: only a sentence that starts with 还没完 / 接着盯 takes an ende
 
 test("F-22: only a plain number after the kind names a ticket; the kind's role is the affair's role unless another is asked for", async () => {
   const w = world({ policy: { roleByKind: { gcp: "deep" }, roles: { glance: DEFAULT_POLICY.roles.glance, deep: { provider: "claude/claude-sonnet-5-5", thinking: "medium", mode: "bypassPermissions", estimateUsd: 0.15 } } } });
-  const a = await ops.create(w.ctx, { id: "other-8", title: "#700 闪退", link: "gcp:#700/截止日期", said: "盯一下 #700", noWait: true });
+  const a = await createWatch(w.ctx, { id: "other-8", title: "#700 闪退", link: "gcp:#700/截止日期", said: "盯一下 #700", noWait: true });
   assert.equal(a.id, "700");
   assert.equal(load(w.root, "700").roleName, "deep");
   const create = w.calls().find((c) => c[0] === "schedule" && c[1] === "create")!;
   assert.equal(create[create.indexOf("--provider") + 1], "claude/claude-sonnet-5-5");
-  const x = await ops.create(w.ctx, { id: "other-9", title: "任务甲", link: "feishu-task:a1-b2-0034", said: "盯一下", noWait: true });
-  const y = await ops.create(w.ctx, { id: "other-10", title: "任务乙", link: "feishu-task:b1-a2-0034", said: "盯一下", noWait: true });
+  const x = await createWatch(w.ctx, { id: "other-9", title: "任务甲", link: "feishu-task:a1-b2-0034", said: "盯一下", noWait: true });
+  const y = await createWatch(w.ctx, { id: "other-10", title: "任务乙", link: "feishu-task:b1-a2-0034", said: "盯一下", noWait: true });
   assert.notEqual(x.id, y.id, "the digits of two different ids are not a number");
-  const own = await ops.create(w.ctx, { id: "other-11", title: "#701 卡死", link: "gcp:#701", role: "glance", said: "盯一下", noWait: true });
+  const own = await createWatch(w.ctx, { id: "other-11", title: "#701 卡死", link: "gcp:#701", role: "glance", said: "盯一下", noWait: true });
   assert.equal(load(w.root, own.id as string).roleName, "glance");
 });
 

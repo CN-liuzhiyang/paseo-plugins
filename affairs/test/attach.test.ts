@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, truncateSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -14,7 +15,7 @@ const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR
 const png = (name?: string) => ({ type: "image", data: PNG.toString("base64"), mimeType: "image/png", ...(name ? { name } : {}) });
 
 async function started(w: ReturnType<typeof world>) {
-  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -156,7 +157,7 @@ test("an image with no name is named for its type; a name without an extension g
 
 test("only into the affair that was meant: another affair's folder is not touched, and a look cannot send things", async () => {
   const { w, id } = await world_();
-  await ops.create(w.ctx, { id: "other-2", title: "牙冠", noWait: true });
+  await createWatch(w.ctx, { id: "other-2", title: "牙冠", noWait: true });
   await ops.note(w.ctx, id, { said: "", via: "workspace", attachments: [png("one.png")] });
   assert.deepEqual(filesOf(w, "other-2"), []);
   const looks = { ...w.ctx, by: "look" };

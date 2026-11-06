@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -66,7 +67,7 @@ function setup(policyOver: Record<string, unknown> = {}, opts: Parameters<typeof
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
-  const made = await ops.create(s.w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
+  const made = await createWatch(s.w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
   await s.engine.scan(made.id);
   return made.id as string;
 };
@@ -100,7 +101,7 @@ test("a new affair's chat has the model of its looks, a long cache, its label an
 test("an affair from before (with the old conversation): a chat is made, the old one is put away, and the first line says it can be talked to", async () => {
   // as if this affair had been made by the old version: a conversation in the log and no chat
   const t = setup();
-  const made = await ops.create(t.w.ctx, { id: "other-2", title: "老的", goal: "x", said: "盯一下老的", noWait: true });
+  const made = await createWatch(t.w.ctx, { id: "other-2", title: "老的", goal: "x", said: "盯一下老的", noWait: true });
   append(t.w.root, made.id, [{ kind: "conversation", agentId: "old-conv" }], { now: t.w.now() });
   await t.engine.scan(made.id);
   assert.equal(t.p.made.length, 1);
@@ -360,14 +361,16 @@ test("the cost the session reports is its total so far: each turn counts only th
   assert.ok(Math.abs(spent() - (0.02 + 0.003)) < 1e-9, `${spent()}`);
 });
 
-test("a provider that reports no usage, or whose chat cannot be refreshed, does not break the chat: nothing is written, the chat stays", async () => {
+test("a provider without usage records unknown cost; a failed refresh does not break the chat", async () => {
   const s = setup({}, { status: () => { throw new Error("no such thing"); } });
   const id = await start(s).catch((e) => e);
   assert.ok(typeof id === "string" || id instanceof Error);
   const t = setup();
   const tid = await start(t);
   t.p.send("chat-1", { type: "turn_completed" });
-  assert.equal(read(t.w.root, tid).filter((l: { kind: string }) => l.kind === "chat.turn").length, 0);
+  const turns = read(t.w.root, tid).filter((l: { kind: string }) => l.kind === "chat.turn");
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].unknown, true);
   assert.equal(load(t.w.root, tid).chatId, "chat-1");
 });
 
@@ -451,7 +454,7 @@ test("a question taken back is turned into a line that says it need not be answe
 
 test("the panel's sources: the affair's own link first, what is watched, references in what is remembered, once each; at most six and how many more", async () => {
   const w = world({ policy: { links: { gcp: "https://pm.example.invalid/issues/{ref}" }, linkHash: "gcp" } });
-  const made = await ops.create(w.ctx, { id: "other-3", title: "闪退 #987735", goal: "盯 #987735", said: "盯一下 #987735", link: "gcp:987735", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-3", title: "闪退 #987735", goal: "盯 #987735", said: "盯一下 #987735", link: "gcp:987735", noWait: true });
   const id = made.id as string;
   await ops.brief(w.ctx, id);
   const facts = Array.from({ length: 8 }, (_, i) => `提交 #${100001 + i} 已合并`);
@@ -465,7 +468,7 @@ test("the panel's sources: the affair's own link first, what is watched, referen
   assert.equal(p.sources.items.filter((i: { href: string }) => i.href?.endsWith("/987735")).length, 1, "the main ticket is not listed twice");
   assert.ok(p.sources.more >= 1);
   const plain = world({ policy: { links: {}, linkHash: "" } });
-  const m2 = await ops.create(plain.ctx, { id: "other-4", title: "洗牙", goal: "x", said: "盯", link: "gcp:555", noWait: true });
+  const m2 = await createWatch(plain.ctx, { id: "other-4", title: "洗牙", goal: "x", said: "盯", link: "gcp:555", noWait: true });
   const s2 = { ...load(plain.root, m2.id), lines: read(plain.root, m2.id) };
   const p2 = panelOf(plain.root, s2, plain.now(), plain.ctx.policy, linkContext(plain.ctx.policy, s2.link));
   assert.equal(p2.sources.items[0].href, null, "a kind with no address is listed and cannot be opened");
@@ -473,7 +476,7 @@ test("the panel's sources: the affair's own link first, what is watched, referen
 
 test("the panel's materials are what is in files/ and only that: his chat pictures are not there; what came to files/ from him is marked", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { id: "other-5", title: "牙", goal: "x", said: "盯", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-5", title: "牙", goal: "x", said: "盯", noWait: true });
   const id = made.id as string;
   let s = { ...load(w.root, id), lines: read(w.root, id) };
   assert.deepEqual(panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null)).materials, { items: [], more: 0 });

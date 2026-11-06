@@ -4,6 +4,7 @@ import path from "node:path";
 import { stepFields } from "./steps.mjs";
 import { isoLocal } from "./time.mjs";
 import { normalizedLink } from "./links.mjs";
+import { defaultMode } from "./mode.mjs";
 
 // One log.jsonl per affair, append only: nothing here opens it for writing from the start. The commands and the plugin
 // both write through append(), under a lock directory, and the plugin watches the root: the log is the only interface.
@@ -161,10 +162,10 @@ const last = (list) => list[list.length - 1] ?? null;
  * The state of an affair, folded from its lines. Every field derives from the log and from nothing else.
  * @returns {any}
  */
-export function fold(lines) {
+export function fold(lines, policy = { watchKinds: ["gcp"] }) {
   const s = {
     id: "", title: "", goal: "", domain: "work", link: null, links: [], projects: [], attached: [], workdir: "", createdAt: null,
-    status: "watching", statusAt: null, doneEvidence: "",
+    status: "watching", statusAt: null, doneEvidence: "", mode: "", modeExplicit: false, budget: null, dispatched: [], envs: [],
     workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
@@ -175,6 +176,25 @@ export function fold(lines) {
     s.lastSeq = l.seq;
     if (l.__broken && !s.chainBroken) s.chainBroken = l.seq;
     switch (l.kind) {
+      case "mode":
+        s.mode = l.mode;
+        s.modeExplicit = true;
+        break;
+      case "budget":
+        if (Number.isFinite(l.usd)) s.budget = { usd: l.usd, until: l.until || "", seq: l.seq };
+        break;
+      case "dispatched":
+        s.dispatched.push({ ...l, usdTotal: null, unknown: true });
+        break;
+      case "dispatch.cost": {
+        const d = s.dispatched.find((d) => d.agentId === l.agentId);
+        if (d) Object.assign(d, { usdTotal: l.usdTotal, unknown: l.unknown });
+        break;
+      }
+      case "env":
+        s.envs = s.envs.filter((e) => e.project !== l.project);
+        if (!l.removed) s.envs.push(l);
+        break;
       case "created":
         Object.assign(s, { id: l.id, title: l.title, goal: l.goal ?? "", domain: l.domain ?? "work", link: l.link ?? null, workdir: l.workdir ?? "", createdAt: l.at, paseoHome: l.paseoHome ?? "", roleName: l.role ?? "", system: l.system === true });
         s.links = [...new Set((l.links ?? (l.link ? [l.link] : [])).map(normalizedLink).filter(Boolean))];
@@ -333,7 +353,7 @@ export function fold(lines) {
       }
       case "asked":
         if (l.for === "breaker") s.breaker = true;
-        s.asks.push({ id: String(l.id), title: String(l.title ?? ""), line: String(l.line ?? ""), options: Array.isArray(l.options) ? l.options.map(String) : [], runs: l.runs ?? {}, proposal: l.proposal ?? null, allowOther: l.allowOther !== false, for: l.for ?? "", at: l.at, seq: l.seq, state: "open", answer: "", answeredAt: null, via: "" });
+        s.asks.push({ id: String(l.id), title: String(l.title ?? ""), line: String(l.line ?? ""), options: Array.isArray(l.options) ? l.options.map(String) : [], runs: l.runs ?? {}, proposal: l.proposal ?? null, allowOther: l.allowOther !== false, for: l.for ?? "", recommend: l.recommend ?? "", why: l.why ?? "", push: l.push, at: l.at, seq: l.seq, state: "open", answer: "", answeredAt: null, via: "" });
         if (String(l.for ?? "").startsWith("down:") && s.watches[l.for.slice(5)]) s.watches[l.for.slice(5)].downAsked = true;
         break;
       case "answered": {
@@ -387,9 +407,10 @@ export function fold(lines) {
         break;
     }
   }
+  if (!s.modeExplicit) s.mode = defaultMode(s, policy);
   return s;
 }
 
 /** @returns {any} */
-export const load = (root, id) => fold(read(root, id));
+export const load = (root, id, policy) => fold(read(root, id), policy);
 export const isOpen = (s) => s.status === "watching";

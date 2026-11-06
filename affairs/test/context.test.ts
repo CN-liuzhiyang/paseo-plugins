@@ -63,7 +63,7 @@ test("new: short names required, invalid names refused, ticket numbers preserved
 });
 
 test("primary link chooses the default role, while explicit and legacy roles stay chosen", async () => {
-  const w = world({ policy: { roleByKind: { ticket: "glance", task: "other" } } });
+  const w = world({ policy: { watchKinds: ["ticket", "task"], roleByKind: { ticket: "glance", task: "other" } } });
   w.ctx.policy.roles = { ...w.ctx.policy.roles, other: { ...w.ctx.policy.roles.glance, provider: "claude/claude-sonnet-5-5" } };
   const made = await ops.create(w.ctx, { title: "默认档位", link: ["ticket:800005", "task:abc"], noWait: true });
   await ops.link(w.ctx, made.id, "rm", "ticket:800005");
@@ -173,6 +173,7 @@ test("work: finish deletes, archive hash recovers latest README, resume restores
 
 test("chat: embeds originals, short handbooks, size warnings and no repeated brief sections", async () => {
   const w = stored(); const books = path.join(w.dir, "books"); mkdirSync(books);
+  append(w.root, "build-tool", [{ kind: "mode", mode: "watch" }], { now: w.now() });
   writeFileSync(path.join(books, "handbook.chat.md"), "PUBLIC CHAT"); writeFileSync(path.join(books, "affair.chat.md"), "PRIVATE CHAT"); writeFileSync(path.join(books, "ticket.chat.md"), "KIND CHAT");
   w.ctx.policy.handbookPath = path.join(books, "handbook.md"); w.ctx.policy.handbooksDir = books; w.ctx.policy.chatHandbookByKind = { ticket: "ticket.chat.md" };
   const s = load(w.root, "build-tool"); const texts = workTexts(w.ctx, s); const prompt = chatPrompt(w.ctx, s);

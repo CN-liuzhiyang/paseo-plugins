@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -9,7 +10,7 @@ import { iso, world } from "./kit";
 const HOUR = 3_600_000;
 
 async function started(w: ReturnType<typeof world>, extra: Record<string, unknown> = {}) {
-  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
+  const made = await createWatch(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -56,12 +57,12 @@ test("new makes the folder, the workspace under the 事项 project, a plan in th
 
 test("a ticket is named by its number, works in its own directory without projects, and is not started twice", async () => {
   const w = world();
-  const first = await ops.create(w.ctx, { id: "other-2", title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
+  const first = await createWatch(w.ctx, { id: "other-2", title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
   assert.equal(first.id, "700");
   assert.equal(load(w.root, "700").workdir, path.join(w.root, "700"));
   const ws = w.calls().find((c) => c[0] === "workspace" && c[1] === "create")!;
   assert.equal(ws[ws.indexOf("--path") + 1], path.join(w.root, "700"));
-  const again = await ops.create(w.ctx, { id: "other-3", title: "#700 某某闪退", link: "gcp:#700", noWait: true });
+  const again = await createWatch(w.ctx, { id: "other-3", title: "#700 某某闪退", link: "gcp:#700", noWait: true });
   assert.match(again.text, /已经在盯/);
   assert.equal(w.calls().filter((c) => c[0] === "workspace" && c[1] === "create").length, 1);
 });
@@ -69,8 +70,8 @@ test("a ticket is named by its number, works in its own directory without projec
 test("no more than the active limit are watched at once", async () => {
   const w = world({ policy: { limits: { ...(await import("../server/lib/policy.mjs")).DEFAULT_POLICY.limits, maxActive: 2 } } });
   await started(w);
-  await ops.create(w.ctx, { id: "other-4", title: "提现", noWait: true });
-  const third = await ops.create(w.ctx, { id: "other-5", title: "体检", noWait: true });
+  await createWatch(w.ctx, { id: "other-4", title: "提现", noWait: true });
+  const third = await createWatch(w.ctx, { id: "other-5", title: "体检", noWait: true });
   assert.equal(third.ok, false);
   assert.match(third.text, /已经 2 件了/);
 });
@@ -265,7 +266,7 @@ test("a Paseo that fails to change the plan is written down, not lost", async ()
 test("find: one name is one affair; two are asked about; none lists what there is", async () => {
   const w = world();
   await started(w);
-  await ops.create(w.ctx, { id: "other-6", title: "牙冠取模", noWait: true });
+  await createWatch(w.ctx, { id: "other-6", title: "牙冠取模", noWait: true });
   assert.equal(ops.resolve(w.ctx, "洗牙").s?.id, "dental");
   assert.match(ops.resolve(w.ctx, "牙").text!, /「洗牙」还是「牙冠取模」/);
   assert.match(ops.resolve(w.ctx, "提现").text!, /没找到「提现」。在盯的有：洗牙、牙冠取模/);
@@ -275,7 +276,7 @@ test("nothing a person reads names the machinery", async () => {
   const w = world();
   const id = await started(w);
   const spoken: string[] = [];
-  spoken.push((await ops.create(w.ctx, { id: "other-7", title: "体检", noWait: true })).text);
+  spoken.push((await createWatch(w.ctx, { id: "other-7", title: "体检", noWait: true })).text);
   spoken.push((await ops.note(w.ctx, id, { said: "约在下周三下午了", by: "user" })).text);
   spoken.push((await ops.pause(w.ctx, id, "2026-11-09 10:00")).text);
   spoken.push((await ops.stop(w.ctx, id)).text, ops.undo(w.ctx, id).text, ops.resolve(w.ctx, "没有的").text!);
@@ -308,7 +309,7 @@ test("nothing that looks like a credential, a token or a pairing link is written
     assert.equal(r.ok, false, said);
     assert.match(r.text, /没记下/);
   }
-  assert.equal((await ops.create(w.ctx, { id: "other-8", title: "令牌", said: "api_key = abcdef123456", noWait: true })).ok, false);
+  assert.equal((await createWatch(w.ctx, { id: "other-8", title: "令牌", said: "api_key = abcdef123456", noWait: true })).ok, false);
   await looking(w, id);
   const sent = await ops.report(w.ctx, id, good({ facts: ["拿到了 token=abcdefghijkl"] }));
   assert.equal(sent.ok, false, "a look that read a secret does not write it down");
@@ -319,7 +320,7 @@ test("nothing that looks like a credential, a token or a pairing link is written
 
 test("an empty word is not a thing the person said, and not an answer", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { id: "other-9", title: "洗牙", noWait: true });
+  const made = await createWatch(w.ctx, { id: "other-9", title: "洗牙", noWait: true });
   const before = read(w.root, made.id).length;
   assert.equal((await ops.note(w.ctx, made.id, { said: "  ", by: "user" })).ok, false);
   assert.equal((await ops.answer(w.ctx, made.id, `${made.id}-1`, "")).ok, false);

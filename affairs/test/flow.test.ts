@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -112,7 +113,7 @@ function setup({ perDay = 3 }: { perDay?: number } = {}) {
 }
 
 async function ticket(w: ReturnType<typeof world>, number = "700", title = "某某闪退") {
-  const made = await ops.create(w.ctx, { id: "dental", title: `#${number} ${title}`, link: `gcp:#${number}`, said: `帮我盯一下 #${number}`, noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: `#${number} ${title}`, link: `gcp:#${number}`, said: `帮我盯一下 #${number}`, noWait: true });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -164,7 +165,7 @@ test("refused: a flow that is not allowed, one for another kind of reference, an
   assert.match((await ops.flow(w.ctx, id, "no-such")).text, /没有叫「no-such」的流程可起。能起的有：do-it、other-job/);
   assert.match((await ops.flow(w.ctx, id, "other-job")).text, /管的是 feishu-task 的事/);
   const plain = await ops.create(w.ctx, { id: "other-2", title: "洗牙", noWait: true });
-  assert.match((await ops.flow(w.ctx, plain.id, "do-it")).text, /管的是 gcp 的事/);
+  assert.match((await ops.flow(w.ctx, plain.id, "do-it")).text, /先请他批额度/);
 
   const chat = chatOf(w, id);
   assert.match((await ops.flow(chat, id, "do-it")).text, /要指给他说的那一行：--said-seq/);

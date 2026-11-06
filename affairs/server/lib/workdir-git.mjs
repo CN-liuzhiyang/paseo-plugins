@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { append, listIds, load } from "./log.mjs";
 import { primaryLink } from "./links.mjs";
+import { modeOf, modeText } from "./mode.mjs";
 
 const exec = promisify(execFile);
 const readText = (file) => existsSync(file) ? readFileSync(file, "utf8") : "";
@@ -17,13 +18,13 @@ const pendingDir = (ctx) => path.join(ctx.root, ".work-pending");
 export const workFolder = (ctx, id) => ctx.policy.workDir ? path.join(ctx.policy.workDir, id) : "";
 export const workTexts = (ctx, s) => {
   const dir = workFolder(ctx, s.id);
-  return { status: dir ? readText(path.join(dir, "status.md")) : statusText(s), readme: dir ? readText(path.join(dir, "README.md")) : "" };
+  return { status: dir ? readText(path.join(dir, "status.md")) : statusText(s, ctx.policy), readme: dir ? readText(path.join(dir, "README.md")) : "" };
 };
 
-export function statusText(s) {
-  const head = { id: s.id, title: s.title, state: s.status === "watching" ? "open" : s.status, links: s.links, projects: s.projects };
+export function statusText(s, policy = { watchKinds: ["gcp"] }) {
+  const head = { id: s.id, title: s.title, state: s.status === "watching" ? "open" : s.status, mode: modeOf(s, policy), links: s.links, projects: s.projects };
   return ["---", ...Object.entries(head).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), "---",
-    `现在：${s.nowText || "还没看过"}${s.nowAt ? `（${s.nowAt.slice(5, 16).replace("T", " ")}）` : ""}`,
+    `方式：${modeText(s, policy)}`, `现在：${s.nowText || "还没看过"}${s.nowAt ? `（${s.nowAt.slice(5, 16).replace("T", " ")}）` : ""}`,
     `在等：${s.next?.waitingFor || "还没定"}`, "记住的：", ...s.facts.map((f) => `- ${f}`), ...s.notes.slice(-10).map((n) => `- ${n.text}（${n.at.slice(5, 16).replace("T", " ")}）`),
     "没答的问题：", ...s.asks.filter((q) => q.state === "open").map((q) => `- ${q.id} ${q.title}：${q.line}（${q.options.join("、")}）`), ""].join("\n");
 }
@@ -31,10 +32,10 @@ export function statusText(s) {
 export function refreshWork(ctx, s) {
   if (!ctx.policy.workDir || s.status !== "watching" || s.system) return;
   const dir = workFolder(ctx, s.id);
-  const changed = writeChanged(path.join(dir, "status.md"), statusText(s));
+  const changed = writeChanged(path.join(dir, "status.md"), statusText(s, ctx.policy));
   const readme = path.join(dir, "README.md");
   const made = !existsSync(readme);
-  if (made) writeChanged(readme, `# ${s.title}\n\n## 是什么\n\n## 决定\n\n## 入口\n`);
+  if (made) writeChanged(readme, `# ${s.title}\n\n## 是什么\n\n${modeOf(s, ctx.policy) === "drive" ? "## 步骤\n\n- [ ] 写步骤和估算 → 他批（谁：他；验收：步骤和额度已批准）\n\n" : ""}## 决定\n\n## 入口\n`);
   const index = refreshIndex(ctx);
   if (changed || made || index) markPending(ctx, s.id);
 }
@@ -50,7 +51,7 @@ export function refreshIndex(ctx) {
   const cell = (v) => String(v).replaceAll("|", "\\|").replace(/\r?\n/g, " ");
   const area = (s) => ["personal", "family"].includes(s.domain) ? "私事" : ctx.policy.areaByKind?.[primaryLink(s)?.split(":")[0]] || "工具";
   states.sort((a, b) => area(a).localeCompare(area(b)) || a.id.localeCompare(b.id));
-  return writeChanged(path.join(ctx.policy.workDir, "INDEX.md"), ["# 在进行的事", "", "| 领域 | 编号 | 标题 | 现在 |", "| --- | --- | --- | --- |", ...states.map((s) => `| ${[area(s), s.id, s.title, s.nowText].map(cell).join(" | ")} |`), ""].join("\n"));
+  return writeChanged(path.join(ctx.policy.workDir, "INDEX.md"), ["# 在进行的事", "", "| 领域 | 编号 | 标题 | 方式 | 现在 |", "| --- | --- | --- | --- | --- |", ...states.map((s) => `| ${[area(s), s.id, s.title, modeText(s, ctx.policy), s.nowText].map(cell).join(" | ")} |`), ""].join("\n"));
 }
 
 export async function gitWork(ctx, args) {

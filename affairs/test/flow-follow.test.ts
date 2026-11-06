@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -30,7 +31,7 @@ function setup() {
 }
 
 async function ticket(w: ReturnType<typeof world>) {
-  const made = await ops.create(w.ctx, { id: "dental", title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "#700 某某闪退", link: "gcp:#700", said: "帮我盯一下 #700", noWait: true });
   assert.equal(made.ok, true, made.text);
   FIRST.set(w, w.calls().filter((c) => c[0] === "schedule" && c[1] === "run-once").length);
   return made.id as string;

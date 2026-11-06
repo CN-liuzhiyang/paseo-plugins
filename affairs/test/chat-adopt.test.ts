@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { mkdirSync, readdirSync, readFileSync, rmdirSync } from "node:fs";
 import path from "node:path";
@@ -16,7 +17,7 @@ async function setup(rootWithSpaces = false) {
     w.ctx.command = w.ctx.command.replace(w.root, root);
     w.root = w.ctx.root = root;
   }
-  const made = await ops.create(w.ctx, { id: "dental", title: "预约", said: "盯一下预约", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "预约", said: "盯一下预约", noWait: true });
   const id = made.id as string;
   const ws = load(w.root, id).workspaceId;
   const agents = new Map<string, ChatAgent>();

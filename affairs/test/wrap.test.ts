@@ -1,3 +1,4 @@
+import { createWatch } from "./kit";
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -73,7 +74,7 @@ test("the panel says what today cost in dollars, with the sign (a template can l
   const { panelOf } = await import("../server/lib/panel.mjs");
   const ops = await import("../server/lib/ops.mjs");
   const w = world();
-  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "洗牙", said: "盯一下洗牙", noWait: true });
+  const made = await createWatch(w.ctx, { id: "dental", title: "洗牙", goal: "洗牙", said: "盯一下洗牙", noWait: true });
   const id = made.id as string;
   const view = () => panelOf(w.root, { ...load(w.root, id), lines: read(w.root, id) }, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null));
   assert.equal(view().spent, "", "nothing spent, nothing said");
