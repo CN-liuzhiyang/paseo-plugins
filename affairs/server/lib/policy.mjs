@@ -77,8 +77,8 @@ export const DEFAULT_POLICY = {
     role: "",
     // Cache lifetime asked for the chat session (the env of its session): its turns come minutes to an hour apart.
     cacheTtl: "1h",
-    // Not spoken to for this long, and the context this long (tokens): replaced.
-    coldMinutes: 30,
+    // Match the default one-hour cache lifetime before treating an idle chat as cold.
+    coldMinutes: 60,
     coldContext: 80_000,
     // Context this long: replaced when it has been idle for idleMinutes, warm or not.
     hardContext: 150_000,

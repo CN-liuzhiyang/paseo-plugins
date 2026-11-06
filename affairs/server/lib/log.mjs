@@ -201,6 +201,9 @@ export function fold(lines) {
         // One turn of the chat finished: when, how long the session's context is now, what it cost (the real figures from the turn).
         if (l.agentId === s.chatId) s.chatTurn = { at: l.at, tokens: Number(l.tokens) || 0, usd: Number(l.usd) || 0, usdTotal: Number(l.usdTotal) || 0 };
         break;
+      case "chat.handoff":
+        // Kept in lines so a chat brief can show it once using the normal seen sequence.
+        break;
       case "note":
         // What the chat session wrote down for itself (a conclusion, a decision): its own words, never taken for his.
         if (l.by === "chat" && typeof l.text === "string") s.notes.push({ seq: l.seq, at: l.at, text: l.text, said: Number.isInteger(l.said) ? l.said : null });

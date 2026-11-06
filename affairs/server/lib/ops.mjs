@@ -13,7 +13,7 @@ import { stepFields, stepLines } from "./steps.mjs";
 import * as schedule from "./schedule.mjs";
 import { isoLocal, localParts, parseLocal, speak } from "./time.mjs";
 import { ago, attachSummary, linkOf, md, say, sentOf, stamp } from "./view.mjs";
-import { clampMax, findTurns, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
+import { clampMax, findTurns, handoffSection, normalize, oneTurn, parseLogs, sayHistory } from "./history.mjs";
 import { hrefOf, linkContext, parseLink, usableTemplates } from "./links.mjs";
 import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
@@ -1065,6 +1065,7 @@ async function briefChat(ctx, s) {
   const now = ctx.now();
   const tz = ctx.policy.tz;
   const cut = s.briefs.chat;
+  const handoffs = s.lines.filter((l) => l.kind === "chat.handoff" && l.seq > cut);
   const news = [];
   for (const l of s.lines) {
     if (l.seq <= cut) continue;
@@ -1095,6 +1096,7 @@ async function briefChat(ctx, s) {
     "## 上次读完以后新的",
     ...(news.length ? news : ["- 没有新的"]),
     "",
+    ...handoffs.flatMap(handoffSection),
     "## 没答的问题",
     ...(asks.length ? asks.map((a) => `- ${a.id}：${a.title}（选项：${a.options.join("、") || "无"}）`) : ["- （没有）"]),
     "",

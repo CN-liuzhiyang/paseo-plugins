@@ -4,6 +4,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { createEngine, type PaseoLike } from "../server/engine";
 import { rotationReason, chatPrompt, noticeFor, chatCreateOptions } from "../server/lib/chat.mjs";
+import { handoffTurns } from "../server/lib/history.mjs";
 import { roleOf } from "../server/lib/schedule.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
 import { counts } from "../server/lib/limits.mjs";
@@ -151,8 +152,10 @@ test("warm, however long, is not replaced until it is very long and idle; cold a
   assert.equal(rotationReason(c.s, c.now, c.policy), "", "very long but he was here five minutes ago: kept");
   c = chatAt(160_000, 11 * MIN);
   assert.equal(rotationReason(c.s, c.now, c.policy), "rotate:long");
-  c = chatAt(90_000, 31 * MIN);
+  c = chatAt(90_000, 61 * MIN);
   assert.equal(rotationReason(c.s, c.now, c.policy), "rotate:cold");
+  c = chatAt(90_000, 31 * MIN);
+  assert.equal(rotationReason(c.s, c.now, c.policy), "", "the default cache is still warm");
   c = chatAt(60_000, 31 * MIN);
   assert.equal(rotationReason(c.s, c.now, c.policy), "", "cold but short: cheap to go on");
 });
@@ -202,6 +205,48 @@ test("a replaced chat: a new one is made, the old put away, the new one starts w
   // and the new one is the one listened to
   assert.ok(s.p.handlers.has("chat-2"));
   assert.ok(!s.p.handlers.has("chat-1"));
+});
+
+test("rotation saves the old conversation, shows it once, and retains answer endings", async () => {
+  const s = setup({}, { tail: () => [
+    { item: { type: "user_message", text: "请继续" } },
+    { item: { type: "reasoning", text: "private thought" } },
+    { item: { type: "assistant_message", text: "前".repeat(600) + "等你授权" } },
+  ] });
+  const id = await start(s);
+  s.p.send("chat-1", turnDone(170_000));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  const handoff = read(s.w.root, id).find((l: any) => l.kind === "chat.handoff");
+  assert.equal(handoff.agentId, "chat-1");
+  assert.equal(handoff.turns[0].reply.length, 600);
+  assert.match(handoff.turns[0].reply, /等你授权$/);
+  const ctx = { ...s.w.ctx, by: "chat", chatFor: id };
+  const first = await ops.brief(ctx, id, { chat: true });
+  assert.match(first.text, /上一段对话停在哪/);
+  assert.match(first.text, /等你授权/);
+  assert.doesNotMatch(first.text, /private thought/);
+  const second = await ops.brief(ctx, id, { chat: true });
+  assert.doesNotMatch(second.text, /上一段对话停在哪/);
+  assert.equal(handoffTurns(Array.from({ length: 4 }, (_, i) => ({ item: { type: "user_message", text: String(i) } }))).length, 3);
+});
+
+test("rotation continues and records the reason when the old timeline cannot be read", async () => {
+  const s = setup();
+  const id = await start(s);
+  const ref = s.p.paseo.agents.ref.bind(s.p.paseo.agents);
+  s.p.paseo.agents.ref = ((agent: string) => {
+    const handle = ref(agent);
+    if (agent === "chat-1") handle.timeline.refetch = async () => { throw new Error("unavailable"); };
+    return handle;
+  }) as typeof s.p.paseo.agents.ref;
+  s.p.send("chat-1", turnDone(170_000));
+  s.w.advance(40 * MIN);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).chatId, "chat-2");
+  assert.equal(read(s.w.root, id).find((l: any) => l.kind === "chat.handoff").error, "unavailable");
+  const result = await ops.brief({ ...s.w.ctx, by: "chat", chatFor: id }, id, { chat: true });
+  assert.match(result.text, /结尾读不到：unavailable，用 history 查/);
 });
 
 test("a chat in the middle of a turn is not replaced: the swap waits for a scan when it is quiet", async () => {

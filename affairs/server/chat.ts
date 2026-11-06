@@ -1,6 +1,7 @@
 import { chatCreateOptions, noticeFor, rotationReason } from "./lib/chat.mjs";
 import { isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
+import { handoffTurns } from "./lib/history.mjs";
 import { flowFinishedMessage, flowMessageId, orchCommand, orchLogDir } from "./lib/flows.mjs";
 import { ASK_KIND, ASK_VERSION, LINE_KIND, LINE_VERSION, type Segment } from "../shared/card";
 
@@ -41,7 +42,7 @@ export interface ChatHandle {
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
     subscribe(handler: (event: any) => void): Unsubscribe;
-    refetch(options?: Record<string, unknown>): Promise<{ entries?: Array<{ item: any; timestamp?: string }> }>;
+    refetch(options?: Record<string, unknown>): Promise<{ entries?: Array<{ item: any; timestamp?: string }>; hasOlder?: boolean; startCursor?: unknown }>;
   };
 }
 export interface ChatPaseo {
@@ -111,9 +112,24 @@ export function createChats(deps: ChatDeps) {
   /** Makes a chat for the affair and puts the old one (if any) away. */
   async function replace(id: string, why: string, old: string | null): Promise<void> {
     const s = deps.state(id);
+    let handoff: Record<string, unknown> | null = null;
+    if (old && why.startsWith("rotate")) {
+      try {
+        const timeline = paseo.agents.ref(old).timeline;
+        let page = await timeline.refetch({ direction: "tail", limit: 100 });
+        let entries = page.entries ?? [];
+        while (handoffTurns(entries).length < 3 && page.hasOlder && page.startCursor) {
+          page = await timeline.refetch({ direction: "before", cursor: page.startCursor, limit: 100 });
+          entries = [...(page.entries ?? []), ...entries];
+        }
+        handoff = { kind: "chat.handoff", agentId: old, turns: handoffTurns(entries) };
+      } catch (error) {
+        handoff = { kind: "chat.handoff", agentId: old, error: (error as Error).message };
+      }
+    }
     const ws = paseo.workspaces.ref(s.workspaceId);
     const made = await ws.agents.create(chatCreateOptions(ctx, s));
-    deps.write(id, [{ kind: "chat", agentId: made.id, why }]);
+    deps.write(id, [...(handoff ? [handoff] : []), { kind: "chat", agentId: made.id, why }]);
     checked.add(made.id);
     const text = noticeFor(why, s.title);
     if (text) notices.set(id, text);

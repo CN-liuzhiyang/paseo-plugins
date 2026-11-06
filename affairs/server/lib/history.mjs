@@ -44,6 +44,29 @@ export function parseLogs(text) {
   return turns.map((t) => ({ ask: t.ask, reply: t.reply.join("\n").trim() }));
 }
 
+/** The last three turns, keeping the end of each answer within a shared 1500-character budget. */
+export function handoffTurns(entries) {
+  const turns = [];
+  let current = null;
+  for (const { item } of entries) {
+    if (item.type === "user_message") {
+      current = String(item.messageId ?? item.clientMessageId ?? "").startsWith("affair-flow:") ? null : { ask: item.text, reply: "" };
+      if (current) turns.push(current);
+    } else if (item.type === "assistant_message" && current) current.reply += (current.reply ? "\n" : "") + item.text;
+  }
+  return turns.slice(-3).map(({ ask, reply }, i, selected) => ({
+    ask: [...ask].slice(0, 100).join(""),
+    reply: [...(reply || "（没有文字回复）")].slice(-(600 - 200 * (selected.length - 1 - i))).join(""),
+  }));
+}
+
+export function handoffSection(line) {
+  return ["## 上一段对话停在哪", ...(line.error
+    ? [`上一段对话的结尾读不到：${line.error}，用 history 查。`]
+    : [...(line.turns.length ? line.turns.flatMap((t) => [`他问：${t.ask}`, `你答：${t.reply}`]) : ["（没有找到问答）"]),
+      "最后一句如果是在等他回答或授权，他这次说的话很可能是在回它；改过的东西以现场为准再核一下。"]), ""];
+}
+
 const cut = (text, max) => ([...text].length > max ? { text: [...text].slice(0, max).join(""), left: [...text].length - max } : { text, left: 0 });
 
 /** One question and its answer within the limits: the question up to 300 characters, the answer up to 1200, both within `total`. */
