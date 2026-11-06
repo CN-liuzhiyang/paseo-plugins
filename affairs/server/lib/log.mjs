@@ -332,7 +332,7 @@ export function fold(lines) {
       }
       case "flow":
         // A flow he had started for this affair (`affair flow`): which, the run it is, what he said that asked for it.
-        s.flows.push({ seq: l.seq, at: l.at, flow: String(l.flow ?? ""), runId: String(l.runId ?? ""), events: String(l.events ?? ""), timeoutMs: Number(l.timeoutMs) || 0, by: l.by ?? "chat", said: Number.isInteger(l.said) ? l.said : null, failed: "", marks: [], outcome: "", summary: "", costUsd: null, endedAt: "" });
+        s.flows.push({ seq: l.seq, at: l.at, flow: String(l.flow ?? ""), runId: String(l.runId ?? ""), events: String(l.events ?? ""), timeoutMs: Number(l.timeoutMs) || 0, by: l.by ?? "chat", said: Number.isInteger(l.said) ? l.said : null, resumeOf: l.resumeOf ?? null, failed: "", marks: [], outcome: "", summary: "", costUsd: null, endedAt: "", resume: null });
         break;
       case "flow.mark": {
         // A step of a run the plugin saw (a card waiting, answered, the end): written once for each (run, key), so the same
@@ -345,6 +345,7 @@ export function fold(lines) {
           f.summary = String(l.summary ?? "");
           f.costUsd = Number.isFinite(l.costUsd) ? l.costUsd : null;
           f.endedAt = l.at;
+          f.resume = l.resume ?? null;
         }
         break;
       }

@@ -70,7 +70,7 @@ const flowBlock = z.object({
   /** How long, and what it cost. */
   meta: z.string(),
   /** Open the card to answer (approve), or the run's own page (detail). */
-  action: z.object({ kind: z.enum(["approve", "detail"]), agentId: z.string().optional(), runId: z.string().optional() }).nullable(),
+  action: z.object({ kind: z.enum(["approve", "detail", "resume"]), agentId: z.string().optional(), runId: z.string().optional(), expect: z.string().optional(), spends: z.string().optional() }).nullable(),
   /** Runs started before this one. */
   more: z.number(),
   /** Said when the "现在" below it is older than the end of the run. */

@@ -24,6 +24,7 @@ export function lastActivity(s) {
 export function rotationReason(s, now, policy) {
   const c = policy.chat;
   if (!s.chatId || !s.chatTurn) return "";
+  if (s.flowRunning) return "";
   const tokens = s.chatTurn.tokens;
   const idle = now - lastActivity(s);
   if (idle < c.typingMinutes * MIN) return "";

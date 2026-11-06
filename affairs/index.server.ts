@@ -6,9 +6,10 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { loadPolicy, defaultRoot } from "./server/lib/policy.mjs";
 import { makeCtx } from "./server/lib/ops.mjs";
 import { settingsDefinition } from "./shared/settings";
-import { answerRpc, fileRpc, listRpc, panelRpc } from "./shared/rpc";
+import { answerRpc, fileRpc, listRpc, panelRpc, resumeFlowRpc } from "./shared/rpc";
 import type { PanelData } from "./shared/panel";
 import { createEngine, type Deliver, type PaseoLike } from "./server/engine";
+import { orchCommand, orchLogDir, wakeLostRuns } from "./server/lib/flows.mjs";
 
 // Affairs: one thing someone asked to have watched, with a workspace of its own. The affair command writes each
 // affair's log; this plugin keeps the chat of each affair (a real session of the model), draws into it what happened
@@ -37,6 +38,7 @@ export default function contribute(server: PluginServerContext) {
     await engine.answered(affairId, askId, text);
     return { ok: true, text: "" };
   });
+  server.handle(resumeFlowRpc, async (input) => engine ? engine.resumeFlow(input) : { ok: false, text: "事项还没准备好" });
 
   host.registerChannel?.({
     id: "affairs",
@@ -57,7 +59,7 @@ export default function contribute(server: PluginServerContext) {
     const home = process.env.PASEO_HOME;
     const own = home && path.resolve(home).toLowerCase() !== path.resolve(os.homedir(), ".paseo").toLowerCase();
     const ctx = makeCtx({ root, policy: loadPolicy(root), ...(own ? { paseoHome: home } : {}) });
-    const next = createEngine({ ctx, paseo: paseo ?? null, deliver: typeof host.deliver === "function" ? (channel, message) => host.deliver!(channel, message) : null, log, checkSetup: true });
+    const next = createEngine({ ctx, paseo: paseo ?? null, deliver: typeof host.deliver === "function" ? (channel, message) => host.deliver!(channel, message) : null, log, checkSetup: true, wakeLost: async () => { await wakeLostRuns({ orch: orchCommand(ctx.policy, ""), logDir: orchLogDir(ctx.policy), paseoHome: ctx.paseoHome }); } });
     engine = next;
     await next.start();
     log(`started (root ${root}${paseo ? "" : ", no server.paseo: no chat is kept"})`);

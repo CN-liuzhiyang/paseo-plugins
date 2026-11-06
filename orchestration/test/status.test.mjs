@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { claimFile, LIVE_WITHIN_MS } from "../runtime/claim.mjs";
 import { eventsFile } from "../runtime/events.mjs";
 import { runStatus } from "../runtime/status.mjs";
+import { pointPrint } from "../runtime/resume-point.mjs";
 import { tempDir } from "./temp.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -117,7 +118,8 @@ test("status: lost keeps the money that was spent and the last resume point the 
   const s = status(dir);
   assert.equal(s.state, "lost");
   assert.equal(s.costUsd, 0.5);
-  assert.deepEqual(s.resume, { flow: "plan-and-patch", from: "从方案接着做", spends: "nothing" });
+  const point = { flow: "plan-and-patch", input: {}, from: "从方案接着做", spends: "nothing" };
+  assert.deepEqual(s.resume, { ...point, print: pointPrint(point) });
   assert.equal(s.asking.length, 1);
 });
 
@@ -126,6 +128,15 @@ test("status: a refused run says why", async () => {
   writeFileSync(claimFile(dir, "r"), JSON.stringify({ pid: process.pid, hostname: os.hostname(), startedAt: at(0), refused: "no available provider" }));
   const s = status(dir);
   assert.deepEqual([s.state, s.refused], ["refused", "no available provider"]);
+});
+
+test("status: the fingerprint covers the declared flow and input, and clearing a point removes it", async () => {
+  const point = { flow: "plan-and-patch", input: { version: 2 }, from: "接着做", spends: "maybe" };
+  const s = status(await setup([start(), ev("run.end", { outcome: "stopped", resume: point })]));
+  assert.deepEqual(s.resume, { ...point, print: pointPrint(point) });
+  assert.notEqual(s.resume.print, pointPrint({ ...point, input: { version: 3 } }));
+  const cleared = status(await setup([start(), ev("resume", point), ev("resume", { cleared: true })]));
+  assert.equal(cleared.resume, null);
 });
 
 test("status: the command prints the same object, and refuses a bad --spawned-at", async () => {

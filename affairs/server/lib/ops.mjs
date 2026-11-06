@@ -4,7 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { dayStart, mayLook, tripped } from "./limits.mjs";
-import { eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
+import { canResume, resumeRefusal, eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
@@ -631,7 +631,7 @@ export async function flowSync(ctx, id) {
     if (!seen) continue;
     const now = ctx.now();
     if (seen.state === "refused" || (seen.state === "absent" && now - Date.parse(f.at) > 5 * 60_000)) {
-      write(ctx, id, [{ kind: "flow.fail", runId: f.runId, why: seen.refused || "没起来" }]);
+      write(ctx, id, [{ kind: "flow.fail", runId: f.runId, why: f.resumeOf && seen.refused ? resumeRefusal(seen.refused) : seen.refused || "没起来" }]);
       ctx.flowNow.delete(f.runId);
       changed = true;
       continue;
@@ -737,15 +737,16 @@ async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
  * and only then is the run written down and started; one that could not be started is taken back (`flow.fail`).
  * @returns {Promise<Result>}
  */
-export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false } = {}) {
+export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | number} */ (""), again = false, resume = false } = {}) {
   if (byLook(ctx)) return lookRefused("起流程");
+  if (resume) return resumeFlow(ctx, ref, { saidSeq });
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
   const flows = flowsOf(ctx.policy);
   const link = parseLink(s.link);
   const mine = Object.entries(flows).filter(([, f]) => link && f.kinds.includes(link.kind));
-  if (!name) return { ok: true, text: mine.length ? `「${s.title}」能起的流程：\n${mine.map(([n, f]) => `- ${n}${f.says ? `（${f.says}）` : ""}`).join("\n")}` : `「${s.title}」没有能起的流程。` };
+  if (!name) return { ok: true, text: [mine.length ? `「${s.title}」能起的流程：\n${mine.map(([n, f]) => `- ${n}${f.says ? `（${f.says}）` : ""}`).join("\n")}` : `「${s.title}」没有能起的流程。`, ...await resumableLines(ctx, s)].join("\n") };
   const f = flows[name];
   if (!f) return fail(`没有叫「${name}」的流程可起。${Object.keys(flows).length ? `能起的有：${Object.keys(flows).join("、")}。` : "现在一个都没配。"}`);
   if (!link || !f.kinds.includes(link.kind)) return fail(`${name} 管的是 ${f.kinds.join("、")} 的事，「${s.title}」不是，起不了。`);
@@ -798,6 +799,48 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   const head = `起了 ${name}${f.says ? `（${f.says}）` : ""}，要你批的时候这件事会亮。`;
   const text = lastSame ? `${head}\n这件事 ${stamp(lastSame.at, ctx.now(), ctx.policy.tz)} 跑过一次 ${name}（${lastOutcome}），这是第${NTH[same.length + 1] ?? same.length + 1}次。` : head;
   return { ok: true, text, runId, pid: started.pid };
+}
+
+/** A button supplies the fingerprint it showed; the chat asks the command to read it. Both use the same start boundary. */
+export async function resumeFlow(ctx, ref, { runId = "", expect = "", saidSeq = /** @type {string | number} */ ("") } = {}) {
+  if (byLook(ctx)) return lookRefused("接着跑流程");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const s = r.s;
+  const f = runId ? s.flows.find((x) => x.runId === runId && !x.failed) : s.flows.filter((x) => !x.failed).at(-1);
+  if (!f) return fail("这件事还没有起过流程。");
+  const orch = orchCommand(ctx.policy, BIN);
+  const logDir = logDirOf(f, orchLogDir(ctx.policy));
+  const st = await readStatus({ orch, logDir, runId: f.runId, spawnedAt: Date.parse(f.at) });
+  if (!canResume(st)) return fail(st?.state === "lost" ? "流程没了下文，要先由负责的人确认做到哪了。" : "这次没有能接着做的位置；要重来用 --again（从头，约 $0.5）。");
+  const ready = await gateNotReady(ctx);
+  if (ready) return fail(ready);
+  const next = randomUUID();
+  const reserved = await withFlowLock(ctx.root, async () => {
+    const allowed = await flowAllowed(ctx, state(ctx, s.id), st.resume.flow, { saidSeq, again: true, orch, logDir });
+    if ("fail" in allowed) return allowed;
+    write(ctx, s.id, [{ kind: "flow", flow: st.resume.flow, runId: next, events: eventsFile(logDir, next), timeoutMs: f.timeoutMs, by: ctx.by, resumeOf: f.runId, ...(allowed.said !== null ? { said: allowed.said } : {}) }]);
+    return allowed;
+  });
+  if ("fail" in reserved) return fail(reserved.fail);
+  const args = [orch, "resume", f.runId, "--run-id", next, "--expect", expect || st.resume.print];
+  const started = await startRun({ args, cwd: s.workdir, env: runEnv(process.env, { paseoHome: ctx.paseoHome, logDir }), logDir, runId: next, waitMs: ctx.flowWaitMs, start: ctx.flowStart });
+  if (!started.ok) {
+    const why = resumeRefusal(started.why);
+    write(ctx, s.id, [{ kind: "flow.fail", runId: next, why }]);
+    return fail(why);
+  }
+  return { ok: true, text: `接着跑了：${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}。`, runId: next };
+}
+
+async function resumableLines(ctx, s) {
+  const f = s.flows.filter((x) => !x.failed).at(-1);
+  if (!f) return [];
+  const st = await readStatus({ orch: orchCommand(ctx.policy, BIN), logDir: logDirOf(f, orchLogDir(ctx.policy)), runId: f.runId, spawnedAt: Date.parse(f.at) });
+  if (canResume(st)) return [`能续的停下：${f.flow}，${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}。他说要接着跑后，用 flow ${s.id} --resume --said-seq N。`];
+  if (st?.state === "ended" && st.outcome !== "done") return ["这次没有能接着做的位置；要重来用 --again（从头，约 $0.5）。"];
+  if (st?.state === "lost") return ["流程没了下文，要先由负责的人确认做到哪了，不能直接接着跑。"];
+  return [];
 }
 
 /** @returns {Result} */
@@ -932,6 +975,7 @@ export async function brief(ctx, ref, { chat = false } = {}) {
         ]
       : []),
     ...flowLines(s, now, tz),
+    ...await resumableLines(ctx, s),
     "## 记住的",
     ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
     "",
@@ -1033,6 +1077,7 @@ async function briefChat(ctx, s) {
     ...(asks.length ? asks.map((a) => `- ${a.id}：${a.title}（选项：${a.options.join("、") || "无"}）`) : ["- （没有）"]),
     "",
     ...flowLines(s, now, tz),
+    ...await resumableLines(ctx, s),
     "## 记住的",
     ...(s.facts.length ? s.facts.map((f) => `- ${f}`) : ["- （还没有）"]),
     "",

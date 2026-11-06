@@ -3,7 +3,7 @@ import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
 import { Pressable, ScrollView, View } from "react-native";
 import type { PanelData } from "../shared/panel";
-import { answerRpc, panelRpc } from "../shared/rpc";
+import { answerRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 import { FlowBox } from "./flow";
 import { Materials, useFiles } from "./files";
@@ -23,6 +23,9 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   const c = theme.colors;
   const load = useRpc(panelRpc);
   const answer = useRpc(answerRpc);
+  const resumeFlow = useRpc(resumeFlowRpc);
+  const [resuming, setResuming] = useState(false);
+  const [flowReply, setFlowReply] = useState("");
   const files = useFiles(workspaceId, (navigation as { openFile?: OpenFile } | undefined)?.openFile);
   const [panel, setPanel] = useState<PanelData | null | undefined>(undefined);
   const [showFacts, setShowFacts] = useState(false);
@@ -66,7 +69,16 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, paddingBottom: 28 }}>
       <StateBadge mood={panel.mood} c={c} />
       {panel.flow ? heading("流程") : null}
-      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} /> : null}
+      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} busy={resuming} resume={() => {
+        const action = panel.flow?.action;
+        if (!action?.runId || !action.expect || resuming) return;
+        setResuming(true);
+        void resumeFlow({ affairId: panel.id, runId: action.runId, expect: action.expect }).then(async (r) => {
+          setFlowReply(r.text);
+          setPanel((await load({ workspaceId })).panel);
+        }).catch(() => setFlowReply("没连上，请过一会儿再试。")).finally(() => setResuming(false));
+      }} /> : null}
+      {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
       {heading("现在")}
       {panel.asks.map((a) => (
         <QuestionCard key={a.id} c={c} title={a.title} line={a.line}>
@@ -77,7 +89,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
               text={o}
               primary={i === 0}
               c={c}
-              onPress={() => void answer({ affairId: panel.id, askId: a.id, text: o }).then(() => load({ workspaceId }).then((r) => setPanel(r.panel)))}
+              onPress={() => void answer({ affairId: panel.id, askId: a.id, text: o }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); })}
             />
           ))}
         </QuestionCard>

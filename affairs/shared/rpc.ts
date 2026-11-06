@@ -39,3 +39,9 @@ export const answerRpc = defineRpc({
   input: z.object({ affairId: z.string(), askId: z.string(), text: z.string() }),
   output: z.object({ ok: z.boolean(), text: z.string() }),
 });
+
+export const resumeFlowRpc = defineRpc({
+  name: "affairs.resume-flow",
+  input: z.object({ affairId: z.string(), runId: z.string(), expect: z.string().regex(/^[0-9a-f]{16}$/) }),
+  output: z.object({ ok: z.boolean(), text: z.string() }),
+});

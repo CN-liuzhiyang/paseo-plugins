@@ -6,8 +6,10 @@
 import { existsSync } from "node:fs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
+import { pointOf, pointPrint } from "./resume-point.mjs";
 
 const oneLine = (text, limit = 120) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+const resumeStatus = (point) => point ? { ...pointOf(point), print: pointPrint(point) } : null;
 
 /**
  * @param {{ dir: string, runId: string, now?: () => number, spawnedAt?: number | null }} options
@@ -78,7 +80,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
         anyCost = true;
       }
     } else if (e.kind === "resume") {
-      resume = { flow: e.flow, from: oneLine(e.from, 60), spends: e.spends };
+      resume = e.cleared ? null : resumeStatus(e);
     } else if (e.kind === "run.end") {
       end = e;
     }
@@ -108,7 +110,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
     out.summary = end.summary ? oneLine(end.summary, 200) : null;
     out.stop = end.stop ? { reason: oneLine(end.stop.reason, 200), kind: end.stop.kind ?? null } : null;
     out.error = end.error ? { name: end.error.name, message: oneLine(end.error.message, 200) } : null;
-    out.resume = end.resume ? { flow: end.resume.flow, from: oneLine(end.resume.from, 60), spends: end.resume.spends } : null;
+    out.resume = resumeStatus(end.resume);
   } else {
     out.durationMs = Math.max(0, now() - Date.parse(start.ts));
     out.resume = resume;

@@ -404,6 +404,11 @@ export function createEngine(deps: EngineDeps) {
 
   return {
     start, stop, scan, scanAll, view, panel, file, affairs, runEnded, readPass,
+    resumeFlow: async ({ affairId, runId, expect }: { affairId: string; runId: string; expect: string }) => {
+      const result = await ops.resumeFlow(ctx, affairId, { runId, expect });
+      await scan(affairId);
+      return result;
+    },
     /** Waits for the looks asked for after a delivery (tests). */
     settle: async () => {
       while (lookWork.size) await Promise.all([...lookWork]);

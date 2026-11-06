@@ -1,6 +1,7 @@
 import { chatCreateOptions, noticeFor, rotationReason } from "./lib/chat.mjs";
 import { isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
+import { orchCommand, orchLogDir } from "./lib/flows.mjs";
 import { ASK_KIND, ASK_VERSION, LINE_KIND, LINE_VERSION, type Segment } from "../shared/card";
 
 // The chat of an affair is a real session of the model (made in the affair's workspace, here). This file keeps it:
@@ -179,7 +180,11 @@ export function createChats(deps: ChatDeps) {
     for (const [old, owner] of [...toPutAway]) if (owner === id) await putAway(id, old);
     if (await recognizeRevived(id)) return;
     s = deps.state(id);
-    const reason = isOpen(s) ? rotationReason(s, ctx.now(), ctx.policy) : "";
+    let flowRunning = false;
+    for (const f of s.flows.filter((f: { failed: string }) => !f.failed)) {
+      if ((await ops.flowStateOf(ctx, f, orchCommand(ctx.policy, ops.BIN), orchLogDir(ctx.policy))).state === "going") { flowRunning = true; break; }
+    }
+    const reason = isOpen(s) ? rotationReason({ ...s, flowRunning }, ctx.now(), ctx.policy) : "";
     // Not while the chat is in the middle of a turn: it may be working on what he just asked, and the new one would not know. The next scan asks again.
     if (reason && !(await busy(s.chatId))) await replace(id, reason, s.chatId);
   }

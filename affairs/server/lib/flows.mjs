@@ -1,4 +1,5 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -72,6 +73,13 @@ export const claimFile = (logDir, runId) => path.join(logDir, "runs", `${runId}.
 
 /** The words for how a run ended, as he reads them. */
 export const outcomeText = (outcome) => ({ done: "做完了", stopped: "停了", failed: "出错停了", timeout: "超时停了", lost: "没了下文", "": "" })[outcome] ?? outcome;
+
+/** Only an explicit end can offer the person a continuation. A lost writer needs its steward first. */
+export const canResume = (st) => st?.state === "ended" && ["stopped", "failed", "timeout"].includes(st.outcome) && Boolean(st.resume?.print);
+export const resumeRefusal = (why) => /not the one that was shown/.test(why) ? "接着做的位置变了，请刷新后再点一次。" : /already carried on|being carried on/.test(why) ? "这次停下已经接着跑过了，请看最新的一次。" : `没接上：${why}`;
+
+/** The runtime alone decides which missing writers are known dead and which steward should hear. */
+export const wakeLostRuns = ({ orch, logDir, paseoHome }) => promisify(execFile)(process.env.AFFAIR_NODE || "node", [orch, "wake-lost"], { env: runEnv(process.env, { paseoHome, logDir }), windowsHide: true, timeout: 60_000 });
 
 /** The environment the run's process gets: what is ours minus the identity of the session that asked; the daemon it is for stays. */
 export function runEnv(base, { paseoHome = "", logDir = "" } = {}) {
@@ -298,7 +306,7 @@ export function marksOf(st) {
   if (over) {
     const [text, bad] = endWords(st);
     const outcome = st.state === "lost" ? "lost" : String(st.outcome ?? "");
-    out.push({ key: "end", text, tone: bad ? "red" : "normal", outcome, summary: String(st.summary ?? ""), costUsd: Number.isFinite(st.costUsd) ? st.costUsd : null });
+    out.push({ key: "end", text, tone: bad ? "red" : "normal", outcome, summary: String(st.summary ?? ""), costUsd: Number.isFinite(st.costUsd) ? st.costUsd : null, resume: canResume(st) ? st.resume : null });
   }
   return out;
 }

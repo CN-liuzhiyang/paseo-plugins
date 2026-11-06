@@ -88,6 +88,9 @@
 `costUsd`（结束了取 `run.end.cost.totalUsd`，没结束是已结束的调用之和，一个都没有为 null）；`summary`、`stop`、`error`、`resume`（同 `run.end`，没结束时 `resume` 取最后一行 `resume` 事件）。
 没有事件文件时这些都是 null、空数组，`state` 照样给。
 
+`resume` 非空时含 `{ flow, input, from, spends, print }`；`print` 来自 `pointPrint`，覆盖实际要启动的流程和输入。
+显示续跑点的调用方应把显示时的 `print` 传给 `resume --expect`，不能在点击后换成新指纹。撤回续跑点后，status 返回 null。
+
 规则：
 
 - **"活着"只看占位文件的修改时间。** pid 会被系统复用，一个同号的别的进程在，不能说明这次运行在。pid 只用来
