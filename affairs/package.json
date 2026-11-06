@@ -13,7 +13,8 @@
     "bin/",
     "readers/",
     "handbook.md",
-    "agent-usage.md"
+    "agent-usage.md",
+    "handbook.chat.md"
   ],
   "bin": {
     "affair": "bin/affair.mjs"

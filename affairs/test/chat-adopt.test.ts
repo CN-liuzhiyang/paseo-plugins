@@ -16,7 +16,7 @@ async function setup(rootWithSpaces = false) {
     w.ctx.command = w.ctx.command.replace(w.root, root);
     w.root = w.ctx.root = root;
   }
-  const made = await ops.create(w.ctx, { title: "预约", said: "盯一下预约", noWait: true });
+  const made = await ops.create(w.ctx, { id: "dental", title: "预约", said: "盯一下预约", noWait: true });
   const id = made.id as string;
   const ws = load(w.root, id).workspaceId;
   const agents = new Map<string, ChatAgent>();
@@ -91,7 +91,7 @@ test("a new ordinary chat is adopted promptly through directory events, hears ea
     assert.equal(s.sent.length, 1);
     const promptFile = path.resolve(affairDir(s.w.root, s.id), "chat-prompt.md");
     assert.equal(readFileSync(promptFile, "utf8"), chatPrompt(s.w.ctx, state));
-    assert.equal(s.sent[0].text, `这是事项 D1「预约」的对话。先读 ${promptFile.replaceAll("\\", "/")}，照里面做（它说每次先跑 brief --chat），再回答我刚才说的。`);
+    assert.equal(s.sent[0].text, `这是事项 dental「预约」的对话。先读 ${promptFile.replaceAll("\\", "/")}，照里面做（它说每次先跑 brief --chat），再回答我刚才说的。`);
     assert.ok(s.sent[0].text.length <= 200, "the visible message stays short");
     assert.doesNotMatch(s.sent[0].text, /affair\.mjs|node |--root|会话|校验|读数|\\|\n/);
     assert.deepEqual(s.sent[0].options, { messageId: "affair-chat:adopted:new", activeTurnBehavior: "steer" });

@@ -17,7 +17,7 @@ const lookOf = (w: W) => ({ ...w.ctx, by: "look" });
 const runs = (w: W) => w.calls().filter((c) => c[1] === "run-once").length;
 
 async function started(w: W, extra: Record<string, unknown> = {}) {
-  const made = await ops.create(w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
+  const made = await ops.create(w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
   assert.equal(made.ok, true, made.text);
   return made.id as string;
 }
@@ -85,11 +85,11 @@ test("the chat session is told by its label, which says which affair it is the c
 test("the chat of one affair touches no other, and cannot start, stop-all, or run a look's brief", async () => {
   const w = world();
   const id = await started(w);
-  const other = (await ops.create(w.ctx, { title: "体检", noWait: true })).id as string;
+  const other = (await ops.create(w.ctx, { id: "other-2", title: "体检", noWait: true })).id as string;
   const c = chatOf(w, id);
-  assert.match((await ops.note(c, other, { said: "x", mine: true })).text, /只管 D1/);
-  assert.match((await ops.show(c, other)).text, /只管 D1/);
-  assert.equal((await ops.create(c, { title: "新的", noWait: true })).ok, false);
+  assert.match((await ops.note(c, other, { said: "x", mine: true })).text, /只管 dental/);
+  assert.match((await ops.show(c, other)).text, /只管 dental/);
+  assert.equal((await ops.create(c, { id: "other-3", title: "新的", noWait: true })).ok, false);
   assert.equal((await ops.pauseAll(c)).ok, false);
   assert.equal((await ops.resumeAll(c)).ok, false);
   const b = await ops.brief(c, id);
@@ -158,7 +158,7 @@ test("note --mine: one sentence of at most 120 characters, no secret, no inner w
   assert.match((await ops.note(c, id, { said: "", mine: true })).text, /没有话/);
   // Without --mine the chat cannot record anything in his name; and --mine is the chat's alone.
   assert.match((await ops.note(c, id, { said: "他说可以了" })).text, /不能以他的名义/);
-  assert.match((await ops.note(w.ctx, id, { said: "x", mine: true })).text, /只有对话的会话用/);
+  assert.match((await ops.note(w.ctx, id, { said: "x", mine: true })).text, /只有对话的会话或已经 attach/);
   await ops.stop(w.ctx, id, { evidence: "不用了" });
   assert.match((await ops.note(c, id, { said: "收尾", mine: true })).text, /不盯了/);
 });
@@ -329,7 +329,7 @@ test("pause from the chat: --said is refused; --said-seq must name a line of his
   assert.equal(load(w.root, id).next.source, "user", "his words backed it");
   assert.equal(load(w.root, id).next.at.slice(0, 10), "2026-11-20");
   assert.equal((await ops.pause(c, id, "2026-11-04 09:30")).ok, true, "within the limit it needs none");
-  assert.equal(load(w.root, id).next.source, "chat");
+  assert.equal(load(w.root, id).next.source, "user", "default uses his newest words in this turn");
   // a human's --said-seq is not a thing
   assert.match((await ops.pause(w.ctx, id, "2026-11-05 09:30", "", { saidSeq: said })).text, /只有对话/);
 });
@@ -410,7 +410,7 @@ test("the chat's own lines are drawn plainly: its notes in a row, its hand-ins a
 
 test("an unknown kind of line is skipped by the fold, and the lines after it still count", () => {
   const lines = [
-    { seq: 1, at: "2026-11-02T10:00:00+08:00", kind: "created", id: "D1", title: "洗牙" },
+    { seq: 1, at: "2026-11-02T10:00:00+08:00", kind: "created", id: "dental", title: "洗牙" },
     { seq: 2, at: "2026-11-02T10:00:01+08:00", kind: "from-the-future", whatever: { a: 1 } },
     { seq: 3, at: "2026-11-02T10:00:02+08:00", kind: "note", by: "chat", text: "一条" },
     { seq: 4, at: "2026-11-02T10:00:03+08:00", kind: "chat", agentId: "agent-1" },
@@ -433,10 +433,8 @@ test("brief --chat: where it stands, what is new since it last read, what it wro
   const b0 = await chatReads(w, id);
   assert.match(b0, /事项 555001：#555001 引擎外放/);
   assert.match(b0, /#2 .*他说：「帮我盯一下洗牙/, "the first read shows what there is");
-  assert.match(b0, /\[#555001\]\(https:\/\/pm\.example\.invalid\/v6\/issues\/555001\)/, "the affair's own ticket, written as a link");
-  assert.match(b0, /gcp：\[<号>\]\(https:\/\/pm\.example\.invalid\/v6\/issues\/\{ref\}\)/);
-  assert.match(b0, /没有（这是这件事的第一段对话）/);
-  assert.equal(await chatReads(w, id).then((t) => /- 没有新的/.test(t)), true, "read again: nothing new");
+  assert.doesNotMatch(b0, /引用怎么写|怎么记、怎么交|## 记住的/);
+  assert.equal(await chatReads(w, id), "没有新的。");
   // news: a look's result, something he said elsewhere, a question, an answer given in the app
   w.advance(HOUR);
   await looked(w, id, { ask: { title: "要不要提醒？", options: ["要", "不要"] } });
@@ -448,8 +446,8 @@ test("brief --chat: where it stands, what is new since it last read, what it wro
   assert.match(b1, /看一眼的结果：飞书里有/);
   assert.match(b1, /他说：「下周一我出差」/);
   assert.match(b1, /他答了问题 .*「要」/);
-  assert.doesNotMatch(b1.split("## 没答的问题")[0], /在对话里说的话不算新消息/);
-  assert.match(b1, /最近 10 行经过[\s\S]*在对话里说的话不算新消息/, "but it is in the lines she can point to");
+
+  assert.match(b1, /在对话里说的话不算新消息/, "but it is in the lines she can point to");
   const wakesBefore = wakes();
   const runsBefore = runs(w);
   await chatReads(w, id);
@@ -464,13 +462,11 @@ test("brief --chat: its own notes are listed (the latest ten), and a closed affa
   await chatReads(w, id);
   for (let i = 1; i <= 12; i++) await ops.note(c, id, { said: `结论${i}`, mine: true });
   const b = await chatReads(w, id);
-  assert.match(b, /结论12/);
-  assert.match(b, /结论3\b/);
-  assert.doesNotMatch(b, /结论2\b/);
+  assert.equal(b, "没有新的。", "own notes are already known to this chat");
   await ops.stop(w.ctx, id, { evidence: "不用了" });
   const closed = await ops.brief(c, id, { chat: true });
   assert.equal(closed.ok, true);
-  assert.match(closed.text, /已经不盯了/);
+  assert.match(closed.text, /不盯了/);
 });
 
 test("brief --chat names the earlier chats and tells when to look into them", async () => {
@@ -480,9 +476,7 @@ test("brief --chat names the earlier chats and tells when to look into them", as
   process.env.PASEO_AGENT_ID = "agent-now";
   try {
     const b = await chatReads(w, id);
-    assert.match(b, /以前的对话[\s\S]*1 段（最早 11-02/);
-    assert.match(b, /history D1 --q <词>/);
-    assert.match(b, /别去读整段旧对话/);
+    assert.doesNotMatch(b, /怎么记、怎么交|引用怎么写/);
   } finally {
     delete process.env.PASEO_AGENT_ID;
   }

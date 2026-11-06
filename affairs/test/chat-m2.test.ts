@@ -66,7 +66,7 @@ function setup(policyOver: Record<string, unknown> = {}, opts: Parameters<typeof
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
-  const made = await ops.create(s.w.ctx, { title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
+  const made = await ops.create(s.w.ctx, { id: "dental", title: "洗牙", goal: "约上洗牙", said: "帮我盯一下洗牙，今天最好要搞定", noWait: true, ...extra });
   await s.engine.scan(made.id);
   return made.id as string;
 };
@@ -100,7 +100,7 @@ test("a new affair's chat has the model of its looks, a long cache, its label an
 test("an affair from before (with the old conversation): a chat is made, the old one is put away, and the first line says it can be talked to", async () => {
   // as if this affair had been made by the old version: a conversation in the log and no chat
   const t = setup();
-  const made = await ops.create(t.w.ctx, { title: "老的", goal: "x", said: "盯一下老的", noWait: true });
+  const made = await ops.create(t.w.ctx, { id: "other-2", title: "老的", goal: "x", said: "盯一下老的", noWait: true });
   append(t.w.root, made.id, [{ kind: "conversation", agentId: "old-conv" }], { now: t.w.now() });
   await t.engine.scan(made.id);
   assert.equal(t.p.made.length, 1);
@@ -451,7 +451,7 @@ test("a question taken back is turned into a line that says it need not be answe
 
 test("the panel's sources: the affair's own link first, what is watched, references in what is remembered, once each; at most six and how many more", async () => {
   const w = world({ policy: { links: { gcp: "https://pm.example.invalid/issues/{ref}" }, linkHash: "gcp" } });
-  const made = await ops.create(w.ctx, { title: "闪退 #987735", goal: "盯 #987735", said: "盯一下 #987735", link: "gcp:987735", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-3", title: "闪退 #987735", goal: "盯 #987735", said: "盯一下 #987735", link: "gcp:987735", noWait: true });
   const id = made.id as string;
   await ops.brief(w.ctx, id);
   const facts = Array.from({ length: 8 }, (_, i) => `提交 #${100001 + i} 已合并`);
@@ -465,7 +465,7 @@ test("the panel's sources: the affair's own link first, what is watched, referen
   assert.equal(p.sources.items.filter((i: { href: string }) => i.href?.endsWith("/987735")).length, 1, "the main ticket is not listed twice");
   assert.ok(p.sources.more >= 1);
   const plain = world({ policy: { links: {}, linkHash: "" } });
-  const m2 = await ops.create(plain.ctx, { title: "洗牙", goal: "x", said: "盯", link: "gcp:555", noWait: true });
+  const m2 = await ops.create(plain.ctx, { id: "other-4", title: "洗牙", goal: "x", said: "盯", link: "gcp:555", noWait: true });
   const s2 = { ...load(plain.root, m2.id), lines: read(plain.root, m2.id) };
   const p2 = panelOf(plain.root, s2, plain.now(), plain.ctx.policy, linkContext(plain.ctx.policy, s2.link));
   assert.equal(p2.sources.items[0].href, null, "a kind with no address is listed and cannot be opened");
@@ -473,7 +473,7 @@ test("the panel's sources: the affair's own link first, what is watched, referen
 
 test("the panel's materials are what is in files/ and only that: his chat pictures are not there; what came to files/ from him is marked", async () => {
   const w = world();
-  const made = await ops.create(w.ctx, { title: "牙", goal: "x", said: "盯", noWait: true });
+  const made = await ops.create(w.ctx, { id: "other-5", title: "牙", goal: "x", said: "盯", noWait: true });
   const id = made.id as string;
   let s = { ...load(w.root, id), lines: read(w.root, id) };
   assert.deepEqual(panelOf(w.root, s, w.now(), w.ctx.policy, linkContext(w.ctx.policy, null)).materials, { items: [], more: 0 });
@@ -512,16 +512,16 @@ test("the prompt a chat is made with lets it know its affair and where the handb
   const text = chatPrompt(s.w.ctx, load(s.w.root, id));
   assert.match(text, new RegExp(`事项 ${id}`));
   assert.match(text, /note .*--mine/);
-  assert.match(text, /「试跑」「测一下流程」「不要真提交」.*--trial/);
-  assert.match(text, /没这么说就别加/);
-  assert.match(text, /别抄密码/, "pictures: only the points, as words, and nothing secret");
+  assert.match(text, /明确说试跑时加 --trial/);
+  assert.match(text, /只有他这一轮明确说的话才能授权/);
+  assert.match(text, /凭据不抄/, "pictures: only the points, as words, and nothing secret");
 });
 
 // ---- which model the chat runs on ----------------------------------------------------------------------------
 
 test("the chat's model: by default the look's, policy.chat.role names another for all chats, a role's own chat entry wins; a role that brings its own env leaves the Claude cache setting out", () => {
   const w = world();
-  const s = { id: "D1", title: "洗牙", roleName: "", workspaceId: "ws" };
+  const s = { ...load(w.root, "dental"), id: "dental", title: "洗牙", roleName: "", workspaceId: "ws" };
   const policy = (over: Record<string, unknown>, roles: Record<string, unknown> = {}) => ({
     ...w.ctx,
     policy: { ...DEFAULT_POLICY, ...over, chat: { ...DEFAULT_POLICY.chat, ...((over.chat as object) ?? {}) }, roles: { ...DEFAULT_POLICY.roles, ...roles } },
@@ -541,7 +541,7 @@ test("the chat's model: by default the look's, policy.chat.role names another fo
   const own = chatCreateOptions(policy({}, { glance: { ...look, chat: { provider: "pi/some-model", env: { SOME: "1" } } } }) as never, s as never);
   assert.equal(own.config.provider, "pi/some-model");
   assert.equal(own.env.CLAUDE_CODE_PROMPT_CACHE_TTL, undefined);
-  assert.deepEqual([own.env.SOME, own.env.AFFAIR_ID], ["1", "D1"]);
+  assert.deepEqual([own.env.SOME, own.env.AFFAIR_ID], ["1", "dental"]);
   // the looks are not touched by any of it
   assert.equal(roleOf(policy({ chat: { role: "talk" } }, { talk: other }).policy, undefined).provider, look.provider);
 });

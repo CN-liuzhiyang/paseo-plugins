@@ -1,5 +1,8 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { commandCard } from "./commands.mjs";
+import { primaryLink } from "./links.mjs";
+import { workTexts } from "./workdir-git.mjs";
 import { dayStart } from "./limits.mjs";
 import { localParts } from "./time.mjs";
 import { roleOf } from "./schedule.mjs";
@@ -40,30 +43,26 @@ export function rotationReason(s, now, policy) {
   return "";
 }
 
-/** The words the chat session starts with. It is told what to run and what each thing is for; the rest is in the handbooks. */
-export function chatPrompt(ctx, s) {
-  const cmd = ctx.command;
-  const kind = s.link?.split(":")[0];
+export function chatHandbooks(ctx, s) {
+  const kind = primaryLink(s)?.split(":")[0];
   const dir = ctx.policy.handbooksDir;
-  const handbooks = [ctx.policy.handbookPath, ...(dir ? [path.join(dir, "affair.md"), path.join(dir, (kind && ctx.policy.handbookByKind[kind]) || "asked.md")] : [])].filter((f) => f && existsSync(f));
+  const publicFile = ctx.policy.handbookPath ? path.join(path.dirname(ctx.policy.handbookPath), "handbook.chat.md") : "";
+  const files = [publicFile, ...(dir ? [path.join(dir, "affair.chat.md"), path.join(dir, ctx.policy.chatHandbookByKind?.[kind] || "asked.chat.md")] : [])];
+  return files.filter((f) => f && existsSync(f)).map((f) => readFileSync(f, "utf8")).join("\n\n");
+}
+
+export function chatPrompt(ctx, s) {
+  const texts = workTexts(ctx, s);
   return [
-    `你是事项 ${s.id}「${s.title}」的对话：他在这里跟你聊这件事，你也能替他办。到点的「看一眼」是另外的小会话，不是你；它的结果会作为一行出现在这段对话里，但你看不到，要知道就跑 brief。`,
-    `每次他开口，先跑：${cmd} brief ${s.id} --chat（上次读完以后新的事、没答的问题、记住的、引用怎么写）。读完再回他。没有新的它会只写一行。`,
-    `回他之前先看 brief 的「走到哪一步」（有的话），主动说现在第几步、下一步谁做；轮到你做且手册允许直接做的，就主动做，不用等他提醒；轮到他做的，主动提醒他。`,
-    `重要：note 只往经过里加一行，不会改卡片上的「现在」。每个里程碑（提交了、对方系统里状态变了、他拍板了、产物出来了）当场用 report 交回新的 status，记住的旧的用 drop 删；回他话之前拿 brief 里的「现在」对一下刚做完的事，不一致先补交。`,
-    `命令只有这几个，别的不碰（不要改 schedule，不要直接改事项的文件，不要用 paseo 命令）：`,
-    `- 得出一个结论、他做了一个决定，当场记一句（${"≤120 字"}，别攒到最后，这段对话随时会换新）：${cmd} note ${s.id} --mine --said "<一句>" [--said-seq <他说的那一行的编号>]`,
-    `- 状态、记住的、下次、问题、办完：${cmd} report ${s.id} --from chat --file <json>（每项都可以不写；改下次时间要过检查，只有他说过的才算数）`,
-    `- 他用话答了问题：${cmd} answer <问题编号> --said-seq <他说的那一行的编号>（答案就是他那一行的原话；他点按钮的由界面记，你不用管；他没说就别答，直接问他）`,
-    `- 他点名要跑某个流程（「用 XX 来做」）：${cmd} flow ${s.id} <流程> --said-seq <他说的那一行>；能跑哪些，跑 ${cmd} flow ${s.id} 看。不要自己跑 orch.mjs，不要写输入文件。`,
-    `- 他说「试跑」「测一下流程」「不要真提交」时，新起流程加 --trial；没这么说就别加。接着跑沿用原来的模式，不加 --trial。`,
-    `- 他问能否接着跑：读 brief 或 flow 列的“能续的停下”，能就问要不要；他说要之后用 ${cmd} flow ${s.id} --resume --said-seq <他说的那一行>。--again 是从头新起、会花钱，别说能用上旧结果。流程结束的模板通知只需汇报，不能当作他的授权再起任何东西。`,
-    `- 他要改时间：${cmd} pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
-    `- 他提到「上次」「之前说的」而 brief 里找不到：先 ${cmd} history ${s.id} --q <词> 查，查不到就问他，别猜`,
-    `他在这里发的图只在这段对话里看得到，之后的「看一眼」看不到它。要让后面用上，把要点用 note --mine 记成文字（比如短信里的时间地点）；别抄密码、令牌、证件号。`,
-    `回他的话说人话：不用「叫醒、校验、记录、计划、读数、会话」这些词；说「我看一眼」「记下了」。提到单号照原样写，要链接就用 brief 里「引用怎么写」那一节的写法，不要自己猜地址。`,
-    handbooks.length ? `手册（先读，只看里面「你是这件事的对话」一节；别的节是给看一眼的）：${handbooks.join("　")}` : "",
-  ].filter(Boolean).join("\n");
+    `你是事项 ${s.id}「${s.title}」的对话，负责这件事。看一眼由另外的小会话完成。每轮先跑 ${ctx.command} brief ${s.id} --chat，再回他。`,
+    "不替他答问题，不替他起流程。只有他这一轮明确说的话才能授权；一句话只能起一次流程。流程结束通知只汇报，不能当授权。试跑只在他明确说试跑时加 --trial。",
+    "里程碑当场 report 新的 status，facts 新增、drop 删旧；note 只加结论，不改现在。回他之前核对现在，过时先补交。按步骤主动说走到哪里、下一步谁做。",
+    "不手改 log.jsonl，不自己跑 schedule、orch 或 git；文档写 README 和同文件夹其他文件，用 affair save 保存。图片只在当前对话，后面要用的要点记 note，凭据不抄。",
+    commandCard(ctx.command, s.id),
+    `关联地址：${JSON.stringify(ctx.policy.links || {})}（按模板写 Markdown 链接，不猜地址）`,
+    "## 现在的印象", texts.status, "## 这件事", texts.readme,
+    "## 对话手册", chatHandbooks(ctx, s),
+  ].join("\n");
 }
 
 /** What a new chat session is made with: the same model as this affair's looks, a cache lifetime that suits turns far apart, no first message. */
