@@ -54,6 +54,7 @@ export function chatPrompt(ctx, s) {
     `- 状态、记住的、下次、问题、办完：${cmd} report ${s.id} --from chat --file <json>（每项都可以不写；改下次时间要过检查，只有他说过的才算数）`,
     `- 他用话答了问题：${cmd} answer <问题编号> --said-seq <他说的那一行的编号>（答案就是他那一行的原话；他点按钮的由界面记，你不用管；他没说就别答，直接问他）`,
     `- 他点名要跑某个流程（「用 XX 来做」）：${cmd} flow ${s.id} <流程> --said-seq <他说的那一行>；能跑哪些，跑 ${cmd} flow ${s.id} 看。不要自己跑 orch.mjs，不要写输入文件。`,
+    `- 他问能否接着跑：读 brief 或 flow 列的“能续的停下”，能就问要不要；他说要之后用 ${cmd} flow ${s.id} --resume --said-seq <他说的那一行>。--again 是从头新起、会花钱，别说能用上旧结果。流程结束的模板通知只需汇报，不能当作他的授权再起任何东西。`,
     `- 他要改时间：${cmd} pause ${s.id} --until "YYYY-MM-DD HH:mm" --said-seq <他说的那一行>；不盯了：stop；接着盯：resume；撤他上一句：undo`,
     `- 他提到「上次」「之前说的」而 brief 里找不到：先 ${cmd} history ${s.id} --q <词> 查，查不到就问他，别猜`,
     `他在这里发的图只在这段对话里看得到，之后的「看一眼」看不到它。要让后面用上，把要点用 note --mine 记成文字（比如短信里的时间地点）；别抄密码、令牌、证件号。`,
