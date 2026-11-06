@@ -313,7 +313,7 @@ export function fold(lines) {
       }
       case "asked":
         if (l.for === "breaker") s.breaker = true;
-        s.asks.push({ id: String(l.id), title: String(l.title ?? ""), line: String(l.line ?? ""), options: Array.isArray(l.options) ? l.options.map(String) : [], proposal: l.proposal ?? null, allowOther: l.allowOther !== false, for: l.for ?? "", at: l.at, seq: l.seq, state: "open", answer: "", answeredAt: null, via: "" });
+        s.asks.push({ id: String(l.id), title: String(l.title ?? ""), line: String(l.line ?? ""), options: Array.isArray(l.options) ? l.options.map(String) : [], runs: l.runs ?? {}, proposal: l.proposal ?? null, allowOther: l.allowOther !== false, for: l.for ?? "", at: l.at, seq: l.seq, state: "open", answer: "", answeredAt: null, via: "" });
         if (String(l.for ?? "").startsWith("down:") && s.watches[l.for.slice(5)]) s.watches[l.for.slice(5)].downAsked = true;
         break;
       case "answered": {

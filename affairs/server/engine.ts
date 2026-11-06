@@ -414,6 +414,6 @@ export function createEngine(deps: EngineDeps) {
     settle: async () => {
       while (lookWork.size) await Promise.all([...lookWork]);
     },
-    answered: async (id: string, qid: string, text: string) => void (await ops.answer(ctx, id, qid, text, "panel")),
+    answered: async (id: string, qid: string, text: string) => ops.answer(ctx, id, qid, text, "panel"),
   };
 }

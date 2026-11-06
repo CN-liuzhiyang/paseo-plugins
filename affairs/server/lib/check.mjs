@@ -13,6 +13,8 @@ export const ENTRY_SAY = 32;
 export const ENTRY_MAX = 40;
 /** A quote shorter than this does not prove anything, unless it is the whole of what was said. */
 const MIN_QUOTE = 6;
+export const optionLabel = (o) => typeof o === "string" ? o : o?.label;
+export const askFields = (a) => ({ title: a.title, line: a.line ?? "", options: a.options.map(optionLabel), runs: Object.fromEntries(a.options.filter((o) => typeof o === "object" && o?.run).map((o) => [o.label, o.run])) });
 const EVIDENCE_FROM = /^(?:said:\d+|answer:[\w-]+|link:\S+|watch:[\w.-]+|reader:\S+)$/;
 /** What looks like a credential, a token or a pairing link: none of it goes into an affair's folder. */
 const SECRETS = [
@@ -143,7 +145,8 @@ function checkStructure(report, finishing, chat = false) {
   else if (new Set(watches.map((w) => w.id)).size !== watches.length) add("watches", "watches 的 id 不能重复");
   if (report.ask !== undefined) {
     const a = report.ask;
-    if (!a || typeof a.title !== "string" || !a.title.trim() || !Array.isArray(a.options) || a.options.length < 1 || a.options.length > 3 || a.options.some((o) => typeof o !== "string" || !o.trim())) add("ask", "ask 要有 title 和 1–3 个选项（推荐的放第一个）");
+    if (!a || typeof a.title !== "string" || !a.title.trim() || !Array.isArray(a.options) || a.options.length < 1 || a.options.length > 3 || a.options.some((o) => typeof optionLabel(o) !== "string" || !optionLabel(o).trim() || typeof o === "object" && !/^[a-z][a-z0-9-]{0,40}$/.test(o.run ?? ""))) add("ask", "ask 要有 title 和 1–3 个选项；选项是文字或 {label, run}（推荐的放第一个）");
+    else if (new Set(a.options.map(optionLabel)).size !== a.options.length) add("ask", "ask 的选项文字不能重复");
   }
   const shown = [["status", report.status], ["entry", report.entry], ["ask", report.ask?.title], ["ask", report.ask?.line], ["next", report.next?.waitingFor], ["next", report.next?.why], ["finish", report.finish?.summary]];
   const noted = Array.isArray(report.facts) ? report.facts.map((f) => ["facts", f]) : [];
@@ -153,7 +156,10 @@ function checkStructure(report, finishing, chat = false) {
     const secret = secretIn(text);
     if (secret) add(field, `${field} 里有${secret}的东西，不要写进来（写「读到了一个令牌」这样的话就够）`);
   }
-  for (const o of Array.isArray(report.ask?.options) ? report.ask.options : []) if (typeof o === "string" && INNER_WORDS.test(o)) add("ask", "ask 的选项里有内部用词，换成人话");
+  for (const o of Array.isArray(report.ask?.options) ? report.ask.options : []) {
+    if (INNER_WORDS.test(optionLabel(o) ?? "")) add("ask", "ask 的选项里有内部用词，换成人话");
+    if (secretIn(optionLabel(o))) add("ask", "ask 的选项里像有密码或令牌，不要写进来");
+  }
   return out;
 }
 

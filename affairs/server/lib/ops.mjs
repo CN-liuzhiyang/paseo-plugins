@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
+import { askFields, buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
 import { dayStart, flowLook, mayLook, tripped } from "./limits.mjs";
 import { canResume, resumeRefusal, eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
 import { append, isOpen, listIds, load as loadState, nextId, read } from "./log.mjs";
@@ -472,6 +472,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     text = from.text;
   }
   write(ctx, s.id, [{ kind: "answered", id: qid, answer: text, via }]);
+  if (q.runs?.[text.trim()]) return flow(ctx, s.id, q.runs[text.trim()], { saidSeq: byChat(ctx) ? saidSeq : "" });
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
     write(ctx, s.id, [{ kind: "breaker.reset" }]);
@@ -1192,7 +1193,7 @@ async function reportFromChat(ctx, s, data) {
   }
   if (fell) entries.push({ kind: "flag", what: "fallback", detail: `对话交回的东西没全过：${result.detail}` });
   if (merged.ask && !fell && !badFields.has("ask")) {
-    entries.push({ kind: "asked", id: `${s.id}-${s.asks.length + 1}`, title: merged.ask.title, line: merged.ask.line ?? "", options: merged.ask.options });
+    entries.push({ kind: "asked", id: `${s.id}-${s.asks.length + 1}`, ...askFields(merged.ask) });
   }
   if (result.verdict === "ask" && merged.next && !fell) {
     const id = `${s.id}-${s.asks.length + 1 + (merged.ask ? 1 : 0)}`;
@@ -1350,7 +1351,7 @@ export async function report(ctx, ref, data, { from = "" } = {}) {
   }
   if (merged.ask && !fell) {
     const id = `${s.id}-${s.asks.length + 1}`;
-    entries.push({ kind: "asked", id, title: merged.ask.title, line: merged.ask.line ?? "", options: merged.ask.options });
+    entries.push({ kind: "asked", id, ...askFields(merged.ask) });
   }
   if (result.verdict === "ask") {
     const id = `${s.id}-${s.asks.length + 1 + (merged.ask ? 1 : 0)}`;

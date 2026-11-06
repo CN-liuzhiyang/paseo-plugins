@@ -35,8 +35,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(fileRpc, ({ workspaceId, name }) => engine?.file(workspaceId, name) ?? { ok: false, kind: "other" as const, mime: "", size: 0, truncated: false, path: "" });
   server.handle(answerRpc, async ({ affairId, askId, text }) => {
     if (!engine) return { ok: false, text: "事项还没准备好" };
-    await engine.answered(affairId, askId, text);
-    return { ok: true, text: "" };
+    return engine.answered(affairId, askId, text);
   });
   server.handle(resumeFlowRpc, async (input) => engine ? engine.resumeFlow(input) : { ok: false, text: "事项还没准备好" });
 

@@ -228,3 +228,25 @@ test("rotation waits while the runtime says a flow is still going", async () => 
   assert.match(rotationReason(state, s.w.now(), s.w.ctx.policy), /^rotate:/);
   assert.equal(rotationReason({ ...state, flowRunning: true }, s.w.now(), s.w.ctx.policy), "");
 });
+
+test("an ask keeps run choices as labels for the UI; choosing one starts by human, declining starts nothing", async () => {
+  for (const choice of ["出方案", "先不"]) {
+    const s = await setup();
+    s.put([{ kind: "flow.fail", runId: s.run, why: "test setup" }]);
+    const ask = { title: "要出方案吗？", options: [{ label: "出方案", run: "do-it" }, "先不"] };
+    const report = { status: "等出方案", entry: "还没有方案", ask, next: { at: "2026-11-03 10:00", waitingFor: "等你决定", why: "你要决定", earlyIf: [] } };
+    const checked = checkReport({ report, state: load(s.w.root, s.id), facts: buildFacts(load(s.w.root, s.id), s.w.now(), s.w.ctx.policy), policy: s.w.ctx.policy, now: s.w.now(), attempt: 1 });
+    assert.equal(checked.problems.length, 0, JSON.stringify(checked.problems));
+    await ops.brief({ ...s.w.ctx, by: "look" }, s.id);
+    const handed = await ops.report({ ...s.w.ctx, by: "look" }, s.id, report);
+    assert.equal(handed.ok, true, handed.text);
+    const q = load(s.w.root, s.id).asks.at(-1);
+    assert.deepEqual(q.options, ["出方案", "先不"]);
+    const answer = await ops.answer(s.w.ctx, s.id, q.id, choice, "panel");
+    assert.equal(answer.ok, true, answer.text);
+    assert.equal(s.launched.length, choice === "出方案" ? 1 : 0);
+    if (choice === "出方案") assert.equal(load(s.w.root, s.id).flows.at(-1).by, "human");
+    await ops.answer(s.w.ctx, s.id, q.id, choice, "panel");
+    assert.equal(s.launched.length, choice === "出方案" ? 1 : 0);
+  }
+});
