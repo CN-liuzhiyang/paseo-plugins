@@ -34,10 +34,10 @@ export function FlowBox({ flow, c, navigation, workspaceId, resume, busy, hideSt
         <Words style={{ color, fontSize: 14, lineHeight: 20, fontWeight: "600", flex: 1, minWidth: 0 }}>{flow.text}</Words>
       </View>
       {flow.detail ? <Words style={{ color: c.foreground, fontSize: 13, lineHeight: 18 }}>{flow.detail}</Words> : null}
-      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17, flex: 1, minWidth: 0 }}>{flow.meta}</Words>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", columnGap: 8, rowGap: 6 }}>
+        <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17, flexShrink: 0 }}>{flow.meta}</Words>
         {buttons.length ? (
-          <View style={{ flexDirection: "row", gap: 8, flexShrink: 0 }}>
+          <View style={{ flexDirection: "row", gap: 8, marginLeft: "auto" }}>
             {buttons.map((open) => (
               <Pressable key={open.label} testID="flow-button" accessibilityRole="button" disabled={busy} onPress={open.press} style={{ borderWidth: 1, borderColor: open.primary ? c.accent : c.border, backgroundColor: open.primary ? c.accent : "transparent", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
                 <Words style={{ color: open.primary ? c.accentForeground : c.foreground, fontSize: 13, fontWeight: open.primary ? "600" : "400" }}>{open.label}</Words>
