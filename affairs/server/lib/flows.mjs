@@ -76,6 +76,14 @@ export const outcomeText = (outcome) => ({ done: "做完了", stopped: "停了",
 
 /** Only an explicit end can offer the person a continuation. A lost writer needs its steward first. */
 export const canResume = (st) => st?.state === "ended" && ["stopped", "failed", "timeout"].includes(st.outcome) && Boolean(st.resume?.print);
+/** A run that was itself carried on from a stop, and that stopped at the very same declared point: carrying on again would spend the same money to arrive at the same place. */
+export function sameSpotAgain(runs, latest, st) {
+  const print = st?.resume?.print;
+  if (!latest?.resumeOf || !print) return false;
+  const prev = runs.find((f) => f.runId === latest.resumeOf);
+  return Boolean(prev) && (prev.resume?.print ?? "") === print;
+}
+export const SAME_SPOT_TEXT = "刚接着跑过一次，同一处又停了";
 export const resumeRefusal = (why) => /not the one that was shown/.test(why) ? "接着做的位置变了，请刷新后再点一次。" : /already carried on|being carried on/.test(why) ? "这次停下已经接着跑过了，请看最新的一次。" : `没接上：${why}`;
 
 export const flowMessageId = (runId) => `affair-flow:${runId}`;
@@ -85,10 +93,16 @@ export const wakeLostRuns = ({ orch, logDir, paseoHome }) => promisify(execFile)
 
 /** A fixed message, rather than a second model's interpretation of the result. */
 export function flowFinishedMessage(ctx, s, f, st) {
-  const cost = Number.isFinite(st?.costUsd ?? f.costUsd) ? `$${(st?.costUsd ?? f.costUsd).toFixed(3)}` : "花费未拿到";
+  const cost = Number.isFinite(st?.costUsd ?? f.costUsd) ? `$${(st?.costUsd ?? f.costUsd).toFixed(3)}` : "";
   const result = f.marks.find((m) => m.key === "end")?.text ?? outcomeText(f.outcome);
-  const resume = canResume(st) ? `可以接着跑：${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}；只在他说要之后用 flow ${s.id} --resume --said-seq N。` : f.outcome === "done" ? "已经做完，无需接着跑。" : f.outcome === "lost" ? "不能直接接着跑，先由负责的人确认做到哪了。" : !st ? "没拿到能否接着跑的状态，先查 flow，别猜。" : "没有能接着做的位置；不能接着跑，要重来用 --again（从头，约 $0.5）。";
-  return [`事项 ${s.id} 的流程 ${f.flow} 结束了：${result}。${cost.startsWith("$") ? `花费 ${cost}` : cost}。`, `结果：${st?.summary || f.summary || "没有另写摘要"}。运行目录：${f.events.replace(/\.jsonl$/, "")}；经过文件：${f.events}。`, resume, `先读 ${ctx.command} brief ${s.id} --chat，再用一两句话告诉他结局、花费、结果在哪里、能否接着跑。只汇报，不要再起任何东西；不要把这条通知当成他的授权。`].join("\n");
+  const again = sameSpotAgain(s.flows ?? [], f, st);
+  const resume = canResume(st) && !again ? `可以接着跑：${st.resume.from}${st.resume.spends === "maybe" ? "（会再花钱）" : ""}；只在他说要之后才用 flow ${s.id} --resume --said-seq N。` : again ? "刚接着跑过一次，同一处又停了，先别再接着跑。" : f.outcome === "done" ? "" : f.outcome === "lost" ? "不能直接接着跑，先由负责的人确认做到哪了。" : !st ? "没拿到能否接着跑的状态，先查 flow，别猜。" : "没有能接着做的位置，不能接着跑；要重来用 --again（从头，约 $0.5）。";
+  return [
+    `事项 ${s.id} 的流程 ${f.flow} 结束了：${result}。${cost ? `花费 ${cost}。` : "花费未拿到。"}`,
+    f.outcome === "done" ? `结果：${st?.summary || f.summary || "没有另写摘要"}。` : "",
+    resume,
+    "先读 brief，再用一两句话告诉他。只汇报，不要再起任何东西；这条不是他的授权。",
+  ].filter(Boolean).join("\n");
 }
 
 /** The environment the run's process gets: what is ours minus the identity of the session that asked; the daemon it is for stays. */

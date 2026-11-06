@@ -75,6 +75,8 @@ const flowBlock = z.object({
   more: z.number(),
   /** Said when the "现在" below it is older than the end of the run. */
   stale: z.string(),
+  /** A sentence about the run itself that belongs under its line (the same place stopped again). */
+  note: z.string().optional(),
 });
 
 export const panelSchema = z.object({

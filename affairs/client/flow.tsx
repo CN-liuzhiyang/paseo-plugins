@@ -14,16 +14,18 @@ type Navigation = {
 
 // COMPAT(navigation.openPluginScreen): a fork-only way to open a screen of another plugin (the run's own page); without it there is no "看详情".
 // The workspace goes along: the run's page, given one, shows the run in that workspace's 流程 tab and does not stay on the page of its own.
-export function FlowBox({ flow, c, navigation, workspaceId, resume, busy }: { flow: NonNullable<PanelData["flow"]>; c: Colors; navigation: Navigation; workspaceId?: string; resume?: () => void; busy?: boolean }) {
+export function FlowBox({ flow, c, navigation, workspaceId, resume, busy, hideStale }: { flow: NonNullable<PanelData["flow"]>; c: Colors; navigation: Navigation; workspaceId?: string; resume?: () => void; busy?: boolean; hideStale?: boolean }) {
   const waiting = flow.action?.kind === "approve";
   const color = flow.tone === "red" ? c.statusDanger : waiting ? c.statusWarning : flow.text === "做完了" ? c.statusSuccess : c.accent;
-  const open = (() => {
+  type Button = { label: string; primary: boolean; press: () => void };
+  const detail = (runId?: string): Button | null => runId && navigation?.openPluginScreen ? { label: "看详情", primary: false, press: () => navigation.openPluginScreen!("orchestration-ui", "runs", { run: runId, ...(workspaceId ? { workspace: workspaceId } : {}) }) } : null;
+  const buttons: Button[] = (() => {
     const action = flow.action;
-    if (!action) return null;
-    if (action.kind === "resume" && resume) return { label: busy ? "正在接着跑…" : action.spends === "maybe" ? "接着跑（会再花钱）" : "接着跑", primary: false, press: resume };
-    if (action.kind === "approve" && action.agentId && navigation?.openAgent) return { label: "去批准", primary: true, press: () => navigation.openAgent!({ agentId: action.agentId! }) };
-    if (action.kind === "detail" && action.runId && navigation?.openPluginScreen) return { label: "看详情", primary: false, press: () => navigation.openPluginScreen!("orchestration-ui", "runs", { run: action.runId!, ...(workspaceId ? { workspace: workspaceId } : {}) }) };
-    return null;
+    if (!action) return [];
+    if (action.kind === "resume" && resume) return [detail(action.runId), { label: busy ? "正在接着跑…" : action.spends === "maybe" ? "接着跑（会再花钱）" : "接着跑", primary: false, press: resume }].filter((b): b is Button => b !== null);
+    if (action.kind === "approve" && action.agentId && navigation?.openAgent) return [{ label: "去批准", primary: true, press: () => navigation.openAgent!({ agentId: action.agentId! }) }];
+    if (action.kind === "detail") return [detail(action.runId)].filter((b): b is Button => b !== null);
+    return [];
   })();
   return (
     <View testID="flow-box" style={{ borderWidth: 1, borderColor: c.border, borderLeftWidth: 3, borderLeftColor: color, borderRadius: 8, padding: 10, backgroundColor: waiting ? tint(c.statusWarning, "1f", c.surface1) : c.surface1, gap: 4 }}>
@@ -33,14 +35,20 @@ export function FlowBox({ flow, c, navigation, workspaceId, resume, busy }: { fl
       </View>
       {flow.detail ? <Words style={{ color: c.foreground, fontSize: 13, lineHeight: 18 }}>{flow.detail}</Words> : null}
       <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-        <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17, flex: 1, minWidth: 0 }}>{[flow.meta, flow.more ? `还有 ${flow.more} 次更早的` : ""].filter(Boolean).join("　")}</Words>
-        {open ? (
-          <Pressable testID="flow-button" accessibilityRole="button" disabled={busy} onPress={open.press} style={{ borderWidth: 1, borderColor: open.primary ? c.accent : c.border, backgroundColor: open.primary ? c.accent : "transparent", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, flexShrink: 0 }}>
-            <Words style={{ color: open.primary ? c.accentForeground : c.foreground, fontSize: 13, fontWeight: open.primary ? "600" : "400" }}>{open.label}</Words>
-          </Pressable>
+        <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17, flex: 1, minWidth: 0 }}>{flow.meta}</Words>
+        {buttons.length ? (
+          <View style={{ flexDirection: "row", gap: 8, flexShrink: 0 }}>
+            {buttons.map((open) => (
+              <Pressable key={open.label} testID="flow-button" accessibilityRole="button" disabled={busy} onPress={open.press} style={{ borderWidth: 1, borderColor: open.primary ? c.accent : c.border, backgroundColor: open.primary ? c.accent : "transparent", borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
+                <Words style={{ color: open.primary ? c.accentForeground : c.foreground, fontSize: 13, fontWeight: open.primary ? "600" : "400" }}>{open.label}</Words>
+              </Pressable>
+            ))}
+          </View>
         ) : null}
       </View>
-      {flow.stale ? <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17 }}>{flow.stale}</Words> : null}
+      {flow.note ? <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17 }}>{flow.note}</Words> : null}
+      {flow.more ? <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17 }}>{`还有 ${flow.more} 次更早的`}</Words> : null}
+      {flow.stale && !hideStale ? <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17 }}>{flow.stale}</Words> : null}
     </View>
   );
 }

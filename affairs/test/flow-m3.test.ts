@@ -119,7 +119,9 @@ test("tell the current chat once after the look reports, across repeated scans a
   await c.make().tellFinished(s.id);
   assert.equal(c.sent.length, 1);
   assert.equal(c.sent[0].id, "current-chat");
-  for (const text of ["停了", "$0.030", "运行目录", "可以接着跑", "不要再起任何东西"]) assert.ok(c.sent[0].text.includes(text), text);
+  for (const text of ["停了", "$0.030", "可以接着跑", "不要再起任何东西"]) assert.ok(c.sent[0].text.includes(text), text);
+  assert.ok(c.sent[0].text.split("\n").length <= 4, "at most four short lines");
+  assert.doesNotMatch(c.sent[0].text, /[A-Za-z]:\\|runs[\\/]|\.jsonl|affair\.mjs|结果：|--root/, "a person reads this: no paths, no command line, and a stop carries no summary");
   assert.equal(load(s.w.root, s.id).said.length, 0, "a plugin notification is never his word");
   assert.equal(read(s.w.root, s.id).filter((l: any) => l.kind === "flow.told").length, 1);
   chat.stop();
@@ -249,4 +251,23 @@ test("an ask keeps run choices as labels for the UI; choosing one starts by huma
     await ops.answer(s.w.ctx, s.id, q.id, choice, "panel");
     assert.equal(s.launched.length, choice === "出方案" ? 1 : 0);
   }
+});
+
+test("a run carried on from a stop that stops at the same point again gets no resume button, only a sentence and the detail", async () => {
+  const s = await setup(); await ops.flowSync(s.w.ctx, s.id);
+  const base = load(s.w.root, s.id).flows[0];
+  const point = (print: string) => ({ ...POINT, print });
+  const first = { ...base, runId: "A", outcome: "stopped", endedAt: new Date().toISOString(), resume: point("p1") };
+  const second = { ...base, runId: "B", resumeOf: "A", outcome: "stopped", endedAt: new Date().toISOString(), resume: point("p1") };
+  const stOf = (print: string) => ({ state: "ended", outcome: "stopped", resume: point(print), costUsd: 0.01 });
+  const state = { ...load(s.w.root, s.id), flows: [first, second] };
+  const same = flowBlockOf(state, s.w.now(), new Map([["B", { st: stOf("p1") }]]))!;
+  assert.equal(same.action!.kind, "detail");
+  assert.equal(same.note, "刚接着跑过一次，同一处又停了");
+  const moved = flowBlockOf(state, s.w.now(), new Map([["B", { st: stOf("p2") }]]))!;
+  assert.equal(moved.action!.kind, "resume");
+  assert.equal(moved.action!.runId, "B", "the detail button needs the run the resume belongs to");
+  assert.equal(flowBlockOf({ ...state, flows: [first] }, s.w.now(), new Map([["A", { st: stOf("p1") }]]))!.action!.kind, "resume", "a first stop is not a repeat");
+  assert.match(flowFinishedMessage(s.w.ctx, state, second, stOf("p1")), /同一处又停了，先别再接着跑/);
+  assert.doesNotMatch(flowFinishedMessage(s.w.ctx, state, second, stOf("p1")), /可以接着跑/);
 });

@@ -69,7 +69,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, paddingBottom: 28 }}>
       <StateBadge mood={panel.mood} c={c} />
       {panel.flow ? heading("流程") : null}
-      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} busy={resuming} resume={() => {
+      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} busy={resuming} hideStale={Boolean(flowReply)} resume={() => {
         const action = panel.flow?.action;
         if (!action?.runId || !action.expect || resuming) return;
         setResuming(true);

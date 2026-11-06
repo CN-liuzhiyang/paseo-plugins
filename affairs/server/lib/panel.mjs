@@ -5,7 +5,7 @@ import { CLIP_CHARS, FULL_CHARS, clip } from "./clip.mjs";
 import { counts } from "./limits.mjs";
 import { cardOf, sentOf, stamp } from "./view.mjs";
 import { eventsOf, shownName, whenOf } from "./events.mjs";
-import { canResume, endedAfterNow, sentenceOf, spanText, usdText } from "./flows.mjs";
+import { SAME_SPOT_TEXT, sameSpotAgain, canResume, endedAfterNow, sentenceOf, spanText, usdText } from "./flows.mjs";
 import { listReaders } from "./readers.mjs";
 
 // What the "进展" panel beside an affair's conversation shows: four blocks (now, what happened, sources, materials), all drawn from the
@@ -219,13 +219,15 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   const cost = usdText(sent.over ? latest.costUsd : st?.costUsd);
   const late = sent.over ? endedAfterNow(state) : null;
   const stop = st ?? { state: latest.outcome ? "ended" : "", outcome: latest.outcome, resume: latest.resume };
+  const again = canResume(stop) && sameSpotAgain(runs, latest, stop);
   return {
     name: latest.flow,
     text: sent.short,
     detail: sent.rest,
     tone: sent.tone === "red" ? "red" : "normal",
     meta: [took, cost].filter(Boolean).join(" · "),
-    action: canResume(stop) ? { kind: "resume", runId: latest.runId, expect: stop.resume.print, spends: stop.resume.spends } : sent.waiting && sent.agentId ? { kind: "approve", agentId: sent.agentId } : { kind: "detail", runId: latest.runId },
+    note: again ? SAME_SPOT_TEXT : "",
+    action: canResume(stop) && !again ? { kind: "resume", runId: latest.runId, expect: stop.resume.print, spends: stop.resume.spends } : sent.waiting && sent.agentId ? { kind: "approve", agentId: sent.agentId } : { kind: "detail", runId: latest.runId },
     more: runs.length - 1,
     // The "现在" is written by a look; until it has read the result it still says what was before.
     stale: late ? (state.running ? "「现在」正在按结果更新" : "「现在」还是流程结束之前的，下一次看一眼会更新") : "",
