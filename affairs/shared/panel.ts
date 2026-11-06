@@ -84,6 +84,8 @@ export const panelSchema = z.object({
   id: z.string(),
   title: z.string(),
   open: z.boolean(),
+  mode: z.string().optional(),
+  steps: z.array(z.string()).optional(),
   mood: z.enum(["watching", "ask", "done", "error", "paused", "stopped"]),
   asks: z.array(ask),
   flow: flowBlock.nullable(),

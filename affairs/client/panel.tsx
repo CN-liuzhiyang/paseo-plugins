@@ -79,7 +79,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
         }).catch(() => setFlowReply("没连上，请过一会儿再试。")).finally(() => setResuming(false));
       }} /> : null}
       {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
-      {heading("现在")}
+      {heading(panel.mode ? `现在 · ${panel.mode}` : "现在")}
       {panel.asks.map((a) => (
         <QuestionCard key={a.id} c={c} title={a.title} line={a.line}>
           {a.options.map((o, i) => (
@@ -98,6 +98,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
       {panel.now.text ? <Pieces text={panel.now.text} parts={panel.now.parts} color={c.accent} style={{ ...body, marginTop: 6 }} /> : null}
       {panel.next.text ? <Words style={{ ...muted, marginTop: 8 }}>下次　{panel.next.text}</Words> : null}
       {panel.spent ? <Words style={{ ...muted, marginTop: 2 }}>{panel.spent}</Words> : null}
+      {panel.steps?.length ? <View style={{ gap: 4, marginTop: 12 }}>{heading("走到哪一步")}{panel.steps.map((s, i) => <Words key={i} style={body}>{s}</Words>)}</View> : null}
       {panel.facts.length ? toggle(showFacts ? "收起记住的 ›" : `记住的 ${panel.facts.length} 条 ›`, () => setShowFacts(!showFacts)) : null}
       {showFacts ? panel.facts.map((f, i) => <Pieces key={i} text={`· ${f.text}`} parts={f.parts} color={c.accent} style={{ ...muted, marginTop: 4 }} />) : null}
 

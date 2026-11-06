@@ -16,6 +16,7 @@ import { ensureProject, titleOf } from "./lib/workspace.mjs";
 import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 import { flushWork, refreshWork } from "./lib/workdir-git.mjs";
 import { modeOf } from "./lib/mode.mjs";
+import { budgetQuestion } from "./lib/drive.mjs";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
 // world agree with it -- its chat exists, the sidebar title is right, the chat shows what the log
@@ -189,6 +190,8 @@ export function createEngine(deps: EngineDeps) {
     // The runs started for this affair: what has happened to them is written down before anything is drawn from the log.
     await ops.flowSync(ctx, id).catch((error: unknown) => log(`${id}: following the run: ${(error as Error).message}`));
     s = state(id);
+    const question = budgetQuestion(ctx, s);
+    if (question) { write(id, [question]); s = state(id); }
     if (s.flows.some((f: { failed: string; outcome: string }) => !f.failed && !f.outcome)) following.add(id);
     else following.delete(id);
     // Lines that do not follow from the one before were put in around the commands: said once, in red, and told to the person.

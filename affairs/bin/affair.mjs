@@ -54,6 +54,9 @@ async function main() {
     case "mode":
       result = await ops.mode(ctx, need(arg, "编号"), rest[2], { saidSeq: flags["said-seq"] });
       break;
+    case "budget":
+      result = await ops.budget(ctx, need(arg, "编号"), need(rest[2], "美元"), { saidSeq: flags["said-seq"], until: flags.until });
+      break;
     case "new":
       result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
       break;

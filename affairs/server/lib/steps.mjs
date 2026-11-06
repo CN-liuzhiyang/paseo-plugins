@@ -1,3 +1,14 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { modeOf } from "./mode.mjs";
+
+export function workSteps(state, policy) {
+  const file = policy.workDir && path.join(policy.workDir, state.id, "README.md");
+  if (!file || !existsSync(file)) return [];
+  const section = readFileSync(file, "utf8").split(/^## 步骤\s*\r?$/m)[1]?.split(/^#{1,2} /m)[0] || "";
+  return [...section.matchAll(/^- \[([ xX])\] (.+)$/gm)].map((m, i) => ({ id: String(i + 1), title: m[2].trim(), state: m[1].toLowerCase() === "x" ? "done" : "todo", who: /谁[：:]\s*他/.test(m[2]) ? "him" : "agent" }));
+}
+
 /** Optional reading metadata, kept outside value so reading times do not change its fingerprint. */
 export const stepFields = (reading) => reading.steps === undefined ? {} : { steps: reading.steps, ...(reading.validUntil ? { validUntil: reading.validUntil } : {}) };
 
@@ -11,8 +22,10 @@ export function stepProblem(reading) {
 const WHO = { agent: "我来做", him: "你来做", wait: "等外部" };
 
 /** The compact checklist a chat and a look both read. No checklist leaves the old brief untouched. */
-export function stepLines(state, now) {
-  const reading = state.stepRead;
+export function stepLines(state, now, policy) {
+  const drive = policy && modeOf(state, policy) === "drive";
+  const reading = drive ? { steps: workSteps(state, policy), at: new Date(now).toISOString() } : state.stepRead;
+  if (drive && !reading.steps.length) return ["## 走到哪一步", "README 还没有步骤清单，先写步骤和估算请他批。"];
   if (!reading?.steps?.length) return [];
   const { steps } = reading;
   const at = Date.parse(reading.at);

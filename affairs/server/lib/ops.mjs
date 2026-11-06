@@ -22,6 +22,7 @@ import { keep } from "./attach.mjs";
 import * as workspace from "./workspace.mjs";
 import { loadPolicy, defaultRoot } from "./policy.mjs";
 import { modeOf, modeText } from "./mode.mjs";
+import { budgetGate, budgetText } from "./drive.mjs";
 
 // The operations behind the `affair` command and the plugin. Every one reads the log, appends to it and then makes
 // Paseo (schedule, workspace) agree; the replies are the sentences a person may read.
@@ -176,6 +177,20 @@ export async function mode(ctx, ref, value, { saidSeq = "" } = {}) {
   }
   await syncPlan(ctx, r.s.id);
   return { ok: true, text: `已改成${value === "drive" ? "我来推" : "我盯着"}。` };
+}
+
+export async function budget(ctx, ref, amount, { saidSeq = "", until = "" } = {}) {
+  if (byLook(ctx)) return lookRefused("设额度");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const usd = Number(amount);
+  if (!Number.isFinite(usd) || usd < 0 || String(amount).trim() === "") return fail("额度要是零或正数的美元。");
+  const from = hisSaid(r.s, saidSeq || currentSaid(r.s)?.seq);
+  if (!from) return fail("要用 --said-seq 指向他说过的原话，不能替他批额度。");
+  if (!(from.text.match(/\d+(?:\.\d+)?/g) ?? []).some((n) => Number(n) === usd)) return fail(`他那句话里没有 ${usd} 这个数字，不能设这个额度。`);
+  if (until && (!/^\d{4}-\d{2}-\d{2}$/.test(until) || parseLocal(`${until} 23:59`, ctx.policy.tz) === null || !mentionsDay(from.text, parseLocal(`${until} 23:59`, ctx.policy.tz), ctx.now(), ctx.policy.tz))) return fail("截止日要写成 YYYY-MM-DD，并且在他的话里说到这个日期。");
+  write(ctx, r.s.id, [{ kind: "budget", usd, until, said: from.seq }]);
+  return { ok: true, text: `已记下他批的 $${usd}${until ? `，到 ${until}` : ""}。` };
 }
 
 export function currentSaid(s) {
@@ -831,6 +846,8 @@ async function withFlowLock(root, fn) {
  * @returns {Promise<{ fail: string } | { said: number | null, same: any[], lastSame: any, lastOutcome: string }>}
  */
 async function flowAllowed(ctx, s, name, { saidSeq, again, orch, logDir }) {
+  const blocked = budgetGate(ctx, s);
+  if (blocked) return { fail: blocked };
   if (!isOpen(s) || s.system) return { fail: `「${s.title}」已经${s.status === "done" ? "办完" : "不盯"}了，不起流程。` };
   if (!s.workspaceId || !s.workdir) return { fail: `「${s.title}」的工作区或工作目录不在了，先找回来再起。` };
   let said = null;
@@ -884,6 +901,7 @@ export async function flow(ctx, ref, name = "", { saidSeq = /** @type {string | 
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
   const { s } = r;
+  if (name && budgetGate(ctx, s)) return fail(budgetGate(ctx, s));
   const flows = flowsOf(ctx.policy);
   const link = parseLink(primaryLink(s));
   const mine = Object.entries(flows).filter(([, f]) => link && f.kinds.includes(link.kind));
@@ -1201,12 +1219,14 @@ async function briefChat(ctx, s) {
   const asks = s.asks.filter((a) => a.state === "open");
   const latest = s.lines.filter((l) => l.seq > cut && l.kind === "said" && l.by === "user" && l.via === "chat-session").map((l) => lineForChat(l, now, tz)).filter(Boolean);
   const content = [...news, ...latest, ...handoffs.flatMap(handoffSection)];
-  const freshSteps = s.lines.some((l) => l.seq > cut && ["read", "watch.read"].includes(l.kind) && l.steps);
+  const driving = modeOf(s, ctx.policy) === "drive";
+  const freshSteps = driving || s.lines.some((l) => l.seq > cut && ["read", "watch.read"].includes(l.kind) && l.steps);
   const freshWarning = s.notes.some((n) => n.seq > cut) && staleLine(s, now).length > 0;
   const text = content.length || freshSteps || freshWarning ? [
     `# 事项 ${s.id}：${s.title}`,
     `现在：${s.nowText || "还没看过"}　在等：${s.next?.waitingFor || "还没定"}`,
     ...staleLine(s, now), ...stepLines(s, now, ctx.policy),
+    ...(driving ? [`方式：我来推。${budgetText(ctx, s)}`] : []),
     "## 上次读完以后新的", ...content,
     ...(asks.some((q) => q.seq > cut) ? ["## 没答的问题", ...asks.map((q) => `- ${q.id} ${q.title}（${q.options.join("、")}）`)] : []),
     ...flowLines(s, now, tz), ...await resumableLines(ctx, s),
