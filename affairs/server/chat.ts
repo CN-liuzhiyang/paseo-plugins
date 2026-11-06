@@ -1,5 +1,7 @@
+import { writeFileSync } from "node:fs";
+import path from "node:path";
 import { chatCreateOptions, chatPrompt, noticeFor, rotationReason } from "./lib/chat.mjs";
-import { isOpen } from "./lib/log.mjs";
+import { affairDir, isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
 import { handoffTurns } from "./lib/history.mjs";
 import { flowFinishedMessage, flowMessageId, orchCommand, orchLogDir } from "./lib/flows.mjs";
@@ -187,7 +189,9 @@ export function createChats(deps: ChatDeps) {
     const handle = paseo.agents.ref(s.chatId);
     // Creation announces an idle session before its initial prompt starts. Wait for his first words so our send cannot replace them.
     if (!heard.has(s.chatId)) return;
-    await handle.send(`这是事项 ${s.id}「${s.title}」的对话，先照下面做，再回答他刚才说的。\n${chatPrompt(ctx, s)}`, { messageId: `affair-chat:adopted:${s.chatId}`, activeTurnBehavior: "steer" });
+    const promptFile = path.resolve(affairDir(ctx.root, id), "chat-prompt.md");
+    writeFileSync(promptFile, chatPrompt(ctx, s), "utf8");
+    await handle.send(`这是事项 ${s.id}「${s.title}」的对话。先读 ${promptFile.replaceAll("\\", "/")}，照里面做（它说每次先跑 brief --chat），再回答我刚才说的。`, { messageId: `affair-chat:adopted:${s.chatId}`, activeTurnBehavior: "steer" });
     deps.write(id, [{ kind: "chat.prompt", agentId: s.chatId }]);
     await putAway(id, s.chats.at(-2).agentId);
   }

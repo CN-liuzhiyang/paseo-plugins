@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
+import { mkdirSync, readdirSync, readFileSync, rmdirSync } from "node:fs";
+import path from "node:path";
 import { test } from "node:test";
 import { createEngine, type PaseoLike } from "../server/engine";
 import { type ChatAgent } from "../server/chat";
 import { chatPrompt } from "../server/lib/chat.mjs";
-import { append, load, read } from "../server/lib/log.mjs";
+import { affairDir, append, load, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { world } from "./kit";
 
-async function setup() {
+async function setup(rootWithSpaces = false) {
   const w = world();
+  if (rootWithSpaces) {
+    const root = path.join(w.dir, "root with spaces");
+    w.ctx.command = w.ctx.command.replace(w.root, root);
+    w.root = w.ctx.root = root;
+  }
   const made = await ops.create(w.ctx, { title: "预约", said: "盯一下预约", noWait: true });
   const id = made.id as string;
   const ws = load(w.root, id).workspaceId;
@@ -74,7 +81,7 @@ async function setup() {
 }
 
 test("a new ordinary chat is adopted promptly through directory events, hears earlier words, and receives instructions once", async () => {
-  const s = await setup();
+  const s = await setup(true);
   try {
     s.add();
     await new Promise((r) => setTimeout(r, 400));
@@ -82,8 +89,11 @@ test("a new ordinary chat is adopted promptly through directory events, hears ea
     assert.equal(state.chatId, "new");
     assert.equal(state.chats.at(-1).why, "adopted");
     assert.equal(s.sent.length, 1);
-    assert.ok(s.sent[0].text.endsWith(chatPrompt(s.w.ctx, state)));
-    assert.match(s.sent[0].text, /^这是事项 D1「预约」的对话，先照下面做，再回答他刚才说的。/);
+    const promptFile = path.resolve(affairDir(s.w.root, s.id), "chat-prompt.md");
+    assert.equal(readFileSync(promptFile, "utf8"), chatPrompt(s.w.ctx, state));
+    assert.equal(s.sent[0].text, `这是事项 D1「预约」的对话。先读 ${promptFile.replaceAll("\\", "/")}，照里面做（它说每次先跑 brief --chat），再回答我刚才说的。`);
+    assert.ok(s.sent[0].text.length <= 200, "the visible message stays short");
+    assert.doesNotMatch(s.sent[0].text, /affair\.mjs|node |--root|会话|校验|读数|\\|\n/);
     assert.deepEqual(s.sent[0].options, { messageId: "affair-chat:adopted:new", activeTurnBehavior: "steer" });
     assert.deepEqual(s.archived, ["made-1"]);
     s.message("new", "明天再看", "person:after");
@@ -96,6 +106,46 @@ test("a new ordinary chat is adopted promptly through directory events, hears ea
     assert.deepEqual(s.logs, []);
   } finally { await s.engine.stop(); }
   assert.equal(s.counts().releases, 1);
+});
+
+test("each adoption overwrites the same prompt file with current instructions", async () => {
+  const s = await setup();
+  try {
+    s.add();
+    await s.engine.scan(s.id);
+    const dir = affairDir(s.w.root, s.id);
+    const promptFile = path.join(dir, "chat-prompt.md");
+    const before = readFileSync(promptFile, "utf8");
+    s.w.ctx.command += " --paseo-home updated";
+    s.w.advance(1000);
+    s.add("next");
+    await s.engine.scan(s.id);
+    const current = readFileSync(promptFile, "utf8");
+    assert.notEqual(current, before);
+    assert.equal(current, chatPrompt(s.w.ctx, load(s.w.root, s.id)));
+    assert.deepEqual(readdirSync(dir).filter((name) => name.startsWith("chat-prompt")), ["chat-prompt.md"]);
+    await s.engine.scan(s.id);
+    assert.equal(s.sent.length, 2);
+    assert.equal(readFileSync(promptFile, "utf8"), current);
+  } finally { await s.engine.stop(); }
+});
+
+test("a prompt file write failure is reported and retried before sending or marking the instruction", async () => {
+  const s = await setup();
+  try {
+    const promptFile = path.join(affairDir(s.w.root, s.id), "chat-prompt.md");
+    mkdirSync(promptFile);
+    s.add();
+    await s.engine.scan(s.id);
+    assert.ok(s.logs.some((message) => message.includes("chat-prompt.md")));
+    assert.equal(s.sent.length, 0);
+    assert.ok(!read(s.w.root, s.id).some((line: any) => line.kind === "chat.prompt"));
+    rmdirSync(promptFile);
+    await s.engine.scan(s.id);
+    assert.equal(s.sent.length, 1);
+    assert.equal(readFileSync(promptFile, "utf8"), chatPrompt(s.w.ctx, load(s.w.root, s.id)));
+    assert.equal(read(s.w.root, s.id).filter((line: any) => line.kind === "chat.prompt").length, 1);
+  } finally { await s.engine.stop(); }
 });
 
 test("adoption refuses other workspaces, known chats, labels, children, helpers, errors, archives, and missing or older creation times", async () => {
