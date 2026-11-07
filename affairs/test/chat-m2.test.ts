@@ -9,12 +9,13 @@ import { handoffTurns } from "../server/lib/history.mjs";
 import { roleOf } from "../server/lib/schedule.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
 import { counts } from "../server/lib/limits.mjs";
+import { spendOf, budgetText } from "../server/lib/drive.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { panelOf, MATERIALS_SHOWN, SOURCES_SHOWN } from "../server/lib/panel.mjs";
 import { linkContext } from "../server/lib/links.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { titleOf } from "../server/lib/workspace.mjs";
-import { emptyDirectory, world } from "./kit";
+import { world } from "./kit";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -28,9 +29,13 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
   const archived: string[] = [];
   const drawn: Array<{ chat: string; item: any }> = [];
   const handlers = new Map<string, (e: Event) => void>();
+  let directoryObserver: any;
   const paseo = {
     agents: {
-      list: emptyDirectory,
+      list: async () => ({ entries: [], subscription: {
+        subscribe: (observer: any) => { directoryObserver = observer; observer.snapshot({ entries: [] }); return () => { directoryObserver = null; }; },
+        release: async () => { directoryObserver = null; },
+      } }),
       ref: (id: string) => ({
         refresh: async () => ({ agent: { status: opts.status?.() ?? "idle", ...(opts.agent?.(id) ?? (archived.includes(id) ? { archivedAt: "2026-01-01T00:00:00.000Z" } : {})) } }),
         archive: async () => {
@@ -56,7 +61,8 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
     },
   } as unknown as PaseoLike;
   const send = (chat: string, event: Event, timestamp?: string) => handlers.get(chat)!({ agentId: chat, event, ...(timestamp ? { timestamp } : {}) });
-  return { paseo, made, archived, drawn, handlers, send };
+  const update = (agent: Record<string, unknown>) => directoryObserver?.update({ type: "agent_update", payload: { kind: "upsert", agent } });
+  return { paseo, made, archived, drawn, handlers, send, update };
 }
 
 function setup(policyOver: Record<string, unknown> = {}, opts: Parameters<typeof paseoWith>[0] = {}) {
@@ -361,6 +367,59 @@ test("the cost the session reports is its total so far: each turn counts only th
   assert.ok(Math.abs(spent() - (0.02 + 0.003)) < 1e-9, `${spent()}`);
 });
 
+test("snapshot usage without completion usage counts increments, including after listening again", async () => {
+  let usage: Record<string, unknown> | undefined;
+  let refreshFails = false;
+  const s = setup({}, { agent: () => { if (refreshFails) throw new Error("usage unavailable"); return { lastUsage: usage }; } });
+  const id = await start(s);
+  const state = () => ({ ...load(s.w.root, id), lines: read(s.w.root, id) });
+  const finish = async (tokens: number, totalCostUsd: number) => {
+    usage = { contextWindowUsedTokens: tokens, totalCostUsd };
+    s.p.send("chat-1", { type: "turn_completed" });
+    await settle();
+  };
+  for (const total of [0.01, 0.015, 0.02]) await finish(1_000, total);
+  assert.deepEqual(state().lines.filter((l: any) => l.kind === "chat.turn").map((l: any) => l.tokens), [1_000, 1_000, 1_000]);
+  assert.ok(Math.abs(spendOf(state()).usd - 0.02) < 1e-9);
+  assert.equal(spendOf(state()).unknown, 0);
+  // A real Pi completion snapshot can still contain an earlier poll. Its final stats arrive via agent_update.
+  usage = { contextWindowUsedTokens: 1_100, totalCostUsd: 0.025 };
+  s.p.update({ id: "chat-1", status: "idle", lastUsage: usage });
+  s.p.update({ id: "chat-1", status: "idle", lastUsage: usage });
+  assert.equal(spendOf(state()).usd, 0.025);
+  assert.equal(state().lines.filter((l: any) => l.kind === "chat.turn").length, 4, "unchanged directory updates do not add rows");
+  s.p.send("chat-1", { type: "turn_started" });
+  s.p.update({ id: "chat-1", status: "running", lastUsage: { contextWindowUsedTokens: 1_200, totalCostUsd: 0.026 } });
+  assert.equal(spendOf(state()).usd, 0.025, "polls during the next turn wait for its completion");
+  await s.engine.stop();
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: s.p.paseo, deliver: null, log: () => {} });
+  await restarted.scan(id);
+  await finish(1_300, 0.03);
+  assert.ok(Math.abs(spendOf(state()).usd - 0.03) < 1e-9, "baseline comes from the log after restart");
+  await finish(200, 0.002);
+  assert.ok(Math.abs(spendOf(state()).usd - 0.032) < 1e-9, "a reset cumulative total counts whole");
+  assert.equal(state().chatTurn.tokens, 200);
+  usage = { contextWindowUsedTokens: 200, totalCostUsd: 0.002, hasUnknownModelCost: true };
+  s.p.send("chat-1", { type: "turn_completed" });
+  await settle();
+  assert.equal(spendOf(state()).unknown, 1);
+  // Refresh can fail or return no usage; a later directory snapshot still resolves the warning.
+  refreshFails = true;
+  usage = undefined;
+  s.p.send("chat-1", { type: "turn_completed" });
+  await settle();
+  assert.equal(spendOf(state()).unknown, 1);
+  refreshFails = false;
+  s.p.update({ id: "chat-1", status: "idle", lastUsage: { contextWindowUsedTokens: 300, totalCostUsd: 0.003 } });
+  assert.equal(spendOf(state()).unknown, 0);
+  assert.ok(Math.abs(spendOf(state()).usd - 0.033) < 1e-9);
+  s.p.send("chat-1", { type: "turn_completed" });
+  s.p.update({ id: "chat-1", status: "idle", lastUsage: { contextWindowUsedTokens: 400, totalCostUsd: 0.004 } });
+  await settle();
+  assert.equal(spendOf(state()).unknown, 0, "an older in-flight refresh cannot overwrite a newer directory snapshot");
+  assert.ok(Math.abs(spendOf(state()).usd - 0.034) < 1e-9);
+  await restarted.stop();
+});
 test("a provider without usage records unknown cost; a failed refresh does not break the chat", async () => {
   const s = setup({}, { status: () => { throw new Error("no such thing"); } });
   const id = await start(s).catch((e) => e);
@@ -368,9 +427,12 @@ test("a provider without usage records unknown cost; a failed refresh does not b
   const t = setup();
   const tid = await start(t);
   t.p.send("chat-1", { type: "turn_completed" });
+  await settle();
   const turns = read(t.w.root, tid).filter((l: { kind: string }) => l.kind === "chat.turn");
   assert.equal(turns.length, 1);
   assert.equal(turns[0].unknown, true);
+  assert.equal(spendOf({ ...load(t.w.root, tid), lines: read(t.w.root, tid) }).unknown, 1);
+  assert.match(budgetText(t.w.ctx, { ...load(t.w.root, tid), lines: read(t.w.root, tid) }), /1 个会话花费不明/);
   assert.equal(load(t.w.root, tid).chatId, "chat-1");
 });
 

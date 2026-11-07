@@ -50,6 +50,7 @@ export interface ChatAgent {
   parentAgentId?: string | null;
   internal?: boolean;
   providerUnavailable?: boolean;
+  lastUsage?: { contextWindowUsedTokens?: number; totalCostUsd?: number; hasUnknownModelCost?: boolean };
 }
 interface ChatDirectory {
   entries: Array<{ agent: ChatAgent }>;
@@ -60,7 +61,7 @@ interface ChatDirectory {
 }
 export interface ChatHandle {
   send(text: string, options: { messageId: string; activeTurnBehavior: "steer" }): Promise<void>;
-  refresh(): Promise<{ agent: { status: string; pendingPermissions?: unknown[]; createdAt?: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
+  refresh(): Promise<{ agent: { status: string; lastUsage?: { contextWindowUsedTokens?: number; totalCostUsd?: number; hasUnknownModelCost?: boolean }; pendingPermissions?: unknown[]; createdAt?: string; archivedAt?: string | null; updatedAt?: string | null; lastUserMessageAt?: string | null } } | null>;
   archive(): Promise<unknown>;
   timeline: {
     append(item: Record<string, unknown>): Promise<unknown>;
@@ -113,6 +114,7 @@ export function createChats(deps: ChatDeps) {
   const directory = new Map<string, ChatAgent>();
   const owners = new Map<string, string>();
   const heard = new Set<string>();
+  const snapshotUsage = new Set<string>();
   let listing: Promise<ChatDirectory> | null = null;
   let stopped = false;
 
@@ -150,6 +152,11 @@ export function createChats(deps: ChatDeps) {
             const update = message.payload;
             if (update.kind === "upsert") {
               directory.set(update.agent.id, update.agent);
+              // Pi finishes before its final stats request resolves. The existing directory subscription delivers
+              // that later lastUsage snapshot, so the final increment is not left until another turn.
+              if (snapshotUsage.has(update.agent.id) && update.agent.lastUsage) {
+                for (const [id, w] of watching) if (w.chatId === update.agent.id) recordUsage(id, w.chatId, update.agent.lastUsage, true);
+              }
               changed(update.agent.workspaceId);
             } else directory.delete(update.agentId);
           },
@@ -330,6 +337,28 @@ export function createChats(deps: ChatDeps) {
 
   const asText = (value: unknown) => (typeof value === "string" ? value : "");
 
+  function recordUsage(id: string, chatId: string, usage: any, onlyChanged = false) {
+    // Totals survive a plugin restart in the log; a total that went down counts whole as before.
+    const before = deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId && Number.isFinite(l.usdTotal));
+    const entry = { kind: "chat.turn", agentId: chatId, tokens: Number(usage?.contextWindowUsedTokens) || 0, ...costIncrement(usage, before?.usdTotal) };
+    const last = deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId);
+    if (onlyChanged && last && last.tokens === entry.tokens && last.usdTotal === entry.usdTotal && last.unknown === entry.unknown) return;
+    deps.write(id, [entry]);
+    deps.changed(id);
+  }
+
+  async function refreshUsage(id: string, chatId: string) {
+    const last = deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId);
+    let usage;
+    try {
+      usage = (await paseo.agents.ref(chatId).refresh())?.agent.lastUsage;
+    } catch (error) {
+      log(`${id}: reading chat usage failed: ${(error as Error).message}`);
+    }
+    // A newer directory snapshot may have arrived while this request was in flight.
+    if (deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId)?.seq === last?.seq) recordUsage(id, chatId, usage);
+  }
+
   /** What he typed (or what another session sent into the chat) is put in the log; a turn that ended says how long the chat has become. */
   function onEvent(id: string, chatId: string, event: any) {
     const e = event?.event;
@@ -338,12 +367,17 @@ export function createChats(deps: ChatDeps) {
       if (e.type === "timeline") void hearItem(id, chatId, e.item, asText(event.timestamp ?? e.timestamp)).then(() => {
         if (e.item?.type === "user_message") deps.changed(id);
       });
+      else if (e.type === "turn_started") snapshotUsage.delete(chatId);
       else if (e.type === "turn_completed") {
-        // The session reports what it has cost in all, not what this turn cost: this turn's part is the step up from last time
-        // (a total that went down is a session that began again, and counts whole). Nothing is lost while the plugin was not listening: the step is bigger.
-        const before = deps.state(id).lines.findLast((l: any) => l.kind === "chat.turn" && l.agentId === chatId && Number.isFinite(l.usdTotal));
-        deps.write(id, [{ kind: "chat.turn", agentId: chatId, tokens: Number(e.usage?.contextWindowUsedTokens) || 0, ...costIncrement(e.usage, before?.usdTotal) }]);
-        deps.changed(id);
+        if (e.usage) {
+          snapshotUsage.delete(chatId);
+          recordUsage(id, chatId, e.usage);
+        }
+        // Pi keeps usage in the agent snapshot; usage_updated is not part of the wire stream schema.
+        else {
+          snapshotUsage.add(chatId);
+          void refreshUsage(id, chatId).catch((error) => log(`${id}: chat event failed: ${(error as Error).message}`));
+        }
       }
     } catch (error) {
       log(`${id}: chat event failed: ${(error as Error).message}`);
