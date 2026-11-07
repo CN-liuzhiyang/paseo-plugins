@@ -4,7 +4,7 @@ import { append, ID, isOpen, load, read } from "./log.mjs";
 import { budgetGate, costIncrement } from "./drive.mjs";
 import { modeOf } from "./mode.mjs";
 import { callerInfo, resolve } from "./ops.mjs";
-import { createWorkspace } from "./workspace.mjs";
+import { directoryWorkspace, samePath } from "./workspace.mjs";
 import { roleOf } from "./schedule.mjs";
 
 export async function dispatch(ctx, ref, { contract, provider, thinking, mode, title, cwd } = {}) {
@@ -29,8 +29,8 @@ export async function dispatch(ctx, ref, { contract, provider, thinking, mode, t
   }
   let workspaceId = s.workspaceId;
   try {
-    if (cwd) workspaceId = await createWorkspace(ctx.run, { projectId: s.projectId, workdir: path.resolve(cwd), title: title || s.title });
-    const createAgent = { workspaceId, title: title || `${s.title}：执行`, provider, settings: { ...(thinking ? { thinkingOptionId: thinking } : {}), ...(mode ? { modeId: mode } : {}) }, labels: { "affairs.affair": s.id, "affairs.role": "dispatched" }, initialPrompt: `先完整读派活说明 ${file}，再读这件事的 README ${readme}，照说明做。`, notifyOnFinish: true };
+    if (cwd && (!s.workdir || !samePath(cwd, s.workdir))) workspaceId = await directoryWorkspace(ctx.run, path.resolve(cwd), title || s.title);
+    const createAgent = { workspaceId, title: `${s.title}：${title || "执行"}`, provider, settings: { ...(thinking ? { thinkingOptionId: thinking } : {}), ...(mode ? { modeId: mode } : {}) }, labels: { "affairs.affair": s.id, "affairs.role": "dispatched" }, initialPrompt: `先完整读派活说明 ${file}，再读这件事的 README ${readme}，照说明做。`, notifyOnFinish: true };
     append(ctx.root, s.id, [{ kind: "dispatch.approved", contract: file, model: provider, workspaceId }], { now: ctx.now(), tz: ctx.policy.tz });
     return { ok: true, createAgent, text: `已核对额度。请在当前主对话调用 Paseo MCP 的 create_agent，参数如下：\n${JSON.stringify(createAgent, null, 2)}` };
   } catch (error) {

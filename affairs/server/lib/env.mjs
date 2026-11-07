@@ -5,10 +5,10 @@ import { promisify } from "node:util";
 import { append } from "./log.mjs";
 import { callerInfo, resolve } from "./ops.mjs";
 import { localPathOf } from "./projects.mjs";
+import { samePath } from "./workspace.mjs";
 
 const exec = promisify(execFile);
 const git = async (cwd, args) => (await exec("git", args, { cwd, windowsHide: true, encoding: "utf8" })).stdout.trim();
-const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
 
 async function defaultBranch(cwd) {
   const refs = (await git(cwd, ["for-each-ref", "--format=%(refname) %(symref)", "refs/heads", "refs/remotes/origin/HEAD"])).split("\n");

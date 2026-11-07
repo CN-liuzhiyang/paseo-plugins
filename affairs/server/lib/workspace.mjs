@@ -31,8 +31,17 @@ export async function ensureProject(run, root) {
 
 export async function createWorkspace(run, { projectId, workdir, title }) {
   mkdirSync(workdir, { recursive: true });
-  const made = await json(run, ["workspace", "create", "--isolation", "local", "--project", projectId, "--path", workdir, "--title", title, "--no-background"]);
+  const made = await json(run, ["workspace", "create", "--isolation", "local", ...(projectId ? ["--project", projectId] : []), "--path", workdir, "--title", title, "--no-background"]);
   return made.workspaceId;
+}
+
+export const samePath = (a, b) => path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase();
+
+/** Existing worktrees are registered as local directories; Paseo detects their isolation without making another tree. */
+export async function directoryWorkspace(run, workdir, title) {
+  const listed = await json(run, ["workspace", "ls", "--background"]);
+  const found = listed.find((w) => w.cwd && samePath(w.cwd, workdir));
+  return found?.workspaceId ?? createWorkspace(run, { workdir, title });
 }
 
 export const renameWorkspace = (run, workspaceId, title) => json(run, ["workspace", "rename", workspaceId, title]);

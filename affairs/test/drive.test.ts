@@ -155,11 +155,11 @@ test("dispatch approves MCP parameters with labels, finish subscription and file
   const f = fixture();f.put([{ kind: "budget", usd: 20 }]);
   assert.equal((await dispatch(f.w.ctx, f.id, {})).ok, false);
   const ctx = f.main();const calls: string[][] = [];
-  ctx.run = async (args: string[]) => { calls.push(args);return { stdout: JSON.stringify(args[0] === "workspace" ? { workspaceId: "other-workspace" } : { agentId: "worker" }), stderr: "", exitCode: 0 }; };
+  ctx.run = async (args: string[]) => { calls.push(args);return { stdout: JSON.stringify(args[1] === "ls" ? [] : { workspaceId: "other-workspace" }), stderr: "", exitCode: 0 }; };
   const contract = path.join(f.w.dir, "contract.md");writeFileSync(contract, "契约");
   const cwd = path.join(f.w.dir, "checkout");
   const made = await dispatch(ctx, f.id, { contract, provider: "claude/example", thinking: "high", mode: "bypassPermissions", cwd });assert.ok(made.ok, made.text);
-  assert.equal(calls.length, 1);assert.equal(calls[0][0], "workspace");
+  assert.equal(calls.length, 2);assert.equal(calls[0][0], "workspace");
   const args = made.createAgent!;
   assert.equal(args.workspaceId, "other-workspace");assert.equal(args.provider, "claude/example");
   assert.deepEqual(args.labels, { "affairs.affair": f.id, "affairs.role": "dispatched" });
