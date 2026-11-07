@@ -59,6 +59,7 @@ type Candidate = { key: string; text: string; live: boolean };
 export function createEngine(deps: EngineDeps) {
   const { ctx, log } = deps;
   const queues = new Map<string, Promise<void>>();
+  const sessions = new Map<string, any[]>();
   let watcher: FSWatcher | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let flowTimer: ReturnType<typeof setInterval> | null = null;
@@ -116,7 +117,7 @@ export function createEngine(deps: EngineDeps) {
     const now = ctx.now();
     const gate = isOpen(s) ? mayLook(ctx.root, found.id, now, ctx.policy, { force: flowLook(s.running ? s.wakes.at(-1)?.why ?? [] : s.pending) }) : { ok: true };
     const trouble = isOpen(s) && s.lastEnd?.state === "failed" && !s.running ? "这次没看成，过一会儿会再试" : "";
-    return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble, flowNow: ctx.flowNow });
+    return panelOf(ctx.root, s, now, ctx.policy, linksOf(s), { budget: gate.ok ? "" : (gate as { text: string }).text, trouble, flowNow: ctx.flowNow, sessions: sessions.get(found.id) ?? [] });
   }
 
   /** A file in the panel's materials, read so it can be drawn where it is listed (a picture as data, a text as its first part). */
@@ -190,7 +191,7 @@ export function createEngine(deps: EngineDeps) {
     refreshWork(ctx, s);
     // The runs started for this affair: what has happened to them is written down before anything is drawn from the log.
     await ops.flowSync(ctx, id).catch((error: unknown) => log(`${id}: following the run: ${(error as Error).message}`));
-    if (deps.paseo && modeOf(s, ctx.policy) === "drive") await dispatchCosts(ctx, id, deps.paseo);
+    if (deps.paseo) sessions.set(id, await dispatchCosts(ctx, id, deps.paseo, { charge: modeOf(s, ctx.policy) === "drive" }));
     s = state(id);
     const question = budgetQuestion(ctx, s);
     if (question) { write(id, [question]); s = state(id); }

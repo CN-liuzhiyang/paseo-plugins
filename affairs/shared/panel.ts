@@ -86,6 +86,7 @@ export const panelSchema = z.object({
   open: z.boolean(),
   mode: z.string().optional(),
   steps: z.array(z.string()).optional(),
+  sessions: z.array(z.object({ agentId: z.string(), title: z.string(), role: z.enum(["主对话", "派活", "流程"]), status: z.enum(["干活中", "做完了", "已关闭", "等你批"]), project: z.string(), usd: z.number().optional() })),
   mood: z.enum(["watching", "ask", "done", "error", "paused", "stopped"]),
   asks: z.array(ask),
   flow: flowBlock.nullable(),

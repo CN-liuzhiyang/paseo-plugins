@@ -1,0 +1,49 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { createEngine } from "../server/engine";
+import { append } from "../server/lib/log.mjs";
+import { panelSchema } from "../shared/panel";
+import { world, emptyDirectory } from "./kit";
+
+test("related sessions reuse the paged cost scan, include main, roles, status, project and cost, and sort by activity", async () => {
+  for (const mode of ["drive", "watch"]) {
+    const w = world();const id = "sessions";
+    append(w.root, id, [{ kind: "created", id, title: "改进工具" }, { kind: "mode", mode }, { kind: "workspace", workspaceId: "headquarters" }, { kind: "chat", agentId: "main", why: "first" }], { now: w.now() });
+    const snapshots = Array.from({ length: 10 }, (_, i) => ({ agent: {
+      id: `worker-${i}`, title: `改进工具：任务 ${i}`, labels: { "affairs.affair": id, "affairs.role": i === 2 ? "flow" : "dispatched" },
+      status: i === 0 ? "running" : i === 1 ? "closed" : "idle", pendingPermissions: i === 3 ? [{}] : [], archivedAt: i === 4 ? "yes" : null,
+      createdAt: new Date(w.now() - i * 1000).toISOString(), updatedAt: new Date(w.now() + i * 1000).toISOString(), provider: "claude", workspaceId: "code", lastUsage: i === 5 ? undefined : { totalCostUsd: i / 100 },
+    }, project: { projectName: "code-project" } }));
+    const main = { agent: { id: "main", title: "主对话", labels: {}, status: "closed", updatedAt: new Date(w.now() + 20_000).toISOString() }, project: { projectName: "事项" } };
+    let scans = 0;
+    const logs: string[] = [];
+    const paseo: any = {
+      agents: {
+        list: async (q: any) => {
+          if (!q.filter) return emptyDirectory();
+          scans++;assert.equal(q.filter.includeArchived, true);assert.deepEqual(q.filter.labels, { "affairs.affair": id });
+          return { entries: q.page.cursor ? snapshots.slice(5) : snapshots.slice(0, 5), pageInfo: { nextCursor: q.page.cursor ? null : "more" } };
+        },
+        ref: (agentId: string) => ({ refresh: async () => agentId === "main" ? main : snapshots.find((s) => s.agent.id === agentId),
+          send: async () => {}, archive: async () => {}, timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }),
+      },
+      workspaces: { ref: () => ({ setTitle: async () => {}, archive: async () => {}, agents: { create: async () => { throw new Error("main must stay"); } } }) },
+    };
+    const engine = createEngine({ ctx: w.ctx, paseo, deliver: null, log: (s) => logs.push(s) });
+    try {
+      await engine.scan(id);
+      assert.deepEqual(logs, []);
+      const panel = engine.panel("headquarters")!;
+      const sessions = (panel as any).sessions;
+      assert.equal(sessions.length, 11);assert.equal(sessions[0].agentId, "main");assert.equal(sessions[1].agentId, "worker-9");
+      assert.equal(sessions[0].role, "主对话");assert.equal(sessions[0].project, "事项");
+      const byId = (name: string) => sessions.find((s: any) => s.agentId === name);
+      assert.equal(byId("worker-2").role, "流程");assert.equal(byId("worker-0").role, "派活");
+      for (const [n, status] of [[0, "干活中"], [1, "已关闭"], [2, "做完了"], [3, "等你批"], [4, "已关闭"]]) assert.equal(byId(`worker-${n}`).status, status);
+      assert.equal(byId("worker-9").usd, 0.09);assert.equal(byId("worker-5").usd, undefined);assert.equal(byId("worker-2").project, "code-project");
+      assert.ok(panelSchema.safeParse(panel).success);
+      for (let i = 0; i < 3; i++) engine.panel("headquarters");
+      assert.equal(scans, 2, "panel polling must not list agents again");assert.deepEqual(logs, []);
+    } finally { await engine.stop(); }
+  }
+});

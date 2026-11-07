@@ -239,7 +239,7 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
 }
 
 /** The whole panel for one affair. */
-export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "", flowNow = new Map() } = {}) {
+export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "", flowNow = new Map(), sessions = /** @type {any[]} */ ([]) } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
   const { labelOf } = namesOf(policy, state, lc);
   const happened = eventsOf(state, now, policy, lc, { labelOf, fileAt: (name) => { const f = fileIn(root, state.id, name); return f ? slashed(f) : null; } });
@@ -250,6 +250,7 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     title: state.title,
     mode: modeText(state, policy),
     steps: stepLines(state, now, policy).filter((l) => l && !l.startsWith("##")),
+    sessions: sessionsOf(state, sessions),
     open: card.open,
     mood: moodOf(state, asks.length > 0, Boolean(trouble), Boolean(budget)),
     asks: asks.map((a) => ({ id: a.id, title: a.title, line: a.line, options: a.options })),
@@ -263,4 +264,16 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     sources: sourcesOf(state, now, policy, lc),
     materials: materialsOf(root, state, now, policy),
   };
+}
+
+export function sessionsOf(state, snapshots) {
+  const activity = (a) => Math.max(...[a.updatedAt, a.lastUserMessageAt, a.createdAt].map((t) => Date.parse(t) || 0));
+  return snapshots.filter(({ agent: a }) => a.id === state.chatId || a.labels?.["affairs.affair"] === state.id)
+    .sort((a, b) => activity(b.agent) - activity(a.agent)).map(({ agent: a, project }) => ({
+      agentId: a.id, title: a.title || state.title,
+      role: a.id === state.chatId || a.labels?.["affairs.chat"] ? "主对话" : a.labels?.["affairs.role"] === "dispatched" ? "派活" : "流程",
+      status: a.pendingPermissions?.length ? "等你批" : a.archivedAt || ["closed", "error"].includes(a.status) ? "已关闭" : ["running", "initializing"].includes(a.status) ? "干活中" : "做完了",
+      project: project?.projectName || "",
+      ...(Number.isFinite(a.lastUsage?.totalCostUsd) ? { usd: a.lastUsage.totalCostUsd } : {}),
+    }));
 }

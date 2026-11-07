@@ -29,6 +29,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   const files = useFiles(workspaceId, (navigation as { openFile?: OpenFile } | undefined)?.openFile);
   const [panel, setPanel] = useState<PanelData | null | undefined>(undefined);
   const [showFacts, setShowFacts] = useState(false);
+  const [showSessions, setShowSessions] = useState(false);
   useEffect(() => {
     let alive = true;
     const once = () =>
@@ -99,6 +100,17 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
       {panel.next.text ? <Words style={{ ...muted, marginTop: 8 }}>下次　{panel.next.text}</Words> : null}
       {panel.spent ? <Words style={{ ...muted, marginTop: 2 }}>{panel.spent}</Words> : null}
       {panel.steps?.length ? <View style={{ gap: 4, marginTop: 12 }}>{heading("走到哪一步")}{panel.steps.map((s, i) => <Words key={i} style={body}>{s}</Words>)}</View> : null}
+      {panel.sessions.length ? heading("相关会话") : null}
+      {(showSessions ? panel.sessions : panel.sessions.slice(0, 8)).map((s) => (
+        <View key={s.agentId} style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 }}>
+          <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+            <Words style={body}>{s.title}</Words>
+            <Words style={muted}>{[s.role, s.status, s.project, s.usd === undefined ? "" : `$${s.usd.toFixed(3)}`].filter(Boolean).join(" · ")}</Words>
+          </View>
+          {navigation?.openAgent ? <Pressable accessibilityRole="button" accessibilityLabel={`打开 ${s.title}`} onPress={() => navigation.openAgent!({ agentId: s.agentId })} style={{ flexShrink: 0, padding: 8 }}><Words style={{ color: c.accent, fontSize: 13 }}>打开</Words></Pressable> : null}
+        </View>
+      ))}
+      {panel.sessions.length > 8 ? toggle(showSessions ? "收起 ›" : `看全部 ${panel.sessions.length} 条 ›`, () => setShowSessions(!showSessions)) : null}
       {panel.facts.length ? toggle(showFacts ? "收起记住的 ›" : `记住的 ${panel.facts.length} 条 ›`, () => setShowFacts(!showFacts)) : null}
       {showFacts ? panel.facts.map((f, i) => <Pieces key={i} text={`· ${f.text}`} parts={f.parts} color={c.accent} style={{ ...muted, marginTop: 4 }} />) : null}
 

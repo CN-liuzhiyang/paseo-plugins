@@ -199,7 +199,7 @@ test("tagged agents are discovered across pages and restart, then charged once w
   const oldMain = { ...worker, id: "old-main", labels: { "affairs.affair": f.id, "affairs.chat": f.id } };
   const paseo = { agents: {
     list: async (q: any) => { queries.push(q);return { entries: q.page.cursor ? [{ agent: worker }] : [{ agent: oldMain }], pageInfo: { nextCursor: q.page.cursor ? null : "second" } }; },
-    ref: (id: string) => { assert.equal(id, "worker", "legacy main already has chat.turn accounting");return { refresh: async () => ({ agent: worker }) }; },
+    ref: (id: string) => ({ refresh: async () => ({ agent: id === "worker" ? worker : id === "old-main" ? oldMain : { id, labels: {} } }) }),
   } };
   await dispatchCosts(f.w.ctx, f.id, paseo);await dispatchCosts(f.w.ctx, f.id, paseo);
   assert.deepEqual(queries[0].filter, { labels: { "affairs.affair": f.id }, includeArchived: true });

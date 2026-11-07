@@ -53,13 +53,17 @@ export function dispatchOpen(ctx, request) {
 }
 
 /** Read cumulative usage, including changes missed while the plugin was stopped. An idle status is never a hand-in. */
-export async function dispatchCosts(ctx, id, paseo) {
+export async function dispatchCosts(ctx, id, paseo, { charge = true } = {}) {
   const s = load(ctx.root, id, ctx.policy);
+  const sessions = new Map();
   let cursor;
   do {
     const listed = await paseo.agents.list({ filter: { labels: { "affairs.affair": id }, includeArchived: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } });
-    for (const { agent } of listed.entries) {
-      if (agent.labels?.["affairs.affair"] !== id || agent.labels["affairs.chat"] || s.dispatched.some((d) => d.agentId === agent.id)) continue;
+    for (const listedEntry of listed.entries) {
+      const { agent } = listedEntry;
+      if (agent.labels?.["affairs.affair"] !== id) continue;
+      sessions.set(agent.id, listedEntry);
+      if (!charge || agent.id === s.chatId || agent.labels["affairs.chat"] || s.dispatched.some((d) => d.agentId === agent.id)) continue;
       const model = agent.model ? `${agent.provider}/${agent.model}` : agent.provider;
       const approved = read(ctx.root, id).findLast((l) => l.kind === "dispatch.approved" && l.workspaceId === agent.workspaceId && l.model === model);
       const entry = { kind: "dispatched", agentId: agent.id, model, workspaceId: agent.workspaceId, ...(approved ? { contract: approved.contract } : {}) };
@@ -68,10 +72,15 @@ export async function dispatchCosts(ctx, id, paseo) {
     }
     cursor = listed.pageInfo?.nextCursor;
   } while (cursor);
-  for (const d of s.dispatched) {
-    const seen = (await paseo.agents.ref(d.agentId).refresh())?.agent;
+  for (const agentId of new Set([...sessions.keys(), ...(charge ? s.dispatched.map((d) => d.agentId) : []), ...(s.chatId ? [s.chatId] : [])])) {
+    const snapshot = await paseo.agents.ref(agentId).refresh();
+    const seen = snapshot?.agent;
+    const d = charge && s.dispatched.find((d) => d.agentId === agentId);
+    if (seen) sessions.set(agentId, { ...sessions.get(agentId), ...snapshot, agent: { ...seen, id: agentId } });
+    if (!d) continue;
     if (!seen) throw new Error(`派出的会话读不到：${d.agentId}`);
     const cost = costIncrement(seen.lastUsage, d.usdTotal);
     if (cost.usdTotal !== d.usdTotal || cost.unknown !== d.unknown) append(ctx.root, id, [{ kind: "dispatch.cost", agentId: d.agentId, ...cost }], { now: ctx.now(), tz: ctx.policy.tz });
   }
+  return [...sessions.values()];
 }
