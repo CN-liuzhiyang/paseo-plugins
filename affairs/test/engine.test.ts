@@ -95,7 +95,7 @@ test("the sidebar title follows the log: a day when the next look is days away, 
   assert.equal(s.calls.titles.length, n, "the title is set when it changes, not on every scan");
 });
 
-test("only an affair that ended is archived, and only after three days; a resumed one is not", async () => {
+test("an ended affair keeps its workspace and panel, including after three days and when resumed", async () => {
   const s = setup();
   const quiet = await start(s);
   await createWatch(s.w.ctx, { id: "other-2", title: "牙冠", noWait: true });
@@ -114,13 +114,13 @@ test("only an affair that ended is archived, and only after three days; a resume
   await ops.stop(s.w.ctx, quiet);
   s.w.advance(3 * DAY + HOUR);
   await s.engine.scan(quiet);
-  assert.equal(s.calls.archived, 1);
-  assert.equal(load(s.w.root, quiet).archived, true);
-  assert.ok(s.w.calls().some((c) => c[0] === "schedule" && c[1] === "delete"), "the plan that ended with the workspace is removed");
+  assert.equal(s.calls.archived, 0);
+  assert.equal(load(s.w.root, quiet).archived, false);
+  assert.equal(s.engine.panel(load(s.w.root, quiet).workspaceId)!.mood, "stopped");
   const again = await ops.resume(s.w.ctx, quiet);
   assert.equal(again.ok, true, again.text);
   assert.equal(load(s.w.root, quiet).status, "watching");
-  assert.equal(s.w.paseo().workspaces.length, 3, "a new workspace; the old one stays in the archive");
+  assert.equal(s.w.paseo().workspaces.length, 2, "the original workspace stays available");
 });
 
 test("a question is pushed once, with its number; answered before the push it is not pushed at all", async () => {

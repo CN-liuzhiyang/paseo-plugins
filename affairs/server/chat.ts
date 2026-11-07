@@ -203,7 +203,8 @@ export function createChats(deps: ChatDeps) {
   /** Archiving a session that is in the middle of a turn cuts the turn short, so a busy one is left alone and tried again later. */
   const busy = async (chatId: string): Promise<boolean> => {
     try {
-      return ["running", "initializing"].includes((await paseo.agents.ref(chatId).refresh())?.agent.status ?? "");
+      const seen = (await paseo.agents.ref(chatId).refresh())?.agent;
+      return ["running", "initializing"].includes(seen?.status ?? "") || Boolean(seen?.pendingPermissions?.length);
     } catch {
       return false; // not there to ask: nothing is running in it
     }
@@ -212,7 +213,9 @@ export function createChats(deps: ChatDeps) {
   /** Puts a replaced chat away; whatever stops it (busy, or Paseo refusing) leaves it on the list for the next scan. */
   async function putAway(id: string, old: string): Promise<void> {
     try {
-      if (await busy(old)) {
+      const seen = (await paseo.agents.ref(old).refresh())?.agent;
+      if (seen?.archivedAt) { toPutAway.delete(old);return; }
+      if (["running", "initializing"].includes(seen?.status ?? "") || seen?.pendingPermissions?.length) {
         toPutAway.set(old, id);
         return;
       }
@@ -437,7 +440,14 @@ export function createChats(deps: ChatDeps) {
     }
   }
 
-  async function sync(id: string): Promise<void> {
+  async function sync(id: string, sessions: Array<{ agent: ChatAgent }> = []): Promise<void> {
+    const s = deps.state(id);
+    if (!isOpen(s)) {
+      await observe(id, s);
+      const related = sessions.filter(({ agent }) => agent.labels?.["affairs.affair"] === id).map(({ agent }) => agent.id);
+      for (const agentId of new Set([s.chatId, ...related, ...[...toPutAway].filter(([, owner]) => owner === id).map(([agentId]) => agentId)].filter(Boolean))) await putAway(id, agentId);
+      return;
+    }
     await ensure(id);
     await listen(id);
     await draw(id);

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createEngine } from "../server/engine";
 import { append } from "../server/lib/log.mjs";
 import { panelSchema } from "../shared/panel";
+import * as ops from "../server/lib/ops.mjs";
 import { world, emptyDirectory } from "./kit";
 
 test("related sessions reuse the paged cost scan, include main, roles, status, project and cost, and sort by activity", async () => {
@@ -44,6 +45,44 @@ test("related sessions reuse the paged cost scan, include main, roles, status, p
       assert.ok(panelSchema.safeParse(panel).success);
       for (let i = 0; i < 3; i++) engine.panel("headquarters");
       assert.equal(scans, 2, "panel polling must not list agents again");assert.deepEqual(logs, []);
+    } finally { await engine.stop(); }
+  }
+});
+
+test("done and stopped affairs archive only quiet related sessions, retry busy, permission and archive failures, and keep their workspace", async () => {
+  for (const done of [true, false]) {
+    const w = world();const id = "put-away";
+    append(w.root, id, [{ kind: "created", id, title: "改进工具" }, { kind: "workspace", workspaceId: "headquarters" }, { kind: "chat", agentId: "main", why: "first" }], { now: w.now() });
+    const agents: any[] = [
+      { id: "main", status: "idle" }, { id: "closed", status: "closed" }, { id: "running", status: "running" },
+      { id: "starting", status: "initializing" }, { id: "permission", status: "idle", pendingPermissions: [{}] },
+      { id: "retry", status: "idle" }, { id: "archived", status: "closed", archivedAt: "yes" },
+      { id: "foreign", status: "idle", labels: { "affairs.affair": "other" } },
+    ].map((a) => ({ ...a, labels: a.labels ?? (a.id === "main" ? {} : { "affairs.affair": id, "affairs.role": "dispatched" }) }));
+    let workspaceArchives = 0, creates = 0, refuse = true;const archives: string[] = [];
+    const paseo: any = {
+      agents: {
+        list: async (q: any) => q.filter ? { entries: agents.filter((a) => a.id !== "main").map((agent) => ({ agent })) } : emptyDirectory(),
+        ref: (agentId: string) => ({ refresh: async () => ({ agent: agents.find((a) => a.id === agentId) }), archive: async () => {
+          if (agentId === "retry" && refuse) throw new Error("temporarily unavailable");
+          archives.push(agentId);agents.find((a) => a.id === agentId).archivedAt = "yes";
+        }, send: async () => {}, timeline: { append: async () => {}, subscribe: () => Object.assign(() => {}, { ready: Promise.resolve() }), refetch: async () => ({ entries: [] }) } }),
+      },
+      workspaces: { ref: () => ({ setTitle: async () => {}, archive: async () => { workspaceArchives++; }, agents: { create: async () => { creates++;return { id: "unwanted" }; } } }) },
+    };
+    const engine = createEngine({ ctx: w.ctx, paseo, deliver: null, log: () => {} });
+    try {
+      assert.ok((await ops.stop(w.ctx, id, { done })).ok);
+      await engine.scan(id);assert.deepEqual(archives.sort(), ["closed", "main"]);
+      agents.find((a) => a.id === "running").status = "idle";agents.find((a) => a.id === "starting").status = "closed";
+      agents.find((a) => a.id === "permission").pendingPermissions = [];refuse = false;
+      await engine.scan(id);await engine.scan(id);
+      assert.deepEqual(archives.sort(), ["closed", "main", "permission", "retry", "running", "starting"]);
+      await engine.stop();
+      const restarted = createEngine({ ctx: w.ctx, paseo, deliver: null, log: () => {} });
+      w.advance(10 * 86_400_000);await restarted.scan(id);await restarted.stop();
+      assert.equal(archives.length, 6, "already archived sessions are not archived again after restart");
+      assert.equal(creates, 0);assert.equal(workspaceArchives, 0);assert.equal(engine.panel("headquarters")!.mood, done ? "done" : "stopped");
     } finally { await engine.stop(); }
   }
 });

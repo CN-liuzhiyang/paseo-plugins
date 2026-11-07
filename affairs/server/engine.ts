@@ -21,11 +21,10 @@ import { dispatchCosts } from "./lib/dispatch.mjs";
 
 // The plugin's one loop: when an affair's log changes (or every minute, or at start) look at that affair and make the
 // world agree with it -- its chat exists, the sidebar title is right, the chat shows what the log
-// says, anything that must reach the person is pushed within the day's budget, and an affair that ended three days
-// ago is archived. Nothing here decides anything about an affair; the log and the check do.
+// says, anything that must reach the person is pushed within the day's budget, and quiet sessions are archived
+// after an affair ends. Nothing here decides anything about an affair; the log and the check do.
 
 type Ctx = ReturnType<typeof ops.makeCtx>;
-const DAY = 86_400_000;
 const TICK_MS = 60_000;
 /** While a run started for an affair is on, its status is asked this often (the minute loop alone would show a card waiting a minute late). */
 const FLOW_TICK_MS = 8000;
@@ -211,15 +210,9 @@ export function createEngine(deps: EngineDeps) {
         await ws.setTitle(want);
         write(id, [{ kind: "workspace", title: want }]);
       }
-      if (!isOpen(s) && s.statusAt && ctx.now() - Date.parse(s.statusAt) > ctx.policy.archiveAfterDays * DAY) {
-        await ws.archive();
-        write(id, [{ kind: "workspace", archived: true }]);
-        // Archiving ends the plan that runs in the workspace; what is left of it is only clutter.
-        if (s.scheduleId) await schedule.remove(ctx.run, s.scheduleId).catch((error: unknown) => log(`${id}: removing the plan failed: ${(error as Error).message}`));
-      }
     }
     // The chat: made, listened to, and shown what the log says.
-    if (ws && chats) await chats.sync(id).catch((error: unknown) => log(`${id}: the chat: ${(error as Error).message}`));
+    if (chats) await chats.sync(id, sessions.get(id)).catch((error: unknown) => log(`${id}: the chat: ${(error as Error).message}`));
     if (chats) await chats.tellFinished(id).catch((error: unknown) => log(`${id}: telling the chat: ${(error as Error).message}`));
     if (chats) await chats.tellDrive(id);
     await pushes(id);

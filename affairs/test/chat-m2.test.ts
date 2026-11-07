@@ -560,7 +560,7 @@ async function replacedOnce(opts: Parameters<typeof paseoWith>[0] = {}) {
   s.w.advance(40 * MIN);
   await s.engine.scan(id);
   assert.equal(load(s.w.root, id).chatId, "chat-2");
-  assert.deepEqual(s.p.archived, ["chat-1"]);
+  assert.deepEqual(s.p.archived, opts.agent?.("chat-1")?.archivedAt ? [] : ["chat-1"]);
   return { s, id };
 }
 
@@ -576,7 +576,7 @@ test("an older chat that is out of the archive again and has been spoken to sinc
   const state = load(s.w.root, id);
   assert.equal(state.chatId, "chat-1");
   assert.deepEqual(state.chats.map((c: { why: string }) => c.why), ["first", "rotate:long", "revived"]);
-  assert.deepEqual(s.p.archived, ["chat-1", "chat-2"], "the new one had nobody in it and is put away");
+  assert.deepEqual(s.p.archived, ["chat-2"], "already archived old main is skipped; the empty replacement is put away");
   assert.ok(s.p.handlers.has("chat-1") && !s.p.handlers.has("chat-2"), "what he types in it is heard again");
   s.w.advance(10 * MIN);
   await s.engine.scan(id);

@@ -75,7 +75,7 @@ async function setup(rootWithSpaces = false, available = false) {
   };
   const engine = createEngine({ ctx: w.ctx, paseo, deliver: null, log: (m) => logs.push(m) });
   await engine.scan(id);
-  if (!available) agents.get("made-1")!.archivedAt = new Date(w.now()).toISOString();
+  if (!available) agents.get("made-1")!.status = "error";
   w.advance(1000);
   const candidate = (name = "new", over: Partial<ChatAgent> = {}): ChatAgent => ({ id: name, workspaceId: ws, status: "idle", createdAt: new Date(w.now()).toISOString(), labels: {}, ...over });
   const add = (name = "new", over: Partial<ChatAgent> = {}) => { message(name, "请接着办", `person:${name}`); emit(candidate(name, over)); };
@@ -135,7 +135,7 @@ test("each adoption overwrites the same prompt file with current instructions", 
     const before = readFileSync(promptFile, "utf8");
     s.w.ctx.command += " --paseo-home updated";
     s.w.advance(1000);
-    s.agents.get("new")!.archivedAt = new Date(s.w.now()).toISOString();
+    s.agents.get("new")!.status = "error";
     s.add("next");
     await s.engine.scan(s.id);
     const current = readFileSync(promptFile, "utf8");
@@ -216,7 +216,7 @@ test("done and stopped affairs adopt nothing and release their directory subscri
   }
 });
 
-test("a busy old chat is put away later without reviving it over the adopted chat", async () => {
+test("a busy healthy main is kept when an ordinary tab arrives and when the main becomes idle", async () => {
   const s = await setup();
   try {
     s.emit({ ...s.agents.get("made-1")!, status: "running" });
@@ -227,9 +227,9 @@ test("a busy old chat is put away later without reviving it over the adopted cha
     s.emit({ ...s.agents.get("made-1")!, status: "idle", updatedAt: new Date(s.w.now()).toISOString() } as ChatAgent);
     await s.engine.scan(s.id);
     await s.engine.scan(s.id);
-    assert.equal(load(s.w.root, s.id).chatId, "new");
-    assert.deepEqual(s.archived, ["made-1"]);
-    assert.equal(s.sent.length, 1);
+    assert.equal(load(s.w.root, s.id).chatId, "made-1");
+    assert.deepEqual(s.archived, []);
+    assert.equal(s.sent.length, 0);
   } finally { await s.engine.stop(); }
 });
 
@@ -241,7 +241,7 @@ test("returning to an old chat does not let an unchosen tab from before that ret
     s.add("latest");
     await s.engine.scan(s.id);
     s.w.advance(6 * 60_000);
-    s.emit({ ...s.agents.get("made-1")!, archivedAt: null, updatedAt: new Date(s.w.now()).toISOString(), lastUserMessageAt: new Date(s.w.now()).toISOString() } as ChatAgent);
+    s.emit({ ...s.agents.get("made-1")!, status: "idle", archivedAt: null, updatedAt: new Date(s.w.now()).toISOString(), lastUserMessageAt: new Date(s.w.now()).toISOString() } as ChatAgent);
     await s.engine.scan(s.id);
     assert.equal(load(s.w.root, s.id).chatId, "made-1");
     await s.engine.scan(s.id);
