@@ -167,7 +167,8 @@ export function createChats(deps: ChatDeps) {
     const s = deps.state(id);
     if (!isOpen(s) || !s.chatId) return false;
     const current = directory.get(s.chatId) ?? (await paseo.agents.ref(s.chatId).refresh())?.agent;
-    const created = Date.parse(current?.createdAt ?? "");
+    if (current && !current.archivedAt && current.status !== "error") return false;
+    const created = Date.parse(current?.createdAt ?? s.chats.at(-1).at);
     if (!Number.isFinite(created)) return false;
     // A return to an older chat must not make an unchosen tab from before that return look new again.
     const since = Math.max(created, Date.parse(s.chats.at(-1).at));

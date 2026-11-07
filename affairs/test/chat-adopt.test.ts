@@ -10,7 +10,7 @@ import { affairDir, append, load, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { world } from "./kit";
 
-async function setup(rootWithSpaces = false) {
+async function setup(rootWithSpaces = false, available = false) {
   const w = world();
   if (rootWithSpaces) {
     const root = path.join(w.dir, "root with spaces");
@@ -40,7 +40,8 @@ async function setup(rootWithSpaces = false) {
   };
   const paseo: PaseoLike = {
     agents: {
-      list: async () => {
+      list: async (options: any) => {
+        if (options.filter) return { entries: [] };
         lists++;
         return { entries: [], subscription: {
           subscribe: (value) => { observer = value; value.snapshot({ entries: [...agents.values()].map((agent) => ({ agent })) }); return () => {}; },
@@ -74,12 +75,27 @@ async function setup(rootWithSpaces = false) {
   };
   const engine = createEngine({ ctx: w.ctx, paseo, deliver: null, log: (m) => logs.push(m) });
   await engine.scan(id);
+  if (!available) agents.get("made-1")!.archivedAt = new Date(w.now()).toISOString();
   w.advance(1000);
   const candidate = (name = "new", over: Partial<ChatAgent> = {}): ChatAgent => ({ id: name, workspaceId: ws, status: "idle", createdAt: new Date(w.now()).toISOString(), labels: {}, ...over });
   const add = (name = "new", over: Partial<ChatAgent> = {}) => { message(name, "请接着办", `person:${name}`); emit(candidate(name, over)); };
   return { w, id, ws, agents, engine, sent, archived, logs, handlers, candidate, add, emit, message,
+    remove: (agentId: string) => { agents.delete(agentId);observer?.update({ type: "agent_update", payload: { kind: "remove", agentId } }); },
     failSend: (v: boolean) => { failSend = v; }, counts: () => ({ lists, releases, creates }) };
 }
+
+test("a healthy main stays main, including closed and running; archived, failed and missing mains allow adoption", async () => {
+  for (const status of ["idle", "closed", "running", "initializing", "archived", "error", "missing"]) {
+    const s = await setup(false, true);
+    try {
+      const old = s.agents.get("made-1")!;
+      if (status === "missing") s.remove(old.id);
+      else s.emit({ ...old, status: status === "archived" ? "closed" : status, archivedAt: status === "archived" ? "yes" : null });
+      s.add();await s.engine.scan(s.id);
+      assert.equal(load(s.w.root, s.id).chatId, ["archived", "error", "missing"].includes(status) ? "new" : "made-1", status);
+    } finally { await s.engine.stop(); }
+  }
+});
 
 test("a new ordinary chat is adopted promptly through directory events, hears earlier words, and receives instructions once", async () => {
   const s = await setup(true);
@@ -119,6 +135,7 @@ test("each adoption overwrites the same prompt file with current instructions", 
     const before = readFileSync(promptFile, "utf8");
     s.w.ctx.command += " --paseo-home updated";
     s.w.advance(1000);
+    s.agents.get("new")!.archivedAt = new Date(s.w.now()).toISOString();
     s.add("next");
     await s.engine.scan(s.id);
     const current = readFileSync(promptFile, "utf8");
@@ -154,6 +171,7 @@ test("adoption refuses other workspaces, known chats, labels, children, helpers,
   try {
     const forbidden: Array<Partial<ChatAgent>> = [
       { workspaceId: "elsewhere" }, { labels: { "affairs.chat": "other" } }, { labels: { "affairs.look": s.id } },
+      { labels: { "affairs.affair": s.id, "affairs.role": "dispatched" } },
       { labels: { "paseo.schedule-id": "plan" } }, { parentAgentId: "parent" }, { labels: { "paseo.parent-agent-id": "parent" } },
       { labels: { "orch-run": "run" } }, { labels: { "orch-step": "gate" } }, { labels: { "orch-steward": "all" } },
       { internal: true }, { providerUnavailable: true }, { archivedAt: "2026-01-01" }, { status: "error" }, { status: "unknown" },
