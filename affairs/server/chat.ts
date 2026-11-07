@@ -503,9 +503,18 @@ export function createChats(deps: ChatDeps) {
     const handle = paseo.agents.ref(s.chatId);
     const seen = (await handle.refresh())?.agent;
     if (!seen || seen.archivedAt || ["running", "initializing"].includes(seen.status)) return;
-    const text = waiting && !ready ? `提醒他：${s.title}还有问题待答。用一两句话提醒，不重复整张卡；先做不依赖答案的步骤。` : `接着推「${s.title}」：先看 README 的步骤，做下一步；做不了就用 affair ask 请他拍板。${ready?.reason === "answered" ? "他刚答了问题，先读新的答案。" : ready?.reason === "created" ? "先写步骤和估算，请他批额度。" : ""}`;
+    const text = waiting && !ready ? `提醒他：${s.title}还有问题待答。用一两句话提醒，不重复整张卡；先做不依赖答案的步骤。` : `接着推「${s.title}」：先看 README 的步骤，做下一步；做不了就用 affair ask 请他拍板。${ready?.reason === "answered" ? answeredText(s, ready.question) : ready?.reason === "created" ? "先写步骤和估算，请他批额度。" : ""}`;
     await handle.send(text, { messageId: `affair-chat:${id}:${key}`, activeTurnBehavior: "steer" });
     deps.write(id, [{ kind: "drive.told", key, agentId: s.chatId }]);
+  }
+
+  /** His answer goes into the nudge word for word (he sees what the chat sees); the chat still reads brief for the rest. */
+  function answeredText(s: any, qid?: string) {
+    const a = s.lines.findLast((l: any) => l.kind === "answered" && (!qid || l.id === qid));
+    const q = a && s.asks.find((x: any) => x.id === a.id);
+    if (!a?.answer) return "他刚答了问题，先读新的答案。";
+    const said = String(a.answer).replace(/\s+/g, " ").trim().slice(0, 300);
+    return `他刚答了${q?.title ? `「${q.title}」` : "问题"}：${said}。先 brief --chat 看全貌再做。`;
   }
 
   async function stop() {

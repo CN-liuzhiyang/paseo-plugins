@@ -267,8 +267,8 @@ test("waiting asks remind no more than once per day; a real answer resumes progr
   await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);f.w.advance(24 * 3_600_000);
   await f.chats.tellDrive(f.id);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);assert.match(f.sent[0].text, /提醒他/);
   f.w.advance(24 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 2);
-  f.put([{ kind: "answered", id: "q", answer: "好" }, { kind: "drive.ready", reason: "answered" }]);
-  await f.chats.tellDrive(f.id);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 3);assert.match(f.sent[2].text, /他刚答了问题/);
+  f.put([{ kind: "answered", id: "q", answer: "按新范围做" }, { kind: "drive.ready", reason: "answered", question: "q" }]);
+  await f.chats.tellDrive(f.id);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 3);assert.match(f.sent[2].text, /他刚答了「确认」：按新范围做/);
 });
 
 test("drive opening includes its short handbook and configured pointer, watch does not", () => {
