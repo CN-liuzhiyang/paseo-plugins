@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { tokenDaysSchema } from "./tokens";
 const time = z.iso.datetime({ offset: true }).nullable();
 const number = z.number().finite().nonnegative().nullable();
 const quota = z.object({ used: number, limit: number, resetsAt: time });
@@ -7,6 +8,8 @@ export const keyStatus = z.enum(["active", "expired", "disabled", "inactive"]);
 export const snapshotSchema = z.object({
   schemaVersion: z.literal(1),
   serverTime: z.iso.datetime({ offset: true }),
+  // Optional telemetry must never break the existing quota card on older or partial servers.
+  tokenDays: tokenDaysSchema.nullish().catch(undefined),
   key: z.object({
     status: keyStatus,
     expiresAt: time,

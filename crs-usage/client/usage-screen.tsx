@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { panelRpc, type PanelEntry } from "../shared/rpc";
+import { summarizeTokens, type TokenRange } from "../shared/tokens";
+import { TokenUsage } from "./token-usage";
 import {
   estimate,
   relativeCollection,
@@ -80,6 +82,7 @@ function Button({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
+      aria-selected={selected}
       disabled={disabled}
       onPress={onPress}
       style={{
@@ -311,6 +314,7 @@ function Entry({
   compact,
   refresh,
   refreshing,
+  range,
 }: {
   entry: PanelEntry;
   mode: Mode;
@@ -318,6 +322,7 @@ function Entry({
   compact: boolean;
   refresh: () => void;
   refreshing: boolean;
+  range: TokenRange;
 }) {
   const c = theme.colors;
   const [linkError, setLinkError] = useState(false);
@@ -481,6 +486,7 @@ function Entry({
               );
             })}
           </View>
+          <TokenUsage data={snapshot.tokenDays} range={range} theme={theme} />
           {snapshot.pools.map((pool, index) => (
             <PoolView
               key={`${pool.platform}-${index}`}
@@ -516,6 +522,7 @@ function Entry({
 }
 export function UsageScreen({ theme, layout }: PluginScreenProps) {
   const [mode, setMode] = useState<Mode>("used");
+  const [range, setRange] = useState<TokenRange>(1);
   const load = useRpc(panelRpc);
   const query = useQuery({
     queryKey: ["crs-panel"],
@@ -560,6 +567,19 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
             selected={mode === "remaining"}
             onPress={() => setMode("remaining")}
           />
+          {query.data?.some((entry) => summarizeTokens(entry.snapshot?.tokenDays, 30)) && (
+            <View style={{ flexDirection: "row", gap: 4, marginLeft: "auto" }}>
+              {([1, 7, 30] as const).map((days) => (
+                <Button
+                  key={days}
+                  label={days === 1 ? "今天" : `${days}天`}
+                  theme={theme}
+                  selected={range === days}
+                  onPress={() => setRange(days)}
+                />
+              ))}
+            </View>
+          )}
         </View>
         {query.isError && (
           <Text style={{ color: c.statusDanger }}>无法读取 CRS 面板，请检查插件或主机连接。</Text>
@@ -577,6 +597,7 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
             mode={mode}
             theme={theme}
             compact={layout.compact}
+            range={range}
             refreshing={query.isFetching}
             refresh={() => {
               void query.refetch();

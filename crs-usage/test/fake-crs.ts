@@ -14,6 +14,8 @@ export type Mode =
   | "management_https"
   | "integration"
   | "pool"
+  | "tokens"
+  | "tokens_null"
   | "fresh"
   | "older"
   | "reset"
@@ -74,6 +76,15 @@ export async function startFakeCrs() {
           ? "pool-snapshot"
           : "snapshot",
     );
+    if (mode === "tokens" || mode === "tokens_null") {
+      data.tokenDays = await fixture("token-days");
+      if (mode === "tokens_null")
+        for (const day of data.tokenDays.days) {
+          for (const field of ["input", "output", "cacheCreate", "cacheRead", "requests"])
+            day[field] = null;
+          day.models = null;
+        }
+    }
     if (mode === "pool") {
       const shift = Date.now() - Date.parse(data.serverTime);
       data.serverTime = new Date(Date.now()).toISOString();

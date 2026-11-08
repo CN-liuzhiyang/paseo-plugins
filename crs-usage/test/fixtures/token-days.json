@@ -1,0 +1,1265 @@
+{
+  "timezoneOffset": 8,
+  "days": [
+    {
+      "date": "2026-10-10",
+      "input": 11500000,
+      "output": 1500000,
+      "cacheCreate": 1200000,
+      "cacheRead": 1000000,
+      "requests": 80,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6900000,
+          "output": 600000,
+          "cacheCreate": 360000,
+          "cacheRead": 750000,
+          "requests": 44
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2875000,
+          "output": 600000,
+          "cacheCreate": 720000,
+          "cacheRead": 150000,
+          "requests": 20
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1150000,
+          "output": 225000,
+          "cacheCreate": 60000,
+          "cacheRead": 80000,
+          "requests": 12
+        },
+        {
+          "model": "other",
+          "input": 575000,
+          "output": 75000,
+          "cacheCreate": 60000,
+          "cacheRead": 20000,
+          "requests": 4
+        }
+      ]
+    },
+    {
+      "date": "2026-10-11",
+      "input": 11250000,
+      "output": 1550000,
+      "cacheCreate": 1500000,
+      "cacheRead": 2000000,
+      "requests": 103,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6750000,
+          "output": 620000,
+          "cacheCreate": 450000,
+          "cacheRead": 1500000,
+          "requests": 57
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2812500,
+          "output": 620000,
+          "cacheCreate": 900000,
+          "cacheRead": 300000,
+          "requests": 26
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1125000,
+          "output": 232500,
+          "cacheCreate": 75000,
+          "cacheRead": 160000,
+          "requests": 15
+        },
+        {
+          "model": "other",
+          "input": 562500,
+          "output": 77500,
+          "cacheCreate": 75000,
+          "cacheRead": 40000,
+          "requests": 5
+        }
+      ]
+    },
+    {
+      "date": "2026-10-12",
+      "input": 11000000,
+      "output": 1600000,
+      "cacheCreate": 1800000,
+      "cacheRead": 3000000,
+      "requests": 126,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6600000,
+          "output": 640000,
+          "cacheCreate": 540000,
+          "cacheRead": 2250000,
+          "requests": 69
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2750000,
+          "output": 640000,
+          "cacheCreate": 1080000,
+          "cacheRead": 450000,
+          "requests": 32
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1100000,
+          "output": 240000,
+          "cacheCreate": 90000,
+          "cacheRead": 240000,
+          "requests": 19
+        },
+        {
+          "model": "other",
+          "input": 550000,
+          "output": 80000,
+          "cacheCreate": 90000,
+          "cacheRead": 60000,
+          "requests": 6
+        }
+      ]
+    },
+    {
+      "date": "2026-10-13",
+      "input": 10750000,
+      "output": 1650000,
+      "cacheCreate": 2100000,
+      "cacheRead": 4000000,
+      "requests": 149,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6450000,
+          "output": 660000,
+          "cacheCreate": 630000,
+          "cacheRead": 3000000,
+          "requests": 82
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2687500,
+          "output": 660000,
+          "cacheCreate": 1260000,
+          "cacheRead": 600000,
+          "requests": 37
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1075000,
+          "output": 247500,
+          "cacheCreate": 105000,
+          "cacheRead": 320000,
+          "requests": 22
+        },
+        {
+          "model": "other",
+          "input": 537500,
+          "output": 82500,
+          "cacheCreate": 105000,
+          "cacheRead": 80000,
+          "requests": 8
+        }
+      ]
+    },
+    {
+      "date": "2026-10-14",
+      "input": 10500000,
+      "output": 1700000,
+      "cacheCreate": 2400000,
+      "cacheRead": 5000000,
+      "requests": 172,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6300000,
+          "output": 680000,
+          "cacheCreate": 720000,
+          "cacheRead": 3750000,
+          "requests": 95
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2625000,
+          "output": 680000,
+          "cacheCreate": 1440000,
+          "cacheRead": 750000,
+          "requests": 43
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1050000,
+          "output": 255000,
+          "cacheCreate": 120000,
+          "cacheRead": 400000,
+          "requests": 26
+        },
+        {
+          "model": "other",
+          "input": 525000,
+          "output": 85000,
+          "cacheCreate": 120000,
+          "cacheRead": 100000,
+          "requests": 8
+        }
+      ]
+    },
+    {
+      "date": "2026-10-15",
+      "input": 10250000,
+      "output": 1750000,
+      "cacheCreate": 1200000,
+      "cacheRead": 6000000,
+      "requests": 195,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6150000,
+          "output": 700000,
+          "cacheCreate": 360000,
+          "cacheRead": 4500000,
+          "requests": 107
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2562500,
+          "output": 700000,
+          "cacheCreate": 720000,
+          "cacheRead": 900000,
+          "requests": 49
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1025000,
+          "output": 262500,
+          "cacheCreate": 60000,
+          "cacheRead": 480000,
+          "requests": 29
+        },
+        {
+          "model": "other",
+          "input": 512500,
+          "output": 87500,
+          "cacheCreate": 60000,
+          "cacheRead": 120000,
+          "requests": 10
+        }
+      ]
+    },
+    {
+      "date": "2026-10-16",
+      "input": 10000000,
+      "output": 1800000,
+      "cacheCreate": 1500000,
+      "cacheRead": 7000000,
+      "requests": 218,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 6000000,
+          "output": 720000,
+          "cacheCreate": 450000,
+          "cacheRead": 5250000,
+          "requests": 120
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2500000,
+          "output": 720000,
+          "cacheCreate": 900000,
+          "cacheRead": 1050000,
+          "requests": 54
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 1000000,
+          "output": 270000,
+          "cacheCreate": 75000,
+          "cacheRead": 560000,
+          "requests": 33
+        },
+        {
+          "model": "other",
+          "input": 500000,
+          "output": 90000,
+          "cacheCreate": 75000,
+          "cacheRead": 140000,
+          "requests": 11
+        }
+      ]
+    },
+    {
+      "date": "2026-10-17",
+      "input": 9750000,
+      "output": 1850000,
+      "cacheCreate": 1800000,
+      "cacheRead": 8000000,
+      "requests": 241,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5850000,
+          "output": 740000,
+          "cacheCreate": 540000,
+          "cacheRead": 6000000,
+          "requests": 133
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2437500,
+          "output": 740000,
+          "cacheCreate": 1080000,
+          "cacheRead": 1200000,
+          "requests": 60
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 975000,
+          "output": 277500,
+          "cacheCreate": 90000,
+          "cacheRead": 640000,
+          "requests": 36
+        },
+        {
+          "model": "other",
+          "input": 487500,
+          "output": 92500,
+          "cacheCreate": 90000,
+          "cacheRead": 160000,
+          "requests": 12
+        }
+      ]
+    },
+    {
+      "date": "2026-10-18",
+      "input": 9500000,
+      "output": 1900000,
+      "cacheCreate": 2100000,
+      "cacheRead": 9000000,
+      "requests": 264,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5700000,
+          "output": 760000,
+          "cacheCreate": 630000,
+          "cacheRead": 6750000,
+          "requests": 145
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2375000,
+          "output": 760000,
+          "cacheCreate": 1260000,
+          "cacheRead": 1350000,
+          "requests": 66
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 950000,
+          "output": 285000,
+          "cacheCreate": 105000,
+          "cacheRead": 720000,
+          "requests": 40
+        },
+        {
+          "model": "other",
+          "input": 475000,
+          "output": 95000,
+          "cacheCreate": 105000,
+          "cacheRead": 180000,
+          "requests": 13
+        }
+      ]
+    },
+    {
+      "date": "2026-10-19",
+      "input": 9250000,
+      "output": 1950000,
+      "cacheCreate": 2400000,
+      "cacheRead": 10000000,
+      "requests": 287,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5550000,
+          "output": 780000,
+          "cacheCreate": 720000,
+          "cacheRead": 7500000,
+          "requests": 158
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2312500,
+          "output": 780000,
+          "cacheCreate": 1440000,
+          "cacheRead": 1500000,
+          "requests": 72
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 925000,
+          "output": 292500,
+          "cacheCreate": 120000,
+          "cacheRead": 800000,
+          "requests": 43
+        },
+        {
+          "model": "other",
+          "input": 462500,
+          "output": 97500,
+          "cacheCreate": 120000,
+          "cacheRead": 200000,
+          "requests": 14
+        }
+      ]
+    },
+    {
+      "date": "2026-10-20",
+      "input": 9000000,
+      "output": 2000000,
+      "cacheCreate": 1200000,
+      "cacheRead": 11000000,
+      "requests": 310,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5400000,
+          "output": 800000,
+          "cacheCreate": 360000,
+          "cacheRead": 8250000,
+          "requests": 170
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2250000,
+          "output": 800000,
+          "cacheCreate": 720000,
+          "cacheRead": 1650000,
+          "requests": 78
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 900000,
+          "output": 300000,
+          "cacheCreate": 60000,
+          "cacheRead": 880000,
+          "requests": 46
+        },
+        {
+          "model": "other",
+          "input": 450000,
+          "output": 100000,
+          "cacheCreate": 60000,
+          "cacheRead": 220000,
+          "requests": 16
+        }
+      ]
+    },
+    {
+      "date": "2026-10-21",
+      "input": 8750000,
+      "output": 2050000,
+      "cacheCreate": 1500000,
+      "cacheRead": 12000000,
+      "requests": 333,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5250000,
+          "output": 820000,
+          "cacheCreate": 450000,
+          "cacheRead": 9000000,
+          "requests": 183
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2187500,
+          "output": 820000,
+          "cacheCreate": 900000,
+          "cacheRead": 1800000,
+          "requests": 83
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 875000,
+          "output": 307500,
+          "cacheCreate": 75000,
+          "cacheRead": 960000,
+          "requests": 50
+        },
+        {
+          "model": "other",
+          "input": 437500,
+          "output": 102500,
+          "cacheCreate": 75000,
+          "cacheRead": 240000,
+          "requests": 17
+        }
+      ]
+    },
+    {
+      "date": "2026-10-22",
+      "input": 8500000,
+      "output": 2100000,
+      "cacheCreate": 1800000,
+      "cacheRead": 13000000,
+      "requests": 356,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 5100000,
+          "output": 840000,
+          "cacheCreate": 540000,
+          "cacheRead": 9750000,
+          "requests": 196
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2125000,
+          "output": 840000,
+          "cacheCreate": 1080000,
+          "cacheRead": 1950000,
+          "requests": 89
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 850000,
+          "output": 315000,
+          "cacheCreate": 90000,
+          "cacheRead": 1040000,
+          "requests": 53
+        },
+        {
+          "model": "other",
+          "input": 425000,
+          "output": 105000,
+          "cacheCreate": 90000,
+          "cacheRead": 260000,
+          "requests": 18
+        }
+      ]
+    },
+    {
+      "date": "2026-10-23",
+      "input": 8250000,
+      "output": 2150000,
+      "cacheCreate": 2100000,
+      "cacheRead": 14000000,
+      "requests": 379,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4950000,
+          "output": 860000,
+          "cacheCreate": 630000,
+          "cacheRead": 10500000,
+          "requests": 208
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2062500,
+          "output": 860000,
+          "cacheCreate": 1260000,
+          "cacheRead": 2100000,
+          "requests": 95
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 825000,
+          "output": 322500,
+          "cacheCreate": 105000,
+          "cacheRead": 1120000,
+          "requests": 57
+        },
+        {
+          "model": "other",
+          "input": 412500,
+          "output": 107500,
+          "cacheCreate": 105000,
+          "cacheRead": 280000,
+          "requests": 19
+        }
+      ]
+    },
+    {
+      "date": "2026-10-24",
+      "input": 8000000,
+      "output": 2200000,
+      "cacheCreate": 2400000,
+      "cacheRead": 15000000,
+      "requests": 402,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4800000,
+          "output": 880000,
+          "cacheCreate": 720000,
+          "cacheRead": 11250000,
+          "requests": 221
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 2000000,
+          "output": 880000,
+          "cacheCreate": 1440000,
+          "cacheRead": 2250000,
+          "requests": 100
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 800000,
+          "output": 330000,
+          "cacheCreate": 120000,
+          "cacheRead": 1200000,
+          "requests": 60
+        },
+        {
+          "model": "other",
+          "input": 400000,
+          "output": 110000,
+          "cacheCreate": 120000,
+          "cacheRead": 300000,
+          "requests": 21
+        }
+      ]
+    },
+    {
+      "date": "2026-10-25",
+      "input": 7750000,
+      "output": 2250000,
+      "cacheCreate": 1200000,
+      "cacheRead": 16000000,
+      "requests": 425,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4650000,
+          "output": 900000,
+          "cacheCreate": 360000,
+          "cacheRead": 12000000,
+          "requests": 234
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1937500,
+          "output": 900000,
+          "cacheCreate": 720000,
+          "cacheRead": 2400000,
+          "requests": 106
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 775000,
+          "output": 337500,
+          "cacheCreate": 60000,
+          "cacheRead": 1280000,
+          "requests": 64
+        },
+        {
+          "model": "other",
+          "input": 387500,
+          "output": 112500,
+          "cacheCreate": 60000,
+          "cacheRead": 320000,
+          "requests": 21
+        }
+      ]
+    },
+    {
+      "date": "2026-10-26",
+      "input": 7500000,
+      "output": 2300000,
+      "cacheCreate": 1500000,
+      "cacheRead": 17000000,
+      "requests": 448,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4500000,
+          "output": 920000,
+          "cacheCreate": 450000,
+          "cacheRead": 12750000,
+          "requests": 246
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1875000,
+          "output": 920000,
+          "cacheCreate": 900000,
+          "cacheRead": 2550000,
+          "requests": 112
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 750000,
+          "output": 345000,
+          "cacheCreate": 75000,
+          "cacheRead": 1360000,
+          "requests": 67
+        },
+        {
+          "model": "other",
+          "input": 375000,
+          "output": 115000,
+          "cacheCreate": 75000,
+          "cacheRead": 340000,
+          "requests": 23
+        }
+      ]
+    },
+    {
+      "date": "2026-10-27",
+      "input": 7250000,
+      "output": 2350000,
+      "cacheCreate": 1800000,
+      "cacheRead": 18000000,
+      "requests": 471,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4350000,
+          "output": 940000,
+          "cacheCreate": 540000,
+          "cacheRead": 13500000,
+          "requests": 259
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1812500,
+          "output": 940000,
+          "cacheCreate": 1080000,
+          "cacheRead": 2700000,
+          "requests": 118
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 725000,
+          "output": 352500,
+          "cacheCreate": 90000,
+          "cacheRead": 1440000,
+          "requests": 71
+        },
+        {
+          "model": "other",
+          "input": 362500,
+          "output": 117500,
+          "cacheCreate": 90000,
+          "cacheRead": 360000,
+          "requests": 23
+        }
+      ]
+    },
+    {
+      "date": "2026-10-28",
+      "input": 7000000,
+      "output": 2400000,
+      "cacheCreate": 2100000,
+      "cacheRead": 19000000,
+      "requests": 494,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4200000,
+          "output": 960000,
+          "cacheCreate": 630000,
+          "cacheRead": 14250000,
+          "requests": 272
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1750000,
+          "output": 960000,
+          "cacheCreate": 1260000,
+          "cacheRead": 2850000,
+          "requests": 124
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 700000,
+          "output": 360000,
+          "cacheCreate": 105000,
+          "cacheRead": 1520000,
+          "requests": 74
+        },
+        {
+          "model": "other",
+          "input": 350000,
+          "output": 120000,
+          "cacheCreate": 105000,
+          "cacheRead": 380000,
+          "requests": 24
+        }
+      ]
+    },
+    {
+      "date": "2026-10-29",
+      "input": 6750000,
+      "output": 2450000,
+      "cacheCreate": 2400000,
+      "cacheRead": 20000000,
+      "requests": 517,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 4050000,
+          "output": 980000,
+          "cacheCreate": 720000,
+          "cacheRead": 15000000,
+          "requests": 284
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1687500,
+          "output": 980000,
+          "cacheCreate": 1440000,
+          "cacheRead": 3000000,
+          "requests": 129
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 675000,
+          "output": 367500,
+          "cacheCreate": 120000,
+          "cacheRead": 1600000,
+          "requests": 78
+        },
+        {
+          "model": "other",
+          "input": 337500,
+          "output": 122500,
+          "cacheCreate": 120000,
+          "cacheRead": 400000,
+          "requests": 26
+        }
+      ]
+    },
+    {
+      "date": "2026-10-30",
+      "input": 6500000,
+      "output": 2500000,
+      "cacheCreate": 1200000,
+      "cacheRead": 21000000,
+      "requests": 540,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3900000,
+          "output": 1000000,
+          "cacheCreate": 360000,
+          "cacheRead": 15750000,
+          "requests": 297
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1625000,
+          "output": 1000000,
+          "cacheCreate": 720000,
+          "cacheRead": 3150000,
+          "requests": 135
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 650000,
+          "output": 375000,
+          "cacheCreate": 60000,
+          "cacheRead": 1680000,
+          "requests": 81
+        },
+        {
+          "model": "other",
+          "input": 325000,
+          "output": 125000,
+          "cacheCreate": 60000,
+          "cacheRead": 420000,
+          "requests": 27
+        }
+      ]
+    },
+    {
+      "date": "2026-10-31",
+      "input": 6250000,
+      "output": 2550000,
+      "cacheCreate": 1500000,
+      "cacheRead": 22000000,
+      "requests": 563,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3750000,
+          "output": 1020000,
+          "cacheCreate": 450000,
+          "cacheRead": 16500000,
+          "requests": 310
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1562500,
+          "output": 1020000,
+          "cacheCreate": 900000,
+          "cacheRead": 3300000,
+          "requests": 141
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 625000,
+          "output": 382500,
+          "cacheCreate": 75000,
+          "cacheRead": 1760000,
+          "requests": 84
+        },
+        {
+          "model": "other",
+          "input": 312500,
+          "output": 127500,
+          "cacheCreate": 75000,
+          "cacheRead": 440000,
+          "requests": 28
+        }
+      ]
+    },
+    {
+      "date": "2026-11-01",
+      "input": 6000000,
+      "output": 2600000,
+      "cacheCreate": 1800000,
+      "cacheRead": 23000000,
+      "requests": 586,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3600000,
+          "output": 1040000,
+          "cacheCreate": 540000,
+          "cacheRead": 17250000,
+          "requests": 322
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1500000,
+          "output": 1040000,
+          "cacheCreate": 1080000,
+          "cacheRead": 3450000,
+          "requests": 146
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 600000,
+          "output": 390000,
+          "cacheCreate": 90000,
+          "cacheRead": 1840000,
+          "requests": 88
+        },
+        {
+          "model": "other",
+          "input": 300000,
+          "output": 130000,
+          "cacheCreate": 90000,
+          "cacheRead": 460000,
+          "requests": 30
+        }
+      ]
+    },
+    {
+      "date": "2026-11-02",
+      "input": 5750000,
+      "output": 2650000,
+      "cacheCreate": 2100000,
+      "cacheRead": 24000000,
+      "requests": 609,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3450000,
+          "output": 1060000,
+          "cacheCreate": 630000,
+          "cacheRead": 18000000,
+          "requests": 335
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1437500,
+          "output": 1060000,
+          "cacheCreate": 1260000,
+          "cacheRead": 3600000,
+          "requests": 152
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 575000,
+          "output": 397500,
+          "cacheCreate": 105000,
+          "cacheRead": 1920000,
+          "requests": 91
+        },
+        {
+          "model": "other",
+          "input": 287500,
+          "output": 132500,
+          "cacheCreate": 105000,
+          "cacheRead": 480000,
+          "requests": 31
+        }
+      ]
+    },
+    {
+      "date": "2026-11-03",
+      "input": 5500000,
+      "output": 2700000,
+      "cacheCreate": 2400000,
+      "cacheRead": 25000000,
+      "requests": 632,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3300000,
+          "output": 1080000,
+          "cacheCreate": 720000,
+          "cacheRead": 18750000,
+          "requests": 348
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1375000,
+          "output": 1080000,
+          "cacheCreate": 1440000,
+          "cacheRead": 3750000,
+          "requests": 158
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 550000,
+          "output": 405000,
+          "cacheCreate": 120000,
+          "cacheRead": 2000000,
+          "requests": 95
+        },
+        {
+          "model": "other",
+          "input": 275000,
+          "output": 135000,
+          "cacheCreate": 120000,
+          "cacheRead": 500000,
+          "requests": 31
+        }
+      ]
+    },
+    {
+      "date": "2026-11-04",
+      "input": 5250000,
+      "output": 2750000,
+      "cacheCreate": 1200000,
+      "cacheRead": 26000000,
+      "requests": 655,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3150000,
+          "output": 1100000,
+          "cacheCreate": 360000,
+          "cacheRead": 19500000,
+          "requests": 360
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1312500,
+          "output": 1100000,
+          "cacheCreate": 720000,
+          "cacheRead": 3900000,
+          "requests": 164
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 525000,
+          "output": 412500,
+          "cacheCreate": 60000,
+          "cacheRead": 2080000,
+          "requests": 98
+        },
+        {
+          "model": "other",
+          "input": 262500,
+          "output": 137500,
+          "cacheCreate": 60000,
+          "cacheRead": 520000,
+          "requests": 33
+        }
+      ]
+    },
+    {
+      "date": "2026-11-05",
+      "input": 5000000,
+      "output": 2800000,
+      "cacheCreate": 1500000,
+      "cacheRead": 27000000,
+      "requests": 678,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 3000000,
+          "output": 1120000,
+          "cacheCreate": 450000,
+          "cacheRead": 20250000,
+          "requests": 373
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1250000,
+          "output": 1120000,
+          "cacheCreate": 900000,
+          "cacheRead": 4050000,
+          "requests": 170
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 500000,
+          "output": 420000,
+          "cacheCreate": 75000,
+          "cacheRead": 2160000,
+          "requests": 102
+        },
+        {
+          "model": "other",
+          "input": 250000,
+          "output": 140000,
+          "cacheCreate": 75000,
+          "cacheRead": 540000,
+          "requests": 33
+        }
+      ]
+    },
+    {
+      "date": "2026-11-06",
+      "input": 4750000,
+      "output": 2850000,
+      "cacheCreate": 1800000,
+      "cacheRead": 28000000,
+      "requests": 701,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 2850000,
+          "output": 1140000,
+          "cacheCreate": 540000,
+          "cacheRead": 21000000,
+          "requests": 386
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1187500,
+          "output": 1140000,
+          "cacheCreate": 1080000,
+          "cacheRead": 4200000,
+          "requests": 175
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 475000,
+          "output": 427500,
+          "cacheCreate": 90000,
+          "cacheRead": 2240000,
+          "requests": 105
+        },
+        {
+          "model": "other",
+          "input": 237500,
+          "output": 142500,
+          "cacheCreate": 90000,
+          "cacheRead": 560000,
+          "requests": 35
+        }
+      ]
+    },
+    {
+      "date": "2026-11-07",
+      "input": 4500000,
+      "output": 2900000,
+      "cacheCreate": 2100000,
+      "cacheRead": 29000000,
+      "requests": 724,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 2700000,
+          "output": 1160000,
+          "cacheCreate": 630000,
+          "cacheRead": 21750000,
+          "requests": 398
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1125000,
+          "output": 1160000,
+          "cacheCreate": 1260000,
+          "cacheRead": 4350000,
+          "requests": 181
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 450000,
+          "output": 435000,
+          "cacheCreate": 105000,
+          "cacheRead": 2320000,
+          "requests": 109
+        },
+        {
+          "model": "other",
+          "input": 225000,
+          "output": 145000,
+          "cacheCreate": 105000,
+          "cacheRead": 580000,
+          "requests": 36
+        }
+      ]
+    },
+    {
+      "date": "2026-11-08",
+      "input": 4250000,
+      "output": 2950000,
+      "cacheCreate": 2400000,
+      "cacheRead": 30000000,
+      "requests": 747,
+      "models": [
+        {
+          "model": "claude-sonnet-5-5",
+          "input": 2550000,
+          "output": 1180000,
+          "cacheCreate": 720000,
+          "cacheRead": 22500000,
+          "requests": 411
+        },
+        {
+          "model": "claude-opus-5-5",
+          "input": 1062500,
+          "output": 1180000,
+          "cacheCreate": 1440000,
+          "cacheRead": 4500000,
+          "requests": 187
+        },
+        {
+          "model": "gpt-6.1",
+          "input": 425000,
+          "output": 442500,
+          "cacheCreate": 120000,
+          "cacheRead": 2400000,
+          "requests": 112
+        },
+        {
+          "model": "other",
+          "input": 212500,
+          "output": 147500,
+          "cacheCreate": 120000,
+          "cacheRead": 600000,
+          "requests": 37
+        }
+      ]
+    }
+  ]
+}

@@ -2,6 +2,8 @@
 
 需要支持 usage-source 的 Paseo（SDK 基线 0.14.0-beta.2）及实现只读 `GET /apiStats/api/usage-snapshot` 接口的 CRS。
 
+快照提供 `tokenDays` 时，侧栏「用量」以四色分段条显示新输入、输出、缓存写入和读取，悬停或点按可看各项数量；大数字显示缓存命中率，小数字显示请求数。「今天 / 7天 / 30天」按 CRS 日期在本地汇总，不重新请求，每次打开默认今天；与已用/剩余独立。按模型明细默认折叠，数量以万/亿缩写，模型名保留原名。命中率为缓存读取除以新输入、缓存写入及缓存读取之和；零用量显示「—」。读失败的 null 不当 0，部分未知时不画不完整的占比；旧服务端缺字段或全 null 时隐藏用量区，原生卡不增加内容。
+
 一般不用填设置。自动读取主机 Pi 的 `models.json` / `auth.json` api_key、Claude Code `settings.json` 的 env（`ANTHROPIC_BASE_URL` 加 `ANTHROPIC_AUTH_TOKEN` 或 `ANTHROPIC_API_KEY`）、Codex `config.toml` 选中的自定义 provider 加 `auth.json` API key。不会使用 OAuth 凭据；文件不存在或读不到就跳过。遵从各工具的主目录环境变量；Pi 目录默认为 `PI_CODING_AGENT_DIR` 或 `~/.pi/agent`。
 
 用各候选自己的 key 探测其 origin 下的快照接口。跳过 `api.anthropic.com`、`api.openai.com` 及其子域。JSON 200/401/403 识别为 CRS；其他服务隐藏。按 origin 和凭据摘要在内存缓存，正向 24 小时、负向 10 分钟。HTTP 返回 403 `Management HTTPS required` 时，只尝试同主机名 HTTPS 443，成功后记住管理地址。不会跟随重定向或错误正文里的地址，证书校验保持启用。
