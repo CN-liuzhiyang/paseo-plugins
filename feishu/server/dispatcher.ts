@@ -964,7 +964,7 @@ export function createDispatcher(deps: {
     const { outcome } = event;
     const at = now();
     if (outcome.kind === "completed") {
-      void answerOf(run.agentId).then((answer) =>
+      void answerOf(run.agentId, event.turnId).then((answer) =>
         run.painter.finish(doneCard(run, answer, at), lastResortCard(doneTitle(run, at), "green", run)),
       );
     } else if (outcome.kind === "failed") {
@@ -979,12 +979,13 @@ export function createDispatcher(deps: {
 
   /**
    * The answer the agent's turn ended with. turn_ended carries no timeline since Paseo 0.13
-   * (it is always empty), so the tail of the history is fetched instead.
+   * (it is always empty), so the tail of the history is fetched instead, and only the entries
+   * of the turn that ended are read from it.
    */
-  async function answerOf(agentId: string): Promise<string> {
+  async function answerOf(agentId: string, turnId: string | null): Promise<string> {
     try {
       const page = await paseo.agents.ref(agentId).timeline.refetch({ direction: "tail", limit: ANSWER_TAIL });
-      return finalAnswer(page.entries.map(({ item }) => item));
+      return finalAnswer(page.entries, turnId);
     } catch (error) {
       log(`answer of agent ${agentId}: ${describe(error)}`);
       return "";

@@ -13,7 +13,7 @@ import { memoryPeople, type People } from "./people";
 import { parseButtonName, requestDetail } from "./permissions";
 import { questionButtonName, questionResponse, questionsOf } from "./questions";
 import { settingsDefinition, type Settings } from "../shared/settings";
-import { describePermission, finalAnswer } from "./timeline";
+import { describePermission, finalAnswer, type TimelineEntry } from "./timeline";
 
 const SENDER = "ou_allowed";
 const CHAT = "oc_routed";
@@ -79,7 +79,9 @@ function registry() {
   const onSend = null as ((agentId: string) => void) | null;
   // Each agent's history, as timeline.refetch returns it.
   const timelines = new Map<string, AgentTimelineItem[]>();
-  return { agents, workspaces, created, sends, responses, streams, timelines, respondFails: false, onSend };
+  // The same with each entry's turn, for an agent whose history spans several turns.
+  const entries = new Map<string, TimelineEntry[]>();
+  return { agents, workspaces, created, sends, responses, streams, timelines, entries, respondFails: false, onSend };
 }
 
 interface Sent {
@@ -203,7 +205,9 @@ function harness(
         paseo.responses.push({ agentId: id, ...input });
       },
       timeline: {
-        refetch: async () => ({ entries: (paseo.timelines.get(id) ?? []).map((item) => ({ item })) }),
+        refetch: async () => ({
+          entries: paseo.entries.get(id) ?? (paseo.timelines.get(id) ?? []).map((item) => ({ item })),
+        }),
         subscribe: (handler: (event: unknown) => void) => {
           paseo.streams.set(id, handler);
           return Object.assign(() => paseo.streams.delete(id), { ready: Promise.resolve() });
@@ -431,8 +435,8 @@ test("a routed message walks one card from received to done", async () => {
       detail: { type: "unknown", input: null, output: null },
       error: null,
     },
-    { type: "assistant_message", text: "构建全部" },
-    { type: "assistant_message", text: "通过。" },
+    { type: "assistant_message", text: "构建全部", messageId: "m2" },
+    { type: "assistant_message", text: "通过。", messageId: "m2" },
   ];
   h.paseo.timelines.set(String(input.agentId), timeline);
   h.dispatcher.onTurnEnded({
@@ -1024,11 +1028,73 @@ test("mention placeholders are removed from the request", () => {
 test("the final answer falls back to all turn text when a tool call ends the turn", () => {
   assert.equal(
     finalAnswer([
-      { type: "user_message", text: "q" },
-      { type: "assistant_message", text: "先看看" },
-      { type: "todo", items: [] },
+      { item: { type: "user_message", text: "q" } },
+      { item: { type: "assistant_message", text: "先看看" } },
+      { item: { type: "todo", items: [] } },
     ]),
     "先看看",
+  );
+});
+
+const toolCall = (callId: string): AgentTimelineItem => ({
+  type: "tool_call",
+  callId,
+  name: "Agent",
+  status: "completed",
+  detail: { type: "unknown", input: null, output: null },
+  error: null,
+});
+
+// As the history read on 2026-11-08: a Feishu message's turn starts a background subagent and
+// ends with an answer; the subagent's tool call is updated in place, far back, when it is done,
+// and the turn that follows (no message started it) adds only its reasoning and its answer.
+const twoTurns: TimelineEntry[] = [
+  { turnId: "foreground-turn-2", item: { type: "user_message", text: "对一下数据" } },
+  { turnId: "foreground-turn-2", item: toolCall("agent-1") },
+  { turnId: "foreground-turn-2", item: { type: "assistant_message", text: "网上那部分还在查，先说咱们的。\n\n- 一周 **6–7 个满窗口**", messageId: "m1" } },
+  { turnId: "autonomous-turn-3", item: { type: "reasoning", text: "pulling it together" } },
+  { turnId: "autonomous-turn-3", item: { type: "assistant_message", text: "**网上资料也查完了**，合起来看：", messageId: "m2" } },
+];
+
+test("the final answer of a turn no message started is that turn's text alone", () => {
+  assert.equal(finalAnswer(twoTurns, "autonomous-turn-3"), "**网上资料也查完了**，合起来看：");
+  assert.equal(
+    finalAnswer(twoTurns, "foreground-turn-2"),
+    "网上那部分还在查，先说咱们的。\n\n- 一周 **6–7 个满窗口**",
+  );
+});
+
+test("without a turn ID, or one the history does not have, a user message is the boundary", () => {
+  // Then the two turns cannot be told apart, but their answers are at least two paragraphs.
+  const both = "网上那部分还在查，先说咱们的。\n\n- 一周 **6–7 个满窗口**\n\n**网上资料也查完了**，合起来看：";
+  assert.equal(finalAnswer(twoTurns), both);
+  assert.equal(finalAnswer(twoTurns, "autonomous-turn-9"), both);
+});
+
+test("separate assistant messages are separate paragraphs; one message's pieces stay joined", () => {
+  assert.equal(
+    finalAnswer([
+      { item: { type: "user_message", text: "q" } },
+      { item: { type: "assistant_message", text: "第一段结尾**加粗**", messageId: "a" } },
+      { item: { type: "reasoning", text: "…" } },
+      { item: { type: "assistant_message", text: "**第二段**开头", messageId: "b" } },
+      { item: { type: "assistant_message", text: "接着写", messageId: "b" } },
+      { item: { type: "assistant_message", text: "没有 ID 的一段" } },
+    ]),
+    "第一段结尾**加粗**\n\n**第二段**开头接着写\n\n没有 ID 的一段",
+  );
+});
+
+test("when a tool call ends the turn, its text before and between tool calls are paragraphs", () => {
+  assert.equal(
+    finalAnswer([
+      { item: { type: "user_message", text: "q" } },
+      { item: { type: "assistant_message", text: "先看看。", messageId: "a" } },
+      { item: toolCall("1") },
+      { item: { type: "assistant_message", text: "再看一处。", messageId: "b" } },
+      { item: toolCall("2") },
+    ]),
+    "先看看。\n\n再看一处。",
   );
 });
 
@@ -1577,6 +1643,26 @@ test("a turn no Feishu message started gets its own card in the chat, which foll
   assert.match(done.title, /^会话继续 · 完成 · /);
   assert.match(done.subtitle ?? "", /不是由飞书消息发起的/);
   assert.match(done.body, /^后台测试全部通过。/);
+});
+
+test("the card of a turn no Feishu message started shows that turn's answer, not the one before", async () => {
+  const h = harness();
+  const agentId = await idle(h);
+  await h.begin(agentId, "autonomous-turn-3");
+  await h.settle();
+  h.paseo.entries.set(agentId, twoTurns);
+  h.paseo.agents.get(agentId)!.status = "idle";
+  h.dispatcher.onTurnEnded({
+    agent: agent(agentId),
+    turnId: "autonomous-turn-3",
+    outcome: { kind: "completed" },
+    timeline: [],
+  });
+  await h.settle();
+  const done = h.sent.at(-1)!;
+  assert.match(done.title, /^会话继续 · 完成 · /);
+  assert.match(done.body, /^\*\*网上资料也查完了\*\*，合起来看：/);
+  assert.ok(!done.body.includes("网上那部分还在查"));
 });
 
 test("such a turn that is canceled or fails says so under the same heading", async () => {
