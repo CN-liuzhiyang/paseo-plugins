@@ -149,6 +149,7 @@ function PoolView({
             : `约${mode === "used" ? "已用" : "剩余"} ${shown.toFixed(1)}%`}
         </Text>
         <Text
+          accessibilityLabel={`估算，纳入 ${summary.included}/${summary.total} 个账号${summary.older ? `，含 ${summary.older} 个较旧数据` : ""}`}
           style={{
             color: c.statusWarning,
             fontSize: 11,
@@ -158,9 +159,13 @@ function PoolView({
             paddingHorizontal: 7,
           }}
         >
-          粗略折合 · 估算 · 纳入 {summary.included}/{summary.total} 个账号
-          {summary.older ? ` · 含 ${summary.older} 个较旧数据` : ""}
+          估算
         </Text>
+        {!!summary.older && (
+          <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
+            含 {summary.older} 个较旧数据
+          </Text>
+        )}
       </View>
       <View style={{ flexDirection: "row", gap: 4 }}>
         {summary.accounts.map((account, index) => {
@@ -303,15 +308,23 @@ function Entry({
   mode,
   theme,
   compact,
+  refresh,
+  refreshing,
 }: {
   entry: PanelEntry;
   mode: Mode;
   theme: Theme;
   compact: boolean;
+  refresh: () => void;
+  refreshing: boolean;
 }) {
   const c = theme.colors;
   const [linkError, setLinkError] = useState(false);
   const snapshot = entry.snapshot;
+  const untilExpiry = snapshot?.key.expiresAt
+    ? Date.parse(snapshot.key.expiresAt) - Date.now()
+    : null;
+  const expiresSoon = untilExpiry !== null && untilExpiry > 0 && untilExpiry <= 7 * 86400000;
   const open = (url: string) => {
     setLinkError(false);
     void openExternalUrl(url).catch(() => setLinkError(true));
@@ -357,12 +370,28 @@ function Entry({
         backgroundColor: c.surface1,
       }}
     >
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
         <Text style={{ color: c.accent, fontSize: 20 }}>◈</Text>
         <Text style={{ color: c.foreground, flex: 1, fontSize: 17, fontWeight: "600" }}>
           CRS 中转
         </Text>
+        {expiresSoon && (
+          <Text
+            style={{
+              color: c.statusWarning,
+              fontSize: 10,
+              borderWidth: 1,
+              borderColor: c.statusWarning,
+              borderRadius: 8,
+              paddingHorizontal: 6,
+              paddingVertical: 2,
+            }}
+          >
+            {Math.ceil(untilExpiry! / 86400000)} 天后到期
+          </Text>
+        )}
         <Text
+          accessibilityLabel={state}
           style={{
             color: entry.error
               ? c.statusDanger
@@ -372,12 +401,30 @@ function Entry({
             fontSize: 12,
           }}
         >
-          ● {state}
+          ●
         </Text>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`刷新 CRS 用量，${state}，上次成功获取 ${stamp(entry.successfulAt)}`}
+          disabled={refreshing}
+          onPress={refresh}
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            gap: 4,
+            minHeight: 40,
+            paddingHorizontal: 4,
+            opacity: refreshing ? 0.5 : 1,
+          }}
+        >
+          <Text style={{ color: c.foregroundMuted, fontSize: 19 }}>↻</Text>
+          <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
+            {entry.successfulAt
+              ? relativeCollection(entry.successfulAt).replace(/采集$/, "")
+              : "尚未获取"}
+          </Text>
+        </Pressable>
       </View>
-      <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-        {entry.providers.join(" · ")} 共用一把 Key
-      </Text>
       {entry.error && (
         <View style={{ borderLeftWidth: 3, borderColor: c.statusDanger, paddingLeft: 12, gap: 5 }}>
           <Text style={{ color: c.statusDanger }}>{entry.error}</Text>
@@ -433,9 +480,6 @@ function Entry({
               );
             })}
           </View>
-          <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-            Key 到期：{stamp(snapshot.key.expiresAt)} · CRS 倍率后费用
-          </Text>
           {snapshot.pools.map((pool, index) => (
             <PoolView
               key={`${pool.platform}-${index}`}
@@ -457,36 +501,15 @@ function Entry({
         </>
       )}
       <View style={{ borderTopWidth: 1, borderColor: c.border, paddingTop: 16, gap: 10 }}>
-        <Text style={{ color: c.foreground, fontWeight: "600" }}>CRS 网页管理</Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 9 }}>
           <Button
-            label="查看用量 / 兑换续费卡 ↗"
+            label="网页管理 ↗"
             theme={theme}
-            onPress={() => open(entry.links.usage)}
+            onPress={() => open(entry.links.keys ?? entry.links.usage)}
           />
-          {entry.links.keys && (
-            <Button
-              label="管理 Key 限额与到期 ↗"
-              theme={theme}
-              onPress={() => open(entry.links.keys!)}
-            />
-          )}
-          {entry.links.accounts && (
-            <Button
-              label="管理共享账号 ↗"
-              theme={theme}
-              onPress={() => open(entry.links.accounts!)}
-            />
-          )}
         </View>
-        <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-          网页按自身登录权限操作。{!entry.links.keys ? "管理入口需在插件设置中填写 SPA 前缀。" : ""}
-        </Text>
         {linkError && <Text style={{ color: c.statusDanger }}>浏览器打开失败，请重试</Text>}
       </View>
-      <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-        成功获取 {stamp(entry.successfulAt)} · 账号窗口由共享使用者共同消耗，当前会话账号未知。
-      </Text>
     </View>
   );
 }
@@ -505,7 +528,24 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
       contentContainerStyle={{ padding: layout.compact ? 16 : 28, gap: 20 }}
     >
       <View style={{ width: "100%", maxWidth: 1060, alignSelf: "center", gap: 18 }}>
-        <Text style={{ color: c.foreground, fontSize: 24, fontWeight: "600" }}>CRS 用量与管理</Text>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Text style={{ color: c.foreground, flex: 1, fontSize: 24, fontWeight: "600" }}>
+            CRS 用量与管理
+          </Text>
+          {!query.data?.length && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="刷新 CRS 用量"
+              disabled={query.isFetching}
+              onPress={() => {
+                void query.refetch();
+              }}
+              style={{ padding: 10, opacity: query.isFetching ? 0.5 : 1 }}
+            >
+              <Text style={{ color: c.foregroundMuted, fontSize: 19 }}>↻</Text>
+            </Pressable>
+          )}
+        </View>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           <Button
             label="已用"
@@ -519,14 +559,6 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
             selected={mode === "remaining"}
             onPress={() => setMode("remaining")}
           />
-          <Button
-            label={query.isFetching ? "刷新中…" : "刷新"}
-            theme={theme}
-            disabled={query.isFetching}
-            onPress={() => {
-              void query.refetch();
-            }}
-          />
         </View>
         {query.isError && (
           <Text style={{ color: c.statusDanger }}>无法读取 CRS 面板，请检查插件或主机连接。</Text>
@@ -538,7 +570,17 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
           </Text>
         )}
         {query.data?.map((entry) => (
-          <Entry key={entry.id} entry={entry} mode={mode} theme={theme} compact={layout.compact} />
+          <Entry
+            key={entry.id}
+            entry={entry}
+            mode={mode}
+            theme={theme}
+            compact={layout.compact}
+            refreshing={query.isFetching}
+            refresh={() => {
+              void query.refetch();
+            }}
+          />
         ))}
       </View>
     </ScrollView>
