@@ -3,7 +3,7 @@ import { inputSchema, type PanelEntry } from "../shared/rpc";
 import { managementOriginSchema, type Settings } from "../shared/settings";
 import { CrsClient } from "./crs-client";
 import { discover, originOf, readCredential, type Discovered } from "./discovery";
-import { mapUsage } from "./usage";
+import { mapUsage, shortUsageError } from "./usage";
 export class UsageService {
   private locators = new Map<string, Discovered>();
   private successes = new Map<string, Pick<PanelEntry, "snapshot" | "successfulAt">>();
@@ -41,7 +41,7 @@ export class UsageService {
     ).filter((entry): entry is Discovered => entry !== null);
     return entries.map((entry) => ({
       key: entry.id,
-      label: "CRS 中转",
+
       harness: [
         ...new Set(
           entry.locators.map(
@@ -94,11 +94,11 @@ export class UsageService {
   async fetch(input: unknown): Promise<UsageReport> {
     const parsed = inputSchema.safeParse(input);
     const entry = parsed.success ? this.locators.get(parsed.data.id) : undefined;
-    if (!entry) return { status: "error", error: "CRS 配置未发现，请刷新用量列表" };
+    if (!entry) return { status: "error", error: "CRS 配置未发现" };
     const result = await this.read(entry);
     return result.snapshot
-      ? mapUsage(result.snapshot, entry.providers)
-      : { status: "error", error: result.error ?? "CRS 数据不可用" };
+      ? mapUsage(result.snapshot)
+      : { status: "error", error: shortUsageError(result.error ?? "CRS 数据不可用") };
   }
   async panel(): Promise<PanelEntry[]> {
     const identities = await this.identities();

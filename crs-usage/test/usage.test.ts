@@ -6,9 +6,9 @@ import { test } from "node:test";
 import { CrsClient } from "../server/crs-client";
 import { discover, originOf } from "../server/discovery";
 import { UsageService } from "../server/service";
-import { mapUsage } from "../server/usage";
+import { mapUsage, shortUsageError } from "../server/usage";
 import { settingsDefinition } from "../shared/settings";
-import { estimate, snapshotSchema, windowState } from "../shared/snapshot";
+import { estimate, relativeCollection, snapshotSchema, windowState } from "../shared/snapshot";
 import { panelEntrySchema } from "../shared/rpc";
 import { fixture, startFakeCrs, TEST_KEY } from "./fake-crs";
 
@@ -107,12 +107,12 @@ test("candidates: automatic defaults, merging, optional filters, separate keys/o
 test("mapping: null stays null, statuses, stale data, estimates, zero limit, exhausted key", async () => {
   const raw = await fixture();
   const snapshot = snapshotSchema.parse(raw);
-  const mapped = mapUsage(snapshot, ["crs-claude", "crs-codex"]);
+  const mapped = mapUsage(snapshot);
   assert.equal(mapped.status, "available");
   if (mapped.status !== "available") return;
-  assert.equal(mapped.windows.length, 10);
-  assert.equal(mapped.balances?.[0].remaining, 17.7);
-  assert.equal(mapped.balances?.[2].limit, null);
+  assert.equal(mapped.windows.length, 4);
+  assert.equal(mapped.balances?.[0].used, 12.3);
+  assert.equal(mapped.balances?.length, 1);
   assert.ok(
     Math.abs(
       estimate(snapshot.pools[0], snapshot.serverTime).usedPct! - (20 * 22 + 5 * 55 + 90) / 26,
@@ -120,33 +120,29 @@ test("mapping: null stays null, statuses, stale data, estimates, zero limit, exh
   );
   for (const state of ["normal", "rate_limited", "unavailable", "unknown"] as const) {
     snapshot.pools[0].accounts[0].state = state;
-    assert.equal(mapUsage(snapshot, []).status, "available");
+    assert.equal(mapUsage(snapshot).status, "available");
   }
   const account = snapshot.pools[0].accounts[0];
   account.windows[0].usedPct = null;
   account.stale = true;
-  const partial = mapUsage(snapshot, []);
+  const partial = mapUsage(snapshot);
   assert.equal(estimate(snapshot.pools[0], snapshot.serverTime).included, 2);
   if (partial.status === "available") {
     assert.equal(
       partial.windows.some((window) => window.label.includes(account.alias)),
       false,
     );
-    assert.ok(
-      partial.details?.some(
-        (detail) => detail.label === account.alias && detail.value.includes("数据已过期"),
-      ),
-    );
+    assert.deepEqual(partial.details, []);
   }
   for (const a of snapshot.pools[1].accounts) a.tier = "unknown";
   assert.equal(estimate(snapshot.pools[1], snapshot.serverTime).usedPct, null);
   snapshot.key.daily.limit = 0;
   snapshot.key.daily.used = 3;
-  const exhausted = mapUsage(snapshot, []);
-  if (exhausted.status === "available") assert.equal(exhausted.balances?.[0].remaining, 0);
+  const exhausted = mapUsage(snapshot);
+  if (exhausted.status === "available") assert.equal(exhausted.balances?.[0].used, 3);
   for (const status of ["expired", "disabled", "inactive"] as const) {
     snapshot.key.status = status;
-    assert.equal(mapUsage(snapshot, []).status, "error");
+    assert.equal(mapUsage(snapshot).status, "error");
   }
 });
 test("real HTTP: single flight, 12s interval, exponential backoff, Retry-After and shared panel/native reader", async () => {
@@ -261,9 +257,9 @@ test("escaped credentials are redacted after parsing, response body is bounded, 
   const oversized = new CrsClient({ fetch: async () => new Response("x".repeat(1024 * 1024 + 1)) });
   assert.ok((await oversized.read("large", "https://crs.example", TEST_KEY)).error);
   const snapshot = snapshotSchema.parse(await fixture());
-  const before = mapUsage(snapshot, []);
+  const before = mapUsage(snapshot);
   snapshot.pools[0].accounts.reverse();
-  const after = mapUsage(snapshot, []);
+  const after = mapUsage(snapshot);
   if (before.status === "available" && after.status === "available") {
     assert.deepEqual(
       Object.fromEntries(before.windows.map((w) => [w.label, w.id])),
@@ -273,16 +269,20 @@ test("escaped credentials are redacted after parsing, response body is bounded, 
   http.close();
   oversized.close();
 });
-test("unknown window durations retain key spending and accurate labels; minimal inactive status is explicit", async () => {
+test("unknown-duration windows remain in the snapshot for the full panel; native spending and inactive errors remain accurate", async () => {
   const raw = await fixture();
   raw.pools[1].accounts[0].windows[0].id = "primary";
   raw.pools[1].accounts[0].windows[1].id = "secondary";
   const snapshot = snapshotSchema.parse(raw);
-  const report = mapUsage(snapshot, []);
+  const report = mapUsage(snapshot);
   assert.equal(report.status, "available");
   assert.equal(estimate(snapshot.pools[1], snapshot.serverTime).included, 1);
   if (report.status === "available") {
-    assert.ok(report.windows.some((w) => w.label.includes("主窗口（时长未知）")));
+    assert.equal(
+      report.windows.some((w) => /primary|secondary|时长未知/.test(w.label)),
+      false,
+    );
+    assert.equal(snapshot.pools[1].accounts[0].windows[0].id, "primary");
     assert.equal(report.balances?.[0].used, 12.3);
   }
   const http = new CrsClient({
@@ -543,7 +543,7 @@ test("source files: Pi + Claude Code + selected Codex custom provider merge; off
 });
 test("integration fixture: unlimited costs, expired windows, unusable accounts and partial estimates keep their meanings", async () => {
   const snapshot = snapshotSchema.parse(await fixture("integration-snapshot"));
-  const report = mapUsage(snapshot, []);
+  const report = mapUsage(snapshot);
   assert.equal(report.status, "available");
   const claude = snapshot.pools[0];
   const summary = estimate(claude, snapshot.serverTime);
@@ -552,36 +552,187 @@ test("integration fixture: unlimited costs, expired windows, unusable accounts a
   assert.equal(summary.total, 4);
   assert.equal(
     windowState(claude.accounts[1], claude.accounts[1].windows[0], snapshot.serverTime),
-    "expired",
+    "reset",
   );
   if (report.status === "available") {
-    assert.equal(report.balances?.[0].limit, null);
+    assert.equal(report.balances?.[0].limit, undefined);
     assert.equal(report.balances?.[0].used, 12.3);
-    assert.equal(report.balances?.[0].remaining, null);
-    assert.match(report.balances![0].label, /无上限/);
+    assert.equal(report.balances?.[0].remaining, undefined);
+    assert.equal(report.balances![0].label, "今日费用");
     const old = report.windows.filter((window) => window.label.includes("Claude-B"));
     assert.equal(old.length, 0);
-    assert.ok(
-      report.details?.some(
-        (detail) => detail.label === "Claude-B" && detail.value.includes("数据已过期"),
-      ),
-    );
+    assert.deepEqual(report.details, []);
     assert.equal(
       report.windows.some((window) => /Claude-C|Claude-D/.test(window.label)),
       false,
     );
-    assert.ok(
-      report.details?.some(
-        (detail) => detail.label === "Claude-C" && detail.value.includes("不可用"),
-      ),
+    assert.equal(
+      report.windows.some((window) => window.label.includes("时长未知")),
+      false,
     );
-    assert.ok(report.details?.some((detail) => detail.value.includes("纳入 1/4 个账号")));
-    assert.ok(report.windows.some((window) => window.label.includes("主窗口（时长未知）")));
   }
   // An elapsed reset is invalid even if the upstream forgot to set stale=true.
   const current = claude.accounts[0];
   current.windows[0].resetsAt = snapshot.serverTime;
-  assert.equal(windowState(current, current.windows[0], snapshot.serverTime), "expired");
+  assert.equal(windowState(current, current.windows[0], snapshot.serverTime), "reset");
   assert.equal(windowState(current, current.windows[1], snapshot.serverTime), "current");
   assert.equal(estimate(claude, snapshot.serverTime).usedPct, null);
+});
+
+test("slim native card: one tightest account per platform, populated known windows, no details or badge", async () => {
+  const snapshot = snapshotSchema.parse(await fixture());
+  const pool = snapshot.pools[0];
+  pool.accounts[0].windows[0].usedPct = 90;
+  pool.accounts[0].windows[1].usedPct = 10;
+  pool.accounts[1].windows[0].usedPct = 20;
+  pool.accounts[1].windows[1].usedPct = 95;
+  pool.accounts[2].windows.push({ id: "week_opus", usedPct: 100, resetsAt: null });
+  const report = mapUsage(snapshot);
+  assert.equal(report.status, "available");
+  if (report.status !== "available") return;
+  const claude = report.windows.filter((window) => window.label.startsWith("Claude"));
+  // Both bars must describe the same account, never independent per-window maxima.
+  assert.deepEqual(
+    claude.map((window) => window.usedPct),
+    [20, 95],
+  );
+  assert.deepEqual(
+    claude.map((window) => window.label),
+    ["Claude 5小时", "Claude 本周"],
+  );
+  assert.equal(report.windows.length, 4);
+  assert.deepEqual(report.details, []);
+  assert.equal(report.planLabel, undefined);
+  assert.ok(report.windows.every((window) => !("resetsAt" in window)));
+  assert.equal(JSON.stringify(report).includes("Claude-A"), false);
+  const ids = claude.map((window) => window.id);
+  pool.accounts[1].windows[0].usedPct = null;
+  pool.accounts[1].windows[1].resetsAt = snapshot.serverTime;
+  pool.accounts[2].state = "unavailable";
+  const switched = mapUsage(snapshot);
+  if (switched.status !== "available") return assert.fail("active snapshot");
+  assert.deepEqual(
+    switched.windows
+      .filter((window) => window.label.startsWith("Claude"))
+      .map((window) => window.id),
+    ids,
+  );
+  assert.deepEqual(
+    switched.windows
+      .filter((window) => window.label.startsWith("Claude"))
+      .map((window) => window.usedPct),
+    [90, 10],
+  );
+  for (const account of pool.accounts) {
+    account.windows[0].usedPct = null;
+    account.windows[1].usedPct = null;
+  }
+  const missing = mapUsage(snapshot);
+  if (missing.status === "available")
+    assert.equal(
+      missing.windows.some((window) => window.label.startsWith("Claude")),
+      false,
+    );
+  const codex = snapshot.pools[1].accounts;
+  codex[0].windows[0].usedPct = 0;
+  codex[0].windows[1].usedPct = 0;
+  codex[1].state = "unavailable";
+  const zero = mapUsage(snapshot);
+  if (zero.status === "available") assert.ok(zero.windows.every((window) => window.usedPct === 0));
+  // Summaries do not mutate the full per-account snapshot used by the panel.
+  assert.equal(pool.accounts.length, 3);
+  assert.equal(pool.accounts[2].windows.at(-1)?.id, "week_opus");
+});
+
+test("native output: one daily amount, imminent warnings only, errors at most 12 characters", async () => {
+  const snapshot = snapshotSchema.parse(await fixture());
+  snapshot.key.weeklyOpus.used = 3;
+  snapshot.key.weeklyOpus.limit = 20;
+  let report = mapUsage(snapshot);
+  if (report.status !== "available") return assert.fail("active snapshot");
+  assert.deepEqual(report.balances, [{ id: "daily", label: "今日费用", used: 12.3, unit: "usd" }]);
+  const tightest = snapshot.pools[0].accounts[2];
+  for (const minutes of [31, 30, 1, 0]) {
+    tightest.windows[0].resetsAt = new Date(
+      Date.parse(snapshot.serverTime) + minutes * 60000,
+    ).toISOString();
+    report = mapUsage(snapshot);
+    if (report.status !== "available") return assert.fail("active snapshot");
+    const window = report.windows.find((window) => window.label === "Claude 5小时");
+    if (minutes === 0) {
+      assert.equal(window, undefined);
+      continue;
+    }
+    assert.equal("resetsAt" in window!, minutes <= 30);
+    assert.equal(window!.tone, minutes <= 30 ? "warning" : "ok");
+  }
+  tightest.windows[0].usedPct = 89;
+  tightest.windows[0].resetsAt = new Date(Date.parse(snapshot.serverTime) + 60000).toISOString();
+  report = mapUsage(snapshot);
+  if (report.status === "available")
+    assert.equal(
+      report.windows.some((window) => "resetsAt" in window),
+      false,
+    );
+  for (const error of [
+    "Key 过期",
+    "Key 禁用",
+    "Key 无效",
+    "Key 未激活",
+    "请求超时",
+    "请求限流",
+    "HTTPS异常",
+    "配置变化",
+    "快照格式不匹配或数据缺失",
+    "拒绝访问",
+    "连不上或响应无效",
+  ])
+    assert.ok(Array.from(shortUsageError(error)).length <= 12);
+  assert.equal(shortUsageError("CRS 暂时连不上或响应无效"), "CRS 暂时不可用");
+});
+test("fresh / older / reset: preserve older values and estimates, hide reset values, null cells stay absent", async () => {
+  const snapshot = snapshotSchema.parse(await fixture());
+  snapshot.pools = [snapshot.pools[0]];
+  const pool = snapshot.pools[0];
+  pool.accounts = [pool.accounts[0]];
+  const account = pool.accounts[0];
+  account.observedAt = "2026-11-08T02:52:00Z";
+  account.windows = [
+    { id: "5h", usedPct: 19, resetsAt: "2026-11-08T04:00:00Z" },
+    { id: "week", usedPct: null, resetsAt: "2026-11-08T02:00:00Z" },
+    { id: "week_opus", usedPct: null, resetsAt: null },
+  ];
+  assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "current");
+  let report = mapUsage(snapshot);
+  if (report.status !== "available") return assert.fail("active snapshot");
+  assert.equal(report.windows.length, 1);
+  assert.equal(report.windows[0].usedPct, 19);
+  assert.equal(report.windows[0].tone, "ok");
+  account.stale = true;
+  assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "older");
+  assert.equal(windowState(account, account.windows[1], snapshot.serverTime), "missing");
+  assert.equal(windowState(account, account.windows[2], snapshot.serverTime), "missing");
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, 19);
+  assert.equal(estimate(pool, snapshot.serverTime).older, 1);
+  report = mapUsage(snapshot);
+  if (report.status !== "available") return assert.fail("active snapshot");
+  assert.equal(report.windows.length, 1);
+  assert.equal(report.windows[0].usedPct, 19);
+  assert.equal(report.windows[0].tone, "default");
+  assert.deepEqual(report.details, []);
+  assert.equal(JSON.stringify(report).includes("数据已过期"), false);
+  account.windows[0].resetsAt = null;
+  assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "older");
+  account.windows[0].resetsAt = snapshot.serverTime;
+  assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "reset");
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, null);
+  report = mapUsage(snapshot);
+  if (report.status !== "available") return assert.fail("active snapshot");
+  assert.equal(report.windows.length, 0);
+  assert.deepEqual(report.details, []);
+  assert.equal(
+    relativeCollection(account.observedAt, Date.parse(snapshot.serverTime)),
+    "8 分钟前采集",
+  );
+  assert.equal(relativeCollection(null), "采集时间未知");
 });

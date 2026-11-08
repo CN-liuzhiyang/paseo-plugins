@@ -52,7 +52,7 @@ export type Snapshot = z.infer<typeof snapshotSchema>;
 export type Pool = Snapshot["pools"][number];
 export type Account = Pool["accounts"][number];
 // Relative tier weights are estimates, not official token capacities.
-// Team/free vary; only current, usable accounts with a known tier enter the estimate.
+// Team/free vary; usable, unreset windows with a known tier enter the estimate, including older data.
 export const TIER_WEIGHTS = {
   max20: 20,
   max5: 5,
@@ -65,13 +65,18 @@ export const TIER_WEIGHTS = {
 export type Window = Account["windows"][number];
 export function windowState(account: Account, window: Window | undefined, serverTime: string) {
   if (account.state === "unavailable") return "unavailable";
-  if (
-    account.stale ||
-    (window?.resetsAt != null && Date.parse(window.resetsAt) <= Date.parse(serverTime))
-  )
-    return "expired";
   if (window?.usedPct == null) return "missing";
-  return "current";
+  if (window.resetsAt != null && Date.parse(window.resetsAt) <= Date.parse(serverTime))
+    return "reset";
+  return account.stale ? "older" : "current";
+}
+export function relativeCollection(value: string | null, now = Date.now()) {
+  if (!value) return "采集时间未知";
+  const minutes = Math.max(0, Math.floor((now - Date.parse(value)) / 60000));
+  if (minutes < 1) return "刚刚采集";
+  if (minutes < 60) return `${minutes} 分钟前采集`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前采集`;
+  return `${Math.floor(minutes / 1440)} 天前采集`;
 }
 export function estimate(pool: Pool, serverTime: string, windowId = "5h") {
   let used = 0;
@@ -83,7 +88,7 @@ export function estimate(pool: Pool, serverTime: string, windowId = "5h") {
     if (
       weight === null ||
       account.state === "unknown" ||
-      windowState(account, window, serverTime) !== "current"
+      !["current", "older"].includes(windowState(account, window, serverTime))
     )
       continue;
     accounts.push(account);
@@ -94,6 +99,7 @@ export function estimate(pool: Pool, serverTime: string, windowId = "5h") {
     usedPct: total ? used / total : null,
     included: accounts.length,
     total: pool.accounts.length,
+    older: accounts.filter((account) => account.stale).length,
     accounts,
   };
 }

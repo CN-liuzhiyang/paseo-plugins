@@ -13,6 +13,9 @@ export type Mode =
   | "redirect"
   | "management_https"
   | "integration"
+  | "fresh"
+  | "older"
+  | "reset"
   | "echo";
 export async function fixture(name = "snapshot") {
   return JSON.parse(await readFile(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
@@ -64,6 +67,21 @@ export async function startFakeCrs() {
       return;
     }
     const data = await fixture(mode === "integration" ? "integration-snapshot" : "snapshot");
+    if (["fresh", "older", "reset"].includes(mode)) {
+      const now = Date.now();
+      data.serverTime = new Date(now).toISOString();
+      data.pools = [data.pools[0]];
+      data.pools[0].accounts = [data.pools[0].accounts[0]];
+      const account = data.pools[0].accounts[0];
+      account.stale = mode !== "fresh";
+      account.observedAt = new Date(now - (mode === "fresh" ? 6 : 8) * 60000).toISOString();
+      account.windows[0].usedPct = 19;
+      for (const window of account.windows)
+        window.resetsAt = new Date(
+          now + (mode === "reset" ? -60000 : window.id === "5h" ? 3600000 : 86400000),
+        ).toISOString();
+      account.windows.push({ id: "week_opus", usedPct: null, resetsAt: null });
+    }
     if (mode === "limited") {
       data.pools[0].accounts[1].state = "rate_limited";
       data.pools[0].accounts[1].limitedUntil = "2026-11-08T09:00:00Z";

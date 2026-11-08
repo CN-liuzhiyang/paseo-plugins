@@ -1,69 +1,76 @@
 import type { UsageReport } from "@getpaseo/plugin/server";
-import { hashAccountKey } from "@getpaseo/plugin/server/usage";
-import { estimate, windowLabel, windowState, type Snapshot } from "../shared/snapshot";
-export function mapUsage(snapshot: Snapshot, providers: string[]): UsageReport {
+import { windowState, type Snapshot } from "../shared/snapshot";
+
+export function shortUsageError(error: string): string {
+  if (error.includes("过期")) return "Key 已过期";
+  if (error.includes("禁用")) return "Key 已禁用";
+  if (error.includes("Key 无效")) return "Key 无效";
+  if (error.includes("激活")) return "Key 未激活";
+  if (error.includes("超时")) return "CRS 请求超时";
+  if (error.includes("限流")) return "CRS 请求限流";
+  if (error.includes("HTTPS")) return "CRS HTTPS异常";
+  if (error.includes("配置") || error.includes("凭据")) return "CRS 配置已变更";
+  if (error.includes("格式") || error.includes("数据缺失")) return "CRS 数据异常";
+  if (error.includes("拒绝")) return "CRS 拒绝访问";
+  return "CRS 暂时不可用";
+}
+
+export function mapUsage(snapshot: Snapshot): UsageReport {
   if (snapshot.key.status !== "active")
-    return { status: "error", error: `API Key 状态：${snapshot.key.status}` };
-  const windows = snapshot.pools.flatMap((pool) =>
-    pool.accounts
-      .filter((account) => account.state !== "unavailable")
-      .flatMap((account) =>
-        account.windows
-          .filter((window) => windowState(account, window, snapshot.serverTime) !== "expired")
-          .map((window) => {
-            const state = windowState(account, window, snapshot.serverTime);
-            const usedPct = state === "current" ? window.usedPct : null;
-            return {
-              id: `${pool.platform}-${hashAccountKey(account.alias).slice(0, 16)}-${window.id}`,
-              label: `${pool.platform === "claude" ? "Claude" : "Codex"} · ${account.alias} · ${windowLabel(window.id)}`,
-              usedPct,
-              remainingPct: usedPct === null ? null : Math.max(0, 100 - usedPct),
-              resetsAt: window.resetsAt,
-              tone:
-                account.state === "rate_limited" || account.state === "unavailable"
-                  ? ("danger" as const)
-                  : account.stale
-                    ? ("warning" as const)
-                    : ("default" as const),
-            };
-          }),
+    return {
+      status: "error",
+      error: shortUsageError(
+        { expired: "Key 过期", disabled: "Key 禁用", inactive: "Key 未激活" }[snapshot.key.status],
       ),
-  );
-  const balances = (["daily", "total", "weeklyOpus"] as const).map((id) => ({
-    id,
-    label: `${id === "daily" ? "Key 今日费用" : id === "total" ? "Key 总费用" : "Key 本周 Opus 费用"}${snapshot.key[id].limit === null ? " · 无上限" : ""}`,
-    ...snapshot.key[id],
-    unit: "usd" as const,
-    remaining:
-      snapshot.key[id].limit === null || snapshot.key[id].used === null
-        ? null
-        : Math.max(0, snapshot.key[id].limit - snapshot.key[id].used),
-  }));
-  const details = [
-    { id: "providers", label: "覆盖配置", value: providers.join(" · ") },
-    { id: "expires", label: "Key 到期", value: snapshot.key.expiresAt ?? "未提供到期时间" },
-    { id: "sharing", label: "共享提示", value: "账号窗口包含其他使用者消耗；当前会话账号未知" },
-    ...snapshot.pools.flatMap((pool, p) => {
-      const summary = estimate(pool, snapshot.serverTime);
-      return [
-        {
-          id: `estimate-${p}`,
-          label: `${pool.platform} · 5 小时粗略折合`,
-          value:
-            summary.usedPct === null
-              ? `无法估算（纳入 0/${pool.accounts.length} 个账号）`
-              : `约已用 ${summary.usedPct.toFixed(1)}%（估算，纳入 ${summary.included}/${pool.accounts.length} 个账号，非官方总额度）`,
-        },
-        ...pool.accounts.map((account, a) => ({
-          id: `account-${p}-${a}`,
-          label: account.alias,
-          value: `${account.state === "rate_limited" ? "限流" : account.state === "unavailable" ? "不可用" : account.state === "unknown" ? "状态未知" : "正常"}${account.limitedUntil ? ` · 恢复 ${account.limitedUntil}` : ""}${account.windows.some((window) => windowState(account, window, snapshot.serverTime) === "expired") ? " · 数据已过期" : ""}（采集于 ${account.observedAt ?? "未知"}）`,
-        })),
-      ];
-    }),
-    ...(snapshot.errors.length
-      ? [{ id: "partial", label: "数据缺失", value: `${snapshot.errors.length} 项数据未能取得` }]
-      : []),
-  ];
-  return { status: "available", planLabel: "CRS Key · 共享账号快照", windows, balances, details };
+    };
+  const windows = (["claude", "openai"] as const).flatMap((platform) => {
+    const selected = snapshot.pools
+      .filter((pool) => pool.platform === platform)
+      .flatMap((pool) => pool.accounts)
+      .filter((account) => account.state !== "unknown")
+      .map((account) => ({
+        account,
+        windows: (["5h", "week"] as const).flatMap((id) => {
+          const window = account.windows.find(
+            (window) =>
+              window.id === id &&
+              ["current", "older"].includes(windowState(account, window, snapshot.serverTime)),
+          );
+          return window ? [window] : [];
+        }),
+      }))
+      .filter((entry) => entry.windows.length > 0)
+      // Select one account across both windows; never combine independent maxima.
+      .sort(
+        (a, b) =>
+          Math.max(...b.windows.map((window) => window.usedPct!)) -
+            Math.max(...a.windows.map((window) => window.usedPct!)) ||
+          a.account.alias.localeCompare(b.account.alias),
+      )[0];
+    return (selected?.windows ?? []).map((window) => {
+      const untilReset = window.resetsAt
+        ? Date.parse(window.resetsAt) - Date.parse(snapshot.serverTime)
+        : null;
+      const warning =
+        window.usedPct! >= 90 && untilReset !== null && untilReset > 0 && untilReset <= 30 * 60000;
+      return {
+        id: `${platform}-tightest-${window.id}`,
+        label: `${platform === "claude" ? "Claude" : "Codex"} ${window.id === "5h" ? "5小时" : "本周"}`,
+        usedPct: window.usedPct,
+        remainingPct: Math.max(0, 100 - window.usedPct!),
+        ...(warning ? { resetsAt: window.resetsAt } : {}),
+        tone: warning
+          ? ("warning" as const)
+          : selected!.account.stale
+            ? ("default" as const)
+            : ("ok" as const),
+      };
+    });
+  });
+  return {
+    status: "available",
+    windows,
+    balances: [{ id: "daily", label: "今日费用", used: snapshot.key.daily.used, unit: "usd" }],
+    details: [],
+  };
 }

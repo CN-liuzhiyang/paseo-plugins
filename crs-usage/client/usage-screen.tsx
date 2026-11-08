@@ -3,7 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { panelRpc, type PanelEntry } from "../shared/rpc";
-import { estimate, TIER_WEIGHTS, windowLabel, windowState, type Pool } from "../shared/snapshot";
+import {
+  estimate,
+  relativeCollection,
+  TIER_WEIGHTS,
+  windowLabel,
+  windowState,
+  type Pool,
+} from "../shared/snapshot";
 
 type Theme = PluginScreenProps["theme"];
 type Mode = "used" | "remaining";
@@ -29,11 +36,13 @@ function Bar({
   used,
   theme,
   tall = false,
+  muted = false,
 }: {
   pct: number | null;
   used: number | null;
   theme: Theme;
   tall?: boolean;
+  muted?: boolean;
 }) {
   return (
     <View
@@ -44,6 +53,7 @@ function Bar({
         borderRadius: 4,
         backgroundColor: theme.colors.surface2,
         overflow: "hidden",
+        opacity: muted ? 0.5 : 1,
       }}
     >
       {pct !== null && (
@@ -112,7 +122,7 @@ function PoolView({
   compact: boolean;
   serverTime: string;
 }) {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   const c = theme.colors;
   const summary = estimate(pool, serverTime);
   const used = summary.usedPct;
@@ -149,6 +159,7 @@ function PoolView({
           }}
         >
           粗略折合 · 估算 · 纳入 {summary.included}/{summary.total} 个账号
+          {summary.older ? ` · 含 ${summary.older} 个较旧数据` : ""}
         </Text>
       </View>
       <View style={{ flexDirection: "row", gap: 4 }}>
@@ -160,14 +171,11 @@ function PoolView({
               key={`${account.alias}-${index}`}
               style={{ flex: TIER_WEIGHTS[account.tier] ?? 1, minWidth: 9 }}
             >
-              <Bar pct={value} used={pct} theme={theme} tall />
+              <Bar pct={value} used={pct} theme={theme} tall muted={account.stale} />
             </View>
           );
         })}
       </View>
-      <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-        格宽 ≈ 纳入账号档位；过期、不可用、未知档位和缺失窗口不参与。估算不代表官方总额度。
-      </Text>
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="展开或收起逐账号明细"
@@ -197,10 +205,25 @@ function PoolView({
                 borderColor: c.border,
               }}
             >
-              <View style={{ width: compact ? undefined : 136, gap: 4 }}>
-                <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 13 }}>
-                  {account.alias}
-                </Text>
+              <View style={{ width: compact ? undefined : 180, gap: 4 }}>
+                <View
+                  style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}
+                >
+                  <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 13 }}>
+                    {account.alias}
+                  </Text>
+                  <Text
+                    accessibilityLabel={`采集于 ${stamp(account.observedAt)}`}
+                    style={{ color: c.foregroundMuted, fontSize: 10 }}
+                  >
+                    {account.windows.some(
+                      (window) => windowState(account, window, serverTime) === "older",
+                    )
+                      ? "较旧 · "
+                      : ""}
+                    {relativeCollection(account.observedAt)}
+                  </Text>
+                </View>
                 <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
                   {account.tier} ·{" "}
                   {
@@ -217,60 +240,55 @@ function PoolView({
                     恢复 {stamp(account.limitedUntil)}
                   </Text>
                 )}
-                {account.windows.some(
-                  (window) => windowState(account, window, serverTime) === "expired",
-                ) && (
-                  <Text style={{ color: c.statusWarning, fontSize: 11 }}>
-                    数据已过期（采集于 {stamp(account.observedAt)}）
-                  </Text>
-                )}
               </View>
-              <View style={{ flex: 1, flexDirection: "row", gap: 18 }}>
-                {(account.windows.length
-                  ? account.windows
-                  : [
-                      { id: "5h", usedPct: null, resetsAt: null },
-                      { id: "week", usedPct: null, resetsAt: null },
-                    ]
-                ).map((window) => {
-                  const state = windowState(account, window, serverTime);
-                  const pct = state === "current" ? window.usedPct : null;
-                  const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
-                  return (
-                    <View key={window.id} style={{ flex: 1, gap: 6 }}>
+              <View style={{ flex: 1, flexDirection: "row", flexWrap: "wrap", gap: 18 }}>
+                {account.windows
+                  .filter((window) => window.usedPct !== null)
+                  .map((window) => {
+                    const state = windowState(account, window, serverTime);
+                    const pct = state === "current" || state === "older" ? window.usedPct : null;
+                    const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
+                    return (
                       <View
-                        style={{
-                          flexDirection: "row",
-                          justifyContent: "space-between",
-                          flexWrap: "wrap",
-                        }}
+                        key={window.id}
+                        style={{ flex: 1, minWidth: compact ? 125 : 120, gap: 6 }}
                       >
-                        <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                          {windowLabel(window.id)}
-                        </Text>
-                        <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>
-                          {state === "expired"
-                            ? "数据已过期"
-                            : value === null
-                              ? "数据缺失"
-                              : `${value.toFixed(0)}%`}
-                        </Text>
+                        <View
+                          style={{
+                            flexDirection: "row",
+                            justifyContent: "space-between",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
+                            {windowLabel(window.id)}
+                          </Text>
+                          <Text
+                            style={{
+                              color: state === "older" ? c.foregroundMuted : c.foreground,
+                              fontSize: 12,
+                              fontWeight: "600",
+                            }}
+                          >
+                            {state === "reset"
+                              ? "窗口已重置，等待新数据"
+                              : value === null
+                                ? "数据缺失"
+                                : `${value.toFixed(0)}%`}
+                          </Text>
+                        </View>
+                        {value !== null && (
+                          <Bar pct={value} used={pct} theme={theme} muted={state === "older"} />
+                        )}
+                        {(state === "current" || state === "older") && (
+                          <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
+                            {reset(window.resetsAt)}
+                          </Text>
+                        )}
                       </View>
-                      {value !== null && <Bar pct={value} used={pct} theme={theme} />}
-                      {state === "current" && (
-                        <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-                          {reset(window.resetsAt)}
-                        </Text>
-                      )}
-                    </View>
-                  );
-                })}
+                    );
+                  })}
               </View>
-              <Text
-                style={{ color: c.foregroundMuted, fontSize: 10, width: compact ? undefined : 114 }}
-              >
-                采集 {stamp(account.observedAt)}
-              </Text>
             </View>
           ),
         )}
@@ -299,6 +317,13 @@ function Entry({
     void openExternalUrl(url).catch(() => setLinkError(true));
   };
   const limited = snapshot?.pools.some((p) => p.accounts.some((a) => a.state === "rate_limited"));
+  const older = snapshot?.pools.some((pool) =>
+    pool.accounts.some((account) =>
+      account.windows.some(
+        (window) => windowState(account, window, snapshot.serverTime) === "older",
+      ),
+    ),
+  );
   const missing =
     snapshot?.errors.length ||
     snapshot?.pools.some(
@@ -306,10 +331,10 @@ function Entry({
         !p.accounts.length ||
         p.accounts.some(
           (a) =>
-            a.stale ||
             a.state === "unknown" ||
             a.state === "unavailable" ||
-            a.windows.some((w) => windowState(a, w, snapshot!.serverTime) !== "current"),
+            !a.windows.some((window) => window.usedPct !== null) ||
+            a.windows.some((w) => windowState(a, w, snapshot!.serverTime) === "reset"),
         ),
     );
   const state = entry.error
@@ -318,7 +343,9 @@ function Entry({
       ? "部分账号限流"
       : missing
         ? "部分数据缺失"
-        : "正常";
+        : older
+          ? "部分数据较旧"
+          : "正常";
   return (
     <View
       style={{
@@ -339,7 +366,7 @@ function Entry({
           style={{
             color: entry.error
               ? c.statusDanger
-              : limited || missing
+              : limited || missing || older
                 ? c.statusWarning
                 : c.statusSuccess,
             fontSize: 12,
@@ -479,9 +506,6 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
     >
       <View style={{ width: "100%", maxWidth: 1060, alignSelf: "center", gap: 18 }}>
         <Text style={{ color: c.foreground, fontSize: 24, fontWeight: "600" }}>CRS 用量与管理</Text>
-        <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-          Key 费用与共享账号窗口 · 已用视图默认 · 按需读取与手动刷新
-        </Text>
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
           <Button
             label="已用"
@@ -504,9 +528,6 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
             }}
           />
         </View>
-        <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-          手动刷新遵守 12 秒最短间隔；失败时退避，服务恢复后可重试。
-        </Text>
         {query.isError && (
           <Text style={{ color: c.statusDanger }}>无法读取 CRS 面板，请检查插件或主机连接。</Text>
         )}
