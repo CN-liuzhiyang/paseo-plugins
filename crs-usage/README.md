@@ -1,0 +1,9 @@
+# CRS usage
+
+See [the overview](OVERVIEW.md) or [中文说明](OVERVIEW.zh-CN.md) for setup and data boundaries. No credentials or deployment defaults ship with this plugin.
+
+Development: `npm ci`, then `npm run typecheck`, `npm run lint`, `npm test`, and `npm run format:check`. The fixture and HTTP server under `test/` contain synthetic values only. Tests cover discovery, session isolation, mapping, shared reads, intervals, retries, aborts, redirects, and credential scans.
+
+For a disposable Windows verification instance, `node --import tsx test/isolated.ts` writes a temporary home and Pi fixture, prints their locations, and serves fake CRS on loopback. It does not install into any daemon. Start your bundled Paseo CLI with `daemon start --home <printed-home>`; that generated config uses port 16879 and serves the installed app's web UI. Type `normal`, `limited`, `missing`, `expired`, `disabled`, `down`, or `slow` in the fixture terminal to change the fake response. Stop that exact home with `daemon stop --home <printed-home>` when finished. The browser helper uses a sibling Paseo checkout's Playwright installation and a locally installed Chromium; it is test tooling, excluded from the plugin package.
+
+The plugin targets the snapshot schema version 1. It never falls back to inference or admin APIs. Real CRS integration is separate from fixture verification.

@@ -1,0 +1,8 @@
+{
+  "id": "crs-usage",
+  "name": "CRS 用量与管理",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.14.0-beta.2"
+  }
+}

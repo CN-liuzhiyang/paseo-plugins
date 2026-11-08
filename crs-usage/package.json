@@ -1,0 +1,37 @@
+{
+  "name": "crs-usage",
+  "private": true,
+  "version": "0.0.0",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "OVERVIEW.*.md",
+    "index.client.ts",
+    "index.client.tsx",
+    "index.server.ts",
+    "index.server.tsx",
+    "client/",
+    "server/",
+    "shared/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "format:check": "biome format ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.6",
+    "@getpaseo/plugin": "0.14.0-beta.2",
+    "@tanstack/react-query": "^5.90.11",
+    "@types/node": "^22.20.5",
+    "@types/react": "~19.2.0",
+    "react": "19.1.0",
+    "react-native": "0.81.5",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "zod": "^4.4.3"
+  },
+  "type": "module"
+}

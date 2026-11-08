@@ -1,0 +1,101 @@
+import http from "node:http";
+import { readFile } from "node:fs/promises";
+export const TEST_KEY = "sk-test-xxxx";
+export type Mode =
+  | "normal"
+  | "limited"
+  | "missing"
+  | "expired"
+  | "disabled"
+  | "down"
+  | "slow"
+  | "body_slow"
+  | "redirect"
+  | "echo";
+export async function fixture() {
+  return JSON.parse(await readFile(new URL("./fixtures/snapshot.json", import.meta.url), "utf8"));
+}
+export async function startFakeCrs() {
+  let mode: Mode = "normal";
+  let requests = 0;
+  let aborted = 0;
+  const server = http.createServer(async (req, res) => {
+    if (req.url !== "/apiStats/api/usage-snapshot") {
+      res.writeHead(404).end();
+      return;
+    }
+    requests++;
+    req.on("close", () => {
+      if (!res.writableEnded) aborted++;
+    });
+    if (req.headers["x-api-key"] !== TEST_KEY) {
+      res.writeHead(401).end();
+      return;
+    }
+    if (mode === "slow") return;
+    if (mode === "body_slow") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.write("{");
+      return;
+    }
+    if (mode === "down") {
+      res.writeHead(503, { "Retry-After": "60" }).end("unavailable");
+      return;
+    }
+    if (mode === "redirect") {
+      res.writeHead(302, { Location: "/never-follow" }).end();
+      return;
+    }
+    if (mode === "expired" || mode === "disabled") {
+      res
+        .writeHead(403, { "Content-Type": "application/json" })
+        .end(JSON.stringify({ key: { status: mode } }));
+      return;
+    }
+    const data = await fixture();
+    if (mode === "limited") {
+      data.pools[0].accounts[1].state = "rate_limited";
+      data.pools[0].accounts[1].limitedUntil = "2026-11-08T09:00:00Z";
+      data.pools[0].accounts[1].windows[0].usedPct = 96;
+    }
+    if (mode === "missing") {
+      for (const pool of data.pools)
+        for (const account of pool.accounts) {
+          account.windows.forEach((w: { usedPct: number | null }) => {
+            w.usedPct = null;
+          });
+          account.observedAt = null;
+          account.stale = true;
+          account.state = "unknown";
+          account.unavailableReason = "snapshot_missing";
+        }
+      data.errors.push({ scope: "pool:claude", code: "snapshot_missing" });
+    }
+    if (mode === "echo") {
+      data.key.name = TEST_KEY;
+      data.pools[0].accounts[0].alias = TEST_KEY;
+      data.unexpected = { apiKey: TEST_KEY, email: "private@example.test" };
+    }
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify(data));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("test server did not bind");
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    setMode(value: Mode) {
+      mode = value;
+    },
+    get requests() {
+      return requests;
+    },
+    get aborted() {
+      return aborted;
+    },
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
+  };
+}
