@@ -4,5 +4,13 @@
   "media": [],
   "requirements": {
     "paseo": ">=0.14.0-beta.2"
-  }
+  },
+  "build": [
+    [
+      "npm",
+      "ci",
+      "--no-audit",
+      "--no-fund"
+    ]
+  ]
 }
