@@ -32,6 +32,7 @@ export const snapshotSchema = z.object({
       accounts: z.array(
         z.object({
           alias: z.string().max(120),
+          name: z.string().optional(),
           tier: z.enum(["max20", "max5", "pro", "plus", "team", "free", "unknown"]),
           state: z.enum(["normal", "rate_limited", "unavailable", "unknown"]),
           limitedUntil: time,

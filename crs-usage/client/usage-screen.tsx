@@ -6,6 +6,7 @@ import { panelRpc, type PanelEntry } from "../shared/rpc";
 import type { TokenRange } from "../shared/tokens";
 import { costView, totalQuotaTime } from "../shared/cost";
 import { TokenUsage } from "./token-usage";
+import { AccountTitle } from "./account-title";
 import {
   estimate,
   relativeCollection,
@@ -200,10 +201,21 @@ function PoolView({
           account.state === "unavailable" ? (
             <View
               key={`${account.alias}-${index}`}
-              style={{ paddingVertical: 12, borderTopWidth: 1, borderColor: c.border }}
+              style={{
+                paddingVertical: 12,
+                borderTopWidth: 1,
+                borderColor: c.border,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 4,
+              }}
             >
-              <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                {account.alias} · 不可用 · 未参与折合
+              <AccountTitle account={account} theme={theme} muted />
+              <Text
+                numberOfLines={1}
+                style={{ color: c.foregroundMuted, fontSize: 12, flexShrink: 0 }}
+              >
+                · 不可用 · 未参与折合
               </Text>
             </View>
           ) : (
@@ -217,13 +229,11 @@ function PoolView({
                 borderColor: c.border,
               }}
             >
-              <View style={{ width: compact ? undefined : 180, gap: 4 }}>
+              <View style={{ width: compact ? undefined : 180, minWidth: 0, gap: 4 }}>
                 <View
                   style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 8 }}
                 >
-                  <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 13 }}>
-                    {account.alias}
-                  </Text>
+                  <AccountTitle account={account} theme={theme} />
                   <Text
                     accessibilityLabel={`采集于 ${stamp(account.observedAt)}`}
                     style={{ color: c.foregroundMuted, fontSize: 10 }}

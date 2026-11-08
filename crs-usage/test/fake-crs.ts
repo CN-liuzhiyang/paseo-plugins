@@ -20,6 +20,7 @@ export type Mode =
   | "cost_unlimited"
   | "cost_legacy"
   | "cost_null"
+  | "account_names"
   | "fresh"
   | "older"
   | "reset"
@@ -94,6 +95,14 @@ export async function startFakeCrs() {
             day[field] = null;
           day.models = null;
         }
+    }
+    if (mode === "account_names") {
+      data.pools[0].accounts[0].name = "工作账号 · 研发一组";
+      data.pools[0].accounts[1].name =
+        '<img src=x onerror="globalThis.accountNameExecuted=true"> & 长名称验证 '.repeat(8);
+      data.pools[1].accounts[0].name = '测试 "Codex" <团队> & 研发';
+      data.pools[1].accounts[1].name = "不可用测试账号 · 长名称".repeat(15);
+      data.pools[1].accounts[1].state = "unavailable";
     }
     if (mode === "pool") {
       const shift = Date.now() - Date.parse(data.serverTime);
