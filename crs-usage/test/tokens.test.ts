@@ -145,19 +145,22 @@ test("30-day fixture: each daily model breakdown sums exactly; range totals and 
   }
 });
 
-test("Chinese token units use three significant digits and cross unit boundaries cleanly", () => {
+test("tokens use M everywhere: sub-0.01M, two/one decimals, integer millions and grouping", () => {
   for (const [value, expected] of [
     [null, "—"],
-    [0, "0"],
-    [12, "12"],
-    [1234, "1230"],
-    [9999, "1万"],
-    [10000, "1万"],
-    [12345, "1.23万"],
-    [12345678, "1230万"],
-    [99999999, "1亿"],
-    [100000000, "1亿"],
-    [2290000000, "22.9亿"],
+    [0, "<0.01M"],
+    [12, "<0.01M"],
+    [9999, "<0.01M"],
+    [10000, "0.01M"],
+    [12345, "0.01M"],
+    [1234567, "1.23M"],
+    [9999000, "10.0M"],
+    [10000000, "10.0M"],
+    [63200000, "63.2M"],
+    [99999999, "100M"],
+    [100000000, "100M"],
+    [22986000000, "22,986M"],
+    [1000000000, "1,000M"],
   ] as const)
     assert.equal(formatTokens(value), expected);
 });

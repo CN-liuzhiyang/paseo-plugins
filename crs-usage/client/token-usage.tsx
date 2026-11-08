@@ -108,21 +108,21 @@ export function TokenUsage({
     >
       <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>用量</Text>
       <TokenBar key={range} values={summary} theme={theme} />
-      <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexWrap: "wrap" }}>
-        <Text
-          testID="token-hit-rate"
-          style={{ color: c.foreground, fontSize: 30, fontWeight: "600" }}
-        >
-          {summary.hitRate === null ? "—" : `${Number(summary.hitRate.toPrecision(3))}%`}
+      <Text testID="token-total" style={{ color: c.foreground, fontSize: 30, fontWeight: "600" }}>
+        {formatTokens(summary.total)}
+      </Text>
+      <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+        <Text testID="token-hit-rate">
+          缓存命中 {summary.hitRate === null ? "—" : `${Number(summary.hitRate.toPrecision(3))}%`}
         </Text>
-        <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>缓存命中率</Text>
-        <Text
-          testID="token-requests"
-          style={{ color: c.foregroundMuted, fontSize: 11, marginLeft: "auto" }}
-        >
-          {formatTokens(summary.requests)} 次请求
+        {" · "}
+        <Text testID="token-requests">
+          {summary.requests === null
+            ? "—"
+            : summary.requests.toLocaleString("en-US", { maximumFractionDigits: 0 })}{" "}
+          次请求
         </Text>
-      </View>
+      </Text>
       {!!summary.models.length && (
         <Pressable
           accessibilityRole="button"

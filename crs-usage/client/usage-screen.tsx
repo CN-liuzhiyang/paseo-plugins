@@ -3,7 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { panelRpc, type PanelEntry } from "../shared/rpc";
-import { summarizeTokens, type TokenRange } from "../shared/tokens";
+import type { TokenRange } from "../shared/tokens";
+import { costView, totalQuotaTime } from "../shared/cost";
 import { TokenUsage } from "./token-usage";
 import {
   estimate,
@@ -33,19 +34,21 @@ function Bar({
   theme,
   tall = false,
   muted = false,
+  thin = false,
 }: {
   pct: number | null;
   used: number | null;
   theme: Theme;
   tall?: boolean;
   muted?: boolean;
+  thin?: boolean;
 }) {
   return (
     <View
       accessibilityRole="progressbar"
       accessibilityLabel={pct === null ? "数据缺失" : `${pct.toFixed(1)}%`}
       style={{
-        height: tall ? 22 : 7,
+        height: tall ? 22 : thin ? 4 : 7,
         borderRadius: 4,
         backgroundColor: theme.colors.surface2,
         overflow: "hidden",
@@ -327,6 +330,10 @@ function Entry({
   const c = theme.colors;
   const [linkError, setLinkError] = useState(false);
   const snapshot = entry.snapshot;
+  const cost = snapshot ? costView(snapshot, range, mode) : null;
+  const totalTime = snapshot
+    ? totalQuotaTime(snapshot.key.total.resetsAt, snapshot.key.expiresAt)
+    : null;
   const untilExpiry = snapshot?.key.expiresAt
     ? Date.parse(snapshot.key.expiresAt) - Date.now()
     : null;
@@ -440,51 +447,72 @@ function Entry({
           </Text>
         </View>
       )}
-      {snapshot && (
+      {snapshot && cost && (
         <>
-          <View style={{ flexDirection: "row", gap: 24 }}>
-            {(["daily", "total"] as const).map((id) => {
-              const quota = snapshot.key[id];
-              const value =
-                mode === "used" || quota.limit === null
-                  ? quota.used
-                  : quota.used === null || quota.limit === null
-                    ? null
-                    : Math.max(0, quota.limit - quota.used);
-              const used =
-                quota.used === null || quota.limit === null || quota.limit <= 0
-                  ? null
-                  : (quota.used / quota.limit) * 100;
-              return (
-                <View key={id} style={{ flex: 1, gap: 7 }}>
-                  <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                    {id === "daily" ? "今日费用" : "总费用"} ·{" "}
-                    {mode === "used" || quota.limit === null ? "已用" : "剩余"}
-                  </Text>
-                  <Text
-                    style={{ color: c.foreground, fontSize: compact ? 23 : 29, fontWeight: "600" }}
-                  >
-                    {value === null ? "未知" : `$${value.toFixed(2)}`}
-                  </Text>
-                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                    {quota.limit === null ? "无上限" : `上限 $${quota.limit.toFixed(2)}`} · USD
-                  </Text>
-                  {used !== null && (
-                    <Bar
-                      pct={used === null ? null : mode === "used" ? used : 100 - used}
-                      used={used}
-                      theme={theme}
-                    />
-                  )}
+          <View testID="range-cost" style={{ gap: 8 }}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+              <Text testID="range-cost-label" style={{ color: c.foregroundMuted, fontSize: 12 }}>
+                {cost.label} · {cost.remaining ? "剩余" : "已用"}
+              </Text>
+              {cost.daily && (
+                <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+                  上限 ${cost.daily.limit.toFixed(2)}
+                </Text>
+              )}
+            </View>
+            <Text
+              testID="range-cost-value"
+              style={{ color: c.foreground, fontSize: compact ? 32 : 36, fontWeight: "600" }}
+            >
+              {cost.value === null ? "—" : `$${cost.value.toFixed(2)}`}
+            </Text>
+            {cost.daily && (
+              <View testID="daily-cost-limit" style={{ gap: 6 }}>
+                <Bar
+                  pct={
+                    cost.daily.usedPct === null
+                      ? null
+                      : mode === "used"
+                        ? cost.daily.usedPct
+                        : Math.max(0, 100 - cost.daily.usedPct)
+                  }
+                  used={cost.daily.usedPct}
+                  theme={theme}
+                />
+                {snapshot.key.daily.resetsAt && (
                   <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-                    {relativeReset(quota.resetsAt)}
+                    {relativeReset(snapshot.key.daily.resetsAt)}
                   </Text>
-                  {quota.limit !== null && quota.used !== null && quota.used >= quota.limit && (
-                    <Text style={{ color: c.statusDanger, fontSize: 12 }}>Key 此项额度已耗尽</Text>
-                  )}
+                )}
+              </View>
+            )}
+            {cost.total && (
+              <View testID="total-cost-limit" style={{ gap: 6, marginTop: 4 }}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 8 }}>
+                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>总额度</Text>
+                  <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+                    {mode === "used" ? "已用" : "剩余"}{" "}
+                    {cost.total.value === null ? "—" : `$${cost.total.value.toFixed(2)}`} / $
+                    {cost.total.limit.toFixed(2)}
+                  </Text>
                 </View>
-              );
-            })}
+                <Bar
+                  thin
+                  pct={
+                    cost.total.usedPct === null
+                      ? null
+                      : mode === "used"
+                        ? cost.total.usedPct
+                        : Math.max(0, 100 - cost.total.usedPct)
+                  }
+                  used={cost.total.usedPct}
+                  theme={theme}
+                />
+                {totalTime && (
+                  <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>{totalTime}</Text>
+                )}
+              </View>
+            )}
           </View>
           <TokenUsage data={snapshot.tokenDays} range={range} theme={theme} />
           {snapshot.pools.map((pool, index) => (
@@ -567,7 +595,7 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
             selected={mode === "remaining"}
             onPress={() => setMode("remaining")}
           />
-          {query.data?.some((entry) => summarizeTokens(entry.snapshot?.tokenDays, 30)) && (
+          {query.data?.some((entry) => entry.snapshot) && (
             <View style={{ flexDirection: "row", gap: 4, marginLeft: "auto" }}>
               {([1, 7, 30] as const).map((days) => (
                 <Button

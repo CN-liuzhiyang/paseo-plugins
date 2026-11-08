@@ -16,6 +16,7 @@ export const tokenDaysSchema = z.object({
     .array(
       counts.extend({
         date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+        cost: count.optional(),
         models: z
           .array(counts.extend({ model: z.string().min(1).max(256) }))
           .max(12)
@@ -45,13 +46,17 @@ export function tokenTotal(values: TokenCounts) {
     ? null
     : TOKEN_PARTS.reduce((sum, field) => sum + values[field]!, 0);
 }
-export function summarizeTokens(data: TokenDays | null | undefined, range: TokenRange) {
-  if (!data?.days.length) return null;
+export function selectTokenDays(data: TokenDays | null | undefined, range: TokenRange) {
+  if (!data?.days.length) return [];
   // Calendar dates already use the CRS timezone. Never reinterpret "today" in the client's timezone.
   const latest = Math.max(...data.days.map((day) => Date.parse(`${day.date}T00:00:00Z`)));
-  const days = data.days.filter(
+  return data.days.filter(
     (day) => Date.parse(`${day.date}T00:00:00Z`) >= latest - (range - 1) * 86400000,
   );
+}
+export function summarizeTokens(data: TokenDays | null | undefined, range: TokenRange) {
+  const days = selectTokenDays(data, range);
+  if (!days.length) return null;
   const present = (value: TokenCounts) => TOKEN_FIELDS.some((field) => value[field] !== null);
   if (!days.some((day) => present(day) || day.models?.some(present))) return null;
   const totals = empty();
@@ -85,9 +90,10 @@ export function summarizeTokens(data: TokenDays | null | undefined, range: Token
 
 export function formatTokens(value: number | null) {
   if (value === null) return "—";
-  const [scale, suffix] = value >= 1e8 ? [1e8, "亿"] : value >= 1e4 ? [1e4, "万"] : [1, ""];
-  const rounded = Number((value / scale).toPrecision(3));
-  if (scale === 1 && rounded >= 1e4) return "1万";
-  if (scale === 1e4 && rounded >= 1e4) return "1亿";
-  return `${rounded}${suffix}`;
+  if (value < 10000) return "<0.01M";
+  const millions = value / 1e6;
+  if (millions >= 100 || Number(millions.toFixed(1)) >= 100)
+    return `${Math.round(millions).toLocaleString("en-US")}M`;
+  if (millions >= 10 || Number(millions.toFixed(2)) >= 10) return `${millions.toFixed(1)}M`;
+  return `${millions.toFixed(2)}M`;
 }

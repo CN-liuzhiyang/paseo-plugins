@@ -16,6 +16,10 @@ export type Mode =
   | "pool"
   | "tokens"
   | "tokens_null"
+  | "cost"
+  | "cost_unlimited"
+  | "cost_legacy"
+  | "cost_null"
   | "fresh"
   | "older"
   | "reset"
@@ -76,8 +80,14 @@ export async function startFakeCrs() {
           ? "pool-snapshot"
           : "snapshot",
     );
-    if (mode === "tokens" || mode === "tokens_null") {
+    if (mode === "tokens" || mode === "tokens_null" || mode.startsWith("cost")) {
       data.tokenDays = await fixture("token-days");
+      if (mode === "cost_unlimited") {
+        data.key.daily.limit = null;
+        data.key.total.limit = null;
+      }
+      if (mode === "cost_legacy") for (const day of data.tokenDays.days) delete day.cost;
+      if (mode === "cost_null") data.tokenDays.days[29].cost = null;
       if (mode === "tokens_null")
         for (const day of data.tokenDays.days) {
           for (const field of ["input", "output", "cacheCreate", "cacheRead", "requests"])
