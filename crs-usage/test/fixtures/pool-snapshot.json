@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "serverTime": "2026-11-08T03:00:00Z",
+  "key": {
+    "status": "active",
+    "name": "fixture-key",
+    "expiresAt": "2026-11-20T03:00:00Z",
+    "daily": {
+      "used": 12.3,
+      "limit": 30,
+      "resetsAt": "2026-11-09T00:00:00Z"
+    },
+    "total": {
+      "used": 81,
+      "limit": 100,
+      "resetsAt": null
+    },
+    "weeklyOpus": {
+      "used": 0,
+      "limit": null,
+      "resetsAt": "2026-11-09T00:00:00Z"
+    },
+    "rateWindow": {
+      "requests": {
+        "used": 0,
+        "limit": null
+      },
+      "cost": {
+        "used": 0,
+        "limit": null
+      },
+      "tokens": {
+        "used": 0,
+        "limit": null
+      },
+      "resetsAt": null
+    },
+    "usage": {
+      "totalTokens": 234000,
+      "totalRequests": 240,
+      "dailyTokens": 12000,
+      "dailyRequests": 20
+    }
+  },
+  "pools": [
+    {
+      "platform": "claude",
+      "bindingKind": "pool",
+      "accounts": [
+        {
+          "alias": "Claude-Pro-A",
+          "tier": "pro",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": null,
+              "resetsAt": null
+            },
+            {
+              "id": "week",
+              "usedPct": 100,
+              "resetsAt": "2026-11-13T06:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T02:57:00Z",
+          "stale": false,
+          "unavailableReason": null
+        },
+        {
+          "alias": "Claude-Pro-B",
+          "tier": "pro",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": 4,
+              "resetsAt": "2026-11-08T06:36:00Z"
+            },
+            {
+              "id": "week",
+              "usedPct": 4,
+              "resetsAt": "2026-11-14T06:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T02:57:00Z",
+          "stale": false,
+          "unavailableReason": null
+        },
+        {
+          "alias": "Claude-Pro-C",
+          "tier": "pro",
+          "state": "unavailable",
+          "limitedUntil": null,
+          "windows": [],
+          "observedAt": "2026-11-08T02:57:00Z",
+          "stale": false,
+          "unavailableReason": "disabled"
+        },
+        {
+          "alias": "Claude-Pro-D",
+          "tier": "pro",
+          "state": "unavailable",
+          "limitedUntil": null,
+          "windows": [],
+          "observedAt": "2026-11-08T02:57:00Z",
+          "stale": false,
+          "unavailableReason": "disabled"
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

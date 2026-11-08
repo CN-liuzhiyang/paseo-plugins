@@ -8,7 +8,14 @@ import { discover, originOf } from "../server/discovery";
 import { UsageService } from "../server/service";
 import { mapUsage, shortUsageError } from "../server/usage";
 import { settingsDefinition } from "../shared/settings";
-import { estimate, relativeCollection, snapshotSchema, windowState } from "../shared/snapshot";
+import {
+  estimate,
+  estimateWindow,
+  relativeCollection,
+  relativeReset,
+  snapshotSchema,
+  windowState,
+} from "../shared/snapshot";
 import { panelEntrySchema } from "../shared/rpc";
 import { fixture, startFakeCrs, TEST_KEY } from "./fake-crs";
 
@@ -547,8 +554,8 @@ test("integration fixture: unlimited costs, expired windows, unusable accounts a
   assert.equal(report.status, "available");
   const claude = snapshot.pools[0];
   const summary = estimate(claude, snapshot.serverTime);
-  assert.equal(summary.usedPct, 22);
-  assert.equal(summary.included, 1);
+  assert.equal(summary.usedPct, 11);
+  assert.equal(summary.included, 2);
   assert.equal(summary.total, 4);
   assert.equal(
     windowState(claude.accounts[1], claude.accounts[1].windows[0], snapshot.serverTime),
@@ -571,15 +578,15 @@ test("integration fixture: unlimited costs, expired windows, unusable accounts a
       false,
     );
   }
-  // An elapsed reset is invalid even if the upstream forgot to set stale=true.
+  // Details hide the old value; the pool counts the reset account as unused.
   const current = claude.accounts[0];
   current.windows[0].resetsAt = snapshot.serverTime;
   assert.equal(windowState(current, current.windows[0], snapshot.serverTime), "reset");
   assert.equal(windowState(current, current.windows[1], snapshot.serverTime), "current");
-  assert.equal(estimate(claude, snapshot.serverTime).usedPct, null);
+  assert.equal(estimate(claude, snapshot.serverTime).usedPct, 0);
 });
 
-test("slim native card: one tightest account per platform, populated known windows, no details or badge", async () => {
+test("native pool card: shared weighted estimates, stable window IDs, no details or badge", async () => {
   const snapshot = snapshotSchema.parse(await fixture());
   const pool = snapshot.pools[0];
   pool.accounts[0].windows[0].usedPct = 90;
@@ -591,14 +598,14 @@ test("slim native card: one tightest account per platform, populated known windo
   assert.equal(report.status, "available");
   if (report.status !== "available") return;
   const claude = report.windows.filter((window) => window.label.startsWith("Claude"));
-  // Both bars must describe the same account, never independent per-window maxima.
+  // Every account keeps its tier weight in both independently estimated windows.
   assert.deepEqual(
     claude.map((window) => window.usedPct),
-    [20, 95],
+    [(20 * 90 + 5 * 20 + 90) / 26, (20 * 10 + 5 * 95 + 85) / 26],
   );
   assert.deepEqual(
     claude.map((window) => window.label),
-    ["Claude 5小时", "Claude 本周"],
+    ["Claude 5小时 · 3/3 可用", "Claude 本周 · 3/3 可用"],
   );
   assert.equal(report.windows.length, 4);
   assert.deepEqual(report.details, []);
@@ -621,11 +628,12 @@ test("slim native card: one tightest account per platform, populated known windo
     switched.windows
       .filter((window) => window.label.startsWith("Claude"))
       .map((window) => window.usedPct),
-    [90, 10],
+    [90, 8],
   );
   for (const account of pool.accounts) {
     account.windows[0].usedPct = null;
     account.windows[1].usedPct = null;
+    for (const window of account.windows) window.resetsAt = null;
   }
   const missing = mapUsage(snapshot);
   if (missing.status === "available")
@@ -644,30 +652,27 @@ test("slim native card: one tightest account per platform, populated known windo
   assert.equal(pool.accounts[2].windows.at(-1)?.id, "week_opus");
 });
 
-test("native output: one daily amount, imminent warnings only, errors at most 12 characters", async () => {
+test("native output: one daily amount, never reset timestamps, errors at most 12 characters", async () => {
   const snapshot = snapshotSchema.parse(await fixture());
   snapshot.key.weeklyOpus.used = 3;
   snapshot.key.weeklyOpus.limit = 20;
   let report = mapUsage(snapshot);
   if (report.status !== "available") return assert.fail("active snapshot");
   assert.deepEqual(report.balances, [{ id: "daily", label: "今日费用", used: 12.3, unit: "usd" }]);
-  const tightest = snapshot.pools[0].accounts[2];
   for (const minutes of [31, 30, 1, 0]) {
-    tightest.windows[0].resetsAt = new Date(
-      Date.parse(snapshot.serverTime) + minutes * 60000,
-    ).toISOString();
+    for (const account of snapshot.pools[0].accounts) {
+      account.windows[0].usedPct = 95;
+      account.windows[0].resetsAt = new Date(
+        Date.parse(snapshot.serverTime) + minutes * 60000,
+      ).toISOString();
+    }
     report = mapUsage(snapshot);
     if (report.status !== "available") return assert.fail("active snapshot");
-    const window = report.windows.find((window) => window.label === "Claude 5小时");
-    if (minutes === 0) {
-      assert.equal(window, undefined);
-      continue;
-    }
-    assert.equal("resetsAt" in window!, minutes <= 30);
-    assert.equal(window!.tone, minutes <= 30 ? "warning" : "ok");
+    const window = report.windows.find((window) => window.id === "claude-pool-5h")!;
+    assert.equal("resetsAt" in window, false);
+    assert.equal(window.usedPct, minutes === 0 ? 0 : 95);
+    assert.equal(window.tone, minutes === 0 ? "ok" : "warning");
   }
-  tightest.windows[0].usedPct = 89;
-  tightest.windows[0].resetsAt = new Date(Date.parse(snapshot.serverTime) + 60000).toISOString();
   report = mapUsage(snapshot);
   if (report.status === "available")
     assert.equal(
@@ -690,7 +695,7 @@ test("native output: one daily amount, imminent warnings only, errors at most 12
     assert.ok(Array.from(shortUsageError(error)).length <= 12);
   assert.equal(shortUsageError("CRS 暂时连不上或响应无效"), "CRS 暂时不可用");
 });
-test("fresh / older / reset: preserve older values and estimates, hide reset values, null cells stay absent", async () => {
+test("fresh / older / reset: preserve older values, reset estimates count as zero, null detail cells stay absent", async () => {
   const snapshot = snapshotSchema.parse(await fixture());
   snapshot.pools = [snapshot.pools[0]];
   const pool = snapshot.pools[0];
@@ -699,7 +704,7 @@ test("fresh / older / reset: preserve older values and estimates, hide reset val
   account.observedAt = "2026-11-08T02:52:00Z";
   account.windows = [
     { id: "5h", usedPct: 19, resetsAt: "2026-11-08T04:00:00Z" },
-    { id: "week", usedPct: null, resetsAt: "2026-11-08T02:00:00Z" },
+    { id: "week", usedPct: null, resetsAt: "2026-11-08T04:00:00Z" },
     { id: "week_opus", usedPct: null, resetsAt: null },
   ];
   assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "current");
@@ -725,14 +730,115 @@ test("fresh / older / reset: preserve older values and estimates, hide reset val
   assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "older");
   account.windows[0].resetsAt = snapshot.serverTime;
   assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "reset");
-  assert.equal(estimate(pool, snapshot.serverTime).usedPct, null);
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, 0);
   report = mapUsage(snapshot);
   if (report.status !== "available") return assert.fail("active snapshot");
-  assert.equal(report.windows.length, 0);
+  assert.equal(report.windows.length, 1);
+  assert.equal(report.windows[0].usedPct, 0);
   assert.deepEqual(report.details, []);
   assert.equal(
     relativeCollection(account.observedAt, Date.parse(snapshot.serverTime)),
     "8 分钟前采集",
   );
   assert.equal(relativeCollection(null), "采集时间未知");
+});
+
+test("pool regression: two Pro accounts at 100% and 4%, two unavailable; panel/native agree at 52%", async () => {
+  const snapshot = snapshotSchema.parse(await fixture("pool-snapshot"));
+  const pool = snapshot.pools[0];
+  const [full, low, unavailable] = pool.accounts;
+  const untouched = JSON.stringify(snapshot);
+  for (const id of ["5h", "week"]) {
+    const summary = estimate(pool, snapshot.serverTime, id);
+    assert.equal(summary.usedPct, 52);
+    assert.equal(summary.included, 2);
+    assert.equal(summary.total, 4);
+    assert.deepEqual(
+      summary.windows.map((window) => window.usedPct),
+      [100, 4],
+    );
+  }
+  assert.equal(estimate(pool, snapshot.serverTime).resetsAt, low.windows[0].resetsAt);
+  assert.equal(estimate(pool, snapshot.serverTime, "week").resetsAt, full.windows[1].resetsAt);
+  const report = mapUsage(snapshot);
+  if (report.status !== "available") return assert.fail("active snapshot");
+  assert.deepEqual(
+    report.windows.map((window) => window.usedPct),
+    [52, 52],
+  );
+  assert.deepEqual(
+    report.windows.map((window) => window.label),
+    ["Claude 5小时 · 2/4 可用", "Claude 本周 · 2/4 可用"],
+  );
+  assert.deepEqual(report.details, []);
+  assert.ok(report.windows.every((window) => !("resetsAt" in window)));
+  assert.equal(JSON.stringify(snapshot), untouched);
+  // Multiple same-platform bindings use the same estimator across their accounts.
+  const split = structuredClone(snapshot);
+  split.pools.push({ ...split.pools[0], accounts: split.pools[0].accounts.splice(1) });
+  assert.deepEqual(mapUsage(split), report);
+  full.state = "rate_limited";
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, 52);
+  full.tier = "max5";
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, 84);
+  unavailable.state = "normal";
+  unavailable.tier = "unknown";
+  unavailable.windows = structuredClone(low.windows);
+  assert.equal(estimate(pool, snapshot.serverTime).included, 2);
+  full.tier = "unknown";
+  assert.equal(estimate(pool, snapshot.serverTime).usedPct, 4);
+  low.state = "unavailable";
+  const empty = mapUsage(snapshot);
+  if (empty.status === "available") assert.deepEqual(empty.windows, []);
+});
+
+test("pool windows: reset counts as zero even without a value; missing 5h inherits an unreset exhausted week", async () => {
+  const snapshot = snapshotSchema.parse(await fixture("pool-snapshot"));
+  const pool = snapshot.pools[0];
+  const account = pool.accounts[0];
+  account.stale = true;
+  assert.equal(estimateWindow(account, snapshot.serverTime, "5h")?.usedPct, 100);
+  account.windows[0].usedPct = 22;
+  assert.equal(estimateWindow(account, snapshot.serverTime, "5h")?.usedPct, 100);
+  account.windows.shift();
+  assert.equal(estimateWindow(account, snapshot.serverTime, "5h")?.usedPct, 100);
+  account.windows.unshift({ id: "5h", usedPct: null, resetsAt: snapshot.serverTime });
+  account.windows[1].resetsAt = snapshot.serverTime;
+  for (const id of ["5h", "week"]) {
+    const summary = estimate(pool, snapshot.serverTime, id);
+    assert.equal(summary.usedPct, 2);
+    assert.equal(summary.included, 2);
+    assert.equal(summary.older, 0);
+    assert.equal(
+      summary.resetsAt,
+      pool.accounts[1].windows.find((window) => window.id === id)?.resetsAt,
+    );
+    assert.equal(estimateWindow(account, snapshot.serverTime, id)?.usedPct, 0);
+  }
+  account.windows[0].resetsAt = null;
+  assert.equal(estimateWindow(account, snapshot.serverTime, "5h"), null);
+  account.windows[1].usedPct = null;
+  account.windows[1].resetsAt = null;
+  assert.equal(estimateWindow(account, snapshot.serverTime, "week"), null);
+  assert.equal(estimate(pool, snapshot.serverTime).included, 1);
+  account.state = "unknown";
+  account.windows[0].usedPct = 70;
+  assert.equal(estimateWindow(account, snapshot.serverTime, "5h"), null);
+});
+
+test("reset countdowns: days/hours, hours/minutes, sub-minute, elapsed and absent timestamps", () => {
+  const now = Date.parse("2026-11-08T03:00:00Z");
+  for (const [milliseconds, expected] of [
+    [5 * 86400000 + 3 * 3600000, "5 天 3 小时后重置"],
+    [3 * 3600000 + 36 * 60000, "3 小时 36 分后重置"],
+    [86400000, "1 天后重置"],
+    [3600000, "1 小时后重置"],
+    [60000, "1 分钟后重置"],
+    [59999, "<1 分钟后重置"],
+    [1, "<1 分钟后重置"],
+    [0, "等待窗口更新"],
+    [-1, "等待窗口更新"],
+  ] as const)
+    assert.equal(relativeReset(new Date(now + milliseconds).toISOString(), now), expected);
+  assert.equal(relativeReset(null, now), "重置时间未知");
 });

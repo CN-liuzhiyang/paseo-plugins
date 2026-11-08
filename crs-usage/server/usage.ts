@@ -1,5 +1,5 @@
 import type { UsageReport } from "@getpaseo/plugin/server";
-import { windowState, type Snapshot } from "../shared/snapshot";
+import { estimate, type Snapshot } from "../shared/snapshot";
 
 export function shortUsageError(error: string): string {
   if (error.includes("过期")) return "Key 已过期";
@@ -24,47 +24,26 @@ export function mapUsage(snapshot: Snapshot): UsageReport {
       ),
     };
   const windows = (["claude", "openai"] as const).flatMap((platform) => {
-    const selected = snapshot.pools
+    const accounts = snapshot.pools
       .filter((pool) => pool.platform === platform)
-      .flatMap((pool) => pool.accounts)
-      .filter((account) => account.state !== "unknown")
-      .map((account) => ({
-        account,
-        windows: (["5h", "week"] as const).flatMap((id) => {
-          const window = account.windows.find(
-            (window) =>
-              window.id === id &&
-              ["current", "older"].includes(windowState(account, window, snapshot.serverTime)),
-          );
-          return window ? [window] : [];
-        }),
-      }))
-      .filter((entry) => entry.windows.length > 0)
-      // Select one account across both windows; never combine independent maxima.
-      .sort(
-        (a, b) =>
-          Math.max(...b.windows.map((window) => window.usedPct!)) -
-            Math.max(...a.windows.map((window) => window.usedPct!)) ||
-          a.account.alias.localeCompare(b.account.alias),
-      )[0];
-    return (selected?.windows ?? []).map((window) => {
-      const untilReset = window.resetsAt
-        ? Date.parse(window.resetsAt) - Date.parse(snapshot.serverTime)
-        : null;
-      const warning =
-        window.usedPct! >= 90 && untilReset !== null && untilReset > 0 && untilReset <= 30 * 60000;
-      return {
-        id: `${platform}-tightest-${window.id}`,
-        label: `${platform === "claude" ? "Claude" : "Codex"} ${window.id === "5h" ? "5小时" : "本周"}`,
-        usedPct: window.usedPct,
-        remainingPct: Math.max(0, 100 - window.usedPct!),
-        ...(warning ? { resetsAt: window.resetsAt } : {}),
-        tone: warning
-          ? ("warning" as const)
-          : selected!.account.stale
-            ? ("default" as const)
-            : ("ok" as const),
-      };
+      .flatMap((pool) => pool.accounts);
+    return (["5h", "week"] as const).flatMap((id) => {
+      const summary = estimate({ accounts }, snapshot.serverTime, id);
+      if (summary.usedPct === null) return [];
+      return [
+        {
+          id: `${platform}-pool-${id}`,
+          label: `${platform === "claude" ? "Claude" : "Codex"} ${id === "5h" ? "5小时" : "本周"} · ${summary.included}/${summary.total} 可用`,
+          usedPct: summary.usedPct,
+          remainingPct: Math.max(0, 100 - summary.usedPct),
+          tone:
+            summary.usedPct >= 90
+              ? ("warning" as const)
+              : summary.older
+                ? ("default" as const)
+                : ("ok" as const),
+        },
+      ];
     });
   });
   return {

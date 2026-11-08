@@ -13,6 +13,7 @@ export type Mode =
   | "redirect"
   | "management_https"
   | "integration"
+  | "pool"
   | "fresh"
   | "older"
   | "reset"
@@ -66,7 +67,24 @@ export async function startFakeCrs() {
         .end(JSON.stringify({ key: { status: mode } }));
       return;
     }
-    const data = await fixture(mode === "integration" ? "integration-snapshot" : "snapshot");
+    const data = await fixture(
+      mode === "integration"
+        ? "integration-snapshot"
+        : mode === "pool"
+          ? "pool-snapshot"
+          : "snapshot",
+    );
+    if (mode === "pool") {
+      const shift = Date.now() - Date.parse(data.serverTime);
+      data.serverTime = new Date(Date.now()).toISOString();
+      for (const pool of data.pools)
+        for (const account of pool.accounts) {
+          account.observedAt = new Date(Date.parse(account.observedAt) + shift).toISOString();
+          for (const window of account.windows)
+            if (window.resetsAt)
+              window.resetsAt = new Date(Date.parse(window.resetsAt) + shift).toISOString();
+        }
+    }
     if (["fresh", "older", "reset"].includes(mode)) {
       const now = Date.now();
       data.serverTime = new Date(now).toISOString();

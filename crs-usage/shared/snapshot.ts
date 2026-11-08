@@ -52,7 +52,7 @@ export type Snapshot = z.infer<typeof snapshotSchema>;
 export type Pool = Snapshot["pools"][number];
 export type Account = Pool["accounts"][number];
 // Relative tier weights are estimates, not official token capacities.
-// Team/free vary; usable, unreset windows with a known tier enter the estimate, including older data.
+// Team/free vary; reset windows count as unused, and exhausted windows keep their full weight.
 export const TIER_WEIGHTS = {
   max20: 20,
   max5: 5,
@@ -78,29 +78,58 @@ export function relativeCollection(value: string | null, now = Date.now()) {
   if (minutes < 1440) return `${Math.floor(minutes / 60)} 小时前采集`;
   return `${Math.floor(minutes / 1440)} 天前采集`;
 }
-export function estimate(pool: Pool, serverTime: string, windowId = "5h") {
+export function relativeReset(value: string | null, now = Date.now()) {
+  if (!value) return "重置时间未知";
+  const remaining = Date.parse(value) - now;
+  if (remaining <= 0) return "等待窗口更新";
+  if (remaining < 60000) return "<1 分钟后重置";
+  const minutes = Math.floor(remaining / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days) return `${days} 天${hours % 24 ? ` ${hours % 24} 小时` : ""}后重置`;
+  if (hours) return `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分` : ""}后重置`;
+  return `${minutes} 分钟后重置`;
+}
+export function estimateWindow(account: Account, serverTime: string, windowId: string) {
+  if (account.state === "unavailable" || account.state === "unknown") return null;
+  const window = account.windows.find((window) => window.id === windowId);
+  const now = Date.parse(serverTime);
+  if (window?.resetsAt && Date.parse(window.resetsAt) <= now)
+    return { usedPct: 0, resetsAt: null, older: false };
+  // Anthropic may omit 5h data once the weekly quota is exhausted.
+  const week = account.windows.find((window) => window.id === "week");
+  if (
+    windowId === "5h" &&
+    !window?.resetsAt &&
+    week?.usedPct != null &&
+    week.usedPct >= 100 &&
+    (!week.resetsAt || Date.parse(week.resetsAt) > now)
+  )
+    return { usedPct: 100, resetsAt: week.resetsAt, older: account.stale };
+  if (window?.usedPct == null) return null;
+  return { usedPct: window.usedPct, resetsAt: window.resetsAt, older: account.stale };
+}
+export function estimate(pool: Pick<Pool, "accounts">, serverTime: string, windowId = "5h") {
   let used = 0;
   let total = 0;
-  const accounts: Account[] = [];
+  const windows: Array<NonNullable<ReturnType<typeof estimateWindow>> & { account: Account }> = [];
   for (const account of pool.accounts) {
     const weight = TIER_WEIGHTS[account.tier];
-    const window = account.windows.find((window) => window.id === windowId);
-    if (
-      weight === null ||
-      account.state === "unknown" ||
-      !["current", "older"].includes(windowState(account, window, serverTime))
-    )
-      continue;
-    accounts.push(account);
-    used += weight * window!.usedPct!;
+    const window = estimateWindow(account, serverTime, windowId);
+    if (weight === null || window === null) continue;
+    windows.push({ account, ...window });
+    used += weight * window.usedPct;
     total += weight;
   }
+  const resets = windows.flatMap((window) => (window.resetsAt ? [window.resetsAt] : []));
   return {
     usedPct: total ? used / total : null,
-    included: accounts.length,
+    included: windows.length,
     total: pool.accounts.length,
-    older: accounts.filter((account) => account.stale).length,
-    accounts,
+    older: windows.filter((window) => window.older).length,
+    resetsAt: resets.sort((a, b) => Date.parse(a) - Date.parse(b))[0] ?? null,
+    accounts: windows.map((window) => window.account),
+    windows,
   };
 }
 export const WINDOW_LABELS = { "5h": "5 小时", week: "本周", week_opus: "本周 Opus" } as const;

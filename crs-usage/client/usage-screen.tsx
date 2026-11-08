@@ -6,6 +6,7 @@ import { panelRpc, type PanelEntry } from "../shared/rpc";
 import {
   estimate,
   relativeCollection,
+  relativeReset,
   TIER_WEIGHTS,
   windowLabel,
   windowState,
@@ -15,13 +16,6 @@ import {
 type Theme = PluginScreenProps["theme"];
 type Mode = "used" | "remaining";
 const stamp = (value: string | null) => (value ? new Date(value).toLocaleString() : "未知");
-function reset(value: string | null) {
-  if (!value) return "重置时间未知";
-  const mins = Math.ceil((Date.parse(value) - Date.now()) / 60000);
-  if (mins <= 0) return "等待窗口更新";
-  if (mins < 1440) return `${Math.floor(mins / 60)} 小时 ${mins % 60} 分后重置`;
-  return `${stamp(value)} 重置`;
-}
 function color(pct: number | null, theme: Theme) {
   return pct === null
     ? theme.colors.foregroundMuted
@@ -139,7 +133,7 @@ function PoolView({
           {pool.platform === "claude" ? "Claude" : "Codex"} · {binding} · 5 小时
         </Text>
         <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-          {pool.accounts.length} 个账号
+          {summary.included}/{summary.total} 可用
         </Text>
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
@@ -168,19 +162,26 @@ function PoolView({
         )}
       </View>
       <View style={{ flexDirection: "row", gap: 4 }}>
-        {summary.accounts.map((account, index) => {
-          const pct = account.windows.find((w) => w.id === "5h")?.usedPct ?? null;
-          const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
+        {summary.windows.map(({ account, usedPct: pct, older }, index) => {
+          const value = mode === "used" ? pct : 100 - pct;
           return (
             <View
               key={`${account.alias}-${index}`}
               style={{ flex: TIER_WEIGHTS[account.tier] ?? 1, minWidth: 9 }}
             >
-              <Bar pct={value} used={pct} theme={theme} tall muted={account.stale} />
+              <Bar pct={value} used={pct} theme={theme} tall muted={older} />
             </View>
           );
         })}
       </View>
+      {summary.resetsAt && (
+        <Text
+          accessibilityLabel={`最早重置于 ${stamp(summary.resetsAt)}`}
+          style={{ color: c.foregroundMuted, fontSize: 10 }}
+        >
+          {relativeReset(summary.resetsAt)}
+        </Text>
+      )}
       <Pressable
         accessibilityRole="button"
         accessibilityLabel="展开或收起逐账号明细"
@@ -287,7 +288,7 @@ function PoolView({
                         )}
                         {(state === "current" || state === "older") && (
                           <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-                            {reset(window.resetsAt)}
+                            {relativeReset(window.resetsAt)}
                           </Text>
                         )}
                       </View>
@@ -471,7 +472,7 @@ function Entry({
                     />
                   )}
                   <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-                    {reset(quota.resetsAt)}
+                    {relativeReset(quota.resetsAt)}
                   </Text>
                   {quota.limit !== null && quota.used !== null && quota.used >= quota.limit && (
                     <Text style={{ color: c.statusDanger, fontSize: 12 }}>Key 此项额度已耗尽</Text>
