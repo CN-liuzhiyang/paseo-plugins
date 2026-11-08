@@ -20,12 +20,14 @@ function Editor({
   return (
     <View style={{ gap: 18 }}>
       <Text style={{ color: c.foregroundMuted }}>
-        只填写配置引用。Key 从主机 Pi auth.json 读取，不要在这里粘贴凭据。
+        一般不用填。自动读取主机 Pi、Claude Code 和 Codex 的配置并识别 CRS；Key
+        留在服务端，不要在这里粘贴凭据。
       </Text>
       {(
         [
-          ["allowedOrigins", "CRS 地址白名单（每行一个 origin）"],
-          ["providerNames", "允许的 Pi provider 名称（每行一个）"],
+          ["allowedOrigins", "可选：只探测这些来源地址（每行一个 origin；留空自动）"],
+          ["providerNames", "可选：只探测这些 provider（每行一个；留空自动）"],
+          ["managementOrigin", "可选：覆盖 CRS 管理地址（HTTPS origin；留空自动）"],
           ["piConfigDir", "Pi 配置目录（留空遵从主机环境 / 默认目录）"],
           ["spaPrefix", "管理网页 SPA 前缀（例如 /admin-next；空则只显示用量入口）"],
         ] as const
@@ -67,7 +69,7 @@ function Editor({
             providerNames: draft.providerNames.map((v) => v.trim()).filter(Boolean),
           });
           if (!parsed.success) {
-            setState("设置格式有误，请检查地址和 SPA 前缀");
+            setState("设置格式有误，请检查 HTTPS 管理地址和 SPA 前缀");
             return;
           }
           setState("保存中…");

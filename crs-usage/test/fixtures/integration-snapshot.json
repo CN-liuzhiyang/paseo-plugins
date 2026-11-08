@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "serverTime": "2026-11-08T04:00:00Z",
+  "key": {
+    "status": "active",
+    "name": "fixture-key",
+    "expiresAt": "2026-11-20T03:00:00Z",
+    "daily": {
+      "used": 12.3,
+      "limit": null,
+      "resetsAt": "2026-11-09T00:00:00Z"
+    },
+    "total": {
+      "used": 81,
+      "limit": null,
+      "resetsAt": null
+    },
+    "weeklyOpus": {
+      "used": 0,
+      "limit": null,
+      "resetsAt": "2026-11-09T00:00:00Z"
+    },
+    "rateWindow": {
+      "requests": {
+        "used": 0,
+        "limit": null
+      },
+      "cost": {
+        "used": 0,
+        "limit": null
+      },
+      "tokens": {
+        "used": 0,
+        "limit": null
+      },
+      "resetsAt": null
+    },
+    "usage": {
+      "totalTokens": 234000,
+      "totalRequests": 240,
+      "dailyTokens": 12000,
+      "dailyRequests": 20
+    }
+  },
+  "pools": [
+    {
+      "platform": "claude",
+      "bindingKind": "pool",
+      "accounts": [
+        {
+          "alias": "Claude-A",
+          "tier": "pro",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": 22,
+              "resetsAt": "2026-11-08T09:00:00Z"
+            },
+            {
+              "id": "week",
+              "usedPct": 40,
+              "resetsAt": "2026-11-12T00:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T03:58:00Z",
+          "stale": false,
+          "unavailableReason": null
+        },
+        {
+          "alias": "Claude-B",
+          "tier": "pro",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": 100,
+              "resetsAt": "2026-11-08T03:00:00Z"
+            },
+            {
+              "id": "week",
+              "usedPct": 70,
+              "resetsAt": "2026-11-12T00:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T02:57:00Z",
+          "stale": true,
+          "unavailableReason": null
+        },
+        {
+          "alias": "Claude-C",
+          "tier": "unknown",
+          "state": "unavailable",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": null,
+              "resetsAt": null
+            },
+            {
+              "id": "week",
+              "usedPct": null,
+              "resetsAt": null
+            }
+          ],
+          "observedAt": null,
+          "stale": false,
+          "unavailableReason": "not_schedulable"
+        },
+        {
+          "alias": "Claude-D",
+          "tier": "unknown",
+          "state": "unavailable",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": null,
+              "resetsAt": null
+            },
+            {
+              "id": "week",
+              "usedPct": null,
+              "resetsAt": null
+            }
+          ],
+          "observedAt": null,
+          "stale": false,
+          "unavailableReason": "not_schedulable"
+        }
+      ]
+    },
+    {
+      "platform": "openai",
+      "bindingKind": "group",
+      "accounts": [
+        {
+          "alias": "Codex-A",
+          "tier": "free",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "primary",
+              "usedPct": 25,
+              "resetsAt": "2026-11-08T06:00:00Z"
+            },
+            {
+              "id": "secondary",
+              "usedPct": 50,
+              "resetsAt": "2026-11-15T06:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T03:58:00Z",
+          "stale": false,
+          "unavailableReason": null
+        },
+        {
+          "alias": "Codex-B",
+          "tier": "plus",
+          "state": "normal",
+          "limitedUntil": null,
+          "windows": [
+            {
+              "id": "5h",
+              "usedPct": 10,
+              "resetsAt": "2026-11-08T09:00:00Z"
+            },
+            {
+              "id": "week",
+              "usedPct": 25,
+              "resetsAt": "2026-11-13T02:00:00Z"
+            }
+          ],
+          "observedAt": "2026-11-08T03:58:00Z",
+          "stale": false,
+          "unavailableReason": null
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

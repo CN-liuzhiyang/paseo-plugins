@@ -52,7 +52,7 @@ export type Snapshot = z.infer<typeof snapshotSchema>;
 export type Pool = Snapshot["pools"][number];
 export type Account = Pool["accounts"][number];
 // Relative tier weights are estimates, not official token capacities.
-// Team/free vary; unknown tiers and stale/missing windows prevent a pool estimate.
+// Team/free vary; only current, usable accounts with a known tier enter the estimate.
 export const TIER_WEIGHTS = {
   max20: 20,
   max5: 5,
@@ -62,25 +62,40 @@ export const TIER_WEIGHTS = {
   free: 0.2,
   unknown: null,
 } as const;
-export function estimate(pool: Pool, windowId = "5h"): number | null {
-  if (!pool.accounts.length) return null;
+export type Window = Account["windows"][number];
+export function windowState(account: Account, window: Window | undefined, serverTime: string) {
+  if (account.state === "unavailable") return "unavailable";
+  if (
+    account.stale ||
+    (window?.resetsAt != null && Date.parse(window.resetsAt) <= Date.parse(serverTime))
+  )
+    return "expired";
+  if (window?.usedPct == null) return "missing";
+  return "current";
+}
+export function estimate(pool: Pool, serverTime: string, windowId = "5h") {
   let used = 0;
   let total = 0;
+  const accounts: Account[] = [];
   for (const account of pool.accounts) {
     const weight = TIER_WEIGHTS[account.tier];
-    const pct = account.windows.find((window) => window.id === windowId)?.usedPct;
+    const window = account.windows.find((window) => window.id === windowId);
     if (
       weight === null ||
-      pct == null ||
-      account.stale ||
       account.state === "unknown" ||
-      account.state === "unavailable"
+      windowState(account, window, serverTime) !== "current"
     )
-      return null;
-    used += weight * pct;
+      continue;
+    accounts.push(account);
+    used += weight * window!.usedPct!;
     total += weight;
   }
-  return used / total;
+  return {
+    usedPct: total ? used / total : null,
+    included: accounts.length,
+    total: pool.accounts.length,
+    accounts,
+  };
 }
 export const WINDOW_LABELS = { "5h": "5 小时", week: "本周", week_opus: "本周 Opus" } as const;
 export function windowLabel(id: string): string {

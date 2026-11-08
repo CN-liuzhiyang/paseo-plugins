@@ -1,8 +1,8 @@
 import type { UsageAccount, UsageReport, UsageScope } from "@getpaseo/plugin/server/usage";
 import { inputSchema, type PanelEntry } from "../shared/rpc";
-import type { Settings } from "../shared/settings";
+import { managementOriginSchema, type Settings } from "../shared/settings";
 import { CrsClient } from "./crs-client";
-import { discover, readCredential, type Discovered } from "./discovery";
+import { discover, originOf, readCredential, type Discovered } from "./discovery";
 import { mapUsage } from "./usage";
 export class UsageService {
   private locators = new Map<string, Discovered>();
@@ -10,6 +10,7 @@ export class UsageService {
   constructor(
     private settings: () => Promise<Settings>,
     private http = new CrsClient(),
+    private env: NodeJS.ProcessEnv = process.env,
   ) {}
   close() {
     this.http.close();
@@ -17,12 +18,37 @@ export class UsageService {
     this.successes.clear();
   }
   async discover(scope: UsageScope): Promise<UsageAccount[]> {
-    const entries = await discover(await this.settings(), scope);
-    for (const entry of entries) this.locators.set(entry.id, entry);
+    const settings = await this.settings();
+    const candidates = await discover(settings, scope, this.env);
+    const entries = (
+      await Promise.all(
+        candidates.map(async (entry) => {
+          const key = await readCredential(entry, settings);
+          const origin = settings.managementOrigin
+            ? originOf(settings.managementOrigin)
+            : entry.origin;
+          if (
+            !key ||
+            !origin ||
+            !managementOriginSchema.safeParse(settings.managementOrigin).success ||
+            !(await this.http.detect(entry.id, origin, key))
+          )
+            return null;
+          this.locators.set(entry.id, entry);
+          return entry;
+        }),
+      )
+    ).filter((entry): entry is Discovered => entry !== null);
     return entries.map((entry) => ({
       key: entry.id,
       label: "CRS 中转",
-      harness: "Pi",
+      harness: [
+        ...new Set(
+          entry.locators.map(
+            (locator) => ({ pi: "Pi", claude: "Claude Code", codex: "Codex" })[locator.kind],
+          ),
+        ),
+      ].join(" / "),
       input: { id: entry.id },
     }));
   }
@@ -34,17 +60,32 @@ export class UsageService {
     }));
   }
   private async read(entry: Discovered) {
-    const key = await readCredential(entry, await this.settings());
+    const settings = await this.settings();
+    const origin = settings.managementOrigin ? originOf(settings.managementOrigin) : entry.origin;
+    const configurationError =
+      !managementOriginSchema.safeParse(settings.managementOrigin).success || !origin
+        ? "请在设置里配置 CRS 管理地址（HTTPS）"
+        : null;
+    if (configurationError)
+      return {
+        snapshot: null,
+        error: configurationError,
+        at: Date.now(),
+        retryAt: Date.now(),
+        origin: origin ?? entry.origin,
+      };
+    const key = await readCredential(entry, settings);
     if (!key)
       return {
         snapshot: null,
         error: "CRS 配置或凭据已变更，请刷新用量列表",
         at: Date.now(),
         retryAt: Date.now(),
+        origin: origin!,
       };
-    const result = await this.http.read(entry.id, entry.origin, key);
+    const result = await this.http.read(entry.id, origin!, key);
     if (result.snapshot)
-      this.successes.set(entry.id, {
+      this.successes.set(JSON.stringify([entry.id, result.origin]), {
         snapshot: result.snapshot,
         successfulAt: new Date(result.at).toISOString(),
       });
@@ -66,7 +107,7 @@ export class UsageService {
       identities.map(async (item) => {
         const entry = this.locators.get(item.id)!;
         const result = await this.read(entry);
-        const last = this.successes.get(item.id);
+        const last = this.successes.get(JSON.stringify([item.id, result.origin]));
         const prefix = settings.spaPrefix.replace(/\/$/, "");
         return {
           ...item,
@@ -75,9 +116,9 @@ export class UsageService {
           successfulAt: last?.successfulAt ?? null,
           retryAt: new Date(result.retryAt).toISOString(),
           links: {
-            usage: `${entry.origin}/apiStats/`,
-            keys: prefix ? `${entry.origin}${prefix}/api-keys` : null,
-            accounts: prefix ? `${entry.origin}${prefix}/accounts` : null,
+            usage: `${result.origin}/apiStats/`,
+            keys: prefix ? `${result.origin}${prefix}/api-keys` : null,
+            accounts: prefix ? `${result.origin}${prefix}/accounts` : null,
           },
         };
       }),

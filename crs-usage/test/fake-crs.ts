@@ -11,9 +11,11 @@ export type Mode =
   | "slow"
   | "body_slow"
   | "redirect"
+  | "management_https"
+  | "integration"
   | "echo";
-export async function fixture() {
-  return JSON.parse(await readFile(new URL("./fixtures/snapshot.json", import.meta.url), "utf8"));
+export async function fixture(name = "snapshot") {
+  return JSON.parse(await readFile(new URL(`./fixtures/${name}.json`, import.meta.url), "utf8"));
 }
 export async function startFakeCrs() {
   let mode: Mode = "normal";
@@ -33,6 +35,15 @@ export async function startFakeCrs() {
       return;
     }
     if (mode === "slow") return;
+    if (mode === "management_https") {
+      res.writeHead(403, { "Content-Type": "application/json" }).end(
+        JSON.stringify({
+          error: "Management HTTPS required",
+          managementUrl: `https://untrusted.example/${TEST_KEY}`,
+        }),
+      );
+      return;
+    }
     if (mode === "body_slow") {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.write("{");
@@ -52,7 +63,7 @@ export async function startFakeCrs() {
         .end(JSON.stringify({ key: { status: mode } }));
       return;
     }
-    const data = await fixture();
+    const data = await fixture(mode === "integration" ? "integration-snapshot" : "snapshot");
     if (mode === "limited") {
       data.pools[0].accounts[1].state = "rate_limited";
       data.pools[0].accounts[1].limitedUntil = "2026-11-08T09:00:00Z";

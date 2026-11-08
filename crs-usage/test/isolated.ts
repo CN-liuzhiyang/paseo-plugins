@@ -7,9 +7,8 @@ import { createInterface } from "node:readline";
 import { startFakeCrs, TEST_KEY, type Mode } from "./fake-crs";
 const fake = await startFakeCrs();
 const home = await mkdtemp(path.join(os.tmpdir(), "paseo-crs-isolated-"));
-const pi = path.join(home, "fixture-pi");
-await mkdir(pi);
-await mkdir(path.join(home, "plugin-settings", "crs-usage"), { recursive: true });
+const pi = path.join(home, ".pi", "agent");
+await mkdir(pi, { recursive: true });
 await writeFile(
   path.join(pi, "models.json"),
   JSON.stringify({
@@ -26,18 +25,9 @@ await writeFile(
     "crs-codex": { type: "api_key", key: TEST_KEY },
   }),
 );
-await writeFile(
-  path.join(home, "plugin-settings", "crs-usage", "crs.json"),
-  JSON.stringify({
-    version: 1,
-    values: {
-      allowedOrigins: [fake.origin],
-      providerNames: [],
-      piConfigDir: pi,
-      spaPrefix: "/admin-next",
-    },
-  }),
-);
+// No plugin settings: exercise automatic discovery using only synthetic source homes.
+// Start with `daemon run` and HOME/USERPROFILE=home, PI_CODING_AGENT_DIR=pi,
+// CLAUDE_CONFIG_DIR=home/.claude, CODEX_HOME=home/.codex to isolate all credential reads.
 await writeFile(
   path.join(home, "config.json"),
   JSON.stringify(

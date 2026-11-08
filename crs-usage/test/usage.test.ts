@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,7 @@ import { discover, originOf } from "../server/discovery";
 import { UsageService } from "../server/service";
 import { mapUsage } from "../server/usage";
 import { settingsDefinition } from "../shared/settings";
-import { estimate, snapshotSchema } from "../shared/snapshot";
+import { estimate, snapshotSchema, windowState } from "../shared/snapshot";
 import { panelEntrySchema } from "../shared/rpc";
 import { fixture, startFakeCrs, TEST_KEY } from "./fake-crs";
 
@@ -30,23 +30,30 @@ async function config(origin = "https://crs.example") {
     dir,
     models,
     auth,
+    env: { HOME: dir, USERPROFILE: dir },
     settings: settingsDefinition.schema.parse({ allowedOrigins: [origin], piConfigDir: dir }),
     close: () => rm(dir, { recursive: true, force: true }),
   };
 }
-test("discovery: empty defaults hide; opt-in merges origin+key, separates keys/origins, respects session directory", async () => {
+test("candidates: automatic defaults, merging, optional filters, separate keys/origins and session directories", async () => {
   const c = await config();
   try {
-    assert.deepEqual(
-      await discover(settingsDefinition.schema.parse({ piConfigDir: c.dir }), { kind: "global" }),
-      [],
+    assert.equal(
+      (
+        await discover(
+          settingsDefinition.schema.parse({ piConfigDir: c.dir }),
+          { kind: "global" },
+          c.env,
+        )
+      ).length,
+      1,
     );
-    const entries = await discover(c.settings, { kind: "global" });
+    const entries = await discover(c.settings, { kind: "global" }, c.env);
     assert.equal(entries.length, 1);
     assert.equal(entries[0].providers.length, 2);
     assert.equal(JSON.stringify(entries.map((e) => ({ id: e.id }))).includes(TEST_KEY), false);
     assert.deepEqual(
-      await discover(c.settings, { kind: "session", provider: "codex", env: {} }),
+      await discover(c.settings, { kind: "session", provider: "codex", env: c.env }),
       [],
     );
     assert.deepEqual(
@@ -71,14 +78,20 @@ test("discovery: empty defaults hide; opt-in merges origin+key, separates keys/o
     );
     c.auth["crs-codex"].key = "sk-test-different";
     await writeFile(path.join(c.dir, "auth.json"), JSON.stringify(c.auth));
-    assert.equal((await discover(c.settings, { kind: "global" })).length, 2);
+    assert.equal((await discover(c.settings, { kind: "global" }, c.env)).length, 2);
     c.models.providers["crs-codex"].baseUrl = "https://other.example/openai";
     c.auth["crs-codex"].key = TEST_KEY;
     await writeFile(path.join(c.dir, "models.json"), JSON.stringify(c.models));
     await writeFile(path.join(c.dir, "auth.json"), JSON.stringify(c.auth));
     assert.equal(
-      (await discover({ ...c.settings, providerNames: ["crs-codex"] }, { kind: "global" })).length,
-      2,
+      (
+        await discover(
+          { ...c.settings, allowedOrigins: [], providerNames: ["crs-codex"] },
+          { kind: "global" },
+          c.env,
+        )
+      ).length,
+      1,
     );
     for (const bad of [
       "https://user:pass@crs.example",
@@ -100,7 +113,11 @@ test("mapping: null stays null, statuses, stale data, estimates, zero limit, exh
   assert.equal(mapped.windows.length, 10);
   assert.equal(mapped.balances?.[0].remaining, 17.7);
   assert.equal(mapped.balances?.[2].limit, null);
-  assert.ok(Math.abs(estimate(snapshot.pools[0])! - (20 * 22 + 5 * 55 + 90) / 26) < 0.00001);
+  assert.ok(
+    Math.abs(
+      estimate(snapshot.pools[0], snapshot.serverTime).usedPct! - (20 * 22 + 5 * 55 + 90) / 26,
+    ) < 0.00001,
+  );
   for (const state of ["normal", "rate_limited", "unavailable", "unknown"] as const) {
     snapshot.pools[0].accounts[0].state = state;
     assert.equal(mapUsage(snapshot, []).status, "available");
@@ -109,13 +126,20 @@ test("mapping: null stays null, statuses, stale data, estimates, zero limit, exh
   account.windows[0].usedPct = null;
   account.stale = true;
   const partial = mapUsage(snapshot, []);
-  assert.equal(estimate(snapshot.pools[0]), null);
+  assert.equal(estimate(snapshot.pools[0], snapshot.serverTime).included, 2);
   if (partial.status === "available") {
-    assert.equal(partial.windows[0].usedPct, null);
-    assert.equal(partial.windows[0].remainingPct, null);
+    assert.equal(
+      partial.windows.some((window) => window.label.includes(account.alias)),
+      false,
+    );
+    assert.ok(
+      partial.details?.some(
+        (detail) => detail.label === account.alias && detail.value.includes("数据已过期"),
+      ),
+    );
   }
   for (const a of snapshot.pools[1].accounts) a.tier = "unknown";
-  assert.equal(estimate(snapshot.pools[1]), null);
+  assert.equal(estimate(snapshot.pools[1], snapshot.serverTime).usedPct, null);
   snapshot.key.daily.limit = 0;
   snapshot.key.daily.used = 3;
   const exhausted = mapUsage(snapshot, []);
@@ -130,7 +154,7 @@ test("real HTTP: single flight, 12s interval, exponential backoff, Retry-After a
   const c = await config(fake.origin);
   let now = Date.now();
   const http = new CrsClient({ now: () => now, random: () => 0 });
-  const service = new UsageService(async () => c.settings, http);
+  const service = new UsageService(async () => c.settings, http, c.env);
   try {
     const accounts = await service.discover({ kind: "global" });
     assert.equal(accounts.length, 1);
@@ -169,7 +193,7 @@ test("real HTTP: single flight, 12s interval, exponential backoff, Retry-After a
     fake.setMode("normal");
     await service.panel();
     assert.equal(fake.requests, 5);
-    c.settings.allowedOrigins = [];
+    c.settings.providerNames = ["removed-provider"];
     assert.deepEqual(await service.identities(), []);
     assert.equal((await service.fetch(accounts[0].input)).status, "error");
   } finally {
@@ -190,6 +214,7 @@ test("HTTP error variants, timeout really aborts, redirects rejected, key never 
   const service = new UsageService(
     async () => c.settings,
     new CrsClient({ now: () => now, random: () => 0, timeoutMs: 35 }),
+    c.env,
   );
   try {
     const [account] = await service.discover({ kind: "global" });
@@ -255,7 +280,7 @@ test("unknown window durations retain key spending and accurate labels; minimal 
   const snapshot = snapshotSchema.parse(raw);
   const report = mapUsage(snapshot, []);
   assert.equal(report.status, "available");
-  assert.equal(estimate(snapshot.pools[1]), null);
+  assert.equal(estimate(snapshot.pools[1], snapshot.serverTime).included, 1);
   if (report.status === "available") {
     assert.ok(report.windows.some((w) => w.label.includes("主窗口（时长未知）")));
     assert.equal(report.balances?.[0].used, 12.3);
@@ -293,4 +318,270 @@ test("401/429, malformed response, HTTP-date retry and credential rotation reset
   assert.ok((await http.read("rotated", "https://crs.example", "sk-test-new")).error);
   assert.equal(calls, 3);
   http.close();
+});
+
+test("automatic HTTPS: same hostname on 443, cached destination, no body URL or redirects, optional override", async () => {
+  const fake = await startFakeCrs();
+  const c = await config(fake.origin);
+  c.settings.allowedOrigins = [];
+  const calls: string[] = [];
+  let now = Date.now();
+  let redirect = false;
+  const service = new UsageService(
+    async () => c.settings,
+    new CrsClient({
+      now: () => now,
+      random: () => 0,
+      fetch: async (input, options) => {
+        const url = String(input);
+        calls.push(url);
+        assert.equal(options?.redirect, "error");
+        assert.equal((options?.headers as Record<string, string>)["x-api-key"], TEST_KEY);
+        if (url.startsWith("http:")) fake.setMode("management_https");
+        else fake.setMode(redirect ? "redirect" : "normal");
+        // Routing is injected; production uses unmodified Node TLS certificate validation.
+        return fetch(`${fake.origin}/apiStats/api/usage-snapshot`, options);
+      },
+    }),
+    c.env,
+  );
+  try {
+    const [account] = await service.discover({ kind: "global" });
+    assert.ok(account);
+    assert.deepEqual(calls, [
+      `${fake.origin}/apiStats/api/usage-snapshot`,
+      "https://127.0.0.1/apiStats/api/usage-snapshot",
+    ]);
+    assert.equal((await service.fetch(account.input)).status, "available");
+    const [panel] = await service.panel();
+    assert.equal(panel.links.usage, "https://127.0.0.1/apiStats/");
+    assert.equal(JSON.stringify([panel, account]).includes(TEST_KEY), false);
+    now += 12000;
+    await service.panel();
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2], "https://127.0.0.1/apiStats/api/usage-snapshot");
+    c.settings.managementOrigin = "https://management.example/";
+    assert.equal((await service.fetch(account.input)).status, "available");
+    assert.equal(calls[3], "https://management.example/apiStats/api/usage-snapshot");
+    assert.equal((await service.panel())[0].links.usage, "https://management.example/apiStats/");
+    c.settings.managementOrigin = "https://other-management.example";
+    redirect = true;
+    assert.equal((await service.fetch(account.input)).status, "error");
+    // Fetch the panel after detection of the new endpoint: redirects are not recognized as CRS.
+    assert.deepEqual(await service.panel(), []);
+    assert.equal(calls.length, 5);
+    assert.equal(
+      calls.some((url) => url.includes("untrusted.example") || url.includes(TEST_KEY)),
+      false,
+    );
+    for (const value of [
+      "http://management.example",
+      "https://user:pass@management.example",
+      "https://management.example/path",
+      "https://management.example/?key=secret",
+      "https://management.example/#secret",
+    ])
+      assert.equal(settingsDefinition.schema.safeParse({ managementOrigin: value }).success, false);
+    assert.equal(settingsDefinition.schema.parse({}).managementOrigin, "");
+  } finally {
+    service.close();
+    await fake.close();
+    await c.close();
+  }
+});
+
+test("automatic recognition: positive 24h and negative 10m cache, JSON 200/401/403, non-CRS hidden, rotation re-probes", async () => {
+  const c = await config();
+  c.settings.allowedOrigins = [];
+  let now = Date.now();
+  let calls = 0;
+  let response = () => new Response("missing", { status: 404 });
+  const service = new UsageService(
+    async () => c.settings,
+    new CrsClient({
+      now: () => now,
+      random: () => 0,
+      fetch: async () => {
+        calls++;
+        return response();
+      },
+    }),
+    c.env,
+  );
+  try {
+    assert.deepEqual(await service.discover({ kind: "global" }), []);
+    now += 599999;
+    assert.deepEqual(await service.identities(), []);
+    assert.equal(calls, 1);
+    now++;
+    response = () => new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    assert.equal((await service.identities()).length, 1);
+    assert.equal(calls, 2);
+    now += 600000;
+    assert.equal((await service.identities()).length, 1);
+    assert.equal(calls, 2);
+    assert.equal((await service.fetch({ id: (await service.identities())[0].id })).status, "error");
+    c.auth["crs-codex"].key = "sk-test-rotated";
+    c.auth["crs-claude"].key = "sk-test-rotated";
+    await writeFile(path.join(c.dir, "auth.json"), JSON.stringify(c.auth));
+    assert.equal((await service.identities()).length, 1);
+    assert.equal(calls, 4);
+    now += 86400000;
+    response = () => new Response("<html>not CRS</html>");
+    assert.deepEqual(await service.identities(), []);
+    const afterHtml = calls;
+    now += 100000;
+    assert.deepEqual(await service.identities(), []);
+    assert.equal(calls, afterHtml);
+    // Connectivity failures and non-JSON 401/403 are hidden too.
+    for (const mode of ["offline", "401", "403"] as const) {
+      now += 600000;
+      response = () => {
+        if (mode === "offline") throw new Error(TEST_KEY);
+        return new Response("no JSON", { status: Number(mode) });
+      };
+      assert.deepEqual(await service.identities(), []);
+    }
+    now += 600000;
+    response = () => new Response(JSON.stringify({ key: { status: "expired" } }), { status: 403 });
+    assert.equal((await service.identities()).length, 1);
+  } finally {
+    service.close();
+    await c.close();
+  }
+});
+
+test("source files: Pi + Claude Code + selected Codex custom provider merge; official domains never probed; unreadable sources skip", async () => {
+  const c = await config();
+  const claudeDir = path.join(c.dir, ".claude");
+  const codexDir = path.join(c.dir, ".codex");
+  await mkdir(claudeDir);
+  await mkdir(codexDir);
+  const writeClaude = (base = "https://crs.example", token = TEST_KEY) =>
+    writeFile(
+      path.join(claudeDir, "settings.json"),
+      JSON.stringify({ env: { ANTHROPIC_BASE_URL: base, ANTHROPIC_AUTH_TOKEN: token } }),
+    );
+  await writeClaude();
+  await writeFile(
+    path.join(codexDir, "config.toml"),
+    'model_provider = "custom"\n[model_providers.custom]\nbase_url = "https://crs.example/v1"\n[model_providers.unused]\nbase_url = "https://never-probe.example"\n',
+  );
+  await writeFile(path.join(codexDir, "auth.json"), JSON.stringify({ OPENAI_API_KEY: TEST_KEY }));
+  c.settings.allowedOrigins = [];
+  let calls = 0;
+  const raw = await fixture();
+  const service = new UsageService(
+    async () => c.settings,
+    new CrsClient({
+      fetch: async () => {
+        calls++;
+        return new Response(JSON.stringify(raw));
+      },
+    }),
+    c.env,
+  );
+  try {
+    const [account] = await service.discover({ kind: "global" });
+    assert.equal(calls, 1);
+    assert.equal((await service.identities())[0].providers.length, 4);
+    assert.match(account.harness!, /Claude Code.*Codex/);
+    const panel = await service.panel();
+    assert.equal(JSON.stringify([account, panel]).includes(TEST_KEY), false);
+    c.settings.providerNames = ["custom"];
+    assert.deepEqual((await service.identities())[0].providers, ["custom"]);
+    c.settings.providerNames = [];
+    c.models.providers["crs-claude"].baseUrl = "https://api.anthropic.com/v1";
+    c.models.providers["crs-codex"].baseUrl = "https://sub.api.openai.com/v1";
+    await writeFile(path.join(c.dir, "models.json"), JSON.stringify(c.models));
+    await writeClaude("https://sub.api.anthropic.com/v1");
+    await writeFile(
+      path.join(codexDir, "config.toml"),
+      'model_provider = "custom"\n[model_providers.custom]\nbase_url = "https://api.openai.com/v1"',
+    );
+    assert.deepEqual(await service.identities(), []);
+    assert.equal(calls, 1);
+    assert.equal((await service.fetch(account.input)).status, "error");
+    await writeFile(path.join(codexDir, "config.toml"), "invalid = [");
+    await writeFile(path.join(claudeDir, "settings.json"), "bad");
+    assert.deepEqual(await service.identities(), []);
+    // API_KEY alternative and session-specific config homes are read without touching the user's files.
+    await writeFile(
+      path.join(claudeDir, "settings.json"),
+      JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: "https://crs.example", ANTHROPIC_API_KEY: TEST_KEY },
+      }),
+    );
+    assert.equal(
+      (
+        await discover(
+          c.settings,
+          { kind: "session", provider: "claude", env: { HOME: c.dir } },
+          c.env,
+        )
+      ).length,
+      1,
+    );
+    await writeFile(
+      path.join(codexDir, "config.toml"),
+      'model_provider = "custom"\n[model_providers.custom]\nbase_url = "https://crs.example/v1"',
+    );
+    assert.equal(
+      (
+        await discover(
+          c.settings,
+          { kind: "session", provider: "codex", env: { CODEX_HOME: codexDir } },
+          c.env,
+        )
+      ).length,
+      1,
+    );
+  } finally {
+    service.close();
+    await c.close();
+  }
+});
+test("integration fixture: unlimited costs, expired windows, unusable accounts and partial estimates keep their meanings", async () => {
+  const snapshot = snapshotSchema.parse(await fixture("integration-snapshot"));
+  const report = mapUsage(snapshot, []);
+  assert.equal(report.status, "available");
+  const claude = snapshot.pools[0];
+  const summary = estimate(claude, snapshot.serverTime);
+  assert.equal(summary.usedPct, 22);
+  assert.equal(summary.included, 1);
+  assert.equal(summary.total, 4);
+  assert.equal(
+    windowState(claude.accounts[1], claude.accounts[1].windows[0], snapshot.serverTime),
+    "expired",
+  );
+  if (report.status === "available") {
+    assert.equal(report.balances?.[0].limit, null);
+    assert.equal(report.balances?.[0].used, 12.3);
+    assert.equal(report.balances?.[0].remaining, null);
+    assert.match(report.balances![0].label, /无上限/);
+    const old = report.windows.filter((window) => window.label.includes("Claude-B"));
+    assert.equal(old.length, 0);
+    assert.ok(
+      report.details?.some(
+        (detail) => detail.label === "Claude-B" && detail.value.includes("数据已过期"),
+      ),
+    );
+    assert.equal(
+      report.windows.some((window) => /Claude-C|Claude-D/.test(window.label)),
+      false,
+    );
+    assert.ok(
+      report.details?.some(
+        (detail) => detail.label === "Claude-C" && detail.value.includes("不可用"),
+      ),
+    );
+    assert.ok(report.details?.some((detail) => detail.value.includes("纳入 1/4 个账号")));
+    assert.ok(report.windows.some((window) => window.label.includes("主窗口（时长未知）")));
+  }
+  // An elapsed reset is invalid even if the upstream forgot to set stale=true.
+  const current = claude.accounts[0];
+  current.windows[0].resetsAt = snapshot.serverTime;
+  assert.equal(windowState(current, current.windows[0], snapshot.serverTime), "expired");
+  assert.equal(windowState(current, current.windows[1], snapshot.serverTime), "current");
+  assert.equal(estimate(claude, snapshot.serverTime).usedPct, null);
 });

@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { panelRpc, type PanelEntry } from "../shared/rpc";
-import { estimate, TIER_WEIGHTS, WINDOW_LABELS, type Pool } from "../shared/snapshot";
+import { estimate, TIER_WEIGHTS, windowLabel, windowState, type Pool } from "../shared/snapshot";
 
 type Theme = PluginScreenProps["theme"];
 type Mode = "used" | "remaining";
@@ -104,15 +104,18 @@ function PoolView({
   mode,
   theme,
   compact,
+  serverTime,
 }: {
   pool: Pool;
   mode: Mode;
   theme: Theme;
   compact: boolean;
+  serverTime: string;
 }) {
   const [expanded, setExpanded] = useState(true);
   const c = theme.colors;
-  const used = estimate(pool);
+  const summary = estimate(pool, serverTime);
+  const used = summary.usedPct;
   const shown = used === null ? null : mode === "used" ? used : 100 - used;
   const binding = { fixed: "固定绑定", group: "分组", pool: "共享池", none: "未绑定" }[
     pool.bindingKind
@@ -129,7 +132,7 @@ function PoolView({
           {pool.accounts.length} 个账号
         </Text>
       </View>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
         <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>
           {shown === null
             ? "无法估算"
@@ -145,11 +148,11 @@ function PoolView({
             paddingHorizontal: 7,
           }}
         >
-          粗略折合 · 估算
+          粗略折合 · 估算 · 纳入 {summary.included}/{summary.total} 个账号
         </Text>
       </View>
       <View style={{ flexDirection: "row", gap: 4 }}>
-        {pool.accounts.map((account, index) => {
+        {summary.accounts.map((account, index) => {
           const pct = account.windows.find((w) => w.id === "5h")?.usedPct ?? null;
           const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
           return (
@@ -163,7 +166,7 @@ function PoolView({
         })}
       </View>
       <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-        格宽 ≈ 账号档位；未知档位等宽。估算不代表官方总额度。
+        格宽 ≈ 纳入账号档位；过期、不可用、未知档位和缺失窗口不参与。估算不代表官方总额度。
       </Text>
       <Pressable
         accessibilityRole="button"
@@ -173,79 +176,104 @@ function PoolView({
         <Text style={{ color: c.accent, fontSize: 12 }}>{expanded ? "▾" : "▸"} 逐账号明细</Text>
       </Pressable>
       {expanded &&
-        pool.accounts.map((account, index) => (
-          <View
-            key={`${account.alias}-${index}`}
-            style={{
-              flexDirection: compact ? "column" : "row",
-              gap: 18,
-              paddingVertical: 12,
-              borderTopWidth: 1,
-              borderColor: c.border,
-            }}
-          >
-            <View style={{ width: compact ? undefined : 136, gap: 4 }}>
-              <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 13 }}>
-                {account.alias}
-              </Text>
-              <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                {account.tier} ·{" "}
-                {
-                  {
-                    normal: "正常",
-                    rate_limited: "限流",
-                    unavailable: "不可用",
-                    unknown: "状态未知",
-                  }[account.state]
-                }
-              </Text>
-              {account.limitedUntil && (
-                <Text style={{ color: c.statusWarning, fontSize: 11 }}>
-                  恢复 {stamp(account.limitedUntil)}
-                </Text>
-              )}
-              {(account.stale || account.unavailableReason) && (
-                <Text style={{ color: c.statusWarning, fontSize: 11 }}>
-                  {account.stale ? "数据陈旧" : "数据缺失"}
-                </Text>
-              )}
-            </View>
-            <View style={{ flex: 1, flexDirection: "row", gap: 18 }}>
-              {(["5h", "week"] as const).map((id) => {
-                const window = account.windows.find((item) => item.id === id);
-                const pct = window?.usedPct ?? null;
-                const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
-                return (
-                  <View key={id} style={{ flex: 1, gap: 6 }}>
-                    <View
-                      style={{
-                        flexDirection: "row",
-                        justifyContent: "space-between",
-                        flexWrap: "wrap",
-                      }}
-                    >
-                      <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                        {WINDOW_LABELS[id]}
-                      </Text>
-                      <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>
-                        {value === null ? "数据缺失" : `${value.toFixed(0)}%`}
-                      </Text>
-                    </View>
-                    <Bar pct={value} used={pct} theme={theme} />
-                    <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
-                      {reset(window?.resetsAt ?? null)}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
-            <Text
-              style={{ color: c.foregroundMuted, fontSize: 10, width: compact ? undefined : 114 }}
+        pool.accounts.map((account, index) =>
+          account.state === "unavailable" ? (
+            <View
+              key={`${account.alias}-${index}`}
+              style={{ paddingVertical: 12, borderTopWidth: 1, borderColor: c.border }}
             >
-              采集 {stamp(account.observedAt)}
-            </Text>
-          </View>
-        ))}
+              <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
+                {account.alias} · 不可用 · 未参与折合
+              </Text>
+            </View>
+          ) : (
+            <View
+              key={`${account.alias}-${index}`}
+              style={{
+                flexDirection: compact ? "column" : "row",
+                gap: 18,
+                paddingVertical: 12,
+                borderTopWidth: 1,
+                borderColor: c.border,
+              }}
+            >
+              <View style={{ width: compact ? undefined : 136, gap: 4 }}>
+                <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 13 }}>
+                  {account.alias}
+                </Text>
+                <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
+                  {account.tier} ·{" "}
+                  {
+                    {
+                      normal: "正常",
+                      rate_limited: "限流",
+                      unavailable: "不可用",
+                      unknown: "状态未知",
+                    }[account.state]
+                  }
+                </Text>
+                {account.limitedUntil && (
+                  <Text style={{ color: c.statusWarning, fontSize: 11 }}>
+                    恢复 {stamp(account.limitedUntil)}
+                  </Text>
+                )}
+                {account.windows.some(
+                  (window) => windowState(account, window, serverTime) === "expired",
+                ) && (
+                  <Text style={{ color: c.statusWarning, fontSize: 11 }}>
+                    数据已过期（采集于 {stamp(account.observedAt)}）
+                  </Text>
+                )}
+              </View>
+              <View style={{ flex: 1, flexDirection: "row", gap: 18 }}>
+                {(account.windows.length
+                  ? account.windows
+                  : [
+                      { id: "5h", usedPct: null, resetsAt: null },
+                      { id: "week", usedPct: null, resetsAt: null },
+                    ]
+                ).map((window) => {
+                  const state = windowState(account, window, serverTime);
+                  const pct = state === "current" ? window.usedPct : null;
+                  const value = pct === null ? null : mode === "used" ? pct : 100 - pct;
+                  return (
+                    <View key={window.id} style={{ flex: 1, gap: 6 }}>
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          justifyContent: "space-between",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
+                          {windowLabel(window.id)}
+                        </Text>
+                        <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "600" }}>
+                          {state === "expired"
+                            ? "数据已过期"
+                            : value === null
+                              ? "数据缺失"
+                              : `${value.toFixed(0)}%`}
+                        </Text>
+                      </View>
+                      {value !== null && <Bar pct={value} used={pct} theme={theme} />}
+                      {state === "current" && (
+                        <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
+                          {reset(window.resetsAt)}
+                        </Text>
+                      )}
+                    </View>
+                  );
+                })}
+              </View>
+              <Text
+                style={{ color: c.foregroundMuted, fontSize: 10, width: compact ? undefined : 114 }}
+              >
+                采集 {stamp(account.observedAt)}
+              </Text>
+            </View>
+          ),
+        )}
       {!pool.accounts.length && (
         <Text style={{ color: c.foregroundMuted }}>账号数据缺失，暂不显示百分比</Text>
       )}
@@ -281,7 +309,7 @@ function Entry({
             a.stale ||
             a.state === "unknown" ||
             a.state === "unavailable" ||
-            a.windows.some((w) => w.usedPct === null),
+            a.windows.some((w) => windowState(a, w, snapshot!.serverTime) !== "current"),
         ),
     );
   const state = entry.error
@@ -338,7 +366,7 @@ function Entry({
             {(["daily", "total"] as const).map((id) => {
               const quota = snapshot.key[id];
               const value =
-                mode === "used"
+                mode === "used" || quota.limit === null
                   ? quota.used
                   : quota.used === null || quota.limit === null
                     ? null
@@ -350,7 +378,8 @@ function Entry({
               return (
                 <View key={id} style={{ flex: 1, gap: 7 }}>
                   <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                    {id === "daily" ? "今日费用" : "总费用"} · {mode === "used" ? "已用" : "剩余"}
+                    {id === "daily" ? "今日费用" : "总费用"} ·{" "}
+                    {mode === "used" || quota.limit === null ? "已用" : "剩余"}
                   </Text>
                   <Text
                     style={{ color: c.foreground, fontSize: compact ? 23 : 29, fontWeight: "600" }}
@@ -358,16 +387,15 @@ function Entry({
                     {value === null ? "未知" : `$${value.toFixed(2)}`}
                   </Text>
                   <Text style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                    {quota.limit === null
-                      ? "上限未知 / 未设上限"
-                      : `上限 $${quota.limit.toFixed(2)}`}{" "}
-                    · USD
+                    {quota.limit === null ? "无上限" : `上限 $${quota.limit.toFixed(2)}`} · USD
                   </Text>
-                  <Bar
-                    pct={used === null ? null : mode === "used" ? used : 100 - used}
-                    used={used}
-                    theme={theme}
-                  />
+                  {used !== null && (
+                    <Bar
+                      pct={used === null ? null : mode === "used" ? used : 100 - used}
+                      used={used}
+                      theme={theme}
+                    />
+                  )}
                   <Text style={{ color: c.foregroundMuted, fontSize: 10 }}>
                     {reset(quota.resetsAt)}
                   </Text>
@@ -388,6 +416,7 @@ function Entry({
               mode={mode}
               theme={theme}
               compact={compact}
+              serverTime={snapshot.serverTime}
             />
           ))}
           {!snapshot.pools.length && (
@@ -484,7 +513,7 @@ export function UsageScreen({ theme, layout }: PluginScreenProps) {
         {query.isPending && <Text style={{ color: c.foregroundMuted }}>正在读取 CRS 快照…</Text>}
         {query.data?.length === 0 && (
           <Text style={{ color: c.foregroundMuted }}>
-            未发现已授权的 CRS 配置。请在插件设置中填写地址白名单或 provider 名称。
+            未发现 CRS。自动检查主机 Pi、Claude Code 和 Codex 配置；非 CRS 服务不会显示。
           </Text>
         )}
         {query.data?.map((entry) => (

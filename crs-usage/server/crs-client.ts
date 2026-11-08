@@ -5,12 +5,15 @@ export type FetchResult = {
   error: string | null;
   at: number;
   retryAt: number;
+  origin: string;
 };
 type State = {
   failures: number;
   next: number;
   result?: FetchResult;
   pending?: Promise<FetchResult>;
+  managementOrigin?: string;
+  detection?: { isCrs: boolean; until: number };
 };
 async function boundedJson(response: Response): Promise<unknown> {
   const reader = response.body?.getReader();
@@ -57,12 +60,19 @@ export class CrsClient {
     for (const controller of this.controllers) controller.abort();
     this.states.clear();
   }
+  async detect(id: string, origin: string, key: string): Promise<boolean> {
+    const state = this.states.get(JSON.stringify([id, origin]));
+    if (state?.detection && this.now() < state.detection.until) return state.detection.isCrs;
+    await this.read(id, origin, key);
+    return this.states.get(JSON.stringify([id, origin]))?.detection?.isCrs ?? false;
+  }
   read(id: string, origin: string, key: string): Promise<FetchResult> {
-    const state = this.states.get(id) ?? { failures: 0, next: 0 };
-    this.states.set(id, state);
+    const cacheKey = JSON.stringify([id, origin]);
+    const state = this.states.get(cacheKey) ?? { failures: 0, next: 0 };
+    this.states.set(cacheKey, state);
     if (state.pending) return state.pending;
     if (state.result && this.now() < state.next) return Promise.resolve(state.result);
-    state.pending = this.request(origin, key, state).finally(() => {
+    state.pending = this.request(state.managementOrigin ?? origin, key, state).finally(() => {
       state.pending = undefined;
     });
     return state.pending;
@@ -74,54 +84,85 @@ export class CrsClient {
     let snapshot: Snapshot | null = null;
     let error: string | null = null;
     let retry = 0;
+    let recognized = false;
     try {
-      const response = await (this.options.fetch ?? fetch)(
-        `${origin}/apiStats/api/usage-snapshot`,
-        {
-          headers: { "x-api-key": key, accept: "application/json" },
-          signal: controller.signal,
-          redirect: "error",
-        },
-      );
-      const after = response.headers.get("retry-after");
-      if (after)
-        retry = /^\d+(\.\d+)?$/.test(after)
-          ? Number(after) * 1000
-          : Math.max(0, Date.parse(after) - this.now());
-      if (!response.ok) {
-        if (response.status === 403) {
-          const value = (await boundedJson(response).catch(() => null)) as {
-            key?: { status?: string };
-          } | null;
-          error =
-            value?.key?.status === "expired"
-              ? "API Key 已过期，请在 CRS 网页管理"
-              : value?.key?.status === "disabled"
-                ? "API Key 已禁用，请在 CRS 网页管理"
-                : "CRS 拒绝访问，请检查 Key 状态";
-        } else
-          error =
-            response.status === 401
-              ? "API Key 无效，请检查本机凭据"
-              : response.status === 429
-                ? "CRS 请求限流，稍后重试"
-                : `CRS 服务请求失败（HTTP ${response.status}）`;
-        if (response.status === 401 || response.status === 403) retry = Math.max(retry, 300000);
-        await response.body?.cancel().catch(() => {});
-      } else {
-        // Never forward vendor fields, raw exceptions, or credentials echoed into labels.
-        const sanitized = redact(await boundedJson(response), key);
-        const status = z.object({ key: z.object({ status: z.string() }) }).safeParse(sanitized);
-        const parsed = snapshotSchema.safeParse(sanitized);
-        if (status.success && ["expired", "disabled", "inactive"].includes(status.data.key.status))
-          error =
-            status.data.key.status === "expired"
-              ? "API Key 已过期，请在 CRS 网页管理"
-              : status.data.key.status === "disabled"
-                ? "API Key 已禁用，请在 CRS 网页管理"
-                : "API Key 尚未激活";
-        else if (!parsed.success) error = "CRS 快照格式不匹配或数据缺失";
-        else snapshot = parsed.data;
+      // At most one upgrade, derived solely from the configured hostname. Never trust managementUrl.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const response = await (this.options.fetch ?? fetch)(
+          `${origin}/apiStats/api/usage-snapshot`,
+          {
+            headers: { "x-api-key": key, accept: "application/json" },
+            signal: controller.signal,
+            redirect: "error",
+          },
+        );
+        const value = await boundedJson(response).catch(() => {
+          if (controller.signal.aborted) throw new Error("aborted");
+          return null;
+        });
+        const json = value !== null && typeof value === "object";
+        if ([200, 401, 403].includes(response.status) && json) recognized = true;
+        const message = value as {
+          key?: { status?: string };
+          error?: string;
+          message?: string;
+        } | null;
+        const needsHttps =
+          response.status === 403 &&
+          (message?.error === "Management HTTPS required" ||
+            message?.message === "Management HTTPS required");
+        if (needsHttps && new URL(origin).protocol === "http:" && attempt === 0) {
+          const target = new URL(origin);
+          target.protocol = "https:";
+          target.port = "";
+          origin = target.origin;
+          continue;
+        }
+        const after = response.headers.get("retry-after");
+        if (after)
+          retry = /^\d+(\.\d+)?$/.test(after)
+            ? Number(after) * 1000
+            : Math.max(0, Date.parse(after) - this.now());
+        if (!response.ok) {
+          if (response.status === 403) {
+            error = needsHttps
+              ? "CRS HTTPS 管理入口仍拒绝访问，请检查服务配置"
+              : message?.key?.status === "expired"
+                ? "API Key 已过期，请在 CRS 网页管理"
+                : message?.key?.status === "disabled"
+                  ? "API Key 已禁用，请在 CRS 网页管理"
+                  : "CRS 拒绝访问，请检查 Key 状态";
+          } else
+            error =
+              response.status === 401
+                ? "API Key 无效，请检查本机凭据"
+                : response.status === 429
+                  ? "CRS 请求限流，稍后重试"
+                  : `CRS 服务请求失败（HTTP ${response.status}）`;
+          if (response.status === 401 || response.status === 403) retry = Math.max(retry, 300000);
+          await response.body?.cancel().catch(() => {});
+        } else {
+          // Never forward vendor fields, raw exceptions, or credentials echoed into labels.
+          const sanitized = redact(value, key);
+          const status = z.object({ key: z.object({ status: z.string() }) }).safeParse(sanitized);
+          const parsed = snapshotSchema.safeParse(sanitized);
+          if (
+            status.success &&
+            ["expired", "disabled", "inactive"].includes(status.data.key.status)
+          )
+            error =
+              status.data.key.status === "expired"
+                ? "API Key 已过期，请在 CRS 网页管理"
+                : status.data.key.status === "disabled"
+                  ? "API Key 已禁用，请在 CRS 网页管理"
+                  : "API Key 尚未激活";
+          else if (!parsed.success) error = "CRS 快照格式不匹配或数据缺失";
+          else {
+            snapshot = parsed.data;
+            state.managementOrigin = origin;
+          }
+        }
+        break;
       }
     } catch {
       error = controller.signal.aborted ? "CRS 请求超时，已中止连接" : "CRS 暂时连不上或响应无效";
@@ -130,13 +171,15 @@ export class CrsClient {
       this.controllers.delete(controller);
     }
     const at = this.now();
+    if (recognized || !state.detection || at >= state.detection.until)
+      state.detection = { isCrs: recognized, until: at + (recognized ? 86400000 : 600000) };
     state.failures = error ? state.failures + 1 : 0;
     const backoff = error
       ? Math.min(300000, 30000 * 2 ** Math.min(state.failures - 1, 4)) *
         (1 + (this.options.random ?? Math.random)() * 0.1)
       : 12000;
     state.next = at + Math.max(12000, backoff, Number.isFinite(retry) ? retry : 0);
-    const result = { snapshot, error, at, retryAt: state.next };
+    const result = { snapshot, error, at, retryAt: state.next, origin };
     state.result = result;
     return result;
   }
