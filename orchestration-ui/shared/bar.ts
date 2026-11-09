@@ -5,7 +5,7 @@
 
 import type { RunCard } from "./card";
 import { fixingText } from "./fixes";
-import { formatBrief, formatUsd } from "./format";
+import { formatBrief, formatCost } from "./format";
 import type { Tone } from "./graph";
 import type { RunSummary } from "./rpc";
 
@@ -69,7 +69,7 @@ function sinceNow(iso: string | null, now: number): string | null {
 }
 
 function cost(card: RunCard): string | null {
-  return card.costUsd === null ? null : formatUsd(card.costUsd);
+  return card.costUsd === null && !card.costUnknown ? null : formatCost(card.costUsd, { estimated: card.costEstimated, unknown: card.costUnknown });
 }
 
 /** Why a run that is not running is not done, in its own words. */

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { fixingOf } from "./fixes";
 import { hero, inputLabel, phaseStrip, callTitle } from "./graph";
-import { costSoFar, openCalls, processGone, type ProcessCheck, type RunState, type RunStatus } from "./run";
+import { runCost, openCalls, processGone, type ProcessCheck, type RunState, type RunStatus } from "./run";
 
 // The card a run leaves in the conversation that started it: what it is doing, where in the
 // flow, what it cost, whether a person has to act, and at the end how it went. The daemon side
@@ -31,6 +31,8 @@ export const runCardSchema = z.object({
   durationMs: z.number().nullable(),
   lastEventAt: z.string().nullable(),
   costUsd: z.number().nullable(),
+  costEstimated: z.boolean().optional(),
+  costUnknown: z.boolean().optional(),
   /** Why the figure is a lower bound; null when it is the whole cost. */
   costNote: z.string().nullable(),
   strip: z.array(z.object({ title: z.string(), state: stripState })).nullable(),
@@ -84,15 +86,15 @@ export function cardOf(
   // No staleMs: "quiet for 20 minutes" would change the card on every look with nothing happening.
   const top = hero(run, status, now, { proc, staleMs: null });
   const end = run.end;
+  const cost = runCost(run);
   let costUsd: number | null;
   let costNote: string | null;
   if (end) {
-    costUsd = end.cost?.totalUsd ?? null;
-    costNote = end.cost?.partial || null;
+    costUsd = cost.usd;
+    costNote = cost.note;
   } else if ([...run.calls.values()].some((call) => call.type === "ask")) {
-    const soFar = costSoFar(run);
-    costUsd = soFar.usd;
-    costNote = soFar.uncounted > 0 ? `已结束调用的合计；${soFar.uncounted} 个调用未计入` : "已结束调用的合计";
+    costUsd = cost.usd;
+    costNote = cost.note;
   } else {
     // Only script steps so far: nothing has cost anything, and "$0" would read as a figure.
     costUsd = null;
@@ -115,6 +117,8 @@ export function cardOf(
     lastEventAt: run.lastEventAt,
     costUsd,
     costNote,
+    costEstimated: cost.estimated,
+    costUnknown: cost.unknown,
     strip: run.phaseOrder.length > 0 ? phaseStrip(run, status) : null,
     fixing: fixingCall ? { title: callTitle(run, fixingCall), ...fixingOf(fixingCall)! } : null,
     gate: gateCall

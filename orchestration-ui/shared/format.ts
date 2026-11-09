@@ -56,6 +56,12 @@ export function formatUsd(value: number | null): string {
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
 }
 
+/** Missing and incomplete prices never look like a free call. */
+export function formatCost(value: number | null, flags: { unknown?: boolean; estimated?: boolean; incomplete?: boolean; source?: string } = {}): string {
+  if (value === null || flags.unknown || flags.incomplete) return "费用未知";
+  return `${flags.estimated || flags.source === "local-estimate" ? "约 " : ""}${formatUsd(value)}`;
+}
+
 function pad(value: number): string {
   return String(value).padStart(2, "0");
 }

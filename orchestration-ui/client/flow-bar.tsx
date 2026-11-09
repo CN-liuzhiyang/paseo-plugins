@@ -4,7 +4,7 @@ import { useState, useSyncExternalStore } from "react";
 import { Pressable, Text, View } from "react-native";
 import { barAffair, barGroups, barRows, clip, groupOf, markOf, nameOf, nameParts, rowAction, rowSentence, stateWord, type BarGroup, type BarRun } from "../shared/bar";
 import { cardOf } from "../shared/card";
-import { formatBrief, formatUsd } from "../shared/format";
+import { formatBrief, formatCost } from "../shared/format";
 import { runStatus } from "../shared/run";
 import { compactStages, stageRows, type StageRow, type Talk } from "../shared/stages";
 import { stewardRow } from "../shared/wake";
@@ -154,7 +154,7 @@ function Opened({ runId, workspaceId, actions, onBack }: { runId: string; worksp
   const started = card.startedAt === null ? NaN : Date.parse(card.startedAt);
   const lastAt = Date.parse(card.endedAt ?? card.lastEventAt ?? "");
   const took = card.durationMs ?? (Number.isFinite(started) ? (card.status === "running" || card.status === "starting" ? now : lastAt) - started : null);
-  const meta = [took === null || !Number.isFinite(took) ? null : formatBrief(took), card.costUsd === null ? null : formatUsd(card.costUsd)].filter(Boolean).join(" · ");
+  const meta = [took === null || !Number.isFinite(took) ? null : formatBrief(took), card.costUsd === null && !card.costUnknown ? null : formatCost(card.costUsd, { estimated: card.costEstimated, unknown: card.costUnknown })].filter(Boolean).join(" · ");
   const stopped = group === "stopped";
   const steward = stewardRow(run.wake);
   const openAgent = card.remote ? undefined : ui.navigation?.openAgent;

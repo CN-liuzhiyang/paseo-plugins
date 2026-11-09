@@ -30,6 +30,10 @@ export interface Cost {
   usd: number | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  source?: string;
+  incomplete?: boolean;
+  scope?: string;
+  agentTotal?: Cost;
 }
 
 export interface PhaseDecl {
@@ -78,7 +82,7 @@ export interface RunEnd {
   stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null } | null;
   error: ErrorInfo | null;
   durationMs: number | null;
-  cost: { totalUsd: number | null; agentCount: number | null; partial: string | null } | null;
+  cost: { totalUsd: number | null; agentCount: number | null; partial: string | null; unknown?: boolean; estimated?: boolean } | null;
   caveats: string[];
   /** Newer runtimes: the flow's own one-line result. */
   summary: string | null;
@@ -307,7 +311,12 @@ function refOf(value: unknown): CallRef | null {
 }
 function costOf(value: unknown): Cost | null {
   if (!isObj(value)) return null;
-  return { usd: num(value.usd), inputTokens: num(value.inputTokens), outputTokens: num(value.outputTokens) };
+  return { usd: num(value.usd), inputTokens: num(value.inputTokens), outputTokens: num(value.outputTokens),
+    ...(typeof value.source === "string" ? { source: value.source } : {}),
+    ...(typeof value.scope === "string" ? { scope: value.scope } : {}),
+    ...(typeof value.incomplete === "boolean" ? { incomplete: value.incomplete } : {}),
+    ...(isObj(value.agentTotal) ? { agentTotal: costOf(value.agentTotal)! } : {}),
+  };
 }
 function fenceOf(value: unknown): Fence | null {
   if (!isObj(value)) return null;
@@ -668,7 +677,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step) }
         : null;
       const cost = isObj(raw.cost)
-        ? { totalUsd: num(raw.cost.totalUsd), agentCount: num(raw.cost.agentCount), partial: str(raw.cost.partial) }
+        ? { totalUsd: num(raw.cost.totalUsd), agentCount: num(raw.cost.agentCount), partial: str(raw.cost.partial), unknown: raw.cost.unknown === true, estimated: raw.cost.estimated === true }
         : null;
       run.end = {
         at: ts,
@@ -817,21 +826,45 @@ export function providerFamily(provider: string | null | undefined): string | nu
   return provider.split("/")[0] ?? null;
 }
 
-/** Codex agents report a cost of 0: it was not counted, not free. */
+/** Historical Codex events with no price metadata used zero for uncounted cost. */
 export function costUncounted(call: CallState): boolean {
-  return call.end !== null && providerFamily(call.ask?.provider) === "codex" && (call.end.cost?.usd ?? 0) === 0;
+  const cost = call.end?.cost?.agentTotal ?? call.end?.cost;
+  return call.end !== null && providerFamily(call.ask?.provider) === "codex" && (cost?.usd ?? 0) === 0 && !cost?.source && !cost?.scope;
 }
 
 /** What the calls ended so far cost; the only figure there is before run.end. */
-export function costSoFar(run: RunState): { usd: number; uncounted: number } {
-  let usd = 0;
-  let uncounted = 0;
+export function costSoFar(run: RunState): { usd: number; uncounted: number; estimated?: boolean } {
+  const agents = new Map<string, { usd: number; unknown: boolean; estimated: boolean }>();
   for (const call of run.calls.values()) {
-    if (call.type !== "ask") continue;
-    if (costUncounted(call) || (call.end && call.end.cost?.usd == null)) uncounted += 1;
-    else usd += call.end?.cost?.usd ?? 0;
+    if (!call.end || (call.type !== "ask" && !call.agentId)) continue;
+    const cost = call.end.cost;
+    const key = call.agentId ?? call.callId;
+    const previous = agents.get(key);
+    const total = cost?.agentTotal;
+    const current = total ?? cost;
+    const unknown = current?.usd == null || current.incomplete === true || costUncounted(call);
+    agents.set(key, {
+      usd: (total ? 0 : previous?.usd ?? 0) + (current?.usd ?? 0),
+      unknown: unknown || (!total && previous?.unknown === true),
+      estimated: current?.source === "local-estimate" || (!total && previous?.estimated === true),
+    });
   }
-  return { usd, uncounted };
+  const values = [...agents.values()];
+  return {
+    usd: values.reduce((n, c) => n + c.usd, 0), uncounted: values.filter((c) => c.unknown).length,
+    ...(values.some((c) => c.estimated) ? { estimated: true } : {}),
+  };
+}
+
+/** The same flags feed the list, timeline card and detail view. */
+export function runCost(run: RunState): { usd: number | null; unknown: boolean; estimated: boolean; note: string | null } {
+  if (run.end) {
+    const cost = run.end.cost;
+    return { usd: cost?.totalUsd ?? null, unknown: cost?.totalUsd == null || cost.unknown === true, estimated: cost?.estimated === true, note: cost?.partial || null };
+  }
+  const cost = costSoFar(run);
+  return { usd: cost.usd, unknown: cost.uncounted > 0, estimated: cost.estimated === true,
+    note: cost.uncounted > 0 ? `已结束调用的合计；${cost.uncounted} 个会话费用未知` : "已结束调用的合计" };
 }
 
 /** Some finished Codex call reported the 0 that means "not counted". */

@@ -8,14 +8,14 @@ import {
   formatDuration,
   formatShort,
   formatTime,
-  formatUsd,
+  formatCost,
   GATE_OUTCOME_LABEL,
 } from "../shared/format";
 import { callMarks, pathLabel, returnedFor, REUSED, stopLine } from "../shared/fixes";
 import { callTitle, headline, nodeState, shortModel, START, END, visitState, type Graph, type GraphVisit } from "../shared/graph";
 import {
   caveatsOf,
-  costSoFar,
+  runCost,
   costUncounted,
   gateVerdict,
   hasUncountedCodex,
@@ -289,7 +289,7 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
         <Meta
           text={[
             `用时 ${formatDuration(end.durationMs)}`,
-            cost ? `${formatUsd(cost.totalUsd)}${cost.agentCount != null ? `（${cost.agentCount} 个 agent）` : ""}` : "没有报告成本",
+            cost ? `${formatCost(cost.totalUsd, cost)}${cost.agentCount != null ? `（${cost.agentCount} 个 agent）` : ""}` : "费用未知",
           ].join(" · ")}
         />
       </Head>
@@ -394,11 +394,13 @@ function VisitDrawer({ run, status, graph, visit, onSelect }: DrawerProps & { vi
   const state = visitState(visit, run, status);
   const look = VISIT_LOOK[state];
   const cost = visit.calls.reduce((sum, call) => sum + (call.end?.cost?.usd ?? 0), 0);
+  const unknownCost = visit.calls.some((call) => call.end && (call.type === "ask" || call.agentId) && (call.end.cost?.usd == null || call.end.cost.incomplete || costUncounted(call)));
+  const estimatedCost = visit.calls.some((call) => call.end?.cost?.source === "local-estimate");
   return (
     <View style={{ gap: 16 }}>
       <Head title={`${visit.title}${visit.round > 1 ? ` · 第 ${visit.round} 次` : ""}`}>
         <Pill tone={look.tone} label={look.label} />
-        <Meta text={`阶段 · ${formatDuration((visit.t1 ?? graph.clock) - visit.t0)} · ${formatUsd(cost)}`} />
+        <Meta text={`阶段 · ${formatDuration((visit.t1 ?? graph.clock) - visit.t0)} · ${formatCost(cost, { unknown: unknownCost, estimated: estimatedCost })}`} />
       </Head>
       <Sec label="这一段做了">
         {visit.calls.length === 0 ? <Text style={ui.styles.muted}>没有调用（阶段里只跑了脚本自己的代码）。</Text> : null}
@@ -619,11 +621,11 @@ function AskBody({
               "花费",
               cost?.usd == null
                 ? call.end
-                  ? "没有报告"
+                  ? "费用未知"
                   : state === "running"
                     ? "还没结束"
                     : "不知道（没有结束记录）"
-                : `${costUncounted(call) ? "未计入（Codex 报 0）" : formatUsd(cost.usd)}${
+                : `${formatCost(cost.usd, { ...cost, unknown: costUncounted(call) })}${
                     cost.inputTokens != null ? ` · ${cost.inputTokens} / ${cost.outputTokens ?? "?"} tokens` : ""
                   }`,
             ],
@@ -811,10 +813,6 @@ function DoBody({ call, state, status }: { call: CallState; state: ReturnType<ty
 
 /** The spend so far, in words, for the numbers row. */
 export function spendText(run: RunState): string {
-  if (run.end) {
-    const cost = run.end.cost;
-    return cost ? formatUsd(cost.totalUsd) : "没有报告";
-  }
-  const soFar = costSoFar(run);
-  return `${formatUsd(soFar.usd)}（已结束的调用）`;
+  const cost = runCost(run);
+  return `${formatCost(cost.usd, cost)}${run.end ? "" : "（已结束的调用）"}`;
 }

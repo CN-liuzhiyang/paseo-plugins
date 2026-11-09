@@ -6,7 +6,7 @@
 // say the same thing. Nothing here decides whether a run is running or lost; that is runStatus.
 
 import { fixingOf, fixingText, stopLine } from "./fixes";
-import { formatDuration, formatUsd, GATE_OUTCOME_LABEL, activity } from "./format";
+import { formatDuration, formatCost, GATE_OUTCOME_LABEL, activity } from "./format";
 import {
   callStatus,
   gateVerdict,
@@ -595,7 +595,7 @@ export function hero(
   if (failed) {
     const cost = failed.end?.cost?.usd;
     const who = [failed.ask?.role, shortModel(failed.ask?.provider)].filter(Boolean).join(" · ");
-    const spent = cost != null && failed.type === "ask" ? `，花了 ${formatUsd(cost)}` : "";
+    const spent = cost != null && failed.type === "ask" ? `，花了 ${formatCost(cost, failed.end?.cost ?? {})}` : "";
     return {
       tone: "danger",
       kicker,

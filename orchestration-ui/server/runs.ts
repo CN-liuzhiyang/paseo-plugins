@@ -7,7 +7,7 @@ import { activity } from "../shared/format";
 import { hero, inputLabel, phaseStrip } from "../shared/graph";
 import {
   applyEvent,
-  costSoFar,
+  runCost,
   createRun,
   foldEvents,
   phaseTitle,
@@ -74,15 +74,15 @@ export function summarize(
   const status = runStatus(run, now, staleMs, proc);
   const top = run.start ? hero(run, status, now, { proc, staleMs }) : null;
   const end = run.end;
+  const cost = runCost(run);
   let costUsd: number | null = null;
   let costNote: string | null = null;
   if (end) {
-    costUsd = end.cost?.totalUsd ?? null;
-    costNote = end.cost?.partial || null;
+    costUsd = cost.usd;
+    costNote = cost.note;
   } else if (run.start) {
-    const soFar = costSoFar(run);
-    costUsd = soFar.usd;
-    costNote = soFar.uncounted > 0 ? `已结束调用的合计；${soFar.uncounted} 个调用未计入` : "已结束调用的合计";
+    costUsd = cost.usd;
+    costNote = cost.note;
   }
   return {
     runId,
@@ -94,6 +94,8 @@ export function summarize(
     durationMs: end?.durationMs ?? null,
     costUsd,
     costNote,
+    costEstimated: cost.estimated,
+    costUnknown: cost.unknown,
     caller: run.start?.caller ?? null,
     host: run.start?.host ?? null,
     affairLabel: run.start?.affair?.label ?? null,

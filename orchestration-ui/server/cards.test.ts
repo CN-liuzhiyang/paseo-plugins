@@ -56,6 +56,7 @@ test("card: a finished run carries its outcome, duration and whole cost", () => 
   assert.equal(card.tone, "success");
   assert.equal(card.gate, null);
   assert.equal(card.costUsd, 0.82);
+  assert.equal(card.costEstimated, false, "old totals remain numeric without an estimate marker");
   assert.equal(card.durationMs, 209910);
   assert.match(card.costNote ?? "", /Codex/);
   assert.match(card.kicker, /^完成 · 用时/);

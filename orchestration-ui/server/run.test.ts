@@ -54,7 +54,8 @@ test("committee: two phases, a loop over debate, concurrent calls", () => {
   // Codex reports 0: not counted, and not added as if free.
   const codex = run.calls.get("c2")!;
   assert.equal(codex.end?.cost?.usd, 0);
-  assert.deepEqual(costSoFar(run), { usd: 0.41 + 0.29 + 0.12, uncounted: 2 });
+  assert.equal(codex.end?.cost?.source, undefined, "old logs have no price metadata");
+  assert.deepEqual(costSoFar(run), { usd: 0.41 + 0.29 + 0.12, uncounted: 1 }, "two unpriced calls in one session count as one unknown session");
   assert.equal(fenceLabel(run.calls.get("c1")!), "请求只读 · 未强制（auto）");
   assert.equal(caveatsOf(run).length, 2);
   assert.equal(run.calls.get("c1")!.caveats.length, 1);

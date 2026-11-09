@@ -1,6 +1,6 @@
 import { ScrollView } from "@getpaseo/plugin/client/react-native";
 import { Pressable, Text, View } from "react-native";
-import { formatTime, formatUsd, RUN_STATUS_LABEL, shortId } from "../shared/format";
+import { formatTime, formatCost, RUN_STATUS_LABEL, shortId } from "../shared/format";
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import { useNow, useRunList } from "./data";
 import { LOG_DIR_SOURCE, RUN_LOOK, VISIT_LOOK } from "./looks";
@@ -207,7 +207,7 @@ export function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen
   const look = RUN_LOOK[run.status];
   const tone = run.hero?.tone ?? look.tone;
   // A note means the figure leaves something out (Codex, calls still open): it is a lower bound.
-  const cost = run.costUsd === null ? "—" : `${run.costNote ? "至少 " : ""}${formatUsd(run.costUsd)}`;
+  const cost = formatCost(run.costUsd, { estimated: run.costEstimated, unknown: run.costUnknown });
   const when = run.startedAt ? formatTime(run.startedAt, now) : "—";
   const label = (
     <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1 }}>

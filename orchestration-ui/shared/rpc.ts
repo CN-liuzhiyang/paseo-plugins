@@ -31,6 +31,8 @@ export const runSummary = z.object({
   /** run.end.durationMs; for a run without one the app counts from startedAt. */
   durationMs: z.number().nullable(),
   costUsd: z.number().nullable(),
+  costEstimated: z.boolean().optional(),
+  costUnknown: z.boolean().optional(),
   /** run.end.cost.partial, or why the figure is a lower bound. */
   costNote: z.string().nullable(),
   caller: z.string().nullable(),
