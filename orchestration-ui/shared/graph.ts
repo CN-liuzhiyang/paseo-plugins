@@ -169,7 +169,7 @@ export function headline(call: CallState, status: RunStatus): string | null {
   const state = nodeState(call, status);
   if (call.type === "gate") {
     if (!call.end) return state === "waiting" ? "等你批准" : null;
-    if (!call.end.ok) return "人闸出错";
+    if (!call.end.ok) return "批准出错了";
     const outcome = gateVerdict(call)?.outcome;
     if (outcome === "expired") return "过期，按拒绝处理";
     if (outcome === "denied") return "被拒绝";
@@ -404,12 +404,12 @@ function foldLoops(columns: GraphVisit[][], visits: GraphVisit[]): Laid[] {
 
 const END_LOOK: Record<RunStatus, { label: string; tone: Tone }> = {
   done: { label: "完成", tone: "success" },
-  stopped: { label: "停下", tone: "warning" },
-  failed: { label: "失败", tone: "danger" },
+  stopped: { label: "停了", tone: "warning" },
+  failed: { label: "出错了", tone: "danger" },
   timeout: { label: "超时", tone: "danger" },
-  running: { label: "进行中", tone: "accent" },
+  running: { label: "在跑", tone: "accent" },
   starting: { label: "启动中", tone: "neutral" },
-  lost: { label: "失联", tone: "warning" },
+  lost: { label: "出错了", tone: "warning" },
 };
 
 const UNKNOWN_END: { label: string; tone: Tone } = { label: "不知道做没做", tone: "danger" };
@@ -509,16 +509,17 @@ export function hero(
       const timeout = gate.gate?.timeout;
       const subtitle = [
         waited === null ? null : `已等 ${formatDuration(now - waited)}`,
-        timeout ? `${timeout} 内没人处理，人闸按过期拒绝` : null,
+        timeout ? `${timeout} 内不批就按拒绝算` : null,
+        others.length ? `同时在跑：${quoted(run, others)}` : null,
       ]
         .filter(Boolean)
-        .join("，");
+        .join(" · ");
       return {
         tone: "warning",
-        kicker: "需要你处理",
-        title: `等你审批：${callTitle(run, gate)}`,
-        subtitle: `${subtitle}${subtitle ? "。" : ""}${others.length ? `同时在跑：${quoted(run, others)}。` : ""}` || null,
-        action: agentAction(gate, "在 Paseo 打开审批卡片"),
+        kicker: "等你",
+        title: `等你批准：${callTitle(run, gate)}`,
+        subtitle: subtitle || null,
+        action: agentAction(gate, "去批准"),
         select: gate.callId,
         needsYou: true,
       };
@@ -527,10 +528,10 @@ export function hero(
     const fixing = open.map(fixingOf).find((one) => one !== null);
     return {
       tone: "accent",
-      kicker: "运行中",
+      kicker: "在跑",
       title: fixing ? `${doing}：${fixingText(fixing)}` : doing,
-      subtitle: started === null ? null : `已运行 ${formatDuration(now - started)}`,
-      action: agentAction(open.find((call) => call.agentId), "打开这个 agent"),
+      subtitle: started === null ? null : `已跑 ${formatDuration(now - started)}`,
+      action: agentAction(open.find((call) => call.agentId), "看对话"),
       select: open[0]?.callId ?? START,
       needsYou: false,
     };
@@ -541,30 +542,29 @@ export function hero(
       const model = shortModel(call.ask?.provider);
       return `「${callTitle(run, call)}」${model ? `（${model}）` : ""}`;
     });
-    const agents = open.some((call) => call.agentId) ? "那个 agent 没有被停掉，可能还在跑、还在花钱。" : "";
-    const quiet = last === null ? "" : `，${formatDuration(now - last)}没有新事件`;
+    const agents = open.some((call) => call.agentId) ? "agent 没被停掉，可能还在花钱" : null;
+    const quiet = last === null ? null : `${formatDuration(now - last)}没有新动静`;
     return {
       tone: "warning",
-      kicker: "失联",
+      kicker: "出错了",
       title:
         processGone(proc)
-          ? `运行进程不在了（pid ${proc!.pid}），不会再有结果`
+          ? "进程没了，不会再有结果"
           : proc && !proc.alive
-            ? "占位文件超过 2 分钟没有更新，运行多半已经停了，不会再有结果"
-            : "不知道它还在不在跑：很久没有新事件，也没有结局",
-      subtitle: `最后在做：${where.join("、") || "调用之间（脚本自己的代码）"}${quiet}。${agents}`,
-      action: agentAction(open.find((call) => call.agentId), "打开那个 agent 看看"),
+            ? "两分钟以上没有动静，多半已经停了"
+            : "不知道它还在不在跑：很久没有动静",
+      subtitle: [where.length ? `最后在做：${where.join("、")}` : null, quiet, agents].filter(Boolean).join(" · ") || null,
+      action: agentAction(open.find((call) => call.agentId), "看对话"),
       select: open[0]?.callId ?? END,
       needsYou: true,
     };
   }
-  const took = end?.durationMs ?? (started === null ? null : clock - started);
   if (status === "done") {
     return {
       tone: "success",
-      kicker: `完成 · 用时 ${formatDuration(took)}`,
-      title: end?.summary || "完成",
-      subtitle: end?.summary ? null : "flow 没有给一句话结果；结果在「结局」里。",
+      kicker: "完成",
+      title: end?.summary || "完成了",
+      subtitle: null,
       action: null,
       select: END,
       needsYou: false,
@@ -575,15 +575,14 @@ export function hero(
     if (line) {
       // Not a stop the flow chose: a step that may or may not have happened is for a person to settle.
       const unknown = end?.stop?.kind === "unknown";
-      return { tone: unknown ? "danger" : "warning", kicker: "停下", title: line, subtitle: null, action: null, select: END, needsYou: unknown };
+      return { tone: unknown ? "danger" : "warning", kicker: "停了", title: line, subtitle: null, action: null, select: END, needsYou: unknown };
     }
-    const reason = end?.stop?.reason || null;
-    const where = end?.stop?.phase ? `在「${phaseTitle(run, end.stop.phase)}」` : "在阶段之外";
+    // Stopped is stopped: one sentence. The reason in full is in the ending's panel, once.
     return {
       tone: "warning",
-      kicker: "停下",
-      title: end?.summary || reason || "flow 停下了，没有说明原因",
-      subtitle: `${end?.summary && reason ? `${reason}。` : ""}flow ${where}主动停下（$.stop），不是出错。`,
+      kicker: "停了",
+      title: end?.summary || end?.stop?.reason || "停了，没有说明原因",
+      subtitle: null,
       action: null,
       select: END,
       needsYou: false,
@@ -591,11 +590,11 @@ export function hero(
   }
   // failed, timeout
   const failed = calls.find((call) => call.end && !call.end.ok);
-  const kicker = status === "timeout" ? "超时" : "失败";
+  const kicker = "出错了";
   if (failed) {
     const cost = failed.end?.cost?.usd;
     const who = [failed.ask?.role, shortModel(failed.ask?.provider)].filter(Boolean).join(" · ");
-    const spent = cost != null && failed.type === "ask" ? `，花了 ${formatUsd(cost)}` : "";
+    const spent = cost != null && failed.type === "ask" ? `花了 ${formatUsd(cost)}` : null;
     return {
       tone: "danger",
       kicker,
@@ -603,11 +602,11 @@ export function hero(
       subtitle:
         end?.summary ||
         (failed.type === "ask"
-          ? `${who}${spent}。重跑前可以先打开它看卡在哪。`
+          ? [who, spent].filter(Boolean).join(" · ") || null
           : failed.type === "gate"
-            ? "人闸自己出了错，不是有人拒绝。"
-            : "脚本动作出错。"),
-      action: agentAction(failed, "打开那个 agent"),
+            ? "批准这一步自己出了错，不是有人拒绝"
+            : null),
+      action: agentAction(failed, "看对话"),
       select: failed.callId,
       needsYou: false,
     };

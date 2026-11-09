@@ -21,10 +21,10 @@ export function standing(flow: FlowRow): Standing {
   if (isBroken(flow)) return { tone: "danger", label: "不能用", rank: 4 };
   const run = flow.latest;
   if (!run) return { tone: "neutral", label: "还没跑过", rank: 3 };
-  if (run.needsYou) return { tone: "warning", label: "需要你处理", rank: 0 };
+  if (run.needsYou) return { tone: "warning", label: "等你", rank: 0 };
   if (run.status === "running" || run.status === "starting") return { tone: "accent", label: RUN_STATUS_LABEL[run.status], rank: 1 };
   const tone = run.status === "done" ? "success" : run.status === "stopped" || run.status === "lost" ? "warning" : "danger";
-  return { tone, label: `上次${RUN_STATUS_LABEL[run.status]}`, rank: 2 };
+  return { tone, label: RUN_STATUS_LABEL[run.status], rank: 2 };
 }
 
 /** Needs you, then running, then by newest run, then never run, then broken; ties by name. */

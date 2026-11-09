@@ -22,7 +22,8 @@ export function fixingText(fixing: { round: number; count: number }): string {
 
 /** How many times a finished call was sent back: 3 answers is 2. */
 export function fixRounds(call: CallState): number {
-  return call.end ? call.end.rounds - 1 : 0;
+  // An answer taken from an earlier run was not sent back again this time.
+  return call.end && !call.reused ? call.end.rounds - 1 : 0;
 }
 
 export interface Mark {

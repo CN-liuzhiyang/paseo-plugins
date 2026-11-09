@@ -38,7 +38,8 @@ const GATE_NOTE: Record<string, string> = {
 
 function gateNote(calls: readonly CallState[], status: RunStatus): string | null {
   const gate = calls.filter((call) => call.type === "gate").at(-1);
-  if (!gate) return null;
+  // A gate taken from an earlier run: nobody was asked this time, so "你批了" would read as asked again.
+  if (!gate || gate.reused) return null;
   if (nodeState(gate, status) === "waiting") return "等你批准";
   const outcome = gateVerdict(gate)?.outcome;
   return outcome ? (GATE_NOTE[outcome] ?? outcome) : null;

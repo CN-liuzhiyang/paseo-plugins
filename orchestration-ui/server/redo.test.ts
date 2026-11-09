@@ -171,11 +171,15 @@ test("stopping on a check that never passed names the step and the rounds; the f
   assert.equal(top.tone, "warning");
   assert.ok(!top.title.includes("$.stop") && !(top.subtitle ?? "").includes("$.stop"));
 
-  // A file from before `kind` was written, and a stop the flow asked for, keep the old words.
+  // A file from before `kind` was written, and a stop the flow asked for, say it was a stop and nothing else:
+  // no developer words, no second sentence.
   for (const stop of [{ reason: "patch：核对 3 轮还不过", phase: null }, { reason: "不想继续了", phase: null, kind: "flow", step: null }]) {
     const run = foldEvents(stream(stop));
     assert.equal(stopLine(run), null);
-    assert.ok(hero(run, "stopped", Date.now()).subtitle?.includes("$.stop"));
+    const top = hero(run, "stopped", Date.now());
+    assert.equal(top.kicker, "停了");
+    assert.equal(top.subtitle, null);
+    assert.ok(!top.title.includes("$.stop"));
   }
 });
 

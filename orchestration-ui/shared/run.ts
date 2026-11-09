@@ -819,7 +819,7 @@ export function providerFamily(provider: string | null | undefined): string | nu
 
 /** Codex agents report a cost of 0: it was not counted, not free. */
 export function costUncounted(call: CallState): boolean {
-  return call.end !== null && providerFamily(call.ask?.provider) === "codex" && (call.end.cost?.usd ?? 0) === 0;
+  return call.end !== null && call.reused === null && providerFamily(call.ask?.provider) === "codex" && (call.end.cost?.usd ?? 0) === 0;
 }
 
 /** What the calls ended so far cost; the only figure there is before run.end. */
@@ -827,7 +827,8 @@ export function costSoFar(run: RunState): { usd: number; uncounted: number } {
   let usd = 0;
   let uncounted = 0;
   for (const call of run.calls.values()) {
-    if (call.type !== "ask") continue;
+    // An answer taken from an earlier run cost nothing this time, and is no missing figure either.
+    if (call.type !== "ask" || call.reused) continue;
     if (costUncounted(call) || (call.end && call.end.cost?.usd == null)) uncounted += 1;
     else usd += call.end?.cost?.usd ?? 0;
   }

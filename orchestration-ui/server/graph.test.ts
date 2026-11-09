@@ -85,7 +85,7 @@ test("waiting gate: script group, repair loop, a call outside phases, gate besid
     "·[c9]",
     "(交叉复核[c10] ‖ 人工审批[c11])",
     "ghost:发布:还没到",
-    "end:进行中",
+    "end:在跑",
   ]);
   assert.deepEqual(nodeIds(graph), allCalls(run));
   assert.deepEqual(graph.groups.get("@gc1")?.map((call) => call.callId), ["c1", "c2", "c3", "c4"]);
@@ -96,11 +96,11 @@ test("waiting gate: script group, repair loop, a call outside phases, gate besid
 
   const top = hero(run, status, now, { proc: alive });
   assert.equal(top.tone, "warning");
-  assert.equal(top.kicker, "需要你处理");
-  assert.equal(top.title, "等你审批：批准发布 #4711 的文档修订");
-  assert.match(top.subtitle ?? "", /2h 内没人处理/);
+  assert.equal(top.kicker, "等你");
+  assert.equal(top.title, "等你批准：批准发布 #4711 的文档修订");
+  assert.match(top.subtitle ?? "", /2h 内不批就按拒绝算/);
   assert.match(top.subtitle ?? "", /同时在跑：「交叉复核修订」/);
-  assert.deepEqual(top.action, { label: "在 Paseo 打开审批卡片", agentId: "dd44ee55-ff66-4a77-8b88-cc9900112204" });
+  assert.deepEqual(top.action, { label: "去批准", agentId: "dd44ee55-ff66-4a77-8b88-cc9900112204" });
   assert.equal(top.select, "c11");
   assert.equal(top.needsYou, true);
 
@@ -131,8 +131,8 @@ test("committee (an old log): the re-entered debate is a loop of two rounds, eac
   // No run.end.summary in this file: the sentence falls back and says where the result is.
   const top = hero(run, status, Date.now());
   assert.equal(top.tone, "success");
-  assert.equal(top.title, "完成");
-  assert.match(top.kicker, /^完成 · 用时 3 分 29 秒$/);
+  assert.equal(top.title, "完成了");
+  assert.equal(top.kicker, "完成");
   assert.equal(top.select, END);
   assert.equal(top.needsYou, false);
   // With the new field it uses the flow's own sentence.
@@ -155,14 +155,14 @@ test("hotfix (an old log): a lone script outside phases, flat phases, stopped at
     "校验[d3]",
     "人工审批[g1]",
     "ghost:写入 QA 目录:没有进入",
-    "end:停下",
+    "end:停了",
   ]);
   const approve = graph.pieces[6];
   assert.equal(approve?.kind === "column" ? approve.stages[0]!.state : null, "stopped");
   const top = hero(run, status, Date.now());
   assert.equal(top.tone, "warning");
   assert.equal(top.title, "人闸没有批准：4:3 没验证，先别写");
-  assert.match(top.subtitle ?? "", /在「人工审批」主动停下/);
+  assert.equal(top.subtitle, null, "a stop is a stop: one sentence, no explaining it away");
   assert.equal(headline(run.calls.get("g1")!, status), "被拒绝");
   assert.equal(headline(run.calls.get("d3")!, status), "通过");
 });
@@ -171,14 +171,14 @@ test("advisor (an old log): the failed call is the sentence and the button", () 
   const run = foldEvents(fixture("advisor-failed.jsonl"));
   const status = runStatus(run, Date.now(), BASE);
   const graph = buildGraph(run, status, Date.now());
-  assert.deepEqual(shape(graph).slice(1), ["征询[a1]", "end:失败"]);
+  assert.deepEqual(shape(graph).slice(1), ["征询[a1]", "end:出错了"]);
   const stage = graph.pieces[1];
   assert.equal(stage?.kind === "column" ? stage.stages[0]!.state : null, "failed");
   const top = hero(run, status, Date.now());
   assert.equal(top.tone, "danger");
   assert.equal(top.title, "「第二意见」没拿到结果：paseo run 等了 10m 仍未返回");
-  assert.match(top.subtitle ?? "", /^reviewer · opus-5-5，花了 \$0\.08。/);
-  assert.deepEqual(top.action, { label: "打开那个 agent", agentId: "d9c8b7a6-5f4e-4d3c-2b1a-0f9e8d7c6b55" });
+  assert.equal(top.subtitle, "reviewer · opus-5-5 · 花了 $0.08");
+  assert.deepEqual(top.action, { label: "看对话", agentId: "d9c8b7a6-5f4e-4d3c-2b1a-0f9e8d7c6b55" });
   assert.equal(top.select, "a1");
 });
 
@@ -187,7 +187,7 @@ test("survey: concurrent phases stack; a lost run's clock stops at its last even
   const last = at(run.lastEventAt!);
   const soon = last + 5_000;
   const running = buildGraph(run, runStatus(run, soon, BASE), soon);
-  assert.deepEqual(shape(running).slice(1), ["(查文档[a1] ‖ 查代码[a2])", "ghost:汇总:还没到", "end:进行中"]);
+  assert.deepEqual(shape(running).slice(1), ["(查文档[a1] ‖ 查代码[a2])", "ghost:汇总:还没到", "end:在跑"]);
   assert.equal(running.clock, soon);
 
   const later = last + 3_600_000;
@@ -197,7 +197,7 @@ test("survey: concurrent phases stack; a lost run's clock stops at its last even
   const lost = buildGraph(run, status, later);
   assert.equal(lost.clock, last);
   assert.equal(runClock(run, status, later), last);
-  assert.deepEqual(shape(lost).slice(-2), ["ghost:汇总:没有进入", "end:失联"]);
+  assert.deepEqual(shape(lost).slice(-2), ["ghost:汇总:没有进入", "end:出错了"]);
   // The open box and call measure to the last event, not to an hour later.
   const column = lost.pieces[1];
   const code = column?.kind === "column" ? column.stages.find((stage) => stage.visit.phase === "collect-code") : undefined;
@@ -205,10 +205,10 @@ test("survey: concurrent phases stack; a lost run's clock stops at its last even
   assert.equal(code?.durationMs, last - at(run.visits.find((visit) => visit.phase === "collect-code")!.startedAt));
 
   const top = hero(run, status, later, { proc: gone });
-  assert.equal(top.kicker, "失联");
-  assert.equal(top.title, "运行进程不在了（pid 4242），不会再有结果");
+  assert.equal(top.kicker, "出错了");
+  assert.equal(top.title, "进程没了，不会再有结果");
   assert.match(top.subtitle ?? "", /「读 packages\/plugin\/src」（gpt-5\.5）/);
-  assert.match(top.subtitle ?? "", /可能还在跑、还在花钱/);
+  assert.match(top.subtitle ?? "", /agent 没被停掉，可能还在花钱/);
   assert.equal(top.needsYou, true);
   assert.equal(top.select, "a2");
 });

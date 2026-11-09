@@ -89,7 +89,7 @@ export function cardOf(
   if (end) {
     costUsd = end.cost?.totalUsd ?? null;
     costNote = end.cost?.partial || null;
-  } else if ([...run.calls.values()].some((call) => call.type === "ask")) {
+  } else if ([...run.calls.values()].some((call) => call.type === "ask" && !call.reused)) {
     const soFar = costSoFar(run);
     costUsd = soFar.usd;
     costNote = soFar.uncounted > 0 ? `已结束调用的合计；${soFar.uncounted} 个调用未计入` : "已结束调用的合计";
