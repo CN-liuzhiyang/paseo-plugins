@@ -1,4 +1,7 @@
+import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { REUSED_LEAD, type ReusedLead } from "../shared/detail";
+import { REUSED } from "../shared/fixes";
 import { formatShort } from "../shared/format";
 import { callTitle, nodeState, type Graph } from "../shared/graph";
 import { ms, type CallState, type RunState, type RunStatus } from "../shared/run";
@@ -14,16 +17,29 @@ export function TimelineView({
   run,
   status,
   selected,
+  lead,
+  legend,
   onSelect,
 }: {
   graph: Graph;
   run: RunState;
   status: RunStatus;
   selected: string;
+  lead: ReusedLead | null;
+  legend: boolean;
   onSelect(key: string): void;
 }) {
   const ui = useUi();
   const c = ui.theme.colors;
+  // The stages that only replayed an earlier run are one line until asked for (or until one of them is picked).
+  const [leadOpen, setLeadOpen] = useState(false);
+  const folded = new Set(
+    lead === null
+      ? []
+      : graph.pieces.slice(1, lead.pieces + 1).flatMap((piece) => (piece.kind === "column" ? piece.stages.map((stage) => stage.visit.key) : [])),
+  );
+  const holdsSelected = graph.visits.some((visit) => folded.has(visit.key) && (visit.key === selected || visit.calls.some((call) => call.callId === selected)));
+  const showLead = leadOpen || holdsSelected;
   const t0 = ms(run.startedAt) ?? graph.visits[0]?.t0 ?? graph.clock;
   const total = Math.max(1, graph.clock - t0);
   const pct = (at: number) => Math.min(100, Math.max(0, ((at - t0) / total) * 100));
@@ -48,7 +64,12 @@ export function TimelineView({
           ))}
         </View>
       </View>
-      {graph.visits.map((visit) => (
+      {lead !== null ? (
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: showLead }} onPress={() => setLeadOpen(!leadOpen)} style={{ paddingVertical: 8 }}>
+          <Text style={[ui.styles.small, { fontWeight: "700" }]}>{showLead ? "▾" : "▸"} {REUSED_LEAD(lead.steps)}</Text>
+        </Pressable>
+      ) : null}
+      {graph.visits.filter((visit) => showLead || !folded.has(visit.key)).map((visit) => (
         <View key={visit.key}>
           <Text style={[ui.styles.small, { fontWeight: "700", marginTop: 8 }]}>
             {visit.loose ? "阶段之外" : `${visit.title}${visit.round > 1 ? ` · 第 ${visit.round} 次` : ""}`}
@@ -70,12 +91,13 @@ export function TimelineView({
             ))}
         </View>
       ))}
+      {legend ? (
       <View style={[ui.styles.row, { marginTop: 10, columnGap: 14, rowGap: 4 }]}>
         {(
           [
             ["accent", "agent", false],
             ["neutral", "脚本", false],
-            ["warning", "人闸", false],
+            ["warning", "批准", false],
             ["danger", "失败", false],
             ["accent", "还没结束", true],
           ] as Array<[Tone, string, boolean]>
@@ -96,8 +118,9 @@ export function TimelineView({
             <Text style={ui.styles.small}>{label}</Text>
           </View>
         ))}
-        <Text style={ui.styles.small}>用来看时间花在哪，比如等人往往是大头。</Text>
+        <Text style={ui.styles.small}>时间花在哪，等人往往是大头。</Text>
       </View>
+      ) : null}
     </View>
   );
 }
@@ -131,7 +154,7 @@ function Row({
   const open = state === "running" || state === "waiting" || state === "interrupted";
   const color = ui.tone(state === "error" ? "danger" : (TYPE_TONE[call.type ?? "do"] ?? "neutral"));
   const took = call.end?.durationMs ?? end - start;
-  const text = `${formatShort(took)}${state === "waiting" ? " 等人中" : state === "interrupted" ? " 没有结束记录" : ""}`;
+  const text = call.reused ? REUSED : `${formatShort(took)}${state === "waiting" ? " 等人中" : state === "interrupted" ? " 没有结束记录" : ""}`;
   // The label goes after the bar while there is room, before it otherwise, inside a bar that fills the lane.
   const right = left + width;
   const place =
@@ -167,7 +190,7 @@ function Row({
             minWidth: 3,
             borderRadius: 3,
             backgroundColor: color,
-            opacity: open ? 0.45 : 1,
+            opacity: call.reused ? 0.25 : open ? 0.45 : 1,
             borderWidth: open ? 1 : 0,
             borderStyle: "dashed",
             borderColor: color,

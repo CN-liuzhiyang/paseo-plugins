@@ -149,13 +149,13 @@ export function claimRun({ dir, runId, heartbeatMs = HEARTBEAT_MS, now = Date.no
         // Already gone.
       }
     },
-    refuse(reason) {
+    refuse(reason, kind = "run-refused") {
       stop();
       // Written beside and renamed over, so a reader sees the claim as it was or as it is now,
       // never an empty or half-written file.
       const next = `${file}.${process.pid}.tmp`;
       try {
-        writeFileSync(next, JSON.stringify({ ...info, refused: String(reason).slice(0, 2_000) }), "utf8");
+        writeFileSync(next, JSON.stringify({ ...info, refused: String(reason).slice(0, 2_000), refusedKind: kind }), "utf8");
         renameSync(next, file);
       } catch {
         // The refusal still reaches the caller as the exception; the file only adds the reason.

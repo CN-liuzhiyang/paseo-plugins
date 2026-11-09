@@ -801,7 +801,7 @@ export async function flowSync(ctx, id) {
     if (!seen) continue;
     const now = ctx.now();
     if (seen.state === "refused" || (seen.state === "absent" && now - Date.parse(f.at) > 5 * 60_000)) {
-      write(ctx, id, [{ kind: "flow.fail", runId: f.runId, why: f.resumeOf && seen.refused ? resumeRefusal(seen.refused) : seen.refused || "没起来" }]);
+      write(ctx, id, [{ kind: "flow.fail", runId: f.runId, why: f.resumeOf && seen.refused ? resumeRefusal(seen.refused, seen.refusedKind) : seen.refused || "没起来" }]);
       ctx.flowNow.delete(f.runId);
       changed = true;
       continue;
@@ -1010,7 +1010,7 @@ export async function resumeFlow(ctx, ref, { runId = "", expect = "", saidSeq = 
   const args = [orch, "resume", f.runId, "--run-id", next, "--expect", expect || st.resume.print];
   const started = await startRun({ args, cwd: s.workdir, env: runEnv(process.env, { paseoHome: ctx.paseoHome, logDir }), logDir, runId: next, waitMs: ctx.flowWaitMs, start: ctx.flowStart });
   if (!started.ok) {
-    const why = resumeRefusal(started.why);
+    const why = resumeRefusal(started.why, started.kind);
     write(ctx, s.id, [{ kind: "flow.fail", runId: next, why }]);
     return fail(why);
   }

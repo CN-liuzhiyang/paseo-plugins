@@ -22,6 +22,7 @@ import { checkEvents, eventsFile, readEvents } from "../runtime/events.mjs";
 import { claimFile, runIdProblem } from "../runtime/claim.mjs";
 import { claimResumption, readResumePoint, resumedFile, ResumeRefused } from "../runtime/resume.mjs";
 import { readRunState } from "../runtime/state.mjs";
+import { runStatus } from "../runtime/status.mjs";
 import { pointPrint, pointProblems } from "../runtime/resume-point.mjs";
 import { parseResumeArgs, resumeRun } from "../runtime/orch.mjs";
 import { loadRoster, ROLES_DIR } from "../runtime/roster.mjs";
@@ -78,6 +79,16 @@ function eventsOf(result) {
 }
 const runEnd = (events) => events.find((e) => e.kind === "run.end");
 const filesIn = (dir) => readdirSync(path.join(dir, "runs")).sort();
+
+test("CLI refusal kind survives the claim and status for a detached reader", async () => {
+  const dir = await tmp("refusal-kind");
+  const error = await run(process.execPath, [ORCH, "resume", "missing", "--run-id", "reader"], {
+    env: { ...process.env, ORCH_LOG_DIR: dir },
+  }).then(() => assert.fail("expected refusal"), (error) => error);
+  assert.equal(error.code, 2);
+  assert.equal(JSON.parse(error.stdout).kind, "resume-refused");
+  assert.equal(runStatus({ dir, runId: "reader" }).refusedKind, "resume-refused");
+});
 
 /** A point for rs-part-two. */
 const TWO = (dir, from = "从第二段接着", spends = "nothing") => ({ flow: "rs-part-two", input: { dir }, from, spends });
@@ -318,11 +329,13 @@ test("resume: a stop is carried on once; the second try is refused, spends nothi
   assert.deepEqual(before, ["first.claim", "first.jsonl", "first.resumed", "taker.claim", "taker.jsonl"]);
   const refused = await resume(dir, "first").then(() => assert.fail("a second resume ran"), (error) => error);
   assert.ok(refused instanceof ResumeRefused, String(refused));
+  assert.equal(refused.kind, "resume-claimed");
   assert.match(refused.message, /was already carried on, as run taker: it ended as done/);
   assert.deepEqual(filesIn(dir), before, "a generated id is nobody's to look up: its claim is gone");
   // A caller's id keeps the reason with its claim, where whoever started the process looks.
   await assert.rejects(resume(dir, "first", ["--run-id", "asker"]), ResumeRefused);
   assert.match(JSON.parse(await readFile(claimFile(dir, "asker"), "utf8")).refused, /^ResumeRefused: .*already carried on/s);
+  assert.equal(JSON.parse(await readFile(claimFile(dir, "asker"), "utf8")).refusedKind, "resume-claimed");
   assert.equal(existsSync(eventsFile(dir, "asker")), false, "no run began");
   assert.equal(first.outcome, "done");
 });
@@ -396,6 +409,7 @@ test("resume --expect: what a person was shown is what is carried on; a point th
   const before = filesIn(dir);
   const changed = await resume(dir, "first", ["--run-id", "asker", "--expect", pointPrint(TWO(path.join(work, "elsewhere")))]).then(() => assert.fail("a point other than the shown one ran"), (error) => error);
   assert.ok(changed instanceof ResumeRefused, String(changed));
+  assert.equal(changed.kind, "resume-point-changed");
   assert.match(changed.message, /is not the one that was shown/);
   assert.equal(existsSync(resumedFile(dir, "first")), false, "the stop was not taken");
   assert.equal(existsSync(eventsFile(dir, "asker")), false, "no run began");
@@ -604,6 +618,7 @@ test("orch.mjs resume: prints the result like run, exits 0 when it ran and 2 whe
   const refused = await run(process.execPath, [ORCH, "resume", "cli-1"], { env }).then(() => assert.fail("expected exit 2"), (error) => error);
   assert.equal(refused.code, 2);
   assert.match(refused.stderr, /ResumeRefused: run cli-1 was already carried on, as run cli-2/);
+  assert.equal(JSON.parse(refused.stdout).kind, "resume-claimed");
   const noId = await run(process.execPath, [ORCH, "resume"], { env }).then(() => assert.fail("expected exit 2"), (error) => error);
   assert.equal(noId.code, 2);
   assert.match(noId.stderr, /Usage:[\s\S]*orch\.mjs resume <runId>/);

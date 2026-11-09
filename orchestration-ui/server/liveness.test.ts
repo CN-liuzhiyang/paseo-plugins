@@ -81,7 +81,7 @@ test("a claim gone quiet is a run that is lost, and the pid still being there do
   assert.equal(reused.status, "lost", "pids are reused");
   assert.deepEqual(reused.process, { pid: 4242, alive: false, gone: false });
   assert.match(reused.activity ?? "", /占位文件超过 2 分钟没有更新（pid 4242 还在，但 pid 可能已被复用）/);
-  assert.match(reused.hero?.title ?? "", /占位文件超过 2 分钟没有更新/);
+  assert.match(reused.hero?.title ?? "", /两分钟以上没有动静/);
 });
 
 test("a pid that is gone is proof of death, whatever the claim says", async () => {

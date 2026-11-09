@@ -62,7 +62,7 @@ export const STAGE_LOOK: Record<StageState, { mark: string; tone: Tone }> = {
 export const KIND_LOOK: Record<CallType, { label: string; tone: Tone; name: string }> = {
   ask: { label: "AI", tone: "accent", name: "agent 调用" },
   do: { label: "脚本", tone: "neutral", name: "脚本动作" },
-  gate: { label: "人闸", tone: "warning", name: "人闸" },
+  gate: { label: "批准", tone: "warning", name: "批准" },
   step: { label: "步骤", tone: "neutral", name: "步骤" },
 };
 

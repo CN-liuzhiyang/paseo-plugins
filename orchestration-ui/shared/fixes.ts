@@ -22,7 +22,8 @@ export function fixingText(fixing: { round: number; count: number }): string {
 
 /** How many times a finished call was sent back: 3 answers is 2. */
 export function fixRounds(call: CallState): number {
-  return call.end ? call.end.rounds - 1 : 0;
+  // An answer taken from an earlier run was not sent back again this time.
+  return call.end && !call.reused ? call.end.rounds - 1 : 0;
 }
 
 export interface Mark {
@@ -77,11 +78,11 @@ export function stoppedStep(run: RunState): { kind: "check" | "unknown"; label: 
   if (!stop?.step) return null;
   if (stop.kind === "check") {
     const asked = [...run.calls.values()].filter((call) => call.type === "ask" && call.name === stop.step).at(-1) ?? null;
-    return { kind: "check", label: asked?.title ?? stop.step, asked };
+    return { kind: "check", label: stop.title ?? asked?.title ?? stop.step, asked };
   }
   if (stop.kind === "unknown") {
-    // The runtime's sentence opens with the step's title in 「」; the event itself carries only the name.
-    return { kind: "unknown", label: /^「([^」]{1,40})」/.exec(stop.reason)?.[1] ?? stop.step, asked: null };
+    // Older events carried only the name and put the title in the sentence.
+    return { kind: "unknown", label: stop.title ?? /^「([^」]{1,40})」/.exec(stop.reason)?.[1] ?? stop.step, asked: null };
   }
   return null;
 }

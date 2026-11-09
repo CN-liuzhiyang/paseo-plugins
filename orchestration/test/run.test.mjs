@@ -227,7 +227,7 @@ test("$.phase / $.do / $.log / $.stop: stop inside a phase ends it cleanly and n
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one", kind: "flow", step: null });
+  assert.deepEqual(result.stop, { reason: "nothing to do", phase: "one", kind: "flow", step: null, title: null });
   assert.deepEqual(result.value, { partial: true });
   const events = eventsOf(result);
   assert.deepEqual(kinds(events), ["run.start", "log", "call.start:c1", "call.end:c1", "phase.start:one", "phase.end:one", "wake", "run.end"]);
@@ -262,7 +262,7 @@ test("$.stop cannot be swallowed: caught and returned, the run is still stopped"
   });
   const result = await run(f, { executor: fakeExecutor() });
   assert.equal(result.outcome, "stopped");
-  assert.deepEqual(result.stop, { reason: "first reason", phase: "one", kind: "flow", step: null });
+  assert.deepEqual(result.stop, { reason: "first reason", phase: "one", kind: "flow", step: null, title: null });
   assert.deepEqual(result.value, { partial: 1 });
   const events = eventsOf(result);
   assert.deepEqual(events.find((e) => e.kind === "phase.end").ok, true);
@@ -1302,7 +1302,7 @@ test("the committed committee fixture conforms to the contract", async () => {
 
 test("a run that stops says why in a word: the flow's own $.stop is kind flow, with no step", async () => {
   const result = await run(flow({ name: "stop-kind", description: "d", phases: [], inputs: {}, grants: [], run: (_, $) => $.stop("because", { n: 1 }) }), { executor: fakeExecutor() });
-  assert.deepEqual(result.stop, { reason: "because", phase: null, kind: "flow", step: null });
+  assert.deepEqual(result.stop, { reason: "because", phase: null, kind: "flow", step: null, title: null });
   assert.deepEqual(checkEvents(readEvents(result.events), { strict: true, complete: true }), []);
   const old = readEvents(result.events);
   delete old.at(-1).stop.kind;

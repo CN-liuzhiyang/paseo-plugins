@@ -1,36 +1,16 @@
-import { ScrollView } from "@getpaseo/plugin/client/react-native";
+import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
+import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { formatTime, formatCost, RUN_STATUS_LABEL, shortId } from "../shared/format";
+import { markOf, rowSentence } from "../shared/bar";
+import { RUN_STATUS_LABEL, shortId } from "../shared/format";
+import { PAGE_SENTENCE_MAX, pageRuns, whenOf } from "../shared/page";
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import { useNow, useRunList } from "./data";
-import { LOG_DIR_SOURCE, RUN_LOOK, VISIT_LOOK } from "./looks";
-import { AffairTag } from "./affair";
 import { FlowList } from "./flow-list";
-import { Banner, Block, useUi } from "./ui";
+import { Banner, Card, FoldHead, useUi } from "./ui";
 
-// Every run, sorted by whether it needs you: a gate waiting or a run gone quiet first, then what
-// is running, then what ended. A row is the flow, the input that tells it apart, how far each
-// phase got, and the same sentence the detail view opens with.
-
-const LAUNCH = "node <paseo-plugins>/orchestration/runtime/orch.mjs run <flow.mjs> --<输入> ...";
-
-type Group = { key: string; title: string; runs: RunSummary[] };
-
-export function grouped(runs: RunSummary[]): Group[] {
-  const needs: RunSummary[] = [];
-  const live: RunSummary[] = [];
-  const ended: RunSummary[] = [];
-  for (const run of runs) {
-    if (run.needsYou) needs.push(run);
-    else if (run.status === "running" || run.status === "starting") live.push(run);
-    else ended.push(run);
-  }
-  return [
-    { key: "needs", title: "需要你处理", runs: needs },
-    { key: "live", title: "运行中", runs: live },
-    { key: "ended", title: "最近结束", runs: ended },
-  ].filter((group) => group.runs.length > 0);
-}
+// What ran lately, in the flow bar's four groups -- 等你, 在跑, 停了, 完成 -- one line each. What is old,
+// or was carried on by a later run, is folded under 更早的; the flows themselves are folded under 全部流程.
 
 export function RunList({
   host,
@@ -47,36 +27,39 @@ export function RunList({
   const { data, error } = useRunList();
   const live = data?.runs.some((run) => run.status === "running" || run.status === "starting") ?? false;
   const now = useNow(live);
+  const page = data ? pageRuns(data.runs, now) : null;
+  // One machine is not worth a line; a run that came from another one is.
+  const elsewhere = data?.runs.some((run) => run.host !== null) ?? false;
 
   return (
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
-      <View style={{ gap: 4 }}>
-        <Text style={ui.styles.title}>流程</Text>
-        <Text style={[ui.styles.small, { fontWeight: "700" }]}>{host}</Text>
-      </View>
-      <FlowList now={now} onOpen={onOpenFlow} onSettings={onSettings} />
-      <View style={{ gap: 4, marginTop: 8 }}>
-        <Text style={ui.styles.heading}>运行记录</Text>
-        {data?.logDir ? <Where info={data.logDir} total={data.total} shown={data.runs.length} onSettings={onSettings} /> : null}
+      <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
+        <View style={{ gap: 2 }}>
+          <Text style={ui.styles.title}>流程</Text>
+          {elsewhere ? <Text style={ui.styles.small}>{host}</Text> : null}
+        </View>
+        <Pressable accessibilityRole="button" accessibilityLabel="设置" onPress={onSettings} style={{ padding: 6 }}>
+          <Icon name="Settings" size={18} color={ui.theme.colors.foregroundMuted} />
+        </Pressable>
       </View>
       {error ? (
-        <Banner tone="danger" icon="TriangleAlert" title="刷新失败，下面是上一次读到的列表">
+        <Banner tone="danger" icon="TriangleAlert" title="刷新失败，下面是上一次读到的">
           <Text style={ui.styles.muted} selectable>
             {error}
           </Text>
         </Banner>
       ) : null}
       {!data ? (
-        error ? null : <Text style={ui.styles.muted}>正在读取流程记录……</Text>
+        error ? null : <Text style={ui.styles.muted}>正在读取……</Text>
       ) : data.state === "config" ? (
         <Banner tone="danger" icon="TriangleAlert" title="不知道流程记录在哪">
           <Text style={ui.styles.text} selectable>
             {data.detail}
           </Text>
-          <Text style={ui.styles.muted}>修好这个文件，或者在插件设置里直接填 logDir。</Text>
+          <Text style={ui.styles.muted}>修好这个文件，或者在设置里填 logDir。</Text>
         </Banner>
       ) : data.state === "unreadable" ? (
-        <Banner tone="danger" icon="TriangleAlert" title="流程记录的目录读不了">
+        <Banner tone="danger" icon="TriangleAlert" title="读不了流程记录的目录">
           <Text style={ui.styles.text} selectable>
             {data.detail}
           </Text>
@@ -84,55 +67,41 @@ export function RunList({
       ) : data.runs.length === 0 ? (
         <Empty info={data.logDir} missing={data.state === "missing"} />
       ) : (
-        <View
-          style={{
-            borderWidth: 1,
-            borderColor: ui.theme.colors.border,
-            borderRadius: 12,
-            overflow: "hidden",
-            backgroundColor: ui.theme.colors.surface1,
-          }}
-        >
-          {grouped(data.runs).map((group) => (
-            <View key={group.key}>
-              <View
-                style={{
-                  paddingHorizontal: 14,
-                  paddingVertical: 7,
-                  backgroundColor: group.key === "needs" ? ui.tint("warning", 0.12) : ui.theme.colors.surface2,
-                  borderBottomWidth: 1,
-                  borderBottomColor: ui.theme.colors.border,
-                }}
-              >
-                <Text style={[ui.styles.small, { fontWeight: "700", color: group.key === "needs" ? ui.tone("warning") : undefined }]}>
-                  {group.title} · {group.runs.length}
-                </Text>
-              </View>
-              {group.runs.map((run) => (
-                <Row key={run.runId} run={run} now={now} onOpen={onOpen} />
-              ))}
+        <>
+          {page!.groups.length === 0 ? <Text style={ui.styles.muted}>这几天没有跑过流程</Text> : null}
+          {page!.groups.map((group) => (
+            <View key={group.group} style={{ gap: 6 }}>
+              <Text style={[ui.styles.small, { fontWeight: "700", color: group.group === "waiting" ? ui.tone("warning") : undefined }]}>
+                {group.title} · {group.runs.length}
+              </Text>
+              <Card>
+                {group.runs.map((run, index) => (
+                  <Row key={run.runId} run={run} now={now} last={index === group.runs.length - 1} onOpen={onOpen} />
+                ))}
+              </Card>
             </View>
           ))}
-        </View>
+          <Older runs={page!.older} now={now} onOpen={onOpen} trimmed={data.total > data.runs.length ? data.total : null} />
+        </>
       )}
+      <FlowList now={now} onOpen={onOpenFlow} onSettings={onSettings} />
     </ScrollView>
   );
 }
 
-// The runs are files on one daemon's disk; the page's host line says whose.
-function Where({ info, total, shown, onSettings }: { info: LogDirInfo; total: number; shown: number; onSettings(): void }) {
-  const ui = useUi();
+function Older({ runs, now, trimmed, onOpen }: { runs: RunSummary[]; now: number; trimmed: number | null; onOpen(runId: string): void }) {
+  const [open, setOpen] = useState(false);
+  if (runs.length === 0 && trimmed === null) return null;
   return (
-    <View style={ui.styles.row}>
-      <Text style={ui.styles.small} selectable>
-        {info.runsDir}
-      </Text>
-      <Text style={ui.styles.small}>
-        （{LOG_DIR_SOURCE[info.source]}）· {total > shown ? `最近 ${shown} 次，共 ${total} 次` : `共 ${total} 次`}
-      </Text>
-      <Pressable accessibilityRole="button" onPress={onSettings}>
-        <Text style={[ui.styles.small, { color: ui.theme.colors.accent }]}>改位置</Text>
-      </Pressable>
+    <View style={{ gap: 6 }}>
+      <FoldHead label={`更早的 · ${runs.length}${trimmed === null ? "" : `（共 ${trimmed} 次，只列了最近的）`}`} open={open} onPress={() => setOpen(!open)} />
+      {open ? (
+        <Card>
+          {runs.map((run, index) => (
+            <Row key={run.runId} run={run} now={now} last={index === runs.length - 1} onOpen={onOpen} />
+          ))}
+        </Card>
+      ) : null}
     </View>
   );
 }
@@ -140,123 +109,60 @@ function Where({ info, total, shown, onSettings }: { info: LogDirInfo; total: nu
 function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean }) {
   const ui = useUi();
   return (
-    <Banner tone="neutral" icon="Inbox" title="还没有流程记录">
+    <Banner tone="neutral" icon="Inbox" title="还没跑过流程">
       <Text style={ui.styles.text}>
-        {missing
-          ? `目录 ${info?.runsDir ?? "runs"} 还不存在：还没有哪次流程在这里写过事件，或者 logDir 指错了地方。`
-          : `目录 ${info?.runsDir ?? "runs"} 是空的。`}
+        {missing ? "还没有哪次流程在这里留下过记录；流程要是在别处跑的，到设置里指一下位置。" : "让 agent 或在终端里跑一次，这里就有了。"}
       </Text>
-      <Text style={ui.styles.text}>
-        编排运行时每跑一次 flow，就在这个目录写一个 {"<runId>.jsonl"}。在终端里，或者让一个 agent 跑一次，例如：
-      </Text>
-      <Block text={LAUNCH} />
-      <Text style={ui.styles.muted}>
-        只有按运行事件契约（orchestration/EVENTS.md）写事件的运行时才会出现在这里；logDir 下按天写的审计日志不是流程记录。
-        flow 在另一台机器、或用另一个 logDir 跑的，要在插件设置里把位置指过去。
-      </Text>
+      {info ? <Text style={ui.styles.small}>{info.runsDir}</Text> : null}
     </Banner>
   );
 }
 
-/** One segment per declared phase; one plain bar in the run's color when there are none. */
-export function PhaseStrip({ strip, status }: { strip: RunSummary["strip"]; status: RunSummary["status"] }) {
-  const ui = useUi();
-  const c = ui.theme.colors;
-  if (!strip || strip.length === 0) {
-    const look = RUN_LOOK[status];
-    return (
-      <View style={{ flexDirection: "row", gap: 3 }}>
-        <View style={{ flex: 1, height: 6, borderRadius: 3, backgroundColor: strip ? ui.tone(look.tone) : c.border }} />
-      </View>
-    );
-  }
-  return (
-    <View style={{ flexDirection: "row", gap: 3 }} accessibilityLabel={strip.map((s) => `${s.title}：${VISIT_LOOK[s.state].label}`).join("，")}>
-      {strip.map((segment, index) => {
-        const look = VISIT_LOOK[segment.state];
-        const empty = segment.state === "pending" || segment.state === "skipped";
-        // Hosts may give "running" and "done" near-identical colors; a running segment is half-filled.
-        const running = segment.state === "running";
-        return (
-          <View
-            key={index}
-            style={{
-              flex: 1,
-              height: 6,
-              borderRadius: 3,
-              backgroundColor: empty ? "transparent" : running ? ui.tint(look.tone, 0.35) : ui.tone(look.tone),
-              borderWidth: empty || running ? 1 : 0,
-              borderStyle: segment.state === "skipped" ? "dashed" : "solid",
-              borderColor: running ? ui.tone(look.tone) : c.border,
-            }}
-          />
-        );
-      })}
-    </View>
-  );
+function sentence(run: RunSummary, now: number): string {
+  if (run.status === "unreadable") return run.problem ?? RUN_STATUS_LABEL.unreadable;
+  return run.card ? rowSentence(run.card, now, PAGE_SENTENCE_MAX) : (run.hero?.title ?? RUN_STATUS_LABEL[run.status]);
 }
 
-function sentence(run: RunSummary): string | null {
-  if (run.status === "unreadable") return run.problem;
-  return run.hero?.title ?? run.activity;
-}
-
-export function Row({ run, now, onOpen }: { run: RunSummary; now: number; onOpen(runId: string): void }) {
+/** The line: the flow and what tells this run from the others, then what it is doing or how it ended, then when. */
+export function Row({ run, now, last, onOpen }: { run: RunSummary; now: number; last: boolean; onOpen(runId: string): void }) {
   const ui = useUi();
   const c = ui.theme.colors;
-  const look = RUN_LOOK[run.status];
-  const tone = run.hero?.tone ?? look.tone;
-  // A note means the figure leaves something out (Codex, calls still open): it is a lower bound.
-  const cost = formatCost(run.costUsd, { estimated: run.costEstimated, unknown: run.costUnknown });
-  const when = run.startedAt ? formatTime(run.startedAt, now) : "—";
-  const label = (
-    <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1 }}>
-      <Text style={[ui.styles.strong, { flexShrink: 0 }]} numberOfLines={1}>
-        {run.flowName ?? "（不是流程记录）"}
-      </Text>
-      <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
-        {run.inputLabel ?? shortId(run.runId)}
-      </Text>
-      {run.affairLabel ? <AffairTag label={run.affairLabel} /> : null}
-    </View>
-  );
-  const said = (
-    <Text style={{ color: tone === "neutral" || tone === "success" ? c.foregroundMuted : ui.tone(tone), fontSize: 13 }} numberOfLines={2}>
-      {sentence(run) ?? RUN_STATUS_LABEL[run.status]}
-    </Text>
-  );
+  const tone = run.hero?.tone ?? (run.card ? markOf(run.card).tone : "danger");
+  const when = whenOf(run.startedAt, now) ?? "—";
   return (
     <Pressable
       accessibilityRole="button"
-      accessibilityLabel={`打开流程 ${run.flowName ?? run.runId}，${RUN_STATUS_LABEL[run.status]}`}
+      accessibilityLabel={`${run.flowName ?? run.runId}，${sentence(run, now)}`}
       onPress={() => onOpen(run.runId)}
       style={({ pressed }) => ({
-        flexDirection: ui.compact ? "column" : "row",
-        alignItems: ui.compact ? "stretch" : "center",
-        gap: ui.compact ? 6 : 14,
+        flexDirection: "row",
+        alignItems: "flex-start",
+        gap: 10,
         paddingHorizontal: 14,
-        paddingVertical: 11,
-        borderBottomWidth: 1,
+        paddingVertical: 10,
+        borderBottomWidth: last ? 0 : 1,
         borderBottomColor: c.border,
         backgroundColor: pressed ? c.surface2 : "transparent",
       })}
     >
-      <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start", flex: 1, minWidth: 0 }}>
-        <View style={{ width: 10, height: 10, borderRadius: 5, marginTop: 5, backgroundColor: ui.tone(tone) }} />
-        <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
-          {label}
-          {said}
+      <View style={{ width: 10, height: 10, borderRadius: 5, marginTop: 5, backgroundColor: ui.tone(tone) }} />
+      <View style={{ flex: 1, minWidth: 0, flexDirection: ui.compact ? "column" : "row", alignItems: ui.compact ? "stretch" : "baseline", gap: ui.compact ? 2 : 12 }}>
+        <View style={{ flexDirection: "row", alignItems: "baseline", gap: 8, flexShrink: 1 }}>
+          <Text style={[ui.styles.strong, { flexShrink: 0 }]} numberOfLines={1}>
+            {run.flowName ?? "（不是流程记录）"}
+          </Text>
+          <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
+            {run.affairLabel ?? run.inputLabel ?? shortId(run.runId)}
+          </Text>
         </View>
-      </View>
-      <View style={{ width: ui.compact ? undefined : 180, paddingLeft: ui.compact ? 20 : 0 }}>
-        <PhaseStrip strip={run.strip} status={run.status} />
-      </View>
-      <View style={{ flexDirection: "row", gap: 14, paddingLeft: ui.compact ? 20 : 0, justifyContent: ui.compact ? "flex-start" : "flex-end" }}>
-        <Text style={[ui.styles.small, { width: ui.compact ? undefined : 64, textAlign: ui.compact ? "left" : "right" }]}>{cost}</Text>
-        <Text style={[ui.styles.small, { width: ui.compact ? undefined : 92, textAlign: ui.compact ? "left" : "right" }]}>
-          {when}
+        <Text
+          style={{ flex: ui.compact ? undefined : 1, color: tone === "neutral" || tone === "success" ? c.foregroundMuted : ui.tone(tone), fontSize: 13 }}
+          numberOfLines={1}
+        >
+          {sentence(run, now)}
         </Text>
       </View>
+      <Text style={[ui.styles.small, { marginTop: 2 }]}>{when}</Text>
     </Pressable>
   );
 }

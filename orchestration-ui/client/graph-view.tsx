@@ -1,6 +1,7 @@
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Platform, Pressable, Text, View, type ScrollView as NativeScrollView } from "react-native";
+import { replayedStage, REUSED_LEAD, type ReusedLead } from "../shared/detail";
 import { callMarks, fixingOf, fixingText, REUSED } from "../shared/fixes";
 import { formatShort } from "../shared/format";
 import {
@@ -49,10 +50,18 @@ export interface GraphViewProps {
   selected: string;
   /** Scroll the selection into view. Off while the selection is only the default ending: the shape matters more then. */
   follow: boolean;
+  /** The front stages that only replayed an earlier run: one folded line until asked for. */
+  lead: ReusedLead | null;
+  /** The key under the picture, off until asked for. */
+  legend: boolean;
   onSelect(key: string): void;
 }
 
-export function GraphView({ graph, run, status, selected, follow, onSelect }: GraphViewProps) {
+export function GraphView({ graph, run, status, selected, follow, lead, legend, onSelect }: GraphViewProps) {
+  const [leadOpen, setLeadOpen] = useState(false);
+  // Looking at a step that sits in the folded part opens it.
+  const inside = lead !== null && (graph.pieceOf.get(selected) ?? 0) >= 1 && (graph.pieceOf.get(selected) ?? 0) <= lead.pieces;
+  const showLead = lead === null || leadOpen || inside;
   const scroll = useRef<NativeScrollView>(null);
   const boxes = useRef(new Map<number, { x: number; width: number }>());
   const view = useRef({ width: 0, x: 0 });
@@ -90,6 +99,12 @@ export function GraphView({ graph, run, status, selected, follow, onSelect }: Gr
   const ctx = useMemo<Ctx>(() => ({ run, status, clock: graph.clock, selected, onSelect }), [run, status, graph.clock, selected, onSelect]);
   const parts: ReactNode[] = [];
   graph.pieces.forEach((piece, index) => {
+    if (lead !== null && index >= 1 && index <= lead.pieces) {
+      if (index === 1) {
+        parts.push(<Edge key="e-lead" />, <LeadPill key="lead" steps={lead.steps} open={showLead} onPress={() => setLeadOpen(!leadOpen)} />);
+      }
+      if (!showLead) return;
+    }
     if (index > 0) parts.push(<Edge key={`e${index}`} dashed={piece.kind === "ghost"} />);
     parts.push(
       <View
@@ -123,7 +138,7 @@ export function GraphView({ graph, run, status, selected, follow, onSelect }: Gr
         >
           <View style={{ flexDirection: "row", alignItems: "center" }}>{parts}</View>
         </ScrollView>
-        <Legend live={live} />
+        {legend ? <Legend live={live} /> : null}
       </View>
     </GraphContext.Provider>
   );
@@ -262,9 +277,11 @@ function StageView({ stage, inLoop }: { stage: Stage; inLoop: boolean }) {
   const tone = FRAME_TONE[stage.state];
   const look = VISIT_LOOK[stage.state];
   const isSelected = selected === visit.key;
+  const replayed = replayedStage(stage);
   return (
     <View
       style={{
+        opacity: replayed ? 0.6 : 1,
         borderWidth: isSelected ? 2 : 1.5,
         borderStyle: stage.state === "running" && !isSelected ? "dashed" : "solid",
         borderColor: isSelected ? c.foreground : tone ? ui.tone(tone) : c.border,
@@ -293,7 +310,7 @@ function StageView({ stage, inLoop }: { stage: Stage; inLoop: boolean }) {
           {visit.round > 1 && !inLoop ? ` · 第 ${visit.round} 次` : ""}
         </Text>
         <Text style={{ color: c.foregroundMuted, fontSize: 12, marginLeft: "auto", paddingLeft: 8 }}>
-          {stage.state === "done" ? formatShort(stage.durationMs) : `${look.label} · ${formatShort(stage.durationMs)}`}
+          {replayed ? "沿用" : stage.state === "done" ? formatShort(stage.durationMs) : `${look.label} · ${formatShort(stage.durationMs)}`}
         </Text>
       </Pressable>
       {body}
@@ -552,6 +569,35 @@ function Edge({ dashed = false }: { dashed?: boolean }) {
   );
 }
 
+/** The front of a run that only replayed an earlier one, as one line; pressing it opens and closes the stages. */
+function LeadPill({ steps, open, onPress }: { steps: number; open: boolean; onPress(): void }) {
+  const ui = useUi();
+  const c = ui.theme.colors;
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ expanded: open }}
+      accessibilityLabel={REUSED_LEAD(steps)}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 5,
+        borderRadius: 999,
+        borderWidth: 1.5,
+        borderStyle: "dashed",
+        borderColor: c.border,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+        opacity: pressed ? 0.8 : 1,
+      })}
+    >
+      <Icon name={open ? "ChevronDown" : "ChevronRight"} size={14} color={c.foregroundMuted} />
+      <Text style={{ color: c.foregroundMuted, fontSize: 13, fontWeight: "600" }}>{REUSED_LEAD(steps)}</Text>
+    </Pressable>
+  );
+}
+
 function Dot({ color }: { color: string }) {
   return <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />;
 }
@@ -573,7 +619,7 @@ function Legend({ live }: { live: boolean }) {
           <Text style={ui.styles.small}>虚线框：还在跑</Text>
         </View>
       ) : null}
-      {item("warning", "等人 / 没有结束记录")}
+      {item("warning", "等你 / 没有结束记录")}
       {item("danger", "失败")}
       <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
         <Icon name="ShieldAlert" size={12} color={ui.tone("warning")} />

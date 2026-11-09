@@ -79,7 +79,7 @@ export interface RunEnd {
   outcome: Outcome;
   value: unknown;
   /** `kind` and `step` are absent in older files: null, and the reader falls back to the reason. */
-  stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null } | null;
+  stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null; title?: string | null } | null;
   error: ErrorInfo | null;
   durationMs: number | null;
   cost: { totalUsd: number | null; agentCount: number | null; partial: string | null; unknown?: boolean; estimated?: boolean } | null;
@@ -674,7 +674,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         problem(run, `run.end 的结局「${outcome ?? ""}」不认识，按失败显示`);
       }
       const stop = isObj(raw.stop)
-        ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step) }
+        ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step), title: str(raw.stop.title) }
         : null;
       const cost = isObj(raw.cost)
         ? { totalUsd: num(raw.cost.totalUsd), agentCount: num(raw.cost.agentCount), partial: str(raw.cost.partial), unknown: raw.cost.unknown === true, estimated: raw.cost.estimated === true }
@@ -829,14 +829,15 @@ export function providerFamily(provider: string | null | undefined): string | nu
 /** Historical Codex events with no price metadata used zero for uncounted cost. */
 export function costUncounted(call: CallState): boolean {
   const cost = call.end?.cost?.agentTotal ?? call.end?.cost;
-  return call.end !== null && providerFamily(call.ask?.provider) === "codex" && (cost?.usd ?? 0) === 0 && !cost?.source && !cost?.scope;
+  return call.end !== null && call.reused === null && providerFamily(call.ask?.provider) === "codex" && (cost?.usd ?? 0) === 0 && !cost?.source && !cost?.scope;
 }
 
 /** What the calls ended so far cost; the only figure there is before run.end. */
 export function costSoFar(run: RunState): { usd: number; uncounted: number; estimated?: boolean } {
   const agents = new Map<string, { usd: number; unknown: boolean; estimated: boolean }>();
   for (const call of run.calls.values()) {
-    if (!call.end || (call.type !== "ask" && !call.agentId)) continue;
+    // An answer taken from an earlier run cost nothing this time, and is no missing figure either.
+    if (!call.end || call.reused || (call.type !== "ask" && !call.agentId)) continue;
     const cost = call.end.cost;
     const key = call.agentId ?? call.callId;
     const previous = agents.get(key);

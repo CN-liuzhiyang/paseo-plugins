@@ -171,12 +171,28 @@ test("stopping on a check that never passed names the step and the rounds; the f
   assert.equal(top.tone, "warning");
   assert.ok(!top.title.includes("$.stop") && !(top.subtitle ?? "").includes("$.stop"));
 
-  // A file from before `kind` was written, and a stop the flow asked for, keep the old words.
+  // A file from before `kind` was written, and a stop the flow asked for, say it was a stop and nothing else:
+  // no developer words, no second sentence.
   for (const stop of [{ reason: "patch：核对 3 轮还不过", phase: null }, { reason: "不想继续了", phase: null, kind: "flow", step: null }]) {
     const run = foldEvents(stream(stop));
     assert.equal(stopLine(run), null);
-    assert.ok(hero(run, "stopped", Date.now()).subtitle?.includes("$.stop"));
+    const top = hero(run, "stopped", Date.now());
+    assert.equal(top.kicker, "停了");
+    assert.equal(top.subtitle, null);
+    assert.ok(!top.title.includes("$.stop"));
   }
+});
+
+test("stop titles are read directly, including when no call events remain", () => {
+  const ended = (stop: Record<string, unknown>) => foldEvents([events[0]!, {
+    v: 1, seq: 1, ts: "2026-10-30T09:00:03.000Z", runId: "r", kind: "run.end",
+    outcome: "stopped", value: null, summary: null, stop, error: null, durationMs: 3, cost: null, caveats: [],
+  }]);
+  const flow = ended({ kind: "flow", reason: "需要处理", title: "更新副本" });
+  assert.equal(flow.end!.stop!.title, "更新副本");
+  assert.equal(hero(flow, "stopped", Date.now()).title, "停在「更新副本」");
+  const unknown = ended({ kind: "unknown", step: "publish", reason: "措辞已变", title: "发布结果" });
+  assert.equal(stopLine(unknown), "要你确认「发布结果」做没做");
 });
 
 test("a step that may or may not have happened is red, asks the person, and is a row of its own in the bar", () => {

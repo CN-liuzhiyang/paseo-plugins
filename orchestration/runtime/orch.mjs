@@ -342,6 +342,7 @@ export async function resumeRun(previous, argv, { logDir = configuredLogDir(), r
     if (expect !== undefined && expect !== print) {
       throw new ResumeRefused(
         `the resume point of run ${previous} is not the one that was shown: it now names flow "${point.flow}" (${JSON.stringify(point.from)}) with a flow or input other than the one expected. Look at the run again before carrying it on`,
+        "resume-point-changed",
       );
     }
     // The run is one of a line that shares a journal. A step to do again is looked for before the stop is taken: a name that is not there
@@ -606,6 +607,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(result.ok ? 0 : 1);
   } catch (error) {
     // Refused before run.start: nothing ran, nothing was spent, no events file.
+    print({ ok: false, kind: error.kind ?? "run-refused", message: error.message });
     console.error(`${error.name}: ${error.message}`);
     if (error.name === "UsageError") console.error(`\n${USAGE}`);
     process.exit(2);

@@ -36,8 +36,8 @@ test("card: a gate waiting says so, with who carries it and since when", () => {
   assert.equal(status, "running");
   const card = cardOf("r1", run, status, now)!;
   assert.equal(card.tone, "warning");
-  assert.equal(card.kicker, "需要你处理");
-  assert.match(card.title, /^等你审批：/);
+  assert.equal(card.kicker, "等你批准");
+  assert.equal(card.title, "批准发布 #4711 的文档修订");
   assert.equal(card.gate?.callId, "c11");
   assert.equal(card.gate?.title, "批准发布 #4711 的文档修订");
   assert.ok(card.gate?.since);
@@ -59,7 +59,7 @@ test("card: a finished run carries its outcome, duration and whole cost", () => 
   assert.equal(card.costEstimated, false, "old totals remain numeric without an estimate marker");
   assert.equal(card.durationMs, 209910);
   assert.match(card.costNote ?? "", /Codex/);
-  assert.match(card.kicker, /^完成 · 用时/);
+  assert.equal(card.kicker, "完成");
 });
 
 test("card: failed and stopped runs keep their tone; a run without run.start has no card", () => {

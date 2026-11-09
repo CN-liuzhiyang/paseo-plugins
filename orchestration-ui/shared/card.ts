@@ -92,7 +92,7 @@ export function cardOf(
   if (end) {
     costUsd = cost.usd;
     costNote = cost.note;
-  } else if ([...run.calls.values()].some((call) => call.type === "ask")) {
+  } else if ([...run.calls.values()].some((call) => call.type === "ask" && !call.reused)) {
     costUsd = cost.usd;
     costNote = cost.note;
   } else {

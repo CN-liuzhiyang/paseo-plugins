@@ -368,3 +368,31 @@ export function Section({ title, trailing, children }: { title: string; trailing
     </View>
   );
 }
+
+export function Card({ children }: { children: ReactNode }) {
+  const ui = useUi();
+  return (
+    <View
+      style={{
+        borderWidth: 1,
+        borderColor: ui.theme.colors.border,
+        borderRadius: 12,
+        overflow: "hidden",
+        backgroundColor: ui.theme.colors.surface1,
+      }}
+    >
+      {children}
+    </View>
+  );
+}
+
+/** A folded heading: the words, and which way it opens. */
+export function FoldHead({ label, open, onPress }: { label: string; open: boolean; onPress(): void }) {
+  const ui = useUi();
+  return (
+    <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} onPress={onPress} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+      <Icon name={open ? "ChevronDown" : "ChevronRight"} size={15} color={ui.theme.colors.foregroundMuted} />
+      <Text style={[ui.styles.small, { fontWeight: "700" }]}>{label}</Text>
+    </Pressable>
+  );
+}

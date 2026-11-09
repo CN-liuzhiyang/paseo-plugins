@@ -11,8 +11,9 @@ import {
   formatCost,
   GATE_OUTCOME_LABEL,
 } from "../shared/format";
+import { replayedStage } from "../shared/detail";
 import { callMarks, pathLabel, returnedFor, REUSED, stopLine } from "../shared/fixes";
-import { callTitle, headline, nodeState, shortModel, START, END, visitState, type Graph, type GraphVisit } from "../shared/graph";
+import { callTitle, headline, hero, nodeState, shortModel, START, END, visitState, type Graph, type GraphVisit } from "../shared/graph";
 import {
   caveatsOf,
   runCost,
@@ -159,19 +160,18 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
   const start = run.start;
   const caveats = caveatsOf(run);
   if (!start) return <Empty />;
+  // As run.end counts them: calls that had an agent this time (one agent may serve several rounds).
+  const agents = run.end?.cost?.agentCount ?? [...run.calls.values()].filter((call) => call.agentId !== null && !call.reused).length;
   return (
     <View style={{ gap: 16 }}>
-      <Head title="这次流程">
-        <Meta text={[start.flow.name, start.flow.description].filter(Boolean).join(" · ")} />
-      </Head>
+      <Head title={start.flow.name} />
       <Sec label="输入">
         <Box>
           <Value value={start.input} schema={start.flow.inputs} />
         </Box>
       </Sec>
       {caveats.length > 0 ? (
-        <Sec label={`没被机械强制的约束（${caveats.length}，整次流程只说这一遍）`}>
-          <Text style={ui.styles.small}>这些只写在 prompt 里、或靠 agent 自觉，运行时没法保证。图上带盾牌标记的节点受它们影响。</Text>
+        <Fold label={`没被强制的约束 · ${caveats.length}`} hint="只靠 prompt 或 agent 自觉，运行时保证不了">
           {caveats.map((text) => (
             <Box key={text} tone="warning">
               <Text style={ui.styles.text} selectable>
@@ -179,12 +179,13 @@ function StartDrawer({ run, now, proc, runId }: DrawerProps) {
               </Text>
             </Box>
           ))}
-        </Sec>
+        </Fold>
       ) : null}
       <Logs run={run} now={now} />
       <Fold label="流程详情（证据）">
         <View style={[ui.styles.card, { gap: 6 }]}>
           <Fact label="开始">{formatTime(run.startedAt, now)}</Fact>
+          <Fact label="agent">{`${agents} 个`}</Fact>
           <Fact label="发起方">
             {start.caller ? <AgentRef agentId={start.caller} remote={false} /> : <Text style={ui.styles.text}>终端（没有发起方 agent）</Text>}
           </Fact>
@@ -255,21 +256,22 @@ function Logs({ run, now }: { run: RunState; now: number }) {
   );
 }
 
-const OUTCOME_WORD = { done: "完成", stopped: "停下", failed: "失败", timeout: "超时" } as const;
+const OUTCOME_WORD = { done: "完成", stopped: "停了", failed: "出错了", timeout: "出错了" } as const;
 
+/** The ending says the reason once, in full; the sentence on top of the page is the short one. */
 function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
   const ui = useUi();
   const end = run.end;
   if (!end) {
     return (
       <View style={{ gap: 12 }}>
-        <Head title="还没有结局" />
+        <Head title="还没有结果" />
         <Text style={ui.styles.text}>
           {status === "lost"
             ? processGone(proc)
-              ? "运行进程已经不在了，不会再写结局。"
-              : "很久没有新事件，也没有结局：运行进程可能已经退出。一有新事件这里会自动恢复。"
-            : "流程结束时这里给出结果。"}
+              ? "进程已经没了，不会再有结果。"
+              : "很久没有动静，进程可能已经退出。有新动静这里会自动恢复。"
+            : "跑完这里会有结果。"}
         </Text>
         <Box>
           <Text style={ui.styles.muted}>{activity(run, status, now, { proc, staleMs })}</Text>
@@ -283,70 +285,53 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
   // A stop the flow did not choose (an answer that never passed, a step with no record of whether it happened).
   const line = stopLine(run);
   const unknown = end.stop?.kind === "unknown";
+  const said = hero(run, status, now, { proc, staleMs }).title;
+  // What the top of the page already says is not said again.
+  const reason = end.stop?.reason && !said.includes(end.stop.reason) && end.summary !== end.stop.reason ? end.stop.reason : null;
+  const error = end.error && !said.includes(end.error.message) ? end.error : null;
+  const costNotes = [cost?.partial ? cost.partial : null, hasUncountedCodex(run) && !cost?.partial?.includes("Codex") ? "Codex agent 的花费读出来是 0，没有计入" : null].filter(Boolean) as string[];
   return (
     <View style={{ gap: 16 }}>
-      <Head title={`结局：${OUTCOME_WORD[end.outcome]}`}>
-        <Meta
-          text={[
-            `用时 ${formatDuration(end.durationMs)}`,
-            cost ? `${formatCost(cost.totalUsd, cost)}${cost.agentCount != null ? `（${cost.agentCount} 个 agent）` : ""}` : "费用未知",
-          ].join(" · ")}
-        />
+      <Head title={OUTCOME_WORD[end.outcome]}>
+        {end.outcome === "stopped" && end.stop?.phase ? <Meta text={`在「${phaseTitle(run, end.stop.phase)}」`} /> : null}
       </Head>
-      {end.summary ? (
-        <Sec label="一句话结果（flow 给出）">
-          <Box>
-            <Text style={ui.styles.text} selectable>
-              {end.summary}
-            </Text>
-          </Box>
-        </Sec>
-      ) : null}
       {end.outcome === "stopped" && line ? (
-        <Sec label={unknown ? "要你确认" : "核对没过"}>
-          <Box tone={unknown ? "danger" : "warning"}>
-            <Text style={ui.styles.text} selectable>
-              {line}
-            </Text>
-          </Box>
-          <Text style={ui.styles.small}>
-            {unknown
-              ? "这一步开始过，没有留下结果，不知道有没有做成。去外面看一下，再告诉运行时做了没有，然后接着跑。"
-              : "答案打回去改了几轮，还是没通过核对，流程没有接住，就停下了。"}
-          </Text>
-        </Sec>
-      ) : end.outcome === "stopped" ? (
-        <Sec label={end.stop?.phase ? `在「${phaseTitle(run, end.stop.phase)}」停下` : "在阶段之外停下"}>
-          <Box tone="warning">
-            <Text style={ui.styles.text} selectable>
-              {end.stop?.reason || "flow 没有说明为什么停下。"}
-            </Text>
-          </Box>
-          <Text style={ui.styles.small}>停下是 flow 主动的决定（$.stop），不是出错。之后的阶段没有进入。</Text>
-        </Sec>
+        <Text style={ui.styles.muted}>
+          {unknown
+            ? "这一步开始过，没有留下结果，不知道有没有做成。去外面看一下，告诉运行时做了没有，再接着跑。"
+            : "答案打回去改了几轮，还是没通过核对，就停下了。"}
+        </Text>
+      ) : reason ? (
+        // The sentence on top is the short one; this is the whole of it, for whoever has to act on it.
+        <Fold label="原因全文">
+          <Block text={reason} />
+        </Fold>
       ) : null}
-      {end.error ? (
-        <Sec label="错误">
-          <Box tone="danger">
-            <Text style={ui.styles.text} selectable>
-              {end.error.name}：{end.error.message}
-            </Text>
-          </Box>
-        </Sec>
+      {error ? (
+        <Box tone="danger">
+          <Text style={ui.styles.text} selectable>
+            {error.name}：{error.message}
+          </Text>
+        </Box>
       ) : null}
       {end.value != null && !line ? (
-        <Sec label={end.outcome === "stopped" ? "停下时给出的结果" : "flow 返回的结果"}>
+        <Fold label="返回的结果">
           <Box>
             <Value value={end.value} />
           </Box>
-        </Sec>
+        </Fold>
       ) : null}
-      {cost?.partial ? <Text style={ui.styles.small}>成本说明：{cost.partial}</Text> : null}
-      {hasUncountedCodex(run) && !cost?.partial?.includes("Codex") ? (
-        <Text style={ui.styles.small}>Codex agent 的成本读出来是 0，没有计入。</Text>
+      {costNotes.length > 0 ? (
+        <Fold label="花费说明">
+          {costNotes.map((note) => (
+            <Text key={note} style={ui.styles.small}>
+              {note}
+            </Text>
+          ))}
+        </Fold>
       ) : null}
       {line && end.stop?.reason ? (
-        <Fold label="停下的原文（证据）">
+        <Fold label="原因全文">
           <Block text={end.stop.reason} />
         </Fold>
       ) : null}
@@ -394,13 +379,14 @@ function VisitDrawer({ run, status, graph, visit, onSelect }: DrawerProps & { vi
   const state = visitState(visit, run, status);
   const look = VISIT_LOOK[state];
   const cost = visit.calls.reduce((sum, call) => sum + (call.end?.cost?.usd ?? 0), 0);
+  const replayed = graph.pieces.some((piece) => piece.kind === "column" && piece.stages.some((stage) => stage.visit === visit && replayedStage(stage)));
   const unknownCost = visit.calls.some((call) => call.end && (call.type === "ask" || call.agentId) && (call.end.cost?.usd == null || call.end.cost.incomplete || costUncounted(call)));
   const estimatedCost = visit.calls.some((call) => call.end?.cost?.source === "local-estimate");
   return (
     <View style={{ gap: 16 }}>
       <Head title={`${visit.title}${visit.round > 1 ? ` · 第 ${visit.round} 次` : ""}`}>
         <Pill tone={look.tone} label={look.label} />
-        <Meta text={`阶段 · ${formatDuration((visit.t1 ?? graph.clock) - visit.t0)} · ${formatCost(cost, { unknown: unknownCost, estimated: estimatedCost })}`} />
+        <Meta text={replayed ? REUSED : `阶段 · ${formatDuration((visit.t1 ?? graph.clock) - visit.t0)} · ${formatCost(cost, { unknown: unknownCost, estimated: estimatedCost })}`} />
       </Head>
       <Sec label="这一段做了">
         {visit.calls.length === 0 ? <Text style={ui.styles.muted}>没有调用（阶段里只跑了脚本自己的代码）。</Text> : null}
@@ -619,7 +605,9 @@ function AskBody({
             ["模型", `${ask.provider}${ask.thinking ? ` · thinking ${ask.thinking}` : ""}`],
             [
               "花费",
-              cost?.usd == null
+              call.reused
+                ? "沿用，这次没花钱"
+                : cost?.usd == null
                 ? call.end
                   ? "费用未知"
                   : state === "running"
@@ -701,13 +689,13 @@ function GateBody({ call, state, remote }: { call: CallState; state: ReturnType<
       {state === "waiting" ? (
         <Box tone="warning">
           <Text style={ui.styles.text}>
-            <Text style={{ fontWeight: "700" }}>你要做的：</Text>在 Paseo 的权限卡片上批准或拒绝。这里只读，不能批。
+            <Text style={{ fontWeight: "700" }}>要你批：</Text>到 Paseo 的批准卡片上批或拒，这里只能看。
           </Text>
-          {gate?.timeout ? <Text style={ui.styles.small}>{gate.timeout} 内没人处理，人闸按过期拒绝。</Text> : null}
+          {gate?.timeout ? <Text style={ui.styles.small}>{gate.timeout} 内不批就按拒绝算。</Text> : null}
           {call.agentId ? (
-            <OpenAgent agentId={call.agentId} remote={remote} label="在 Paseo 打开审批卡片" primary wide />
+            <OpenAgent agentId={call.agentId} remote={remote} label="去批准" primary wide />
           ) : (
-            <Text style={ui.styles.small}>承载审批卡片的 agent 还没起来。</Text>
+            <Text style={ui.styles.small}>批准的卡片还没起来。</Text>
           )}
         </Box>
       ) : null}
@@ -715,7 +703,7 @@ function GateBody({ call, state, remote }: { call: CallState; state: ReturnType<
       {call.end && !call.end.ok ? (
         <Box tone="danger">
           <Text style={ui.styles.text} selectable>
-            人闸自己出了错：{call.end.error ? `${call.end.error.name}：${call.end.error.message}` : "没有错误说明"}
+            批准这一步出错了：{call.end.error ? `${call.end.error.name}：${call.end.error.message}` : "没有错误说明"}
           </Text>
         </Box>
       ) : null}
@@ -740,7 +728,7 @@ function GateBody({ call, state, remote }: { call: CallState; state: ReturnType<
         </Sec>
       ) : null}
       {gate?.brief ? (
-        <Sec label="给审批人的说明">
+        <Sec label="要批的是什么">
           <Box>
             <Text style={ui.styles.text} selectable>
               {gate.brief}
@@ -748,7 +736,7 @@ function GateBody({ call, state, remote }: { call: CallState; state: ReturnType<
           </Box>
         </Sec>
       ) : null}
-      {call.agentId && state !== "waiting" ? <OpenAgent agentId={call.agentId} remote={remote} label="在 Paseo 中打开承载审批的 agent" wide /> : null}
+      {call.agentId && state !== "waiting" ? <OpenAgent agentId={call.agentId} remote={remote} label="看批准卡片的对话" wide /> : null}
       <Sec label="证据">
         {gate?.content != null ? (
           <Fold label="待批原文" hint={gate.sha256 ? `sha256 ${gate.sha256.slice(0, 12)}…` : undefined}>

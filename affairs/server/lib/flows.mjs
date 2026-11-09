@@ -85,7 +85,7 @@ export function sameSpotAgain(runs, latest, st) {
   return Boolean(prev) && (prev.resume?.print ?? "") === print;
 }
 export const SAME_SPOT_TEXT = "刚接着跑过一次，同一处又停了";
-export const resumeRefusal = (why) => /not the one that was shown/.test(why) ? "接着做的位置变了，请刷新后再点一次。" : /already carried on|being carried on/.test(why) ? "这次停下已经接着跑过了，请看最新的一次。" : `没接上：${why}`;
+export const resumeRefusal = (why, kind) => kind === "resume-point-changed" ? "接着做的位置变了，请刷新后再点一次。" : kind === "resume-claimed" ? "这次停下已经接着跑过了，请看最新的一次。" : kind === "line-busy" ? "这条流程还有步骤没结束，请等它结束后再接着跑。" : `没接上：${why}`;
 
 export const flowMessageId = (runId) => `affair-flow:${runId}`;
 
@@ -166,7 +166,7 @@ export function prepareInput(file, args, { timeoutMs = 120_000, node = process.e
  * Starts the runtime for a run, detached from this process and from the session that asked, and waits a few seconds to see
  * whether it was turned away at once (a bad input is refused before anything is spent, and says why in the run's claim).
  * `start` is how a process is made (tests put their own).
- * @returns {Promise<{ ok: true, pid: number | undefined } | { ok: false, why: string }>}
+ * @returns {Promise<{ ok: true, pid: number | undefined } | { ok: false, why: string, kind?: string | null }>}
  */
 export async function startRun({ node = process.env.AFFAIR_NODE || "node", args, cwd, env, logDir, runId, waitMs = 8000, start = spawn }) {
   let exited = null;
@@ -182,13 +182,15 @@ export async function startRun({ node = process.env.AFFAIR_NODE || "node", args,
   if (existsSync(events)) return { ok: true, pid: child.pid };
   if (exited !== null && exited !== 0) {
     let why = `退出码 ${exited}`;
+    let kind = null;
     try {
-      const refused = JSON.parse(readFileSync(claimFile(logDir, runId), "utf8")).refused;
+      const { refused, refusedKind } = JSON.parse(readFileSync(claimFile(logDir, runId), "utf8"));
+      kind = refusedKind ?? null;
       if (typeof refused === "string" && refused) why = refused.split(/\r?\n/)[0].slice(0, 300);
     } catch {
       // no claim written: the exit code is all there is
     }
-    return { ok: false, why };
+    return { ok: false, why, kind };
   }
   // Neither events nor an exit within the wait: it is slow to load, not refused; the log has its id.
   return { ok: true, pid: child.pid };
@@ -314,7 +316,7 @@ export function endWords(st) {
   const tail = cost ? ` · ${cost}` : "";
   if (st.state === "lost") return ["没了下文，不知道做到哪了", true];
   if (st.outcome === "done") return [`做完了${st.summary ? `：${clip(st.summary, 50)}` : ""}${tail}`, false];
-  if (st.outcome === "stopped") return [`停了${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
+  if (st.outcome === "stopped") return [`${st.stop?.title ? `停在「${clip(st.stop.title, 30)}」` : "停了"}${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
   if (st.outcome === "timeout") return [`超时停了${tail}`, true];
   return [`出错停了${errorWords(st.error)}${tail}`, true];
 }

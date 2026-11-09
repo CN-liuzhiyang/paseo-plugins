@@ -97,11 +97,11 @@ export function shortId(id: string): string {
 
 export const RUN_STATUS_LABEL: Record<RunStatus | "unreadable", string> = {
   done: "完成",
-  stopped: "已停止",
-  failed: "失败",
-  timeout: "超时",
-  running: "运行中",
-  lost: "失联",
+  stopped: "停了",
+  failed: "出错了",
+  timeout: "出错了",
+  running: "在跑",
+  lost: "出错了",
   starting: "启动中",
   unreadable: "读不了",
 };
@@ -119,7 +119,7 @@ export const PHASE_STATUS_LABEL: Record<PhaseStatus, string> = {
 export const CALL_TYPE_LABEL: Record<string, string> = {
   ask: "agent",
   do: "动作",
-  gate: "人闸",
+  gate: "批准",
   step: "步骤",
 };
 
@@ -165,7 +165,7 @@ export function byLabel(by: string | null): string {
   if (by.startsWith("unattributed")) return "未能归属到具体的人：Paseo 不记录是谁应答的（unattributed）";
   if (by === "gate timeout") return "没人应答：到期后由运行时替人拒绝";
   if (by.startsWith("nobody (no card was raised")) return "没有人：内容太长，卡片没有起来";
-  if (by.startsWith("nobody (gate lost sight")) return "没有人：一直查不到载体状态，人闸不知道发生了什么";
+  if (by.startsWith("nobody (gate lost sight")) return "没有人：一直查不到那张卡的状态";
   if (by.startsWith("nobody (the carrier ended")) return "没有人：载体没等到应答就结束了";
   return by;
 }

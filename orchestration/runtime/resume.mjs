@@ -27,9 +27,10 @@ import { validate } from "./step.mjs";
 
 /** The run cannot be carried on, and why. Nothing was started and nothing was spent. */
 export class ResumeRefused extends Error {
-  constructor(message) {
+  constructor(message, kind = "resume-refused") {
     super(message);
     this.name = "ResumeRefused";
+    this.kind = kind;
   }
 }
 
@@ -154,6 +155,7 @@ export function claimResumption({ dir, runId, by, now }) {
       if (holder === null) {
         throw new ResumeRefused(
           `run ${runId} is being carried on right now (${path.basename(file)} cannot be read yet): look again in a moment. If the process that made it died, the file is empty: delete it`,
+          "resume-claimed",
         );
       }
       const state = readRunState({ dir, runId: holder.id, spawnedAt: holder.madeMs, ...(now ? { now } : {}) });
@@ -167,7 +169,7 @@ export function claimResumption({ dir, runId, by, now }) {
           : state.state === "pending" || state.state === "starting" || state.state === "running"
             ? "it is running"
             : `it reads as ${state.state}; a person decides what to do with it`;
-      throw new ResumeRefused(`run ${runId} was already carried on, as run ${holder.id}: ${how}. A stop is carried on once`);
+      throw new ResumeRefused(`run ${runId} was already carried on, as run ${holder.id}: ${how}. A stop is carried on once`, "resume-claimed");
     }
     try {
       writeSync(fd, by);

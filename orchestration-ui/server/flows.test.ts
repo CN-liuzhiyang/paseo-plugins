@@ -96,8 +96,8 @@ test("standing: needs you, then running, then newest ended, then never run, then
     row("asks", { latest: run({ needsYou: true, status: "running", startedAt: "2026-09-01T00:00:00.000Z" }) }),
   ];
   assert.deepEqual(sortFlows(rows).map((f) => f.name), ["asks", "live", "new", "old", "never", "broken"]);
-  assert.equal(standing(rows[2]!).label, "上次完成");
-  assert.equal(standing(rows[3]!).label, "上次失败");
+  assert.equal(standing(rows[2]!).label, "完成");
+  assert.equal(standing(rows[3]!).label, "出错了");
   assert.equal(standing(rows[1]!).label, "还没跑过");
   assert.equal(isBroken(rows[0]!), true);
 });

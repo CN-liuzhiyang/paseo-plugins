@@ -210,7 +210,7 @@ test("byLabel: the runtime's by values read as sentences, unknown ones as they a
   assert.equal(byLabel("unattributed (Paseo does not record who answered)"), "未能归属到具体的人：Paseo 不记录是谁应答的（unattributed）");
   assert.equal(byLabel("gate timeout"), "没人应答：到期后由运行时替人拒绝");
   assert.equal(byLabel("nobody (no card was raised)"), "没有人：内容太长，卡片没有起来");
-  assert.equal(byLabel("nobody (gate lost sight of the request)"), "没有人：一直查不到载体状态，人闸不知道发生了什么");
+  assert.equal(byLabel("nobody (gate lost sight of the request)"), "没有人：一直查不到那张卡的状态");
   assert.equal(byLabel("nobody (the carrier ended without an answer)"), "没有人：载体没等到应答就结束了");
   assert.equal(byLabel("feishu:ou_x"), "feishu:ou_x");
   assert.equal(byLabel(null), "不知道是谁（判定里没有 by）");

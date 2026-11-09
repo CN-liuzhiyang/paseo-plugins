@@ -22,6 +22,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
     state: live.state,
     reason: live.reason,
     refused: live.refused,
+    refusedKind: live.refusedKind,
     outcome: live.outcome,
     flow: null,
     resumeOf: null,
@@ -114,7 +115,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
     out.endedAt = end.ts;
     out.durationMs = end.durationMs ?? null;
     out.summary = end.summary ? oneLine(end.summary, 200) : null;
-    out.stop = end.stop ? { reason: oneLine(end.stop.reason, 200), kind: end.stop.kind ?? null } : null;
+    out.stop = end.stop ? { reason: oneLine(end.stop.reason, 200), kind: end.stop.kind ?? null, title: end.stop.title ?? null } : null;
     out.error = end.error ? { name: end.error.name, message: oneLine(end.error.message, 200) } : null;
     out.resume = resumeStatus(end.resume);
   } else {
