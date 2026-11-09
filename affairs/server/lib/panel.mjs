@@ -235,21 +235,18 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   };
 }
 
-/** Attach numbered facts before limiting or presenting the remaining notes. Ranges belong to their first step. */
+/** A numbered fact belongs to its first step; step notes no longer need the numbering prefix. */
 export function progressOf(state, policy, lc) {
   const list = stepsOf(state, policy).map(({ title, state, who, note }) => ({ title, state, who, ...(note ? { note } : {}), notes: [] }));
   const synthetic = !list.length;
   const facts = [];
   for (const fact of state.facts ?? []) {
     const text = String(fact);
-    const match = /^第\s*(\d+(?:\s*[、,，–—\-至]\s*\d+)*)\s*步/.exec(text);
-    const numbers = match ? (/[–—\-至]/.test(match[1]) ? [Number(match[1].match(/\d+/)[0])] : match[1].match(/\d+/g).map(Number)) : [];
-    const targets = [...new Set(numbers)].filter((n) => n > 0 && (synthetic || n <= list.length));
-    if (!targets.length) { facts.push(withParts(text, lc)); continue; }
-    for (const n of targets) {
-      if (synthetic && !list.some((s) => s.number === n)) list.push({ title: `第 ${n} 步`, number: n, state: ["done", "stopped"].includes(state.status) ? "done" : "todo", who: "agent", notes: [] });
-      (synthetic ? list.find((s) => s.number === n) : list[n - 1]).notes.push(withParts(text, lc));
-    }
+    const match = /^第\s*(\d+)(?:\s*[、,，–—\-至]\s*\d+)*\s*步\s*[:：]?\s*/.exec(text);
+    const n = match ? Number(match[1]) : 0;
+    if (!n || (!synthetic && n > list.length)) { facts.push(withParts(text, lc)); continue; }
+    if (synthetic && !list.some((s) => s.number === n)) list.push({ title: `第 ${n} 步`, number: n, state: ["done", "stopped"].includes(state.status) ? "done" : "todo", who: "agent", notes: [] });
+    (synthetic ? list.find((s) => s.number === n) : list[n - 1]).notes.push(withParts(text.slice(match[0].length), lc));
   }
   return { stepList: list, facts };
 }

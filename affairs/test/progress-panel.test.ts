@@ -12,19 +12,21 @@ import { world } from "./kit";
 const lc = linkContext(DEFAULT_POLICY as never, null);
 const checklist = ["定位", "修复", "观察", "收口"].map((title, i) => ({ id: String(i + 1), title, state: i < 2 ? "done" : i === 2 ? "now" : "todo", who: "agent" }));
 
-test("facts join checklist steps, enumerated steps share a fact, ranges join their first step and links survive", () => {
-  const state = { mode: "watch", modeExplicit: true, stepRead: { steps: checklist }, facts: ["第 1、2 步已完成 doc:change", "第 3–4 步先观察", "保留原始数据", "第 9 步待补"] };
+test("enumerated and ranged facts join only their first step, stripping prefixes while preserving content and links", () => {
+  const state = { mode: "watch", modeExplicit: true, stepRead: { steps: checklist }, facts: ["第 1、2 步： 已完成 doc:change；保留：正文  空格", "第 3–4 步先观察", "保留原始数据", "第 9 步待补"] };
   const result = progressOf(state, DEFAULT_POLICY, linkContext({ links: { doc: "https://example.com/{ref}" } }, null));
-  assert.deepEqual(result.stepList.map((s: any) => s.notes.length), [1, 1, 1, 0]);
-  assert.ok(result.stepList[0].notes[0].parts.some((p: any) => p.href === "https://example.com/change"));
-  assert.equal(result.stepList[1].notes[0].text, state.facts[0]);
+  assert.deepEqual(result.stepList.map((s: any) => s.notes.length), [1, 0, 1, 0]);
+  assert.equal(result.stepList[0].notes[0].text, "已完成 doc:change；保留：正文  空格");
+  assert.deepEqual(result.stepList[0].notes[0].parts, [{ text: "已完成 " }, { text: "doc:change", href: "https://example.com/change" }, { text: "；保留：正文  空格" }]);
+  assert.equal(result.stepList[2].notes[0].text, "先观察");
   assert.deepEqual(result.facts.map((f: any) => f.text), state.facts.slice(2));
 });
 
 test("without a checklist, numbered facts form numbered nodes in appearance order and terminal states mark them done", () => {
   for (const status of ["watching", "done", "stopped"]) {
     const result = progressOf({ mode: "watch", modeExplicit: true, status, facts: ["第 3 步观察", "第 1、2 步修复", "第 5-6 步验证", "普通记录"] }, DEFAULT_POLICY, lc);
-    assert.deepEqual(result.stepList.map((s: any) => s.number), [3, 1, 2, 5]);
+    assert.deepEqual(result.stepList.map((s: any) => s.number), [3, 1, 5]);
+    assert.deepEqual(result.stepList.map((s: any) => s.notes[0].text), ["观察", "修复", "验证"]);
     assert.ok(result.stepList.every((s: any) => s.state === (status === "watching" ? "todo" : "done")));
     assert.deepEqual(result.facts, [{ text: "普通记录" }]);
   }
@@ -40,7 +42,7 @@ test("drive uses the README checklist; a stopped or done affair never asks for m
   writeFileSync(path.join(w.dir, state.id, "README.md"), "## 步骤\n- [x] 定位\n- [ ] 修复\n");
   const result = progressOf(state, policy, lc);
   assert.deepEqual(result.stepList.map((s: any) => [s.title, s.state]), [["定位", "done"], ["修复", "todo"]]);
-  assert.equal(result.stepList[0].notes[0].text, state.facts[0]);
+  assert.equal(result.stepList[0].notes[0].text, "已提交");
 });
 
 test("source failure tone comes from lastError and successful readings stay neutral", () => {

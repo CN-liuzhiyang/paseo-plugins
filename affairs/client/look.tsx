@@ -39,7 +39,7 @@ export function Section({ affairId, name, title, count, c, defaultOpen, summary,
   return (
     <View style={{ borderBottomWidth: 1, borderBottomColor: c.border }}>
       <Pressable testID={`section-${name}`} accessibilityRole={disabled ? undefined : "button"} accessibilityLabel={title} accessibilityState={disabled ? { disabled: true } : { expanded: open }} disabled={disabled} onPress={disabled ? undefined : toggle} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 12, paddingHorizontal: 16 }}>
-        <Words style={{ color: c.foregroundMuted, fontSize: 10, width: 12, flexShrink: 0 }}>{disabled ? "" : open ? "▾" : "▸"}</Words>
+        <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 18, textAlign: "center", width: 12, flexShrink: 0 }}>{disabled ? "" : open ? "▼" : "▶"}</Words>
         <Words style={{ color: c.foreground, fontSize: 13, fontWeight: "700", flexShrink: 0 }}>{title}</Words>
         {count !== undefined ? <Words style={{ color: c.foregroundMuted, fontSize: 12, flexShrink: 0 }}>{count}</Words> : null}
         {(!open || summaryAlways || disabled) && summary ? <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 5 }}>{summary}</View> : null}
