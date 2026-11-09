@@ -144,7 +144,10 @@ test("ask uses existing questions, permits attached callers and the current main
   assert.equal(f.state().asks.length, 1);assert.match(f.state().asks[0].line, /推荐：先停/);
   const his = await ops.hear(f.w.ctx, f.id, "先停");
   assert.ok((await ops.answer(main, f.id, opened.id, "", "chat", { saidSeq: his.seq })).ok);
-  assert.ok(f.state().lines.some((l: any) => l.kind === "drive.ready"));
+  assert.ok(!f.state().lines.some((l: any) => l.kind === "drive.ready"), "the chat answering from his line must not nudge itself with his words");
+  const second = await ops.ask(main, f.id, question);assert.ok(second.ok, second.text);
+  assert.ok((await ops.answer(f.w.ctx, f.id, second.id, "先停", "panel")).ok);
+  assert.ok(f.state().lines.some((l: any) => l.kind === "drive.ready" && l.question === second.id), "his button press still nudges the chat");
   f.put([{ kind: "attached", agentId: "attached-chat" }]);process.env.PASEO_AGENT_ID = "attached-chat";
   assert.ok((await ops.ask({ ...f.w.ctx, by: "attached" }, f.id, question)).ok);
   f.put([{ kind: "schedule", scheduleId: "plan" }]);process.env.FAKE_PASEO_LABELS = JSON.stringify({ "paseo.schedule-id": "plan" });

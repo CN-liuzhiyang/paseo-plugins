@@ -7,7 +7,7 @@ import { answerRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 import { FlowBox } from "./flow";
 import { Materials, useFiles } from "./files";
-import { ChoiceButton, Heading, QuestionCard, Rule, StateBadge, Tag } from "./look";
+import { ChoiceButton, Heading, OtherAnswer, QuestionCard, Rule, StateBadge, Tag } from "./look";
 import { Timeline } from "./timeline";
 import { Clip, Words } from "./text";
 
@@ -81,20 +81,16 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
       }} /> : null}
       {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
       {heading(panel.mode ? `现在 · ${panel.mode}` : "现在")}
-      {panel.asks.map((a) => (
-        <QuestionCard key={a.id} c={c} title={a.title} line={a.line}>
-          {a.options.map((o, i) => (
-            <ChoiceButton
-              key={o}
-              testID={`panel-ask-${o}`}
-              text={o}
-              primary={i === 0}
-              c={c}
-              onPress={() => void answer({ affairId: panel.id, askId: a.id, text: o }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); })}
-            />
-          ))}
-        </QuestionCard>
-      ))}
+      {panel.asks.map((a) => {
+        const send = (text: string) => void answer({ affairId: panel.id, askId: a.id, text }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); });
+        return (
+          <QuestionCard key={a.id} c={c} title={a.title} line={a.line} footer={<OtherAnswer c={c} testID={`panel-ask-other-${a.id}`} onSend={send} />}>
+            {a.options.map((o, i) => (
+              <ChoiceButton key={o} testID={`panel-ask-${o}`} text={o} primary={i === 0} c={c} onPress={() => send(o)} />
+            ))}
+          </QuestionCard>
+        );
+      })}
       <Pieces text={panel.waiting.text} parts={panel.waiting.parts} color={c.accent} style={{ color: c.foreground, fontSize: 17, lineHeight: 24, fontWeight: "700" }} />
       {panel.now.text ? <Pieces text={panel.now.text} parts={panel.now.parts} color={c.accent} style={{ ...body, marginTop: 6 }} /> : null}
       {panel.next.text ? <Words style={{ ...muted, marginTop: 8 }}>下次　{panel.next.text}</Words> : null}

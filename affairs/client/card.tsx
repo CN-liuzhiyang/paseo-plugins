@@ -3,7 +3,7 @@ import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginTimelineItemProps } from "@getpaseo/plugin/client";
 import { Fragment, useState, type ReactNode } from "react";
 import { Linking, type TextStyle } from "react-native";
-import { QuestionCard, ChoiceButton } from "./look";
+import { QuestionCard, ChoiceButton, OtherAnswer } from "./look";
 import { Words, only } from "./text";
 import type { Ask, Line, Segment } from "../shared/card";
 import { answerRpc } from "../shared/rpc";
@@ -51,7 +51,7 @@ export function AffairLine({ item, theme }: PluginTimelineItemProps<Line>) {
   return <Pieces text={text} parts={parts} color={c.accent} strong={tone === "warn" ? "等你批" : undefined} style={{ color: tone === "red" ? c.statusDanger : tone === "warn" ? c.statusWarning : c.foregroundMuted, fontSize: 14, lineHeight: 21, marginVertical: 4 }} />;
 }
 
-/** A question for him, with its choices as buttons. Pressing one answers it; he can also just say it in the chat. */
+/** A question for him, with its choices as buttons and a box for his own words. Either answers it; he can also just say it in the chat. */
 export function AffairAsk({ item, theme, layout }: PluginTimelineItemProps<Ask>) {
   const c = theme.colors;
   const answer = useRpc(answerRpc);
@@ -69,7 +69,7 @@ export function AffairAsk({ item, theme, layout }: PluginTimelineItemProps<Ask>)
       title={title}
       line={line}
       size={layout.compact ? 15 : 16}
-      footer={<Words style={{ color: c.foregroundMuted, fontSize: 12 }}>{sent ? "好，记下了" : "也可以直接跟我说"}</Words>}
+      footer={sent ? <Words style={{ color: c.foregroundMuted, fontSize: 12 }}>好，记下了</Words> : <OtherAnswer c={c} testID="ask-other" onSend={press} />}
     >
       {options.map((o, i) => (
         <ChoiceButton key={o} testID={`ask-${o}`} text={o} primary={i === 0} picked={sent === o} c={c} disabled={Boolean(sent)} dim={Boolean(sent) && sent !== o} onPress={() => press(o)} />

@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { Pressable, View, type ViewStyle } from "react-native";
+import { useState, type ReactNode } from "react";
+import { Pressable, TextInput, View, type ViewStyle } from "react-native";
 import type { PanelData } from "../shared/panel";
 import { MOODS, tint, type Colors } from "../shared/look";
 import { Words } from "./text";
@@ -60,6 +60,34 @@ export function ChoiceButton({ text, primary, c, onPress, disabled, picked, dim,
     <Pressable testID={testID} accessibilityRole="button" disabled={disabled} onPress={onPress} style={style}>
       <Words style={{ color: primary ? c.accentForeground : c.foreground, fontSize: 14, fontWeight: primary ? "600" : "400" }}>{text}</Words>
     </Pressable>
+  );
+}
+
+/** The answer in his own words, for when none of the choices fits; it goes the same way a choice does. */
+export function OtherAnswer({ c, onSend, disabled, testID }: { c: Colors; onSend: (text: string) => void; disabled?: boolean; testID: string }) {
+  const [text, setText] = useState("");
+  const send = () => {
+    const t = text.trim();
+    if (!t || disabled) return;
+    setText("");
+    onSend(t);
+  };
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, width: "100%" }}>
+      <TextInput
+        testID={testID}
+        accessibilityLabel="其他答案"
+        placeholder="其他，直接写"
+        placeholderTextColor={c.foregroundMuted}
+        value={text}
+        editable={!disabled}
+        onChangeText={setText}
+        onSubmitEditing={send}
+        returnKeyType="send"
+        style={{ flex: 1, minWidth: 0, color: c.foreground, borderColor: c.border, borderWidth: 1, backgroundColor: c.surface1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8, fontSize: 14 }}
+      />
+      <ChoiceButton testID={`${testID}-send`} text="发送" primary={false} c={c} disabled={disabled || !text.trim()} dim={!text.trim()} onPress={send} />
+    </View>
   );
 }
 

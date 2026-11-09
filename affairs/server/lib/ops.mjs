@@ -616,7 +616,9 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     if (amount) write(ctx, s.id, [{ kind: "budget", usd: Number(amount[1]), until: s.budget?.until || "", answer: qid }]);
     if (text.trim() === "先停") write(ctx, s.id, [{ kind: "hold", on: true }]);
   }
-  if (modeOf(s, ctx.policy) === "drive") write(ctx, s.id, [{ kind: "drive.ready", reason: "answered", question: qid }]);
+  // The nudge is for his button press: the chat does not know it happened. When the chat answers from a line of his that it
+  // already read this turn, a nudge would only hand his words back to it as a new message and start a turn with nothing to do.
+  if (modeOf(s, ctx.policy) === "drive" && !byChat(ctx)) write(ctx, s.id, [{ kind: "drive.ready", reason: "answered", question: qid }]);
   if (q.runs?.[text.trim()]) return flow(ctx, s.id, q.runs[text.trim()], { saidSeq: byChat(ctx) ? saidSeq : "" });
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
