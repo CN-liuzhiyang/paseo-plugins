@@ -31,12 +31,12 @@ export function FlowDetail({ name, onBack, onOpenRun }: { name: string; onBack()
     <ScrollView style={ui.styles.screen} contentContainerStyle={ui.styles.content}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel="返回流程列表"
+        accessibilityLabel="返回流程"
         onPress={onBack}
         style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" }}
       >
         <Icon name="ArrowLeft" size={16} color={ui.theme.colors.foregroundMuted} />
-        <Text style={ui.styles.muted}>全部流程</Text>
+        <Text style={ui.styles.muted}>流程</Text>
       </Pressable>
       {!flows.data ? (
         <Text style={ui.styles.muted}>{flows.error ?? "正在读取……"}</Text>
@@ -60,8 +60,8 @@ export function FlowDetail({ name, onBack, onOpenRun }: { name: string; onBack()
               backgroundColor: ui.theme.colors.surface1,
             }}
           >
-            {mine.map((run) => (
-              <Row key={run.runId} run={run} now={now} onOpen={onOpenRun} />
+            {mine.map((run, index) => (
+              <Row key={run.runId} run={run} now={now} last={index === mine.length - 1} onOpen={onOpenRun} />
             ))}
           </View>
         )}

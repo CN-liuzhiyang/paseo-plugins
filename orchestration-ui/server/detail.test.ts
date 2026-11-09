@@ -108,3 +108,11 @@ test("the 流程 page: the bar's four groups; old, carried-on and unreadable run
   assert.equal(flowStanding("停了", "10-30", 7), "停了 · 10-30 · 7 次");
   assert.equal(flowStanding("还没跑过", null, 0), "还没跑过");
 });
+
+test("a time in a list has no seconds; today is just the clock", async () => {
+  const { whenOf } = await import("../shared/page");
+  const now = new Date(2026, 10, 9, 15, 0, 0).getTime();
+  assert.equal(whenOf(new Date(2026, 10, 9, 9, 12, 33).toISOString(), now), "09:12");
+  assert.equal(whenOf(new Date(2026, 9, 30, 9, 12, 33).toISOString(), now), "10-30 09:12");
+  assert.equal(whenOf(null, now), null);
+});

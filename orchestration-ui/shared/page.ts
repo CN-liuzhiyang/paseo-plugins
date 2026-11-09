@@ -2,6 +2,7 @@
 // each, and whatever is too old or already carried on by a later run folded away. Pure; `now` is handed in.
 
 import { BAR_ORDER, BAR_TITLE, groupOf, supersededRuns, type BarGroup } from "./bar";
+import { formatTime } from "./format";
 import type { RunSummary } from "./rpc";
 
 /** A finished run older than this is under "更早的". */
@@ -56,4 +57,9 @@ export function pageRuns(runs: readonly RunSummary[], now: number): PageRuns {
 /** "停了 · 10-30 · 7 次": a flow's newest run, when, and how many there are; the date is the caller's to format. */
 export function flowStanding(label: string, when: string | null, count: number): string {
   return [label, when, count > 0 ? `${count} 次` : null].filter(Boolean).join(" · ");
+}
+
+/** "10-30 09:12" (the year only when it is not this one), "09:12" for today; no seconds, a list does not need them. */
+export function whenOf(iso: string | null, now: number): string | null {
+  return iso === null ? null : formatTime(iso, now).replace(/:\d\d$/, "");
 }
