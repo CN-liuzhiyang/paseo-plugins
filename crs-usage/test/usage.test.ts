@@ -9,6 +9,7 @@ import { UsageService } from "../server/service";
 import { mapUsage, shortUsageError } from "../server/usage";
 import { settingsDefinition } from "../shared/settings";
 import {
+  compactReset,
   estimate,
   estimateWindow,
   relativeCollection,
@@ -139,7 +140,7 @@ test("mapping: null stays null, statuses, stale data, estimates, zero limit, exh
       partial.windows.some((window) => window.label.includes(account.alias)),
       false,
     );
-    assert.deepEqual(partial.details, []);
+    assert.equal(JSON.stringify(partial.details).includes(account.alias), false);
   }
   for (const a of snapshot.pools[1].accounts) a.tier = "unknown";
   assert.equal(estimate(snapshot.pools[1], snapshot.serverTime).usedPct, null);
@@ -568,7 +569,7 @@ test("integration fixture: unlimited costs, expired windows, unusable accounts a
     assert.equal(report.balances![0].label, "今日费用");
     const old = report.windows.filter((window) => window.label.includes("Claude-B"));
     assert.equal(old.length, 0);
-    assert.deepEqual(report.details, []);
+    assert.equal(/Claude-[A-D]/.test(JSON.stringify(report.details)), false);
     assert.equal(
       report.windows.some((window) => /Claude-C|Claude-D/.test(window.label)),
       false,
@@ -605,12 +606,30 @@ test("native pool card: shared weighted estimates, stable window IDs, no details
   );
   assert.deepEqual(
     claude.map((window) => window.label),
-    ["Claude 5小时 · 3/3 可用", "Claude 本周 · 3/3 可用"],
+    ["Claude 5小时", "Claude 本周"],
   );
   assert.equal(report.windows.length, 4);
-  assert.deepEqual(report.details, []);
+  assert.deepEqual(
+    report.details?.map((detail) => detail.id),
+    ["claude-reset", "openai-reset", "accounts"],
+  );
+  assert.match(report.details![2].value, /^Claude 3\/3 · Codex \d\/\d$/);
   assert.equal(report.planLabel, undefined);
-  assert.ok(report.windows.every((window) => !("resetsAt" in window)));
+  // The reset rows show each window's earliest account reset to the minute, as of the snapshot time.
+  const now = Date.parse(snapshot.serverTime);
+  for (const [platform, accounts] of [
+    ["claude", pool.accounts],
+    ["openai", snapshot.pools[1].accounts],
+  ] as const)
+    assert.equal(
+      report.details?.find((detail) => detail.id === `${platform}-reset`)?.value,
+      (["5h", "week"] as const)
+        .map(
+          (id) =>
+            `${id === "5h" ? "5小时" : "本周"} ${compactReset(estimate({ accounts }, snapshot.serverTime, id).resetsAt, now)}`,
+        )
+        .join(" · "),
+    );
   assert.equal(JSON.stringify(report).includes("Claude-A"), false);
   const ids = claude.map((window) => window.id);
   pool.accounts[1].windows[0].usedPct = null;
@@ -652,7 +671,7 @@ test("native pool card: shared weighted estimates, stable window IDs, no details
   assert.equal(pool.accounts[2].windows.at(-1)?.id, "week_opus");
 });
 
-test("native output: one daily amount, never reset timestamps, errors at most 12 characters", async () => {
+test("native output: one daily amount, reset rows only while in the future, errors at most 12 characters", async () => {
   const snapshot = snapshotSchema.parse(await fixture());
   snapshot.key.weeklyOpus.used = 3;
   snapshot.key.weeklyOpus.limit = 20;
@@ -670,15 +689,12 @@ test("native output: one daily amount, never reset timestamps, errors at most 12
     if (report.status !== "available") return assert.fail("active snapshot");
     const window = report.windows.find((window) => window.id === "claude-pool-5h")!;
     assert.equal("resetsAt" in window, false);
+    const row = report.details!.find((detail) => detail.id === "claude-reset")?.value ?? "";
+    // A window that has already reset shows no countdown; the others keep theirs.
+    assert.equal(row.startsWith(`5小时 ${minutes}分`), minutes !== 0);
     assert.equal(window.usedPct, minutes === 0 ? 0 : 95);
     assert.equal(window.tone, minutes === 0 ? "ok" : "warning");
   }
-  report = mapUsage(snapshot);
-  if (report.status === "available")
-    assert.equal(
-      report.windows.some((window) => "resetsAt" in window),
-      false,
-    );
   for (const error of [
     "Key 过期",
     "Key 禁用",
@@ -724,7 +740,10 @@ test("fresh / older / reset: preserve older values, reset estimates count as zer
   assert.equal(report.windows.length, 1);
   assert.equal(report.windows[0].usedPct, 19);
   assert.equal(report.windows[0].tone, "default");
-  assert.deepEqual(report.details, []);
+  assert.deepEqual(
+    report.details?.map((detail) => detail.id),
+    ["claude-reset", "accounts"],
+  );
   assert.equal(JSON.stringify(report).includes("数据已过期"), false);
   account.windows[0].resetsAt = null;
   assert.equal(windowState(account, account.windows[0], snapshot.serverTime), "older");
@@ -735,7 +754,10 @@ test("fresh / older / reset: preserve older values, reset estimates count as zer
   if (report.status !== "available") return assert.fail("active snapshot");
   assert.equal(report.windows.length, 1);
   assert.equal(report.windows[0].usedPct, 0);
-  assert.deepEqual(report.details, []);
+  assert.deepEqual(
+    report.details?.map((detail) => detail.id),
+    ["accounts"],
+  );
   assert.equal(
     relativeCollection(account.observedAt, Date.parse(snapshot.serverTime)),
     "8 分钟前采集",
@@ -768,10 +790,13 @@ test("pool regression: two Pro accounts at 100% and 4%, two unavailable; panel/n
   );
   assert.deepEqual(
     report.windows.map((window) => window.label),
-    ["Claude 5小时 · 2/4 可用", "Claude 本周 · 2/4 可用"],
+    ["Claude 5小时", "Claude 本周"],
   );
-  assert.deepEqual(report.details, []);
-  assert.ok(report.windows.every((window) => !("resetsAt" in window)));
+  assert.equal(report.details?.find((detail) => detail.id === "accounts")?.value, "Claude 2/4");
+  assert.equal(
+    report.details?.find((detail) => detail.id === "claude-reset")?.value,
+    `5小时 ${compactReset(estimate(pool, snapshot.serverTime).resetsAt, Date.parse(snapshot.serverTime))} · 本周 ${compactReset(estimate(pool, snapshot.serverTime, "week").resetsAt, Date.parse(snapshot.serverTime))}`,
+  );
   assert.equal(JSON.stringify(snapshot), untouched);
   // Multiple same-platform bindings use the same estimator across their accounts.
   const split = structuredClone(snapshot);
@@ -841,4 +866,19 @@ test("reset countdowns: days/hours, hours/minutes, sub-minute, elapsed and absen
   ] as const)
     assert.equal(relativeReset(new Date(now + milliseconds).toISOString(), now), expected);
   assert.equal(relativeReset(null, now), "重置时间未知");
+});
+
+test("compact reset countdown: exact to the minute, days with hours, unknown and elapsed as a dash", () => {
+  const now = Date.parse("2026-11-09T00:00:00Z");
+  const at = (ms: number) => new Date(now + ms).toISOString();
+  const min = 60000;
+  assert.equal(compactReset(at(30 * 1000), now), "<1分");
+  assert.equal(compactReset(at(5 * min), now), "5分");
+  assert.equal(compactReset(at(60 * min), now), "1时");
+  assert.equal(compactReset(at(80 * min), now), "1时20分");
+  assert.equal(compactReset(at(26 * 60 * min), now), "1天2时");
+  assert.equal(compactReset(at(48 * 60 * min), now), "2天");
+  assert.equal(compactReset(at(0), now), "—");
+  assert.equal(compactReset(at(-min), now), "—");
+  assert.equal(compactReset(null, now), "—");
 });

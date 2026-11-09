@@ -1,5 +1,5 @@
 import type { UsageReport } from "@getpaseo/plugin/server";
-import { estimate, type Snapshot } from "../shared/snapshot";
+import { compactReset, estimate, type Snapshot } from "../shared/snapshot";
 
 export function shortUsageError(error: string): string {
   if (error.includes("过期")) return "Key 已过期";
@@ -23,33 +23,72 @@ export function mapUsage(snapshot: Snapshot): UsageReport {
         { expired: "Key 过期", disabled: "Key 禁用", inactive: "Key 未激活" }[snapshot.key.status],
       ),
     };
-  const windows = (["claude", "openai"] as const).flatMap((platform) => {
+  const names = { claude: "Claude", openai: "Codex" } as const;
+  const now = Date.parse(snapshot.serverTime);
+  const reports = (["claude", "openai"] as const).map((platform) => {
     const accounts = snapshot.pools
       .filter((pool) => pool.platform === platform)
       .flatMap((pool) => pool.accounts);
-    return (["5h", "week"] as const).flatMap((id) => {
+    const summaries = (["5h", "week"] as const).flatMap((id) => {
       const summary = estimate({ accounts }, snapshot.serverTime, id);
-      if (summary.usedPct === null) return [];
-      return [
-        {
-          id: `${platform}-pool-${id}`,
-          label: `${platform === "claude" ? "Claude" : "Codex"} ${id === "5h" ? "5小时" : "本周"} · ${summary.included}/${summary.total} 可用`,
-          usedPct: summary.usedPct,
-          remainingPct: Math.max(0, 100 - summary.usedPct),
-          tone:
-            summary.usedPct >= 90
-              ? ("warning" as const)
-              : summary.older
-                ? ("default" as const)
-                : ("ok" as const),
-        },
-      ];
+      return summary.usedPct === null ? [] : [{ id, summary }];
     });
+    return { platform, summaries };
   });
+  const windows = reports.flatMap(({ platform, summaries }) =>
+    summaries.map(({ id, summary }) => ({
+      id: `${platform}-pool-${id}`,
+      label: `${names[platform]} ${id === "5h" ? "5小时" : "本周"}`,
+      usedPct: summary.usedPct!,
+      remainingPct: Math.max(0, 100 - summary.usedPct!),
+      tone:
+        summary.usedPct! >= 90
+          ? ("warning" as const)
+          : summary.older
+            ? ("default" as const)
+            : ("ok" as const),
+    })),
+  );
+  // Detail rows carry what the short labels leave out: per platform the earliest account reset
+  // of each window that has one, to the minute, and how many accounts are counted (the first window's count).
+  const details = [
+    ...reports.flatMap(({ platform, summaries }) => {
+      const resets = summaries.filter(({ summary }) => summary.resetsAt);
+      return resets.length
+        ? [
+            {
+              id: `${platform}-reset`,
+              label: `${names[platform]} 重置`,
+              value: resets
+                .map(
+                  ({ id, summary }) =>
+                    `${id === "5h" ? "5小时" : "本周"} ${compactReset(summary.resetsAt, now)}`,
+                )
+                .join(" · "),
+            },
+          ]
+        : [];
+    }),
+    ...(windows.length
+      ? [
+          {
+            id: "accounts",
+            label: "可用账号",
+            value: reports
+              .filter(({ summaries }) => summaries.length)
+              .map(
+                ({ platform, summaries }) =>
+                  `${names[platform]} ${summaries[0].summary.included}/${summaries[0].summary.total}`,
+              )
+              .join(" · "),
+          },
+        ]
+      : []),
+  ];
   return {
     status: "available",
     windows,
     balances: [{ id: "daily", label: "今日费用", used: snapshot.key.daily.used, unit: "usd" }],
-    details: [],
+    details,
   };
 }

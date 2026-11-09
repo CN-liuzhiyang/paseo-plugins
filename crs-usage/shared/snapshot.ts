@@ -94,6 +94,19 @@ export function relativeReset(value: string | null, now = Date.now()) {
   if (hours) return `${hours} 小时${minutes % 60 ? ` ${minutes % 60} 分` : ""}后重置`;
   return `${minutes} 分钟后重置`;
 }
+// Compact countdown for the native card, exact to the minute: "1时20分", "1天3时", "5分", "<1分".
+export function compactReset(value: string | null, now: number): string {
+  if (!value) return "—";
+  const remaining = Date.parse(value) - now;
+  if (!(remaining > 0)) return "—";
+  if (remaining < 60000) return "<1分";
+  const minutes = Math.floor(remaining / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days) return `${days}天${hours % 24 ? `${hours % 24}时` : ""}`;
+  if (hours) return `${hours}时${minutes % 60 ? `${minutes % 60}分` : ""}`;
+  return `${minutes}分`;
+}
 export function estimateWindow(account: Account, serverTime: string, windowId: string) {
   if (account.state === "unavailable" || account.state === "unknown") return null;
   const window = account.windows.find((window) => window.id === windowId);
