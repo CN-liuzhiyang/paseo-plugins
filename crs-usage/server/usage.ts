@@ -38,7 +38,8 @@ export function mapUsage(snapshot: Snapshot): UsageReport {
   const windows = reports.flatMap(({ platform, summaries }) =>
     summaries.map(({ id, summary }) => ({
       id: `${platform}-pool-${id}`,
-      label: `${names[platform]} ${id === "5h" ? "5小时" : "本周"}`,
+      // The pool's earliest account reset, to the minute, as of the snapshot time.
+      label: `${names[platform]} ${id === "5h" ? "5小时" : "本周"}${summary.resetsAt ? ` (${compactReset(summary.resetsAt, now)}后重置)` : ""}`,
       usedPct: summary.usedPct!,
       remainingPct: Math.max(0, 100 - summary.usedPct!),
       tone:
@@ -49,26 +50,8 @@ export function mapUsage(snapshot: Snapshot): UsageReport {
             : ("ok" as const),
     })),
   );
-  // Detail rows carry what the short labels leave out: per platform the earliest account reset
-  // of each window that has one, to the minute, and how many accounts are counted (the first window's count).
+  // One detail row says how many accounts each platform's estimate counts (its first window's count).
   const details = [
-    ...reports.flatMap(({ platform, summaries }) => {
-      const resets = summaries.filter(({ summary }) => summary.resetsAt);
-      return resets.length
-        ? [
-            {
-              id: `${platform}-reset`,
-              label: `${names[platform]} 重置`,
-              value: resets
-                .map(
-                  ({ id, summary }) =>
-                    `${id === "5h" ? "5小时" : "本周"} ${compactReset(summary.resetsAt, now)}`,
-                )
-                .join(" · "),
-            },
-          ]
-        : [];
-    }),
     ...(windows.length
       ? [
           {

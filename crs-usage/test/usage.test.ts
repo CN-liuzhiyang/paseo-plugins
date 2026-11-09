@@ -606,30 +606,18 @@ test("native pool card: shared weighted estimates, stable window IDs, no details
   );
   assert.deepEqual(
     claude.map((window) => window.label),
-    ["Claude 5小时", "Claude 本周"],
+    (["5h", "week"] as const).map(
+      (id) =>
+        `Claude ${id === "5h" ? "5小时" : "本周"} (${compactReset(estimate({ accounts: pool.accounts }, snapshot.serverTime, id).resetsAt, Date.parse(snapshot.serverTime))}后重置)`,
+    ),
   );
   assert.equal(report.windows.length, 4);
   assert.deepEqual(
     report.details?.map((detail) => detail.id),
-    ["claude-reset", "openai-reset", "accounts"],
+    ["accounts"],
   );
-  assert.match(report.details![2].value, /^Claude 3\/3 · Codex \d\/\d$/);
+  assert.match(report.details![0].value, /^Claude 3\/3 · Codex \d\/\d$/);
   assert.equal(report.planLabel, undefined);
-  // The reset rows show each window's earliest account reset to the minute, as of the snapshot time.
-  const now = Date.parse(snapshot.serverTime);
-  for (const [platform, accounts] of [
-    ["claude", pool.accounts],
-    ["openai", snapshot.pools[1].accounts],
-  ] as const)
-    assert.equal(
-      report.details?.find((detail) => detail.id === `${platform}-reset`)?.value,
-      (["5h", "week"] as const)
-        .map(
-          (id) =>
-            `${id === "5h" ? "5小时" : "本周"} ${compactReset(estimate({ accounts }, snapshot.serverTime, id).resetsAt, now)}`,
-        )
-        .join(" · "),
-    );
   assert.equal(JSON.stringify(report).includes("Claude-A"), false);
   const ids = claude.map((window) => window.id);
   pool.accounts[1].windows[0].usedPct = null;
@@ -689,9 +677,11 @@ test("native output: one daily amount, reset rows only while in the future, erro
     if (report.status !== "available") return assert.fail("active snapshot");
     const window = report.windows.find((window) => window.id === "claude-pool-5h")!;
     assert.equal("resetsAt" in window, false);
-    const row = report.details!.find((detail) => detail.id === "claude-reset")?.value ?? "";
-    // A window that has already reset shows no countdown; the others keep theirs.
-    assert.equal(row.startsWith(`5小时 ${minutes}分`), minutes !== 0);
+    // A window that has already reset shows no countdown in its label.
+    assert.equal(
+      window.label,
+      minutes === 0 ? "Claude 5小时" : `Claude 5小时 (${minutes}分后重置)`,
+    );
     assert.equal(window.usedPct, minutes === 0 ? 0 : 95);
     assert.equal(window.tone, minutes === 0 ? "ok" : "warning");
   }
@@ -742,7 +732,7 @@ test("fresh / older / reset: preserve older values, reset estimates count as zer
   assert.equal(report.windows[0].tone, "default");
   assert.deepEqual(
     report.details?.map((detail) => detail.id),
-    ["claude-reset", "accounts"],
+    ["accounts"],
   );
   assert.equal(JSON.stringify(report).includes("数据已过期"), false);
   account.windows[0].resetsAt = null;
@@ -790,13 +780,12 @@ test("pool regression: two Pro accounts at 100% and 4%, two unavailable; panel/n
   );
   assert.deepEqual(
     report.windows.map((window) => window.label),
-    ["Claude 5小时", "Claude 本周"],
+    (["5h", "week"] as const).map(
+      (id) =>
+        `Claude ${id === "5h" ? "5小时" : "本周"} (${compactReset(estimate(pool, snapshot.serverTime, id).resetsAt, Date.parse(snapshot.serverTime))}后重置)`,
+    ),
   );
   assert.equal(report.details?.find((detail) => detail.id === "accounts")?.value, "Claude 2/4");
-  assert.equal(
-    report.details?.find((detail) => detail.id === "claude-reset")?.value,
-    `5小时 ${compactReset(estimate(pool, snapshot.serverTime).resetsAt, Date.parse(snapshot.serverTime))} · 本周 ${compactReset(estimate(pool, snapshot.serverTime, "week").resetsAt, Date.parse(snapshot.serverTime))}`,
-  );
   assert.equal(JSON.stringify(snapshot), untouched);
   // Multiple same-platform bindings use the same estimator across their accounts.
   const split = structuredClone(snapshot);
