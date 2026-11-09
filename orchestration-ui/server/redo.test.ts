@@ -183,6 +183,18 @@ test("stopping on a check that never passed names the step and the rounds; the f
   }
 });
 
+test("stop titles are read directly, including when no call events remain", () => {
+  const ended = (stop: Record<string, unknown>) => foldEvents([events[0]!, {
+    v: 1, seq: 1, ts: "2026-10-30T09:00:03.000Z", runId: "r", kind: "run.end",
+    outcome: "stopped", value: null, summary: null, stop, error: null, durationMs: 3, cost: null, caveats: [],
+  }]);
+  const flow = ended({ kind: "flow", reason: "需要处理", title: "更新副本" });
+  assert.equal(flow.end!.stop!.title, "更新副本");
+  assert.equal(hero(flow, "stopped", Date.now()).title, "停在「更新副本」");
+  const unknown = ended({ kind: "unknown", step: "publish", reason: "措辞已变", title: "发布结果" });
+  assert.equal(stopLine(unknown), "要你确认「发布结果」做没做");
+});
+
 test("a step that may or may not have happened is red, asks the person, and is a row of its own in the bar", () => {
   const run = foldEvents(events);
   const top = hero(run, "stopped", Date.now());

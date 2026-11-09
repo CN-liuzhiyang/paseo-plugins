@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import * as ops from "../server/lib/ops.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
-import { canResume, claimFile, eventsFile, flowFinishedMessage, readStatus, resumeRefusal } from "../server/lib/flows.mjs";
+import { canResume, claimFile, eventsFile, flowFinishedMessage, readStatus, resumeRefusal, endWords } from "../server/lib/flows.mjs";
 import { flowBlockOf } from "../server/lib/panel.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { createChats, type ChatPaseo } from "../server/chat";
@@ -18,6 +18,12 @@ import { checkReport, buildFacts } from "../server/lib/check.mjs";
 import { emptyDirectory, world } from "./kit";
 
 const POINT = { flow: "do-it", input: { version: 1 }, from: "从补丁接着做", spends: "maybe" };
+
+test("the affair's ending sentence uses the stop title and tolerates old logs", () => {
+  const st = { outcome: "stopped", stop: { title: "更新副本", reason: "需要处理" } };
+  assert.equal(endWords(st)[0], "停在「更新副本」：需要处理");
+  assert.equal(endWords({ ...st, stop: { reason: "旧原因" } })[0], "停了：旧原因");
+});
 
 test("refusal kinds decide the message independently of wording; old claims still show their reason", () => {
   assert.match(resumeRefusal("原因已换语言", "resume-claimed"), /已经接着跑过/);

@@ -581,7 +581,7 @@ export function hero(
     return {
       tone: "warning",
       kicker: "停了",
-      title: end?.summary || end?.stop?.reason || "停了，没有说明原因",
+      title: end?.stop?.title ? `停在「${end.stop.title}」` : end?.summary || end?.stop?.reason || "停了，没有说明原因",
       subtitle: null,
       action: null,
       select: END,

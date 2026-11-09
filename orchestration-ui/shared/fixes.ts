@@ -78,11 +78,11 @@ export function stoppedStep(run: RunState): { kind: "check" | "unknown"; label: 
   if (!stop?.step) return null;
   if (stop.kind === "check") {
     const asked = [...run.calls.values()].filter((call) => call.type === "ask" && call.name === stop.step).at(-1) ?? null;
-    return { kind: "check", label: asked?.title ?? stop.step, asked };
+    return { kind: "check", label: stop.title ?? asked?.title ?? stop.step, asked };
   }
   if (stop.kind === "unknown") {
-    // The runtime's sentence opens with the step's title in 「」; the event itself carries only the name.
-    return { kind: "unknown", label: /^「([^」]{1,40})」/.exec(stop.reason)?.[1] ?? stop.step, asked: null };
+    // Older events carried only the name and put the title in the sentence.
+    return { kind: "unknown", label: stop.title ?? /^「([^」]{1,40})」/.exec(stop.reason)?.[1] ?? stop.step, asked: null };
   }
   return null;
 }

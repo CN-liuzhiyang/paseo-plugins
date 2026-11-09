@@ -75,7 +75,7 @@ export interface RunEnd {
   outcome: Outcome;
   value: unknown;
   /** `kind` and `step` are absent in older files: null, and the reader falls back to the reason. */
-  stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null } | null;
+  stop: { reason: string; phase: string | null; kind: StopKind | null; step: string | null; title?: string | null } | null;
   error: ErrorInfo | null;
   durationMs: number | null;
   cost: { totalUsd: number | null; agentCount: number | null; partial: string | null } | null;
@@ -665,7 +665,7 @@ export function applyEvent(run: RunState, raw: unknown): void {
         problem(run, `run.end 的结局「${outcome ?? ""}」不认识，按失败显示`);
       }
       const stop = isObj(raw.stop)
-        ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step) }
+        ? { reason: str(raw.stop.reason) ?? "", phase: str(raw.stop.phase), kind: stopKindOf(raw.stop.kind), step: str(raw.stop.step), title: str(raw.stop.title) }
         : null;
       const cost = isObj(raw.cost)
         ? { totalUsd: num(raw.cost.totalUsd), agentCount: num(raw.cost.agentCount), partial: str(raw.cost.partial) }

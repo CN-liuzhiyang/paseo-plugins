@@ -122,6 +122,7 @@ export function wakeText(facts) {
     lines.push(`${head.join(" · ")} · 运行 ${facts.runId}`);
   } else {
     lines.push(head.join(" · "));
+    if (facts.stopTitle) lines.push(`停在「${oneLine(facts.stopTitle, 80)}」`);
     lines.push(`原因：${oneLine(facts.reason)}`);
     lines.push(`运行 ${facts.runId}${facts.lineage && facts.lineage !== facts.runId ? `（接着线 ${facts.lineage}）` : ""} · 事件 ${facts.events}`);
     if (facts.resume) lines.push(`接着跑：node ${ORCH_PATH} resume ${facts.runId}（${oneLine(facts.resume.from, 80)}）`);
@@ -275,6 +276,7 @@ export async function wakeAtEnd({ run, dir, executor, roster, stewards, timeoutM
         lineage: run.lineage,
         events: run.events,
         reason: run.reason,
+        stopTitle: run.stopTitle ?? null,
         resume: run.resume,
         working: run.working ?? 0,
         manual: manualFile && existsSync(manualFile) ? manualFile : null,

@@ -93,7 +93,7 @@ export class GrantError extends Error {
  * known; `step` is that step).
  */
 class StopSignal extends Error {
-  constructor(reason, value, phase, kind = "flow", step = null) {
+  constructor(reason, value, phase, kind = "flow", step = null, title = null) {
     super(`flow stopped: ${reason}`);
     this.name = "StopSignal";
     this.reason = reason;
@@ -101,6 +101,7 @@ class StopSignal extends Error {
     this.phase = phase;
     this.kind = kind;
     this.step = step;
+    this.title = title;
   }
 }
 
@@ -217,7 +218,7 @@ function checkKeys(where, object, allowed) {
  *           taken?: ReturnType<typeof takeRunId> }} [options]
  * @returns {Promise<{ ok: boolean, outcome: "done"|"stopped"|"failed"|"timeout", value: unknown, summary: string | null, runId: string,
  *   events: string, cost: object | null, caveats: string[], durationMs: number,
- *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null, kind: "flow" | "check" | "unknown", step: string | null } | null,
+ *   error: { name: string, message: string } | null, stop: { reason: string, phase: string | null, kind: "flow" | "check" | "unknown", step: string | null, title: string | null } | null,
  *   resume: { flow: string, input: object, from: string, spends: "nothing" | "maybe" } | null }>}
  */
 export async function runFlow(target, options = {}) {
@@ -452,6 +453,7 @@ async function runClaimed(target, options, taken) {
   // does not move the names of what comes after it.
   // Its value is the names of the steps a place is inside, outermost first.
   const stepScope = new AsyncLocalStorage();
+  const titleScope = new AsyncLocalStorage();
   const scoped = () => {
     const chain = stepScope.getStore();
     return chain && chain.length > 0 ? { scope: [...chain] } : {};
@@ -735,7 +737,7 @@ async function runClaimed(target, options, taken) {
     };
     const mismatch = (found) =>
       Object.assign(new Error(`the answer does not fit the step's schema: ${found.problems.map((p) => `${p.at || "(root)"} ${p.say}`).join("; ")}`), { name: "OutputMismatch" });
-    const failed = (found) => new CheckFailed({ step: step.name, problems: found.problems, value: state.value, rounds: state.rounds, phase });
+    const failed = (found) => Object.assign(new CheckFailed({ step: step.name, problems: found.problems, value: state.value, rounds: state.rounds, phase }), { title: record.stopTitle });
     const whenOpen = (kind, fields) => {
       if (open.has(record.callId)) log.emit(kind, fields);
     };
@@ -993,6 +995,7 @@ async function runClaimed(target, options, taken) {
 
     const record = startCall();
     record.title = title;
+    record.stopTitle = callOptions.title ?? step.title ?? step.name;
     const startEvent = {
       callId: record.callId,
       type: "ask",
@@ -1181,8 +1184,8 @@ async function runClaimed(target, options, taken) {
   };
 
   // The stop is recorded now, the first one wins (see $.stop).
-  const stopNow = (reason, value = null, kind = "flow", step = null) => {
-    const signal = new StopSignal(reason, value, currentPhase(), kind, step);
+  const stopNow = (reason, value = null, kind = "flow", step = null, title = titleScope.getStore() ?? null) => {
+    const signal = new StopSignal(reason, value, currentPhase(), kind, step, title);
     if (!ending) {
       stopped = signal;
       ending = true;
@@ -1362,6 +1365,7 @@ async function runClaimed(target, options, taken) {
             { step: name, unknown: true },
             "unknown",
             name,
+            title,
           );
         }
       }
@@ -1376,7 +1380,7 @@ async function runClaimed(target, options, taken) {
       }
       let began = false;
       try {
-        const raw = await stepScope.run([...(stepScope.getStore() ?? []), name], async () => {
+        const raw = await titleScope.run(title, () => stepScope.run([...(stepScope.getStore() ?? []), name], async () => {
           const given = before ? await before() : undefined;
           // A run that ended while `before` waited (a timeout, a stop in another branch) does not start the act: it could not be told of it.
           if (ending) throw new RunEnded();
@@ -1386,7 +1390,7 @@ async function runClaimed(target, options, taken) {
             began = true;
           }
           return once ? onceAct.run(name, () => fn(given)) : fn(given);
-        });
+        }));
         let kept;
         try {
           kept = stepValue(name, raw);
@@ -1432,7 +1436,7 @@ async function runClaimed(target, options, taken) {
       record.title = title;
       log.emit("call.start", { callId: record.callId, type: "do", name, title, phase: currentPhase() });
       try {
-        const value = await fn();
+        const value = await titleScope.run(title, fn);
         endCall(record, { ok: true, output: safe(value, DO_STRING_LIMIT), error: null, agentId: null, cost: null });
         return value;
       } catch (error) {
@@ -1736,12 +1740,12 @@ async function runClaimed(target, options, taken) {
     if (thrown instanceof StopSignal) {
       outcome = "stopped";
       value = thrown.value;
-      stop = { reason: thrown.reason, phase: thrown.phase, kind: thrown.kind, step: thrown.step };
+      stop = { reason: thrown.reason, phase: thrown.phase, kind: thrown.kind, step: thrown.step, title: thrown.title };
     } else if (thrown instanceof CheckFailed) {
       // Not a failure of the run: the flow did not catch an answer that never came right, and a run stopped here can be carried on.
       outcome = "stopped";
       value = null;
-      stop = { reason: thrown.reason, phase: thrown.phase, kind: "check", step: thrown.step };
+      stop = { reason: thrown.reason, phase: thrown.phase, kind: "check", step: thrown.step, title: thrown.title ?? thrown.step };
     } else {
       outcome = thrown instanceof RunTimeout ? "timeout" : "failed";
       value = null;
@@ -1757,7 +1761,7 @@ async function runClaimed(target, options, taken) {
   if (stopped) {
     outcome = "stopped";
     value = stopped.value;
-    stop = { reason: stopped.reason, phase: stopped.phase, kind: stopped.kind, step: stopped.step };
+    stop = { reason: stopped.reason, phase: stopped.phase, kind: stopped.kind, step: stopped.step, title: stopped.title };
     error = null;
   }
 
@@ -1841,6 +1845,7 @@ async function runClaimed(target, options, taken) {
       notify,
       outcome,
       reason: outcome === "stopped" ? stop?.reason : outcome === "failed" || outcome === "timeout" ? `${error?.name}: ${error?.message}` : summary,
+      stopTitle: stop?.title ?? null,
       durationMs,
       usd: cost?.totalUsd ?? null,
       resume,

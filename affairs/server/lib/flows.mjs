@@ -316,7 +316,7 @@ export function endWords(st) {
   const tail = cost ? ` · ${cost}` : "";
   if (st.state === "lost") return ["没了下文，不知道做到哪了", true];
   if (st.outcome === "done") return [`做完了${st.summary ? `：${clip(st.summary, 50)}` : ""}${tail}`, false];
-  if (st.outcome === "stopped") return [`停了${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
+  if (st.outcome === "stopped") return [`${st.stop?.title ? `停在「${clip(st.stop.title, 30)}」` : "停了"}${st.stop?.reason ? `：${clip(st.stop.reason, 50)}` : ""}${tail}`, true];
   if (st.outcome === "timeout") return [`超时停了${tail}`, true];
   return [`出错停了${errorWords(st.error)}${tail}`, true];
 }

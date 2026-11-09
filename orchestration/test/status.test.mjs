@@ -101,6 +101,9 @@ test("status: how a run ended -- done, stopped, failed, timeout -- with cost, su
   assert.deepEqual([done.state, done.outcome, done.summary, done.costUsd, done.durationMs], ["ended", "done", "提交了 r123", 2.4, 120000]);
   const stopped = status(await setup([start(), ev("run.end", { outcome: "stopped", stop: { reason: "补丁没批", kind: "flow", step: null }, resume })], { ageMs: 9_000_000 }));
   assert.deepEqual([stopped.outcome, stopped.stop.reason, stopped.resume.from], ["stopped", "补丁没批", "从补丁接着做"]);
+  assert.equal(stopped.stop.title, null, "old events have no title");
+  const titled = status(await setup([start(), ev("run.end", { outcome: "stopped", stop: { reason: "需要处理", title: "更新副本" } })]));
+  assert.equal(titled.stop.title, "更新副本");
   const failed = status(await setup([start(), ev("run.end", { outcome: "failed", error: { name: "Boom", message: "炸了" } })], { ageMs: 9_000_000 }));
   assert.deepEqual([failed.outcome, failed.error.message], ["failed", "炸了"]);
   const timeout = status(await setup([start(), ev("run.end", { outcome: "timeout", error: { name: "Timeout", message: "超时" } })], { ageMs: 9_000_000 }));

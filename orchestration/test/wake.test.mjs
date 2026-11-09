@@ -66,6 +66,32 @@ async function go(f, logDir, extra = {}) {
 const withSteward = (executor, id = "steward-1", labels = {}) => executor.addAgent({ id, labels });
 const ledger = (dir) => readLedger(dir);
 
+test("stop title follows the innermost step across awaits and reaches the end and wake", async () => {
+  for (const title of ["更新副本", undefined]) {
+    const executor = fakeExecutor();
+    executor.addAgent({ id: "caller-1" });
+    const { result, events } = await go(make("title-stop", async ($) => {
+      await $.step("outer", () => $.do("update-copy", async () => {
+        await Promise.resolve();
+        $.stop("需要处理");
+      }, title ? { title } : {}), { title: "外层" });
+    }), await logs(), { executor, notify: "caller-1" });
+    assert.equal(result.stop.title, title ?? "update-copy");
+    assert.equal(events.at(-1).stop.title, title ?? "update-copy");
+    assert.ok(executor.notifications[0].text.includes(`停在「${title ?? "update-copy"}」`));
+  }
+});
+
+test("parallel step titles do not cross; the first caught stop keeps its title", async () => {
+  const { result } = await go(make("parallel-title", async ($) => {
+    await $.all([
+      $.step("other", () => new Promise((resolve) => setTimeout(resolve, 20)), { title: "另一分支" }),
+      $.step("halt", async () => { await Promise.resolve(); try { $.stop("停下"); } catch {} }, { title: "这里停" }),
+    ]);
+  }), await logs(), { executor: fakeExecutor() });
+  assert.equal(result.stop.title, "这里停");
+});
+
 // --- Who is told ------------------------------------------------------------------------------------------------------
 
 test("nobody asked and no steward configured: nothing is sent, no account is kept, and the event says why", async () => {

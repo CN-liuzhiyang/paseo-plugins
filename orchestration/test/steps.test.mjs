@@ -520,6 +520,7 @@ test("a step that cannot be taken back, in a process that dies inside it, is not
   assert.equal(unknown.outcome, "stopped");
   assert.match(unknown.stop.reason, /settle crash-2 commit/);
   assert.deepEqual([unknown.stop.kind, unknown.stop.step], ["unknown", "commit"]);
+  assert.equal(unknown.stop.title, "commit");
   assert.deepEqual(lines(inCommit.work), ["commit with code 483921"]);
 });
 
