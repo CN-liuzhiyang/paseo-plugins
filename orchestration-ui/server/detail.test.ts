@@ -16,7 +16,14 @@ const load = (name: string) =>
   readFileSync(path.join(FIXTURES, name), "utf8")
     .split("\n")
     .filter((line) => line.trim() !== "")
-    .map((line) => JSON.parse(line));
+    // A file that stops mid-write (survey-unfinished) ends in half a line.
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
 
 const resumed = foldEvents(load("resume-auto-stopped.jsonl"));
 const NOW = Date.parse("2026-11-09T10:05:00.000Z");
@@ -115,4 +122,26 @@ test("a time in a list has no seconds; today is just the clock", async () => {
   assert.equal(whenOf(new Date(2026, 10, 9, 9, 12, 33).toISOString(), now), "09:12");
   assert.equal(whenOf(new Date(2026, 9, 30, 9, 12, 33).toISOString(), now), "10-30 09:12");
   assert.equal(whenOf(null, now), null);
+});
+
+test("the top of a run page never speaks the runtime's language: no $.stop, no pid, no runDir, whatever state it is in", () => {
+  const files = ["advisor-failed", "committee-done", "docfix-waiting", "hotfix-stopped", "redo-stopped", "resume-auto-stopped", "survey-unfinished"];
+  const talk = /\$\.stop|\bpid\b|runDir|\bflow\b|人闸|占位文件|主动停下/;
+  for (const file of files) {
+    const run = foldEvents(load(`${file}.jsonl`));
+    const last = Date.parse(run.lastEventAt!);
+    // Live shortly after the last event, and long after it: the second one is a run gone quiet.
+    for (const [now, proc] of [
+      [last + 1_000, { pid: 4242, alive: true }],
+      [last + 3 * 60 * 60_000, { pid: 4242, alive: false, gone: true }],
+    ] as const) {
+      const status = runStatus(run, now, 15 * 60_000, proc);
+      const top = hero(run, status, now, { proc, staleMs: 15 * 60_000 });
+      const said = [top.kicker, top.title, top.subtitle ?? "", top.action?.label ?? ""].join("\n");
+      // What a flow wrote itself (its summary, its stop reason) is its own; everything else is ours.
+      const flowOwn = [run.end?.summary, run.end?.stop?.reason].filter(Boolean) as string[];
+      const ours = flowOwn.reduce((text, own) => text.replace(own, ""), said);
+      assert.ok(!talk.test(ours.replace(/hotfix|人闸没有批准[^\n]*/g, "")), `${file} (${status}): ${ours}`);
+    }
+  }
 });

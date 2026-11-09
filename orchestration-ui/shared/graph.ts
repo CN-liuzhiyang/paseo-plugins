@@ -122,7 +122,7 @@ export function callWho(call: CallState): string | null {
     const model = shortModel(call.ask?.provider);
     return [call.ask?.role, model].filter(Boolean).join(" · ") || null;
   }
-  if (call.type === "gate") return "在 Paseo 的权限卡片上批";
+  if (call.type === "gate") return "在 Paseo 的批准卡片上批";
   return null;
 }
 
@@ -468,7 +468,7 @@ export function buildGraph(run: RunState, status: RunStatus, now: number): Graph
 
 export interface Hero {
   tone: Tone;
-  /** A few words above the title: "需要你处理", "完成 · 用时 3 分". */
+  /** A few words above the title: "等你批准", "停了". */
   kicker: string;
   title: string;
   subtitle: string | null;
@@ -516,8 +516,8 @@ export function hero(
         .join(" · ");
       return {
         tone: "warning",
-        kicker: "等你",
-        title: `等你批准：${callTitle(run, gate)}`,
+        kicker: "等你批准",
+        title: callTitle(run, gate),
         subtitle: subtitle || null,
         action: agentAction(gate, "去批准"),
         select: gate.callId,

@@ -96,8 +96,8 @@ test("waiting gate: script group, repair loop, a call outside phases, gate besid
 
   const top = hero(run, status, now, { proc: alive });
   assert.equal(top.tone, "warning");
-  assert.equal(top.kicker, "等你");
-  assert.equal(top.title, "等你批准：批准发布 #4711 的文档修订");
+  assert.equal(top.kicker, "等你批准");
+  assert.equal(top.title, "批准发布 #4711 的文档修订");
   assert.match(top.subtitle ?? "", /2h 内不批就按拒绝算/);
   assert.match(top.subtitle ?? "", /同时在跑：「交叉复核修订」/);
   assert.deepEqual(top.action, { label: "去批准", agentId: "dd44ee55-ff66-4a77-8b88-cc9900112204" });

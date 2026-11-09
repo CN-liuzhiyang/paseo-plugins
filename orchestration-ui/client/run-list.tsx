@@ -1,12 +1,11 @@
 import { Icon, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
-import { cardSentence, markOf } from "../shared/bar";
+import { markOf, rowSentence } from "../shared/bar";
 import { RUN_STATUS_LABEL, shortId } from "../shared/format";
-import { pageRuns, whenOf } from "../shared/page";
+import { PAGE_SENTENCE_MAX, pageRuns, whenOf } from "../shared/page";
 import type { LogDirInfo, RunSummary } from "../shared/rpc";
 import { useNow, useRunList } from "./data";
-import { AffairTag } from "./affair";
 import { FlowList } from "./flow-list";
 import { Banner, Card, FoldHead, useUi } from "./ui";
 
@@ -121,7 +120,7 @@ function Empty({ info, missing }: { info: LogDirInfo | null; missing: boolean })
 
 function sentence(run: RunSummary, now: number): string {
   if (run.status === "unreadable") return run.problem ?? RUN_STATUS_LABEL.unreadable;
-  return run.card ? cardSentence(run.card, now) : (run.hero?.title ?? RUN_STATUS_LABEL[run.status]);
+  return run.card ? rowSentence(run.card, now, PAGE_SENTENCE_MAX) : (run.hero?.title ?? RUN_STATUS_LABEL[run.status]);
 }
 
 /** The line: the flow and what tells this run from the others, then what it is doing or how it ended, then when. */
@@ -153,9 +152,8 @@ export function Row({ run, now, last, onOpen }: { run: RunSummary; now: number; 
             {run.flowName ?? "（不是流程记录）"}
           </Text>
           <Text style={[ui.styles.muted, { flexShrink: 1 }]} numberOfLines={1}>
-            {run.inputLabel ?? shortId(run.runId)}
+            {run.affairLabel ?? run.inputLabel ?? shortId(run.runId)}
           </Text>
-          {run.affairLabel && !ui.compact ? <AffairTag label={run.affairLabel} /> : null}
         </View>
         <Text
           style={{ flex: ui.compact ? undefined : 1, color: tone === "neutral" || tone === "success" ? c.foregroundMuted : ui.tone(tone), fontSize: 13 }}

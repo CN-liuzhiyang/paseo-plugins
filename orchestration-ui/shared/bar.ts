@@ -107,19 +107,19 @@ export function cardSentence(card: RunCard, now: number): string {
   }
 }
 
-/** The sentence under the flow's name in a bar row; the group heading has already said waiting, stopped or done. */
-export function rowSentence(card: RunCard, now: number): string {
+/** The sentence under the flow's name in a bar row (or after it, on the page, with more room); the group heading has already said waiting, stopped or done. */
+export function rowSentence(card: RunCard, now: number, max: number = ROW_SENTENCE_MAX): string {
   switch (groupOf(card)) {
     case "waiting": {
       const waited = sinceNow(card.gate!.since, now);
-      return join(card.gate!.title, waited === null ? null : `等了 ${waited}`, ROW_SENTENCE_MAX);
+      return join(card.gate!.title, waited === null ? null : `等了 ${waited}`, max);
     }
     case "running":
-      return runningSentence(card, now, ROW_SENTENCE_MAX);
+      return runningSentence(card, now, max);
     case "done":
-      return join(card.title, cost(card), ROW_SENTENCE_MAX);
+      return join(card.title, cost(card), max);
     case "stopped":
-      return clip(trouble(card), ROW_SENTENCE_MAX);
+      return clip(trouble(card), max);
   }
 }
 

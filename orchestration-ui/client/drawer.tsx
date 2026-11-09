@@ -302,11 +302,10 @@ function EndDrawer({ run, events, status, now, proc, staleMs }: DrawerProps) {
             : "答案打回去改了几轮，还是没通过核对，就停下了。"}
         </Text>
       ) : reason ? (
-        <Box tone="warning">
-          <Text style={ui.styles.text} selectable>
-            {reason}
-          </Text>
-        </Box>
+        // The sentence on top is the short one; this is the whole of it, for whoever has to act on it.
+        <Fold label="原因全文">
+          <Block text={reason} />
+        </Fold>
       ) : null}
       {error ? (
         <Box tone="danger">

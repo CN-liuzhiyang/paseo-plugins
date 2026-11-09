@@ -1,6 +1,6 @@
 import * as pluginClient from "@getpaseo/plugin/client";
 import { Icon } from "@getpaseo/plugin/client/react-native";
-import { Linking, Platform, Pressable, Text, View } from "react-native";
+import { Linking, Platform, Pressable, Text } from "react-native";
 import { affairTarget, openPluginScreenOf, urlHost, type Affair, type AffairTarget } from "../shared/affair";
 import { useUi } from "./ui";
 
@@ -65,25 +65,5 @@ export function AffairLink({ affair }: { affair: Affair }) {
       <Icon name={target.kind === "url" ? "ExternalLink" : "ArrowUpRight"} size={13} color={c.accent} />
       {where ? <Text style={ui.styles.small}>{where}</Text> : null}
     </Pressable>
-  );
-}
-
-/** The affair as a small tag on a list row: just the words, the row itself is what opens. */
-export function AffairTag({ label }: { label: string }) {
-  const ui = useUi();
-  return (
-    <View
-      style={{
-        flexShrink: 1,
-        paddingHorizontal: 6,
-        paddingVertical: 1,
-        borderRadius: 4,
-        backgroundColor: ui.theme.colors.surface2,
-      }}
-    >
-      <Text style={[ui.styles.small, { color: ui.theme.colors.foregroundMuted }]} numberOfLines={1}>
-        {label}
-      </Text>
-    </View>
   );
 }

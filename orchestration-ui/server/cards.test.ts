@@ -36,8 +36,8 @@ test("card: a gate waiting says so, with who carries it and since when", () => {
   assert.equal(status, "running");
   const card = cardOf("r1", run, status, now)!;
   assert.equal(card.tone, "warning");
-  assert.equal(card.kicker, "等你");
-  assert.match(card.title, /^等你批准：/);
+  assert.equal(card.kicker, "等你批准");
+  assert.equal(card.title, "批准发布 #4711 的文档修订");
   assert.equal(card.gate?.callId, "c11");
   assert.equal(card.gate?.title, "批准发布 #4711 的文档修订");
   assert.ok(card.gate?.since);

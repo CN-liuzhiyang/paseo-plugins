@@ -10,6 +10,9 @@ export const PAGE_DONE_DAYS = 3;
 /** A run that stopped or failed stays up front this long, unless a later run carried it on. */
 export const PAGE_STOPPED_DAYS = 7;
 
+/** Characters a run's sentence may take on the page: the bar's row has 20, a line this wide has room for more. */
+export const PAGE_SENTENCE_MAX = 40;
+
 const DAY = 24 * 60 * 60_000;
 
 export interface PageGroup {
