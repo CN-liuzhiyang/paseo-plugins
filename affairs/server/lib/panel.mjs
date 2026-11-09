@@ -9,7 +9,7 @@ import { SAME_SPOT_TEXT, sameSpotAgain, canResume, endedAfterNow, sentenceOf, sp
 import { listReaders } from "./readers.mjs";
 import { modeOf, modeText } from "./mode.mjs";
 import { budgetOf, budgetText } from "./drive.mjs";
-import { stepLines, stepsOf } from "./steps.mjs";
+import { stepLines, stepsOf, workReadme } from "./steps.mjs";
 
 // The progress panel draws its status, sources, steps and history from the affair's log and files.
 
@@ -251,6 +251,16 @@ export function progressOf(state, policy, lc) {
   return { stepList: list, facts };
 }
 
+/** The first paragraph introducing the affair, read fresh along with its steps. */
+export function whatOf(state, policy) {
+  const file = workReadme(state, policy);
+  if (!file || !existsSync(file)) return undefined;
+  const section = readFileSync(file, "utf8").split(/^## 是什么[ \t]*\r?$/m)[1]?.split(/^#{1,2} /m)[0] ?? "";
+  const paragraph = section.trim().split(/\r?\n\s*\r?\n/)[0];
+  const text = paragraph.replace(/\[([^\]]+)\]\([^\n]*?\)/g, "$1").replace(/`|\*\*/g, "").replace(/\s+/g, " ").trim();
+  return text ? { text, path: slashed(file) } : undefined;
+}
+
 export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "", flowNow = new Map(), sessions = /** @type {any[]} */ ([]) } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
   const { labelOf } = namesOf(policy, state, lc);
@@ -259,9 +269,11 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
   const asks = (state.asks ?? []).filter((a) => a.state === "open");
   const drive = modeOf(state, policy) === "drive";
   const costs = drive ? budgetOf({ flowNow }, state) : undefined;
+  const what = whatOf(state, policy);
   return {
     id: state.id,
     title: state.title,
+    ...(what ? { what } : {}),
     mode: modeText(state, policy),
     steps: stepLines(state, now, policy).filter((l) => l && !l.startsWith("##")),
     ...progressOf(state, policy, lc),

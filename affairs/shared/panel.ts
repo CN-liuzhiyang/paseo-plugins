@@ -84,6 +84,7 @@ export const panelSchema = z.object({
   id: z.string(),
   title: z.string(),
   open: z.boolean(),
+  what: z.object({ text: z.string(), path: z.string() }).optional(),
   mode: z.string().optional(),
   steps: z.array(z.string()).optional(),
   stepList: z.array(z.object({ title: z.string(), state: z.enum(["done", "now", "todo", "blocked"]), who: z.enum(["agent", "him", "wait"]), note: z.string().optional(), notes: z.array(text), number: z.number().optional() })).optional(),

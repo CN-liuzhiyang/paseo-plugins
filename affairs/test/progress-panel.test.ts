@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { panelOf, progressOf, sourcesOf } from "../server/lib/panel.mjs";
+import { panelOf, progressOf, sourcesOf, whatOf } from "../server/lib/panel.mjs";
 import { budgetOf, budgetText } from "../server/lib/drive.mjs";
 import { stepLines } from "../server/lib/steps.mjs";
 import { linkContext } from "../server/lib/links.mjs";
@@ -11,6 +11,33 @@ import { world } from "./kit";
 
 const lc = linkContext(DEFAULT_POLICY as never, null);
 const checklist = ["定位", "修复", "观察", "收口"].map((title, i) => ({ id: String(i + 1), title, state: i < 2 ? "done" : i === 2 ? "now" : "todo", who: "agent" }));
+
+test("the introduction uses only the first README paragraph, strips inline markup, and updates on each read", () => {
+  const w = world();
+  const state = { id: "sample", title: "示例", status: "stopped", facts: [], asks: [], flows: [], lines: [] };
+  const policy = { ...w.ctx.policy, workDir: w.dir };
+  mkdirSync(path.join(w.dir, state.id));
+  const file = path.join(w.dir, state.id, "README.md");
+  writeFileSync(file, "# 示例\r\n\r\n## 是什么\r\n\r\n负责 `示例工具` 的 **改进**，\r\n可以查看[详细文档](https://example.com/docs)。\r\n\r\n第二段不放到面板。\r\n\r\n## 步骤\r\n- [ ] 检查\r\n");
+  const what = { text: "负责 示例工具 的 改进， 可以查看详细文档。", path: file.replace(/\\/g, "/") };
+  assert.deepEqual(whatOf(state, policy), what);
+  assert.deepEqual(panelOf(w.root, state, w.now(), policy, lc).what, what);
+  writeFileSync(file, "## 是什么\n新的说明\n## 步骤\n- [ ] 检查\n");
+  assert.equal(panelOf(w.root, state, w.now(), policy, lc).what?.text, "新的说明");
+});
+
+test("missing README, missing introduction, and an empty introduction omit the block", () => {
+  const w = world();
+  const state = { id: "sample", title: "示例", status: "stopped", facts: [], asks: [], flows: [], lines: [] };
+  const policy = { ...w.ctx.policy, workDir: w.dir };
+  assert.equal(whatOf(state, {}), undefined);
+  assert.ok(!("what" in panelOf(w.root, state, w.now(), policy, lc)));
+  mkdirSync(path.join(w.dir, state.id));
+  for (const content of ["## 步骤\n- [ ] 检查", "## 是什么\n\n## 步骤\n- [ ] 检查", "## 是什么\n\n   \n"]) {
+    writeFileSync(path.join(w.dir, state.id, "README.md"), content);
+    assert.ok(!("what" in panelOf(w.root, state, w.now(), policy, lc)));
+  }
+});
 
 test("enumerated and ranged facts join only their first step, stripping prefixes while preserving content and links", () => {
   const state = { mode: "watch", modeExplicit: true, stepRead: { steps: checklist }, facts: ["第 1、2 步： 已完成 doc:change；保留：正文  空格", "第 3–4 步先观察", "保留原始数据", "第 9 步待补"] };

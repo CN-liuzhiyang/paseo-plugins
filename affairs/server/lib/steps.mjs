@@ -2,8 +2,10 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { modeOf } from "./mode.mjs";
 
+export const workReadme = (state, policy) => policy.workDir && path.resolve(policy.workDir, state.id, "README.md");
+
 export function workSteps(state, policy) {
-  const file = policy.workDir && path.join(policy.workDir, state.id, "README.md");
+  const file = workReadme(state, policy);
   if (!file || !existsSync(file)) return [];
   const section = readFileSync(file, "utf8").split(/^## 步骤\s*\r?$/m)[1]?.split(/^#{1,2} /m)[0] || "";
   return [...section.matchAll(/^- \[([ xX])\] (.+)$/gm)].map((m, i) => ({ id: String(i + 1), title: m[2].trim(), state: m[1].toLowerCase() === "x" ? "done" : "todo", who: /谁[：:]\s*他/.test(m[2]) ? "him" : "agent" }));

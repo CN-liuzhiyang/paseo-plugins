@@ -7,7 +7,7 @@ import { tint } from "../shared/look";
 import { answerRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 import { FlowBox } from "./flow";
-import { Materials, useFiles } from "./files";
+import { Materials, What, useFiles } from "./files";
 import { ChoiceButton, Dot, Heading, OtherAnswer, QuestionCard, Rule, Section, StateBadge } from "./look";
 import { Sessions, SessionSummary } from "./sessions";
 import { Timeline } from "./timeline";
@@ -46,6 +46,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   const notes = (items: PanelData["facts"], lines: number) => items.map((n, i) => <Clip key={i} text={n.text} parts={n.parts} linkColor={c.accent} onLink={openExternal} lines={lines} style={muted} />);
   return (
     <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ paddingBottom: 28 }}>
+      {panel.what ? <What key={panel.id} what={panel.what} files={files} c={c} /> : null}
       <View style={{ padding: 16, gap: 8, borderBottomWidth: 1, borderBottomColor: c.border }}>
         <StateBadge mood={panel.mood} c={c} />
         <Pieces text={panel.waiting.text} parts={panel.waiting.parts} color={c.accent} style={{ color: c.foreground, fontSize: 17, lineHeight: 24, fontWeight: "700" }} />

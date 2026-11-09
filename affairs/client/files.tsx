@@ -1,7 +1,7 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Image, Pressable, View, type ViewStyle } from "react-native";
-import type { PanelMaterial } from "../shared/panel";
+import type { PanelData, PanelMaterial } from "../shared/panel";
 import { fileRpc } from "../shared/rpc";
 import type { Colors } from "../shared/look";
 import { Rule, Tag } from "./look";
@@ -42,6 +42,7 @@ export function useFiles(workspaceId: string, openFile: Opener) {
     opened,
     shownKey,
     canOpen: typeof openFile === "function",
+    openPath: typeof openFile === "function" ? (path: string) => openFile({ workspaceId, path }) : undefined,
     /** Press on a file: the host's tab when it has one, else the preview under `place`. */
     open(name: string, version: string, path: string, place: string) {
       if (typeof openFile === "function") {
@@ -55,6 +56,17 @@ export function useFiles(workspaceId: string, openFile: Opener) {
   };
 }
 export type Files = ReturnType<typeof useFiles>;
+
+/** Open the introduction in the host's README tab, or expand it here on older hosts. */
+export function What({ what, files, c }: { what: NonNullable<PanelData["what"]>; files: Pick<Files, "openPath">; c: Colors }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <Pressable testID="panel-what" accessibilityRole="button" accessibilityLabel={files.openPath ? "打开 README" : expanded ? "收起" : "展开全文"} onPress={() => files.openPath ? files.openPath(what.path) : setExpanded(!expanded)} style={{ marginHorizontal: 16, marginTop: 14, paddingHorizontal: 12, paddingVertical: 10, borderRadius: 10, backgroundColor: c.surface1 }}>
+      <Words numberOfLines={expanded ? undefined : 3} style={{ color: c.foreground, fontSize: 13, lineHeight: 19 }}>{what.text}</Words>
+      <Words style={{ color: c.accent, fontSize: 12, lineHeight: 18, textAlign: "right", marginTop: 4 }}>{expanded ? "收起" : "README ›"}</Words>
+    </Pressable>
+  );
+}
 
 /** The picture of a thumbnail: the file's own when it came, else a block with its type. */
 export function Thumb({ item, got, c, size = 44 }: { item: { name: string; ext: string; thumb: boolean; version: string }; got?: Got; c: Colors; size?: number }) {
