@@ -21,11 +21,13 @@ export function stepProblem(reading) {
 
 const WHO = { agent: "我来做", him: "你来做", wait: "等外部" };
 
+export const stepsOf = (state, policy) => policy && modeOf(state, policy) === "drive" ? workSteps(state, policy) : state.stepRead?.steps ?? [];
+
 /** The compact checklist a chat and a look both read. No checklist leaves the old brief untouched. */
 export function stepLines(state, now, policy) {
   const drive = policy && modeOf(state, policy) === "drive";
-  const reading = drive ? { steps: workSteps(state, policy), at: new Date(now).toISOString() } : state.stepRead;
-  if (drive && !reading.steps.length) return ["## 走到哪一步", "README 还没有步骤清单，先写步骤和估算请他批。"];
+  const reading = drive ? { steps: stepsOf(state, policy), at: new Date(now).toISOString() } : state.stepRead;
+  if (drive && !reading.steps.length) return ["done", "stopped"].includes(state.status) ? [] : ["## 走到哪一步", "README 还没有步骤清单，先写步骤和估算请他批。"];
   if (!reading?.steps?.length) return [];
   const { steps } = reading;
   const at = Date.parse(reading.at);

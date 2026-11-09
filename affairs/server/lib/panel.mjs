@@ -8,16 +8,13 @@ import { eventsOf, shownName, whenOf } from "./events.mjs";
 import { SAME_SPOT_TEXT, sameSpotAgain, canResume, endedAfterNow, sentenceOf, spanText, usdText } from "./flows.mjs";
 import { listReaders } from "./readers.mjs";
 import { modeOf, modeText } from "./mode.mjs";
-import { budgetText } from "./drive.mjs";
-import { stepLines } from "./steps.mjs";
+import { budgetOf, budgetText } from "./drive.mjs";
+import { stepLines, stepsOf } from "./steps.mjs";
 
-// What the "进展" panel beside an affair's conversation shows: four blocks (now, what happened, sources, materials), all drawn from the
-// affair's log and its files/ folder, nothing remembered anywhere else. The words are what a person reads: none of
-// 叫醒, 校验, 记录, 计划, 读数, 会话, agent (a test holds it to that).
+// The progress panel draws its status, sources, steps and history from the affair's log and files.
 
 export const SOURCES_SHOWN = 6;
 export const MATERIALS_SHOWN = 5;
-const FACTS_SHOWN = 12;
 const MATERIAL_CHARS = 20_000;
 /** A picture bigger than this is not sent to the panel to be drawn: it is a block with its type on it. */
 export const PICTURE_BYTES = 3 * 1024 * 1024;
@@ -130,7 +127,7 @@ export function sourcesOf(state, now, policy, lc) {
   if (main) add({ label: main.label, status: state.status === "done" ? "办完了" : state.status === "stopped" ? "不盯了" : "", at: "", href: main.href });
   for (const w of Object.values(state.watches ?? {})) {
     const label = w.label || toolName(w.tool);
-    add({ label, ...(w.lastError ? { status: "读不到" } : shown(w.summary)), at: shortWhen(w.readAt, now, policy.tz), href: null });
+    add({ label, ...(w.lastError ? { status: "读不到", full: clip(String(w.lastError), FULL_CHARS), tone: "bad" } : shown(w.summary)), at: shortWhen(w.readAt, now, policy.tz), href: null });
   }
   // The references in what is remembered and said: each once, newest wording kept.
   const texts = [...(state.facts ?? []), state.nowText ?? ""];
@@ -238,18 +235,40 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   };
 }
 
-/** The whole panel for one affair. */
+/** Attach numbered facts before limiting or presenting the remaining notes. Ranges belong to their first step. */
+export function progressOf(state, policy, lc) {
+  const list = stepsOf(state, policy).map(({ title, state, who, note }) => ({ title, state, who, ...(note ? { note } : {}), notes: [] }));
+  const synthetic = !list.length;
+  const facts = [];
+  for (const fact of state.facts ?? []) {
+    const text = String(fact);
+    const match = /^第\s*(\d+(?:\s*[、,，–—\-至]\s*\d+)*)\s*步/.exec(text);
+    const numbers = match ? (/[–—\-至]/.test(match[1]) ? [Number(match[1].match(/\d+/)[0])] : match[1].match(/\d+/g).map(Number)) : [];
+    const targets = [...new Set(numbers)].filter((n) => n > 0 && (synthetic || n <= list.length));
+    if (!targets.length) { facts.push(withParts(text, lc)); continue; }
+    for (const n of targets) {
+      if (synthetic && !list.some((s) => s.number === n)) list.push({ title: `第 ${n} 步`, number: n, state: ["done", "stopped"].includes(state.status) ? "done" : "todo", who: "agent", notes: [] });
+      (synthetic ? list.find((s) => s.number === n) : list[n - 1]).notes.push(withParts(text, lc));
+    }
+  }
+  return { stepList: list, facts };
+}
+
 export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "", flowNow = new Map(), sessions = /** @type {any[]} */ ([]) } = {}) {
   const card = cardOf(state, now, policy, { budget, trouble });
   const { labelOf } = namesOf(policy, state, lc);
   const happened = eventsOf(state, now, policy, lc, { labelOf, fileAt: (name) => { const f = fileIn(root, state.id, name); return f ? slashed(f) : null; } });
   const spent = counts(root, now, policy).per[state.id]?.usd ?? 0;
   const asks = (state.asks ?? []).filter((a) => a.state === "open");
+  const drive = modeOf(state, policy) === "drive";
+  const costs = drive ? budgetOf({ flowNow }, state) : undefined;
   return {
     id: state.id,
     title: state.title,
     mode: modeText(state, policy),
     steps: stepLines(state, now, policy).filter((l) => l && !l.startsWith("##")),
+    ...progressOf(state, policy, lc),
+    ...(costs ? { budget: costs } : {}),
     sessions: sessionsOf(state, sessions),
     open: card.open,
     mood: moodOf(state, asks.length > 0, Boolean(trouble), Boolean(budget)),
@@ -258,9 +277,8 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
     waiting: withParts(card.waiting, lc),
     now: withParts(card.now, lc),
     next: withParts(modeOf(state, policy) === "drive" ? "" : card.next, lc),
-    spent: modeOf(state, policy) === "drive" ? budgetText({ policy, flowNow, now: () => now }, state) : spent > 0 ? `今天花了 $${spent.toFixed(2)}` : "",
+    spent: drive ? budgetText({ policy, flowNow, now: () => now }, state, costs) : spent > 0 ? `今天花了 $${spent.toFixed(2)}` : "",
     events: { total: happened.total, items: happened.items.map((e) => ({ ...e, ...withParts(e.text, lc) })) },
-    facts: (state.facts ?? []).slice(0, FACTS_SHOWN).map((f) => withParts(String(f), lc)),
     sources: sourcesOf(state, now, policy, lc),
     materials: materialsOf(root, state, now, policy),
   };

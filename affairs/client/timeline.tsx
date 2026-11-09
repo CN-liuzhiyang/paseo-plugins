@@ -121,7 +121,7 @@ function EventRow({ e, c, last, open, onToggle, files }: { e: PanelEvent; c: Col
 }
 
 /** The block: a heading with "看全部" on its right, the filters once all are open, and the rows under their days. */
-export function Timeline({ events, c, files }: { events: PanelEvent[]; c: Colors; files: Files }) {
+export function Timeline({ events, c, files, embedded = false }: { events: PanelEvent[]; c: Colors; files: Files; embedded?: boolean }) {
   const [all, setAll] = useState(false);
   const [filter, setFilter] = useState<FilterId>("all");
   const [openKey, setOpenKey] = useState<Record<string, boolean>>({});
@@ -135,7 +135,7 @@ export function Timeline({ events, c, files }: { events: PanelEvent[]; c: Colors
   );
   return (
     <>
-      <Heading text="经过" c={c} right={events.length > SHOWN ? (all ? link("收起 ›", () => (setAll(false), setFilter("all"))) : link(`看全部 ${events.length} 条 ›`, () => setAll(true))) : undefined} />
+      {!embedded ? <Heading text="经过" c={c} /> : null}
       {events.length === 0 ? <Words style={{ color: c.foregroundMuted, fontSize: 12, lineHeight: 17 }}>还没有</Words> : null}
       {all ? (
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
@@ -159,6 +159,7 @@ export function Timeline({ events, c, files }: { events: PanelEvent[]; c: Colors
           <EventRow e={e} c={c} last={i === rows.length - 1} open={Boolean(openKey[e.key])} onToggle={() => setOpenKey((o) => ({ ...o, [e.key]: !o[e.key] }))} files={files} />
         </View>
       ))}
+      {events.length > SHOWN ? (all ? link("收起 ›", () => (setAll(false), setFilter("all"))) : link(`看全部 ${events.length} 条 ›`, () => setAll(true))) : null}
     </>
   );
 }

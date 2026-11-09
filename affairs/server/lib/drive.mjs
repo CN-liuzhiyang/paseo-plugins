@@ -25,8 +25,11 @@ export function budgetGate(ctx, s) {
   return "";
 }
 
-export function budgetText(ctx, s) {
-  const spent = spendOf(s, ctx.flowNow);
+export function budgetOf(ctx, s) {
+  return { ...spendOf(s, ctx.flowNow), ...(s.budget ? { cap: s.budget.usd } : {}) };
+}
+
+export function budgetText(ctx, s, spent = budgetOf(ctx, s)) {
   return `已花 $${spent.usd.toFixed(4)}${s.budget ? ` / 已批 $${s.budget.usd}${s.budget.until ? `（到 ${s.budget.until}）` : ""}` : "；尚未批准额度"}${spent.unknown ? `；另有 ${spent.unknown} 个会话花费不明` : ""}`;
 }
 

@@ -39,7 +39,7 @@ test("a wash of a theme color is only made from a plain #rrggbb; anything else f
 
 test("the client files name no color of their own (only the theme's), so light and dark both read", () => {
   const dir = path.resolve(import.meta.dirname, "../client");
-  for (const f of ["look.tsx", "panel.tsx", "card.tsx", "timeline.tsx", "files.tsx", "zoom.tsx"]) {
+  for (const f of ["look.tsx", "panel.tsx", "sessions.tsx", "card.tsx", "timeline.tsx", "files.tsx", "zoom.tsx"]) {
     const source = readFileSync(path.join(dir, f), "utf8");
     assert.ok(!/#[0-9a-fA-F]{3,8}\b/.test(source.replace(/\/\^#\[0-9a-f\]\{6\}\$\/i/g, "")), `${f} has a hard-coded color`);
     assert.ok(!/\brgba?\(|\bhsla?\(/.test(source), `${f} has a hard-coded color`);

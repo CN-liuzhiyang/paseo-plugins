@@ -6,7 +6,7 @@ import { segmentSchema } from "./card";
 
 const text = z.object({ text: z.string(), parts: z.array(segmentSchema).optional() });
 const ask = z.object({ id: z.string(), title: z.string(), line: z.string(), options: z.array(z.string()) });
-const source = z.object({ label: z.string(), status: z.string().optional(), full: z.string().optional(), at: z.string().optional(), href: z.string().nullable().optional() });
+const source = z.object({ label: z.string(), status: z.string().optional(), full: z.string().optional(), at: z.string().optional(), href: z.string().nullable().optional(), tone: z.enum(["ok", "bad"]).optional() });
 const material = z.object({
   /** The name in the folder (to ask for it). */
   name: z.string(),
@@ -86,6 +86,8 @@ export const panelSchema = z.object({
   open: z.boolean(),
   mode: z.string().optional(),
   steps: z.array(z.string()).optional(),
+  stepList: z.array(z.object({ title: z.string(), state: z.enum(["done", "now", "todo", "blocked"]), who: z.enum(["agent", "him", "wait"]), note: z.string().optional(), notes: z.array(text), number: z.number().optional() })).optional(),
+  budget: z.object({ usd: z.number(), cap: z.number().optional(), unknown: z.number().optional() }).optional(),
   sessions: z.array(z.object({ agentId: z.string(), title: z.string(), role: z.enum(["主对话", "派活", "流程"]), status: z.enum(["干活中", "做完了", "已关闭", "等你批"]), project: z.string(), usd: z.number().optional() })),
   mood: z.enum(["watching", "ask", "done", "error", "paused", "stopped"]),
   asks: z.array(ask),

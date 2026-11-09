@@ -1,22 +1,20 @@
 import { useRpc } from "@getpaseo/plugin/client";
 import type { PluginWorkspacePanelProps } from "@getpaseo/plugin/client";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, View } from "react-native";
+import { ScrollView, View } from "react-native";
 import type { PanelData } from "../shared/panel";
+import { tint } from "../shared/look";
 import { answerRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 import { FlowBox } from "./flow";
 import { Materials, useFiles } from "./files";
-import { ChoiceButton, Heading, OtherAnswer, QuestionCard, Rule, StateBadge, Tag } from "./look";
+import { ChoiceButton, Dot, Heading, OtherAnswer, QuestionCard, Rule, Section, StateBadge } from "./look";
+import { Sessions, SessionSummary } from "./sessions";
 import { Timeline } from "./timeline";
 import { Clip, Words } from "./text";
 
-// The 进展 panel beside an affair's chat: now / what happened / sources / materials. It only draws what the plugin sends and asks again
-// every few seconds while it is on screen; it keeps nothing and does nothing when it opens (it is also mounted while the sidebar is shut).
-
 const POLL_MS = 4000;
-
-// COMPAT(navigation.openFile): a fork-only way to open a file of the machine as a tab of the workspace; a host without it shows the file in the panel.
+// COMPAT(navigation.openFile): a fork-only way to open a machine file in the workspace.
 type OpenFile = (input: { workspaceId: string; path: string }) => void;
 
 export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelProps) {
@@ -28,117 +26,106 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   const [flowReply, setFlowReply] = useState("");
   const files = useFiles(workspaceId, (navigation as { openFile?: OpenFile } | undefined)?.openFile);
   const [panel, setPanel] = useState<PanelData | null | undefined>(undefined);
-  const [showFacts, setShowFacts] = useState(false);
-  const [showSessions, setShowSessions] = useState(false);
   useEffect(() => {
     let alive = true;
-    const once = () =>
-      void load({ workspaceId })
-        .then((r) => alive && setPanel(r.panel))
-        .catch(() => {});
+    const once = () => void load({ workspaceId }).then((r) => alive && setPanel(r.panel)).catch(() => {});
     once();
     const timer = setInterval(once, POLL_MS);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
+    return () => { alive = false; clearInterval(timer); };
   }, [workspaceId]);
-
-  const heading = (text: string) => <Heading text={text} c={c} />;
   const body = { color: c.foreground, fontSize: 14, lineHeight: 20 } as const;
-  const muted = { color: c.foregroundMuted, fontSize: 12, lineHeight: 17 } as const;
-  const toggle = (text: string, onPress: () => void) => (
-    <Pressable onPress={onPress}>
-      <Words style={{ color: c.accent, fontSize: 13, marginTop: 4 }}>{text}</Words>
-    </Pressable>
-  );
+  const muted = { color: c.foregroundMuted, fontSize: 12, lineHeight: 18 } as const;
+  if (!panel) return <View style={{ flex: 1, backgroundColor: c.surface0, padding: 16 }}><Words style={muted}>{panel === undefined ? "…" : "这里不是事项。"}</Words></View>;
 
-  if (panel === undefined)
-    return (
-      <View style={{ flex: 1, backgroundColor: c.surface0, padding: 14 }}>
-        <Words style={muted}>…</Words>
-      </View>
-    );
-  if (panel === null)
-    return (
-      <View style={{ flex: 1, backgroundColor: c.surface0, padding: 14 }}>
-        <Words style={muted}>这里不是事项。</Words>
-      </View>
-    );
-
+  const steps = panel.stepList ?? [];
+  const sourceColor = (s: PanelData["sources"]["items"][number]) => s.tone === "bad" ? c.statusDanger : s.tone === "ok" ? c.statusSuccess : c.foregroundMuted;
+  const done = steps.filter((s) => s.state === "done").length;
+  const budget = panel.budget;
+  const sourceCount = panel.sources.items.length + panel.sources.more;
+  const section = { affairId: panel.id, c };
+  const notes = (items: PanelData["facts"], lines: number) => items.map((n, i) => <Clip key={i} text={n.text} parts={n.parts} linkColor={c.accent} onLink={openExternal} lines={lines} style={muted} />);
   return (
-    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ padding: 14, paddingBottom: 28 }}>
-      <StateBadge mood={panel.mood} c={c} />
-      {panel.flow ? heading("流程") : null}
-      {panel.flow ? <FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} busy={resuming} hideStale={Boolean(flowReply)} resume={() => {
-        const action = panel.flow?.action;
-        if (!action?.runId || !action.expect || resuming) return;
-        setResuming(true);
-        void resumeFlow({ affairId: panel.id, runId: action.runId, expect: action.expect }).then(async (r) => {
-          setFlowReply(r.text);
-          setPanel((await load({ workspaceId })).panel);
-        }).catch(() => setFlowReply("没连上，请过一会儿再试。")).finally(() => setResuming(false));
-      }} /> : null}
-      {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
-      {heading(panel.mode ? `现在 · ${panel.mode}` : "现在")}
-      {panel.asks.map((a) => {
-        const send = (text: string) => void answer({ affairId: panel.id, askId: a.id, text }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); });
-        return (
-          <QuestionCard key={a.id} c={c} title={a.title} line={a.line} footer={<OtherAnswer c={c} testID={`panel-ask-other-${a.id}`} onSend={send} />}>
-            {a.options.map((o, i) => (
-              <ChoiceButton key={o} testID={`panel-ask-${o}`} text={o} primary={i === 0} c={c} onPress={() => send(o)} />
-            ))}
-          </QuestionCard>
-        );
-      })}
-      <Pieces text={panel.waiting.text} parts={panel.waiting.parts} color={c.accent} style={{ color: c.foreground, fontSize: 17, lineHeight: 24, fontWeight: "700" }} />
-      {panel.now.text ? <Pieces text={panel.now.text} parts={panel.now.parts} color={c.accent} style={{ ...body, marginTop: 6 }} /> : null}
-      {panel.next.text ? <Words style={{ ...muted, marginTop: 8 }}>下次　{panel.next.text}</Words> : null}
-      {panel.spent ? <Words style={{ ...muted, marginTop: 2 }}>{panel.spent}</Words> : null}
-      {panel.steps?.length ? <View style={{ gap: 4, marginTop: 12 }}>{heading("走到哪一步")}{panel.steps.map((s, i) => <Words key={i} style={body}>{s}</Words>)}</View> : null}
-      {panel.sessions.length ? heading("相关会话") : null}
-      {(showSessions ? panel.sessions : panel.sessions.slice(0, 8)).map((s) => (
-        <View key={s.agentId} style={{ flexDirection: "row", alignItems: "center", gap: 8, marginTop: 8 }}>
-          <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
-            <Words style={body}>{s.title}</Words>
-            <Words style={muted}>{[s.role, s.status, s.project, s.usd === undefined ? "" : `$${s.usd.toFixed(3)}`].filter(Boolean).join(" · ")}</Words>
+    <ScrollView style={{ flex: 1, backgroundColor: c.surface0 }} contentContainerStyle={{ paddingBottom: 28 }}>
+      <View style={{ padding: 16, gap: 8, borderBottomWidth: 1, borderBottomColor: c.border }}>
+        <StateBadge mood={panel.mood} c={c} />
+        <Pieces text={panel.waiting.text} parts={panel.waiting.parts} color={c.accent} style={{ color: c.foreground, fontSize: 17, lineHeight: 24, fontWeight: "700" }} />
+        {panel.now.text ? <Pieces text={panel.now.text} parts={panel.now.parts} color={c.accent} style={body} /> : null}
+        {panel.next.text ? <Words style={muted}>下次　{panel.next.text}</Words> : null}
+        {budget ? <View style={{ gap: 5, marginTop: 4 }}>
+          {budget.cap !== undefined && budget.cap > 0 ? <View accessibilityLabel={`额度已用 ${Math.round(budget.usd / budget.cap * 100)}%`} style={{ height: 6, borderRadius: 3, backgroundColor: c.surface2, overflow: "hidden" }}><View style={{ height: 6, borderRadius: 3, width: `${Math.min(100, Math.max(0, budget.usd / budget.cap * 100))}%`, backgroundColor: budget.usd / budget.cap > 0.8 ? c.statusWarning : c.accent }} /></View> : null}
+          <View style={{ flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 4 }}>
+            <Words style={{ ...muted, color: c.foreground, fontVariant: ["tabular-nums"] }}>{`$${budget.usd.toFixed(2)}${budget.cap !== undefined ? ` / $${budget.cap}` : ""}`}</Words>
+            {budget.unknown ? <Words style={muted}>另 {budget.unknown} 个会话花费不明</Words> : null}
           </View>
-          {navigation?.openAgent ? <Pressable accessibilityRole="button" accessibilityLabel={`打开 ${s.title}`} onPress={() => navigation.openAgent!({ agentId: s.agentId })} style={{ flexShrink: 0, padding: 8 }}><Words style={{ color: c.accent, fontSize: 13 }}>打开</Words></Pressable> : null}
-        </View>
-      ))}
-      {panel.sessions.length > 8 ? toggle(showSessions ? "收起 ›" : `看全部 ${panel.sessions.length} 条 ›`, () => setShowSessions(!showSessions)) : null}
-      {panel.facts.length ? toggle(showFacts ? "收起记住的 ›" : `记住的 ${panel.facts.length} 条 ›`, () => setShowFacts(!showFacts)) : null}
-      {showFacts ? panel.facts.map((f, i) => <Pieces key={i} text={`· ${f.text}`} parts={f.parts} color={c.accent} style={{ ...muted, marginTop: 4 }} />) : null}
+        </View> : panel.spent ? <Words style={muted}>{panel.spent}</Words> : null}
+      </View>
+      {panel.flow || flowReply || panel.asks.length ? <View style={{ paddingHorizontal: 16, paddingVertical: 12 }}>
+        {panel.flow ? <><Heading text="流程" c={c} /><FlowBox flow={panel.flow} c={c} workspaceId={workspaceId} navigation={navigation as Parameters<typeof FlowBox>[0]["navigation"]} busy={resuming} hideStale={Boolean(flowReply)} resume={() => {
+          const action = panel.flow?.action;
+          if (!action?.runId || !action.expect || resuming) return;
+          setResuming(true);
+          void resumeFlow({ affairId: panel.id, runId: action.runId, expect: action.expect }).then(async (r) => {
+            setFlowReply(r.text);
+            setPanel((await load({ workspaceId })).panel);
+          }).catch(() => setFlowReply("没连上，请过一会儿再试。")).finally(() => setResuming(false));
+        }} /></> : null}
+        {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
+        {panel.asks.map((a) => {
+          const send = (text: string) => void answer({ affairId: panel.id, askId: a.id, text }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); });
+          return <QuestionCard key={a.id} c={c} title={a.title} line={a.line} footer={<OtherAnswer c={c} testID={`panel-ask-other-${a.id}`} onSend={send} />}>
+            {a.options.map((o, i) => <ChoiceButton key={o} testID={`panel-ask-${o}`} text={o} primary={i === 0} c={c} onPress={() => send(o)} />)}
+          </QuestionCard>;
+        })}
+      </View> : null}
 
-      <Timeline events={panel.events.items} c={c} files={files} />
-
-      {heading("来源")}
-      {panel.sources.items.length === 0 ? <Words style={muted}>还没有</Words> : null}
-      {panel.sources.items.map((s, i) => (
-        <View key={i}>
-          {i > 0 ? <Rule c={c} /> : null}
-          {/* the name and what was read on the left, taking the width that is left and folding its lines; the time on the right, never squeezed */}
-          <View style={{ flexDirection: "row", gap: 8, alignItems: "flex-start" }}>
+      <Section key={`${panel.id}-sources`} {...section} name="sources" title="来源" count={sourceCount || undefined} defaultOpen={sourceCount > 0} disabled={!sourceCount} summary={sourceCount ? <>
+        {panel.sources.items.slice(0, 3).map((s, i) => <View key={i} style={{ backgroundColor: s.tone === "bad" ? tint(c.statusDanger, "1f", c.surface2) : c.surface1, borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2, maxWidth: "100%" }}><Words numberOfLines={1} style={{ ...muted, fontSize: 11, color: s.tone === "bad" ? c.statusDanger : c.foregroundMuted }}>{[s.label, s.status].filter(Boolean).join(" ")}</Words></View>)}
+        {sourceCount > 3 ? <Words style={muted}>+{sourceCount - 3}</Words> : null}
+      </> : <Words style={muted}>还没接</Words>}>
+        {panel.sources.items.map((s, i) => <View key={i}>
+          {i ? <Rule c={c} /> : null}
+          <View style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }}>
+            <View style={{ paddingTop: 6 }}><Dot color={sourceColor(s)} /></View>
             <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
-              {s.href ? (
-                <Pressable onPress={() => openExternal(s.href!)} accessibilityRole="link">
-                  <Words style={{ ...body, color: c.accent, fontWeight: "700", textDecorationLine: "underline" }}>↗ {s.label}</Words>
-                </Pressable>
-              ) : (
-                <View style={{ flexDirection: "row" }}>
-                  <Tag text={s.label} c={c} />
-                </View>
-              )}
-              {s.status ? <Clip text={s.status} full={s.full} style={{ ...muted, color: s.status === "读不到" ? c.statusDanger : c.foreground }} /> : null}
+              <View style={{ flexDirection: "row", gap: 8, alignItems: "baseline" }}>
+                <Words numberOfLines={1} accessibilityRole={s.href ? "link" : undefined} onPress={s.href ? () => openExternal(s.href!) : undefined} style={{ ...body, fontSize: 13, fontWeight: "600", color: s.href ? c.accent : c.foreground }}>{s.label}{s.href ? " ↗" : ""}</Words>
+                {s.status && s.status.length <= 24 ? <Words numberOfLines={1} style={{ ...muted, color: s.tone ? sourceColor(s) : c.foreground, flex: 1 }}>{s.status}</Words> : <View style={{ flex: 1 }} />}
+                {s.at ? <Words style={{ ...muted, flexShrink: 0 }}>{s.at}</Words> : null}
+              </View>
+              {s.full || (s.status && s.status.length > 24) ? <Clip text={s.full ?? s.status!} lines={2} style={{ ...muted, color: c.foreground }} /> : null}
             </View>
-            {s.at ? <Words style={{ ...muted, flexShrink: 0 }}>{s.at}</Words> : null}
           </View>
-        </View>
-      ))}
-      {panel.sources.more ? <Words style={{ ...muted, marginTop: 6 }}>还有 {panel.sources.more} 项</Words> : null}
+        </View>)}
+        {panel.sources.more ? <Words style={{ ...muted, marginTop: 6 }}>还有 {panel.sources.more} 项</Words> : null}
+      </Section>
 
-      {heading("资料")}
-      <Materials items={panel.materials.items} more={panel.materials.more} files={files} c={c} />
+      {steps.length || panel.steps?.length ? <Section key={`${panel.id}-steps`} {...section} name="steps" title="步骤" count={steps.length ? `${done}/${steps.length}` : undefined} defaultOpen summaryAlways summary={<View style={{ flexDirection: "row", flexShrink: 1, gap: 3 }}>{steps.map((s, i) => <View key={i} style={{ height: 4, width: 12, flexShrink: 1, borderRadius: 2, backgroundColor: s.state === "done" ? c.statusSuccess : s.state === "now" ? c.accent : s.state === "blocked" ? c.statusDanger : c.border }} />)}</View>}>
+        {steps.map((s, i) => {
+          const color = s.state === "done" ? c.statusSuccess : s.state === "blocked" ? c.statusDanger : s.state === "now" ? c.accent : c.border;
+          const checked = s.state === "done" && s.number === undefined;
+          return <View key={i} style={{ flexDirection: "row", gap: 10, paddingBottom: i === steps.length - 1 ? 0 : 10 }}>
+            <View style={{ width: 20, alignItems: "center" }}>
+              {i < steps.length - 1 ? <View style={{ position: "absolute", top: 20, bottom: -10, width: 2, backgroundColor: s.state === "done" ? tint(c.statusSuccess, "66", c.border) : c.border }} /> : null}
+              <View style={{ width: 20, height: 20, borderRadius: 10, borderWidth: checked ? 0 : 2, borderColor: color, backgroundColor: checked ? color : c.surface0, alignItems: "center", justifyContent: "center" }}><Words style={{ color: checked ? c.surface0 : s.state === "todo" ? c.foregroundMuted : color, fontSize: 11, fontWeight: "700" }}>{checked ? "✓" : s.number ?? i + 1}</Words></View>
+            </View>
+            <View style={{ flex: 1, minWidth: 0, gap: 2 }}>
+              <Words style={{ fontSize: 13, lineHeight: 20, fontWeight: s.state === "todo" ? "400" : "600", color: s.state === "todo" ? c.foregroundMuted : c.foreground }}>{s.title}</Words>
+              {s.note || s.state === "blocked" ? <Clip text={s.note || "原因未说明"} lines={1} style={{ ...muted, color: s.state === "blocked" ? c.statusDanger : c.foregroundMuted }} /> : null}
+              {notes(s.notes, 1)}
+            </View>
+          </View>;
+        })}
+        {!steps.length ? panel.steps?.map((s, i) => <Words key={i} style={muted}>{s}</Words>) : null}
+      </Section> : null}
+
+      {panel.sessions.length ? <Section key={`${panel.id}-sessions`} {...section} name="sessions" title="会话" count={panel.sessions.length} defaultOpen={panel.sessions.some((s) => s.status === "等你批" || s.status === "干活中")} summaryAlways summary={<SessionSummary sessions={panel.sessions} c={c} />}>
+        <Sessions sessions={panel.sessions} c={c} openAgent={navigation?.openAgent} />
+      </Section> : null}
+      <Section key={`${panel.id}-events`} {...section} name="events" title="经过" defaultOpen summary={<Words style={muted}>{panel.events.items[0]?.when}</Words>}>
+        <Timeline events={panel.events.items} c={c} files={files} embedded />
+      </Section>
+      {panel.facts.length ? <Section key={`${panel.id}-facts`} {...section} name="facts" title="记下的" count={panel.facts.length} defaultOpen={false}><View style={{ gap: 8 }}>{notes(panel.facts, 2)}</View></Section> : null}
+      {panel.materials.items.length ? <Section key={`${panel.id}-materials`} {...section} name="materials" title="资料" count={panel.materials.items.length + panel.materials.more} defaultOpen={false}><Materials items={panel.materials.items} more={panel.materials.more} files={files} c={c} /></Section> : null}
     </ScrollView>
   );
 }

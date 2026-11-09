@@ -19,9 +19,32 @@ export function StateBadge({ mood, c }: { mood: PanelData["mood"]; c: Colors }) 
   const color = m.color(c);
   const loud = mood === "ask";
   return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start", paddingHorizontal: loud ? 10 : 0, paddingVertical: loud ? 4 : 0, borderRadius: 999, backgroundColor: loud ? color : "transparent" }}>
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 6, alignSelf: "flex-start", paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: loud ? color : tint(color, "1f", c.surface2) }}>
       <Dot color={loud ? c.surface0 : color} />
       <Words style={{ color: loud ? c.surface0 : color, fontSize: 13, fontWeight: "700" }}>{m.label}</Words>
+    </View>
+  );
+}
+
+/** Remember a block per affair; unavailable device storage only loses this convenience. */
+export function Section({ affairId, name, title, count, c, defaultOpen, summary, summaryAlways, disabled, children }: { affairId: string; name: string; title: string; count?: string | number; c: Colors; defaultOpen: boolean; summary?: ReactNode; summaryAlways?: boolean; disabled?: boolean; children?: ReactNode }) {
+  const key = `affairs.section.${affairId}.${name}`;
+  const [open, setOpen] = useState(() => {
+    try { const saved = localStorage.getItem(key); return saved === null ? defaultOpen : saved === "1"; } catch { return defaultOpen; }
+  });
+  const toggle = () => {
+    setOpen(!open);
+    try { localStorage.setItem(key, open ? "0" : "1"); } catch { /* no storage: not remembered */ }
+  };
+  return (
+    <View style={{ borderBottomWidth: 1, borderBottomColor: c.border }}>
+      <Pressable testID={`section-${name}`} accessibilityRole={disabled ? undefined : "button"} accessibilityLabel={title} accessibilityState={disabled ? { disabled: true } : { expanded: open }} disabled={disabled} onPress={disabled ? undefined : toggle} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 12, paddingHorizontal: 16 }}>
+        <Words style={{ color: c.foregroundMuted, fontSize: 10, width: 12, flexShrink: 0 }}>{disabled ? "" : open ? "▾" : "▸"}</Words>
+        <Words style={{ color: c.foreground, fontSize: 13, fontWeight: "700", flexShrink: 0 }}>{title}</Words>
+        {count !== undefined ? <Words style={{ color: c.foregroundMuted, fontSize: 12, flexShrink: 0 }}>{count}</Words> : null}
+        {(!open || summaryAlways || disabled) && summary ? <View style={{ flex: 1, minWidth: 0, flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 5 }}>{summary}</View> : null}
+      </Pressable>
+      {open && !disabled ? <View style={{ paddingHorizontal: 16, paddingBottom: 14 }}>{children}</View> : null}
     </View>
   );
 }
