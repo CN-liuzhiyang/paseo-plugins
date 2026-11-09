@@ -295,12 +295,19 @@ export function panelOf(root, state, now, policy, lc, { trouble = "", budget = "
 
 export function sessionsOf(state, snapshots) {
   const activity = (a) => Math.max(...[a.updatedAt, a.lastUserMessageAt, a.createdAt].map((t) => Date.parse(t) || 0));
+  const order = { 等你批: 0, 出错: 1, 干活中: 2, 做完了: 3 };
   return snapshots.filter(({ agent: a }) => a.id === state.chatId || a.labels?.["affairs.affair"] === state.id)
-    .sort((a, b) => activity(b.agent) - activity(a.agent)).map(({ agent: a, project }) => ({
-      agentId: a.id, title: a.title || state.title,
-      role: a.id === state.chatId || a.labels?.["affairs.chat"] ? "主对话" : a.labels?.["affairs.role"] === "dispatched" ? "派活" : "流程",
-      status: a.pendingPermissions?.length ? "等你批" : a.archivedAt || ["closed", "error"].includes(a.status) ? "已关闭" : ["running", "initializing"].includes(a.status) ? "干活中" : "做完了",
-      project: project?.projectName || "",
-      ...(Number.isFinite(a.lastUsage?.totalCostUsd) ? { usd: a.lastUsage.totalCostUsd } : {}),
-    }));
+    .map(({ agent: a, project }) => {
+      const main = a.id === state.chatId || a.labels?.["affairs.chat"];
+      const title = a.title || state.title;
+      const prefix = `${state.title}：`;
+      return {
+        agentId: a.id, title: !main && title.startsWith(prefix) ? title.slice(prefix.length).trim() || title : title,
+        role: main ? "主对话" : a.labels?.["affairs.role"] === "dispatched" ? "派活" : "流程",
+        status: a.status === "error" ? "出错" : a.archivedAt || a.status === "closed" ? "做完了" : a.pendingPermissions?.length ? "等你批" : ["running", "initializing"].includes(a.status) ? "干活中" : "做完了",
+        at: new Date(activity(a)).toISOString(),
+        project: project?.projectName || "",
+        ...(Number.isFinite(a.lastUsage?.totalCostUsd) ? { usd: a.lastUsage.totalCostUsd } : {}),
+      };
+    }).sort((a, b) => order[a.status] - order[b.status] || Date.parse(b.at) - Date.parse(a.at));
 }

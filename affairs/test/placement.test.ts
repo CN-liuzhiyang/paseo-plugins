@@ -13,7 +13,7 @@ test("dispatch keeps the affair directory, reuses external workspaces and lets P
   const id = "placement", workdir = path.join(w.dir, "A"), cwd = path.join(w.dir, "B");
   mkdirSync(path.join(w.ctx.policy.workDir, id), { recursive: true });
   writeFileSync(path.join(w.ctx.policy.workDir, id, "README.md"), "Steps");
-  const contract = path.join(w.dir, "contract.md");writeFileSync(contract, "Task");
+  const contract = path.join(w.dir, "card-reset-shot.md");writeFileSync(contract, "Task");
   append(w.root, id, [{ kind: "created", id, title: "改进工具", workdir }, { kind: "workspace", workspaceId: "headquarters", projectId: "affairs" }, { kind: "chat", agentId: "main" }, { kind: "budget", usd: 1 }]);
   process.env.PASEO_AGENT_ID = "main";
   const calls: string[][] = [];let existing = false;
@@ -30,7 +30,7 @@ test("dispatch keeps the affair directory, reuses external workspaces and lets P
   }
   assert.equal(calls.length, 0);
   const made = await dispatch(w.ctx, id, { contract, provider: "claude/example", cwd });
-  assert.ok(made.ok, made.text);assert.equal(made.createAgent!.workspaceId, "external");assert.equal(made.createAgent!.title, "改进工具：执行");
+  assert.ok(made.ok, made.text);assert.equal(made.createAgent!.workspaceId, "external");assert.equal(made.createAgent!.title, "改进工具：card-reset-shot");
   const create = calls.find((a) => a[1] === "create")!;
   assert.ok(create);assert.ok(!create.includes("--project"));assert.equal(create[create.indexOf("--path") + 1], cwd);
   assert.equal(create[create.indexOf("--isolation") + 1], "local");

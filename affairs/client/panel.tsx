@@ -119,7 +119,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
         {!steps.length ? panel.steps?.map((s, i) => <Words key={i} style={muted}>{s}</Words>) : null}
       </Section> : null}
 
-      {panel.sessions.length ? <Section key={`${panel.id}-sessions`} {...section} name="sessions" title="会话" count={panel.sessions.length} defaultOpen={panel.sessions.some((s) => s.status === "等你批" || s.status === "干活中")} summaryAlways summary={<SessionSummary sessions={panel.sessions} c={c} />}>
+      {panel.sessions.length ? <Section key={`${panel.id}-sessions`} {...section} name="sessions" title="会话" count={panel.sessions.length} defaultOpen={panel.sessions.some((s) => s.status !== "做完了")} summaryAlways summary={<SessionSummary sessions={panel.sessions} c={c} />}>
         <Sessions sessions={panel.sessions} c={c} openAgent={navigation?.openAgent} />
       </Section> : null}
       <Section key={`${panel.id}-events`} {...section} name="events" title="经过" defaultOpen summary={<Words style={muted}>{panel.events.items[0]?.when}</Words>}>

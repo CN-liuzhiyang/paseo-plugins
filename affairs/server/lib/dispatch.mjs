@@ -28,9 +28,10 @@ export async function dispatch(ctx, ref, { contract, provider, thinking, mode, t
     mode ??= role.mode;
   }
   let workspaceId = s.workspaceId;
+  title ||= path.basename(file, path.extname(file));
   try {
     if (cwd && (!s.workdir || !samePath(cwd, s.workdir))) workspaceId = await directoryWorkspace(ctx.run, path.resolve(cwd), title || s.title);
-    const createAgent = { workspaceId, title: `${s.title}：${title || "执行"}`, provider, settings: { ...(thinking ? { thinkingOptionId: thinking } : {}), ...(mode ? { modeId: mode } : {}) }, labels: { "affairs.affair": s.id, "affairs.role": "dispatched" }, initialPrompt: `先完整读派活说明 ${file}，再读这件事的 README ${readme}，照说明做。`, notifyOnFinish: true };
+    const createAgent = { workspaceId, title: `${s.title}：${title}`, provider, settings: { ...(thinking ? { thinkingOptionId: thinking } : {}), ...(mode ? { modeId: mode } : {}) }, labels: { "affairs.affair": s.id, "affairs.role": "dispatched" }, initialPrompt: `先完整读派活说明 ${file}，再读这件事的 README ${readme}，照说明做。`, notifyOnFinish: true };
     append(ctx.root, s.id, [{ kind: "dispatch.approved", contract: file, model: provider, workspaceId }], { now: ctx.now(), tz: ctx.policy.tz });
     return { ok: true, createAgent, text: `已核对额度。请在当前主对话调用 Paseo MCP 的 create_agent，参数如下：\n${JSON.stringify(createAgent, null, 2)}` };
   } catch (error) {

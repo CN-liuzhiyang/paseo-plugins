@@ -23,7 +23,7 @@ const usage = {
   mode: "mode <编号> watch|drive --said-seq N：只有他说过的原话能切换。推的事不排看一眼，切回盯才恢复。",
   budget: "budget <编号> <美元> [--until YYYY-MM-DD] --said-seq N：数字、截止日必须在他那句原话里；额度是累计上限，重新批不会清零花费。",
   ask: 'ask <编号> --file F.json：{title,line,options:[选项,...],recommend:选项,why:理由,push?:true,budget?:true}。budget:true 是额度卡：至少一个选项写明金额（如「批准，额度 $3」），他点了那个选项就记为批准的额度，不用再说一遍。只有当前主对话和 attach 过的会话能开；看一眼走 report。',
-  dispatch: "dispatch <编号> --contract F [--provider p/model] [--thinking T] [--mode M] [--title T] [--cwd D]：只有推事项的当前主对话可用，先批额度；只记录核对结果并返回参数，不创建会话。由主对话原样调用 Paseo MCP create_agent，保留事项标签和 notifyOnFinish:true；创建时再次核额度，daemon 发最终完成通知。指定目录时先建工作区。",
+  dispatch: "dispatch <编号> --contract F [--provider p/model] [--thinking T] [--mode M] [--title T] [--cwd D]：只有推事项的当前主对话可用，先批额度；只记录核对结果并返回参数，不创建会话。由主对话原样调用 Paseo MCP create_agent，保留事项标签和 notifyOnFinish:true；创建时再次核额度，daemon 发最终完成通知。title 缺省用契约文件名（去扩展名）。指定目录时先建工作区。",
   env: "env <编号> [--remove]：每个 git 项目在主检出同级建 affair/<编号> 工作树，联接已有依赖，不安装；svn 副本问他。拆时先拆目录联接，未合并分支保留。",
   new: "new --title T [--id short-name] [--goal G] [--said -|--file F] [--link kind:ref（可多次）] [--project key（可多次）] [--domain personal|family] [--deadline T] [--role R] [--no-wait]\n没有单号关联时必须给 --id：2–40 个小写字母、数字或连字符，字母开头。",
   note: "note <编号|名字> --said -|--file F [--deadline T]\nnote <编号> --mine --said -|--file F [--said-seq N]\n对话和 attach 的会话用 --mine，≤120 字；这是自己的结论，不是他说的话，也不改现在。",

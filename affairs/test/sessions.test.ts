@@ -3,8 +3,38 @@ import { test } from "node:test";
 import { createEngine } from "../server/engine";
 import { append } from "../server/lib/log.mjs";
 import { panelSchema } from "../shared/panel";
+import { sessionsOf } from "../server/lib/panel.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { world, emptyDirectory } from "./kit";
+
+test("session titles, four states and activity survive archiving and sort by urgency then latest activity", () => {
+  const state = { id: "sample", title: "示例事项", chatId: "main" };
+  const time = (h: number) => new Date(Date.UTC(2026, 10, 9, h)).toISOString();
+  const worker = (id: string, extra: any = {}) => ({ agent: { id, title: `示例事项：${id}`, labels: { "affairs.affair": "sample", "affairs.role": "dispatched" }, status: "idle", createdAt: time(1), ...extra } });
+  const list = sessionsOf(state, [
+    worker("archived", { archivedAt: time(12), status: "running", updatedAt: time(2) }),
+    worker("main", { title: "示例事项：主对话", updatedAt: time(4) }),
+    worker("error", { status: "error", archivedAt: time(12), pendingPermissions: [{}], updatedAt: time(5) }),
+    worker("waiting", { pendingPermissions: [{}], updatedAt: time(3) }),
+    worker("running", { status: "running", updatedAt: time(6) }),
+    worker("starting", { status: "initializing", lastUserMessageAt: time(7) }),
+    worker("closed", { title: "示例事项：", status: "closed", updatedAt: time(8) }),
+    worker("blank", { title: "示例事项：  " }),
+    worker("other-title", { title: "另一事项：检查", updatedAt: "invalid", lastUserMessageAt: time(9) }),
+    worker("foreign", { labels: { "affairs.affair": "other" } }),
+  ]);
+  assert.deepEqual(list.map((s: any) => s.agentId), ["waiting", "error", "starting", "running", "other-title", "closed", "main", "archived", "blank"]);
+  assert.deepEqual(list.map((s: any) => s.status), ["等你批", "出错", "干活中", "干活中", ...Array(5).fill("做完了")]);
+  const byId = (id: string) => list.find((s: any) => s.agentId === id)!;
+  assert.equal(byId("archived").title, "archived");
+  assert.equal(byId("main").title, "示例事项：主对话");
+  assert.equal(byId("closed").title, "示例事项：");
+  assert.equal(byId("blank").title, "示例事项：  ");
+  assert.equal(byId("other-title").title, "另一事项：检查");
+  assert.equal(byId("other-title").at, time(9));
+  assert.equal(byId("starting").at, time(7));
+  assert.equal(byId("blank").at, time(1));
+});
 
 test("related sessions reuse the paged cost scan, include main, roles, status, project and cost, and sort by activity", async () => {
   for (const mode of ["drive", "watch"]) {
@@ -36,11 +66,11 @@ test("related sessions reuse the paged cost scan, include main, roles, status, p
       assert.deepEqual(logs, []);
       const panel = engine.panel("headquarters")!;
       const sessions = (panel as any).sessions;
-      assert.equal(sessions.length, 11);assert.equal(sessions[0].agentId, "main");assert.equal(sessions[1].agentId, "worker-9");
-      assert.equal(sessions[0].role, "主对话");assert.equal(sessions[0].project, "事项");
+      assert.equal(sessions.length, 11);assert.equal(sessions[0].agentId, "worker-3");assert.equal(sessions[1].agentId, "worker-0");
+      assert.equal(sessions.find((s: any) => s.agentId === "main").role, "主对话");assert.equal(sessions.find((s: any) => s.agentId === "main").project, "事项");
       const byId = (name: string) => sessions.find((s: any) => s.agentId === name);
       assert.equal(byId("worker-2").role, "流程");assert.equal(byId("worker-0").role, "派活");
-      for (const [n, status] of [[0, "干活中"], [1, "已关闭"], [2, "做完了"], [3, "等你批"], [4, "已关闭"]]) assert.equal(byId(`worker-${n}`).status, status);
+      for (const [n, status] of [[0, "干活中"], [1, "做完了"], [2, "做完了"], [3, "等你批"], [4, "做完了"]]) assert.equal(byId(`worker-${n}`).status, status);
       assert.equal(byId("worker-9").usd, 0.09);assert.equal(byId("worker-5").usd, undefined);assert.equal(byId("worker-2").project, "code-project");
       assert.ok(panelSchema.safeParse(panel).success);
       for (let i = 0; i < 3; i++) engine.panel("headquarters");
