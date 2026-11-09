@@ -55,7 +55,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
         {budget ? <View style={{ gap: 5, marginTop: 4 }}>
           {budget.cap !== undefined && budget.cap > 0 ? <View accessibilityLabel={`额度已用 ${Math.round(budget.usd / budget.cap * 100)}%`} style={{ height: 6, borderRadius: 3, backgroundColor: c.surface2, overflow: "hidden" }}><View style={{ height: 6, borderRadius: 3, width: `${Math.min(100, Math.max(0, budget.usd / budget.cap * 100))}%`, backgroundColor: budget.usd / budget.cap > 0.8 ? c.statusWarning : c.accent }} /></View> : null}
           <View style={{ flexDirection: "row", justifyContent: "space-between", flexWrap: "wrap", gap: 4 }}>
-            <Words style={{ ...muted, color: c.foreground, fontVariant: ["tabular-nums"] }}>{`$${budget.usd.toFixed(2)}${budget.cap !== undefined ? ` / $${budget.cap}` : ""}`}</Words>
+            <Words style={{ ...muted, color: c.foreground, fontVariant: ["tabular-nums"] }}>{`$${budget.usd.toFixed(2)}${budget.estimated ? "（含估算）" : ""}${budget.cap !== undefined ? ` / $${budget.cap}` : ""}`}</Words>
             {budget.unknown ? <Words style={muted}>另 {budget.unknown} 个会话花费不明</Words> : null}
           </View>
         </View> : panel.spent ? <Words style={muted}>{panel.spent}</Words> : null}

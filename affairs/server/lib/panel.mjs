@@ -216,7 +216,9 @@ export function flowBlockOf(state, now, flowNow = new Map()) {
   const ended = latest.endedAt ? Date.parse(latest.endedAt) : 0;
   if (sent.over && now - (ended || Date.parse(latest.at)) > FLOW_SHOWN_MS) return null;
   const took = spanText((sent.over && ended ? ended : now) - Date.parse(latest.at));
-  const cost = usdText(sent.over ? latest.costUsd : st?.costUsd);
+  const costState = st ?? latest;
+  const amount = usdText(sent.over ? latest.costUsd : st?.costUsd);
+  const cost = costState.costUnknown === true || !amount ? "" : `${costState.costEstimated === true ? "约 " : ""}${amount}`;
   const late = sent.over ? endedAfterNow(state) : null;
   const stop = st ?? { state: latest.outcome ? "ended" : "", outcome: latest.outcome, resume: latest.resume };
   const again = canResume(stop) && sameSpotAgain(runs, latest, stop);
@@ -307,7 +309,7 @@ export function sessionsOf(state, snapshots) {
         status: a.status === "error" ? "出错" : a.archivedAt || a.status === "closed" ? "做完了" : a.pendingPermissions?.length ? "等你批" : ["running", "initializing"].includes(a.status) ? "干活中" : "做完了",
         at: new Date(activity(a)).toISOString(),
         project: project?.projectName || "",
-        ...(Number.isFinite(a.lastUsage?.totalCostUsd) ? { usd: a.lastUsage.totalCostUsd } : {}),
+        ...(Number.isFinite(a.lastUsage?.totalCostUsd) && a.lastUsage?.hasUnknownModelCost !== true ? { usd: a.lastUsage.totalCostUsd, ...(a.lastUsage.costSource === "local-estimate" ? { estimated: true } : {}) } : {}),
       };
     }).sort((a, b) => order[a.status] - order[b.status] || Date.parse(b.at) - Date.parse(a.at));
 }

@@ -188,7 +188,7 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         break;
       case "dispatch.cost": {
         const d = s.dispatched.find((d) => d.agentId === l.agentId);
-        if (d) Object.assign(d, { usdTotal: l.usdTotal, unknown: l.unknown });
+        if (d) Object.assign(d, { usdTotal: l.usdTotal, unknown: l.unknown, ...(l.estimated === undefined ? {} : { estimated: l.estimated === true }) });
         break;
       }
       case "env":

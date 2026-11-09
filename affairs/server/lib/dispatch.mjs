@@ -86,7 +86,9 @@ export async function dispatchCosts(ctx, id, paseo, { charge = true } = {}) {
     if (!d) continue;
     if (!seen) throw new Error(`派出的会话读不到：${d.agentId}`);
     const cost = costIncrement(seen.lastUsage, d.usdTotal);
-    if (cost.usdTotal !== d.usdTotal || cost.unknown !== d.unknown) append(ctx.root, id, [{ kind: "dispatch.cost", agentId: d.agentId, ...cost }], { now: ctx.now(), tz: ctx.policy.tz });
+    // A temporarily missing usage record does not make the last known estimate exact.
+    if (cost.estimated === undefined && d.estimated !== undefined) cost.estimated = d.estimated;
+    if (cost.usdTotal !== d.usdTotal || cost.unknown !== d.unknown || (cost.estimated === true) !== (d.estimated === true)) append(ctx.root, id, [{ kind: "dispatch.cost", agentId: d.agentId, ...cost }], { now: ctx.now(), tz: ctx.policy.tz });
   }
   return [...sessions.values()];
 }

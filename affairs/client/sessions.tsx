@@ -42,7 +42,7 @@ export function Sessions({ sessions, c, openAgent }: { sessions: Session[]; c: C
       {s.role === "流程" ? <Tag text="流程" c={c} /> : null}
       {s.status !== "做完了" ? <SessionPill text={s.status} color={color} c={c} /> : null}
       <View style={{ flexDirection: "row", alignItems: "baseline", gap: 5, flexShrink: 0 }}>
-        {s.usd !== undefined ? <Words style={{ color: c.foregroundMuted, fontSize: 12, fontVariant: ["tabular-nums"] }}>{`$${s.usd.toFixed(2)}`}</Words> : null}
+        {s.usd !== undefined ? <Words style={{ color: c.foregroundMuted, fontSize: 12, fontVariant: ["tabular-nums"] }}>{`${s.estimated ? "约 " : ""}$${s.usd.toFixed(2)}`}</Words> : null}
         <Words style={{ color: c.foregroundMuted, fontSize: 11 }}>{sessionWhen(s.at)}</Words>
       </View>
       {openAgent ? <Words style={{ color: c.foregroundMuted, fontSize: 16, flexShrink: 0 }}>›</Words> : null}

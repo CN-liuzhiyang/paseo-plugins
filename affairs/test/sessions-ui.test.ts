@@ -5,6 +5,7 @@ import { runInNewContext } from "node:vm";
 import { test } from "node:test";
 import ts from "typescript";
 import { sessionWhen } from "../shared/time.mjs";
+import { sessionsOf } from "../server/lib/panel.mjs";
 const now = new Date(2026, 10, 9, 14).getTime();
 const at = (h: number, m = 0, day = 9) => new Date(2026, 10, day, h, m).toISOString();
 
@@ -82,4 +83,19 @@ test("session time changes to the month and day at local midnight", () => {
   assert.equal(sessionWhen(at(11), now), "3 小时前");
   assert.equal(sessionWhen(at(23, 59, 8), new Date(2026, 10, 9, 0, 1).getTime()), "11-08");
   assert.equal(sessionWhen("invalid", now), "");
+});
+
+test("session UI renders estimates with 约, hides unknown prices and keeps SDK zero and old amounts", () => {
+  const snapshots = [
+    ["estimate", { totalCostUsd: 1.25, costSource: "local-estimate" }],
+    ["unknown", { totalCostUsd: 9, hasUnknownModelCost: true }],
+    ["missing", undefined], ["free", { totalCostUsd: 0, costSource: "sdk" }], ["old", { totalCostUsd: 2 }],
+  ].map(([id, lastUsage]) => ({ agent: { id, lastUsage, createdAt: at(11), labels: { "affairs.affair": "cost" } } }));
+  const sessions = sessionsOf({ id: "cost", title: "费用" }, snapshots);
+  const nodes = walk(exports.Sessions({ sessions, c: {} }));
+  const words = (id: string) => walk(nodes.find((n) => n.props?.testID === `session-${id}`)).map((n) => n.props?.children).filter((s) => typeof s === "string");
+  assert.ok(words("estimate").includes("约 $1.25"));
+  assert.ok(words("free").includes("$0.00"));
+  assert.ok(words("old").includes("$2.00"));
+  for (const id of ["unknown", "missing"]) assert.ok(!words(id).some((s) => s.includes("$")));
 });

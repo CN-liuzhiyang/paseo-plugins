@@ -211,6 +211,7 @@ test("tagged agents are discovered across pages and restart, then charged once w
   assert.deepEqual(queries[0].filter, { labels: { "affairs.affair": f.id }, includeArchived: true });
   assert.equal(f.state().dispatched.length, 1);assert.equal(f.state().dispatched[0].model, "claude/example");
   assert.equal(f.state().lines.filter((l: any) => l.kind === "dispatch.cost").length, 1);
+  assert.equal(f.state().dispatched[0].estimated, false, "legacy numeric usage has no estimate marker");
   assert.deepEqual(spendOf(f.state()), { usd: 2, unknown: 0 });
 });
 
