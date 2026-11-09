@@ -126,9 +126,8 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       await runJson(["send", agentId, "--prompt-file", file, "--behavior", "steer", "--no-wait"], { timeoutMs });
     },
 
-    // `inspect --json` is PascalCase, unlike `ls --json`. LastUsage is the
-    // last turn, which for one structured call is the whole call. Codex
-    // reports CostUsd 0 with real token counts; it is passed on as is.
+    // `inspect --json` is PascalCase, unlike `ls --json`. LastUsage is a
+    // cumulative session snapshot. Missing prices are unknown; zero is free.
     inspect: async (agentId) => {
       const detail = await runJson(["inspect", agentId], opts());
       const usage = detail?.LastUsage ?? null;
@@ -136,7 +135,10 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
         status: detail?.Status ?? null,
         archived: typeof detail?.Archived === "boolean" ? detail.Archived : null,
         usage: usage
-          ? { usd: usage.CostUsd ?? null, inputTokens: usage.InputTokens ?? null, outputTokens: usage.OutputTokens ?? null }
+          ? { usd: usage.CostUsd ?? null, inputTokens: usage.InputTokens ?? null, outputTokens: usage.OutputTokens ?? null,
+              ...(usage.CostSource === undefined ? {} : { source: usage.CostSource }),
+              ...(usage.HasUnknownModelCost === undefined ? {} : { incomplete: usage.HasUnknownModelCost }),
+              ...(usage.TokenUsageScope === undefined ? {} : { scope: usage.TokenUsageScope }) }
           : null,
       };
     },
@@ -190,4 +192,17 @@ export function paseoExecutor({ host = null, cli = { runPaseo, runPaseoJson } } 
       return { workspaceId: made.workspaceId };
     },
   };
+}
+
+/** Known subtotal, with an explicit warning whenever any session's price is missing. */
+export function totalCost(snapshots) {
+  const costs = [...snapshots];
+  const unknown = costs.filter((c) => c?.usd == null || c.incomplete === true).length;
+  return costs.length ? {
+    totalUsd: costs.reduce((sum, c) => sum + (c?.usd ?? 0), 0),
+    agentCount: costs.length,
+    partial: unknown ? `${unknown} agent(s) have unknown or incomplete cost` : "",
+    unknown: unknown > 0,
+    estimated: costs.some((c) => c?.source === "local-estimate"),
+  } : null;
 }

@@ -110,7 +110,7 @@ test("committee: two rounds, converges, every event in the contract", async () =
   for (const end of ends) {
     assert.equal(end.ok, true);
     assert.match(end.agentId, /^fake-agent-/);
-    assert.deepEqual(end.cost, { usd: 0.01, inputTokens: 1200, outputTokens: 300 });
+    assert.deepEqual(end.cost, { usd: 0.01, inputTokens: 1200, outputTokens: 300, agentTotal: { usd: 0.01, inputTokens: 1200, outputTokens: 300 } });
   }
   // Each call's agent was announced while the call ran, once, and matches call.end.
   for (const end of ends) {

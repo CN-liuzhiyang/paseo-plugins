@@ -54,6 +54,11 @@ const withFirst = (first, options = {}) => {
     ...base,
     sends,
     asks,
+    inspect: async (agentId) => {
+      const detail = await base.inspect(agentId);
+      const rounds = 1 + (options.sendUnknown ? 0 : sends.filter((s) => s.agentId === agentId).length);
+      return { ...detail, usage: Object.fromEntries(Object.entries(detail.usage).map(([key, value]) => [key, value * rounds])) };
+    },
     ask: async (request) => {
       asks.push(request);
       if (options.askUnknown && request.maxRetries !== undefined) throw unknownOption(options.askUnknown);

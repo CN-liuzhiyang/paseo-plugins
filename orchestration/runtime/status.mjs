@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { eventsFile, readEvents } from "./events.mjs";
 import { readRunState } from "./state.mjs";
 import { pointOf, pointPrint } from "./resume-point.mjs";
+import { totalCost } from "./executor.mjs";
 
 const oneLine = (text, limit = 120) => String(text ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
 const resumeStatus = (point) => point ? { ...pointOf(point), print: pointPrint(point) } : null;
@@ -56,8 +57,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
   const calls = new Map();
   const open = [];
   let lastPhase = null;
-  let spent = 0;
-  let anyCost = false;
+  const spent = new Map();
   let resume = null;
   let end = null;
   for (const e of events) {
@@ -75,9 +75,12 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
     } else if (e.kind === "call.end") {
       const call = calls.get(e.callId);
       if (call) Object.assign(call, { ended: true, ok: e.ok, output: e.output, endedAt: e.ts, agentId: e.agentId ?? call.agentId });
-      if (typeof e.cost?.usd === "number") {
-        spent += e.cost.usd;
-        anyCost = true;
+      // New events carry the session snapshot; old events carry call increments.
+      const key = e.agentId ?? e.callId;
+      if (e.cost?.agentTotal) spent.set(key, e.cost.agentTotal);
+      else if (e.cost) {
+        const before = spent.get(key);
+        spent.set(key, { ...e.cost, usd: e.cost.usd == null || before?.usd === null ? null : (before?.usd ?? 0) + e.cost.usd });
       }
     } else if (e.kind === "resume") {
       resume = e.cleared ? null : resumeStatus(e);
@@ -103,7 +106,10 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
       agentId: c.output?.agentId ?? c.agentId,
       reason: c.output?.reason ? oneLine(c.output.reason) : null,
     }));
-  out.costUsd = end?.cost?.totalUsd ?? (anyCost ? spent : null);
+  const cost = end ? end.cost : totalCost(spent.values());
+  out.costUsd = cost?.totalUsd ?? null;
+  out.costUnknown = cost?.unknown === true || Boolean(cost?.partial);
+  out.costEstimated = cost?.estimated === true;
   if (end) {
     out.endedAt = end.ts;
     out.durationMs = end.durationMs ?? null;

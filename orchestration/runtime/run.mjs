@@ -30,7 +30,7 @@ import { affairKey, ensureWorkspace, normalizeDir, samePath, workspaceRefusal, w
 import { claimRun, ClaimTaken, runIdProblem } from "./claim.mjs";
 import { checkResumePoint } from "./resume.mjs";
 import { FROM_LIMIT, pointOf, pointProblems, PRINT_SHAPE } from "./resume-point.mjs";
-import { paseoExecutor, sentTitle } from "./executor.mjs";
+import { paseoExecutor, sentTitle, totalCost } from "./executor.mjs";
 import { requestApproval, prepareGate, carrierKind, parseDuration, bytesDigest, contentDigest, INPUT_REDACTED } from "./gate.mjs";
 import { Journal, JournalError, MAX_VALUE_BYTES, fingerprint, known, shortPrint } from "./journal.mjs";
 import { LineBusy, takeLine } from "./line-lock.mjs";
@@ -64,11 +64,13 @@ const GATE_CLOSE_WAIT_MS = 15_000;
 const DEFAULT_FIXES = 2;
 const MAX_FIXES = 5;
 
-const COST_NOTE =
-  "per agent turn, LastUsage, added up over the rounds of a call (a turn the CLI retried inside one command counts only its last). Codex reports CostUsd 0, so totalUsd counts Claude only";
-
-const sumOrNull = (a, b) => (a === null ? b : b === null ? a : a + b);
-const addCost = (a, b) => (a === null ? b : b === null ? a : { usd: sumOrNull(a.usd, b.usd), inputTokens: sumOrNull(a.inputTokens, b.inputTokens), outputTokens: sumOrNull(a.outputTokens, b.outputTokens) });
+const sumOrNull = (a, b) => (a == null || b == null ? null : a + b);
+const addCost = (a, b) => (a === null ? b : b === null ? a : {
+  ...b, usd: sumOrNull(a.usd, b.usd), inputTokens: sumOrNull(a.inputTokens, b.inputTokens), outputTokens: sumOrNull(a.outputTokens, b.outputTokens),
+  ...(a.incomplete || b.incomplete ? { incomplete: true } : {}),
+  ...(a.source === "local-estimate" || b.source === "local-estimate" ? { source: "local-estimate" } : {}),
+});
+const delta = (now, before) => now == null || before === null ? null : now >= (before ?? 0) ? now - (before ?? 0) : now;
 
 /** The input, the flow's source text, or its grants are wrong. Nothing ran and nothing was spent. */
 export class RunRefused extends Error {
@@ -599,7 +601,12 @@ async function runClaimed(target, options, taken) {
     const agentId = record.agentId ?? (await executor.findAgent(record.labels).catch(() => null));
     if (!agentId) return { agentId: null, cost: null };
     const detail = await executor.inspect(agentId).catch(() => null);
-    return { agentId, cost: detail?.usage ? { usd: detail.usage.usd, inputTokens: detail.usage.inputTokens, outputTokens: detail.usage.outputTokens } : null };
+    const snapshot = detail?.usage ?? { usd: null, inputTokens: null, outputTokens: null };
+    const before = spent.get(agentId);
+    spent.set(agentId, snapshot);
+    return { agentId, cost: { ...snapshot,
+      usd: delta(snapshot.usd, before?.usd), inputTokens: delta(snapshot.inputTokens, before?.inputTokens), outputTokens: delta(snapshot.outputTokens, before?.outputTokens),
+    } };
   };
 
   // A call's agent, announced once, while the call is still open, so a
@@ -680,7 +687,6 @@ async function runClaimed(target, options, taken) {
     if (!open.delete(record.callId)) return;
     if (!ok) lastBad = record.title ?? null;
     // An answer taken from the journal names the agent that gave it, but this run did not use that agent: nothing was spent.
-    if (agentId && !reused) spent.set(agentId, addCost(spent.get(agentId) ?? null, cost));
     log.emit("call.end", {
       callId: record.callId,
       ok,
@@ -688,7 +694,7 @@ async function runClaimed(target, options, taken) {
       output,
       error: error ? errorOf(error) : null,
       agentId,
-      cost,
+      cost: agentId && !reused && cost ? { ...cost, agentTotal: spent.get(agentId) } : cost,
       ...(rounds === undefined ? {} : { rounds }),
     });
   };
@@ -1802,10 +1808,7 @@ async function runClaimed(target, options, taken) {
 
   if (outcome !== "done") rewordFrom();
 
-  const cost =
-    spent.size > 0
-      ? { totalUsd: [...spent.values()].reduce((sum, c) => sum + (c?.usd ?? 0), 0), agentCount: spent.size, partial: COST_NOTE }
-      : null;
+  const cost = totalCost(spent.values());
   const recorded = safe(value);
   const summary = outcome === "done" || outcome === "stopped" ? summarizeRun(f, recorded, outcome, log) : null;
   const durationMs = Date.now() - startedAt;
