@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import { chatCreateOptions, chatPrompt, noticeFor, rotationReason } from "./lib/chat.mjs";
+import { chatCreateOptions, chatPrompt, noticeFor, renewAsked, renewHint, rotationReason } from "./lib/chat.mjs";
 import { affairDir, isOpen } from "./lib/log.mjs";
 import * as ops from "./lib/ops.mjs";
 import { handoffTurns } from "./lib/history.mjs";
@@ -108,6 +108,8 @@ export function createChats(deps: ChatDeps) {
   const drawn = new Map<string, Drawn>();
   const watching = new Map<string, { chatId: string; stop: () => void }>();
   const notices = new Map<string, string>();
+  /** The "this chat is long and cold" line waiting to be drawn (affair -> text). */
+  const hints = new Map<string, string>();
   /** Chats that were replaced and could not be put away yet (old chat id -> its affair): tried again on the next scan. */
   const toPutAway = new Map<string, string>();
   const revivedAt = new Map<string, number>();
@@ -326,13 +328,26 @@ export function createChats(deps: ChatDeps) {
     }
     if (await recognizeRevived(id)) return;
     s = deps.state(id);
+    // He asked for a new one: made once the turn that asked is over.
+    if (renewAsked(s)) {
+      if (!(await busy(s.chatId))) await replace(id, "rotate:asked", s.chatId);
+      return;
+    }
     let flowRunning = false;
     for (const f of s.flows.filter((f: { failed: string }) => !f.failed)) {
       if ((await ops.flowStateOf(ctx, f, orchCommand(ctx.policy, ops.BIN), orchLogDir(ctx.policy))).state === "going") { flowRunning = true; break; }
     }
     const reason = isOpen(s) ? rotationReason({ ...s, flowRunning }, ctx.now(), ctx.policy) : "";
     // Not while the chat is in the middle of a turn: it may be working on what he just asked, and the new one would not know. The next scan asks again.
-    if (reason && !(await busy(s.chatId))) await replace(id, reason, s.chatId);
+    if (reason && !(await busy(s.chatId))) {
+      await replace(id, reason, s.chatId);
+      return;
+    }
+    const hint = isOpen(s) ? renewHint({ ...s, flowRunning }, ctx.now(), ctx.policy) : "";
+    if (hint && !s.lines.some((l: any) => l.kind === "chat.hint" && l.agentId === s.chatId)) {
+      deps.write(id, [{ kind: "chat.hint", agentId: s.chatId, tokens: s.chatTurn.tokens }]);
+      hints.set(id, hint);
+    }
   }
 
   const asText = (value: unknown) => (typeof value === "string" ? value : "");
@@ -441,6 +456,11 @@ export function createChats(deps: ChatDeps) {
       if (notice) {
         await put(chatId, "notice", LINE_KIND, LINE_VERSION, { text: notice, tone: "normal", detail: "" });
         notices.delete(id);
+      }
+      const hint = hints.get(id);
+      if (hint) {
+        await put(chatId, `hint-${chatId}`, LINE_KIND, LINE_VERSION, { text: hint, tone: "normal", detail: "" });
+        hints.delete(id);
       }
       // First time in this run: the older lines are not drawn again (the chat has them or does not need them); the latest few and the open questions are.
       const first = !d.started;

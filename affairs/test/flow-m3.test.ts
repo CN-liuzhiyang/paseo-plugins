@@ -258,8 +258,9 @@ test("rotation waits while the runtime says a flow is still going", async () => 
   s.put([{ kind: "chat", agentId: "chat" }, { kind: "chat.turn", agentId: "chat", tokens: 200000 }]);
   s.w.advance(24 * 60 * 60_000);
   const state = load(s.w.root, s.id);
-  assert.match(rotationReason(state, s.w.now(), s.w.ctx.policy), /^rotate:/);
-  assert.equal(rotationReason({ ...state, flowRunning: true }, s.w.now(), s.w.ctx.policy), "");
+  const policy = { ...s.w.ctx.policy, chat: { ...s.w.ctx.policy.chat, maxPerDay: 2 } };
+  assert.match(rotationReason(state, s.w.now(), policy), /^rotate:/);
+  assert.equal(rotationReason({ ...state, flowRunning: true }, s.w.now(), policy), "");
 });
 
 test("an ask keeps run choices as labels for the UI; choosing one starts by human, declining starts nothing", async () => {

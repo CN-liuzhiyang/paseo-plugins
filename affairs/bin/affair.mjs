@@ -106,6 +106,9 @@ async function main() {
     case "resume":
       result = await ops.resume(ctx, need(arg, "编号"));
       break;
+    case "renew":
+      result = ops.renew(ctx, need(arg, "编号"));
+      break;
     case "undo":
       result = ops.undo(ctx, need(arg, "编号"));
       break;

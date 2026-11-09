@@ -22,6 +22,8 @@ const HOUR = 60 * MIN;
 const MECHANISM = /叫醒|校验|记录|计划|读数|会话|agent/i;
 
 type Event = Record<string, unknown>;
+/** The chat replaced on its own (off by default since 2026-11-09): the tests of those rules turn it on. */
+const AUTO = { chat: { ...DEFAULT_POLICY.chat, maxPerDay: 2 } };
 
 /** A Paseo with chats in it: what was made, archived, drawn, and the handlers the plugin listens with (called by the test as the session would). */
 function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unknown }>; archiveFails?: () => boolean; agent?: (id: string) => Record<string, unknown> } = {}) {
@@ -66,7 +68,7 @@ function paseoWith(opts: { status?: () => string; tail?: () => Array<{ item: unk
 }
 
 function setup(policyOver: Record<string, unknown> = {}, opts: Parameters<typeof paseoWith>[0] = {}) {
-  const w = world({ policy: { push: { ...DEFAULT_POLICY.push, to: "p2p:me" }, ...policyOver } });
+  const w = world({ policy: { push: { ...DEFAULT_POLICY.push, to: "p2p:me" }, ...AUTO, ...policyOver } });
   const p = paseoWith(opts);
   const engine = createEngine({ ctx: w.ctx, paseo: p.paseo, deliver: null, log: () => {}, lookDelaysMs: [0, 0, 0] });
   return { w, p, engine };
@@ -85,6 +87,49 @@ const userMessage = (text: string, messageId = `m-${Math.random()}`) => ({ type:
 const turnDone = (tokens: number, totalCost = 0.02) => ({ type: "turn_completed", usage: { contextWindowUsedTokens: tokens, totalCostUsd: totalCost } });
 const T1 = "2026-11-03T10:00:00.000Z";
 const at = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
+
+// ---- he says when ------------------------------------------------------------------------------------------
+
+test("by default a chat is never replaced on its own: long and cold, it gets one line suggesting a new one, once", async () => {
+  const s = setup({ chat: DEFAULT_POLICY.chat });
+  const id = await start(s);
+  s.p.handlers.get("chat-1")!({ event: turnDone(160_000) });
+  await settle();
+  s.w.advance(30 * MIN);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 1, "long, quiet half an hour: kept");
+  assert.equal(lines(s).filter((d) => String(d.item.id).startsWith("hint-")).length, 0, "and not hinted while the cache is warm");
+  s.w.advance(10 * HOUR);
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 1, "long and cold for hours: still kept");
+  assert.deepEqual(s.p.archived, []);
+  const hints = lines(s).filter((d) => String(d.item.id).startsWith("hint-"));
+  assert.equal(hints.length, 1, "one line, once");
+  assert.match(textOf(hints[0]!), /16 万.*换个新对话/);
+  assert.doesNotMatch(textOf(hints[0]!), MECHANISM);
+});
+
+test("affair renew: the chat is replaced once the turn that asked is over, with the last turns carried over; a look cannot ask", async () => {
+  let status = "running";
+  const s = setup({ chat: DEFAULT_POLICY.chat }, { status: () => status });
+  const id = await start(s);
+  const asked = ops.renew(s.w.ctx, id);
+  assert.equal(asked.ok, true);
+  assert.match(asked.text, /换新对话/);
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 1, "still in the turn that asked: not yet");
+  status = "idle";
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 2);
+  assert.deepEqual(s.p.archived, ["chat-1"]);
+  const st = load(s.w.root, id);
+  assert.equal(st.chats.at(-1).why, "rotate:asked");
+  assert.ok(read(s.w.root, id).some((l: any) => l.kind === "chat.handoff" && l.agentId === "chat-1"));
+  await s.engine.scan(id);
+  assert.equal(s.p.made.length, 2, "asked once, replaced once");
+  assert.equal(ops.renew({ ...s.w.ctx, by: "look" }, id).ok, false);
+});
 
 // ---- keeping the chat -------------------------------------------------------------------------------------
 
@@ -142,7 +187,7 @@ test("the chat is made once however many scans; one a restart left closed is kep
 // ---- when it is replaced -----------------------------------------------------------------------------------
 
 function chatAt(tokens: number, idleMs: number, over: Record<string, unknown> = {}) {
-  const w = world({ policy: over });
+  const w = world({ policy: { ...AUTO, ...over } });
   const now = w.now();
   const s = {
     chatId: "c",
@@ -170,7 +215,7 @@ test("warm, however long, is not replaced until it is very long and idle; cold a
 
 test("never while he is typing, and not more than twice a day; unknown length is left alone", () => {
   // (with no wait required, so that it is the typing that holds it back)
-  const c = chatAt(200_000, 11 * MIN, { chat: { ...DEFAULT_POLICY.chat, idleMinutes: 0 } });
+  const c = chatAt(200_000, 11 * MIN, { chat: { ...AUTO.chat, idleMinutes: 0 } });
   c.s.said.push({ via: "chat-session", at: new Date(c.now - 60_000).toISOString() });
   assert.equal(rotationReason(c.s, c.now, c.policy), "", "he spoke a minute ago");
   const d = chatAt(200_000, 60 * MIN);
@@ -183,7 +228,7 @@ test("never while he is typing, and not more than twice a day; unknown length is
 });
 
 test("overnight: after 4 o'clock a chat from before it, quiet for six hours and long enough, is replaced; a short one is not", () => {
-  const w = world();
+  const w = world({ policy: AUTO });
   const morning = Date.parse("2026-11-03T07:00:00+08:00");
   const last = Date.parse("2026-11-02T23:00:00+08:00");
   const mk = (tokens: number) => ({

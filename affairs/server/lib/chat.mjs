@@ -44,6 +44,25 @@ export function rotationReason(s, now, policy) {
   return "";
 }
 
+/**
+ * The line that tells him the chat has grown long and gone cold, or "". Only a hint: guessing from quiet time whether he
+ * is done replaced chats he was still using (waiting for a dispatched worker, thinking over an answer), so he decides.
+ */
+export function renewHint(s, now, policy) {
+  const c = policy.chat;
+  if (!s.chatId || !s.chatTurn || s.flowRunning) return "";
+  const tokens = s.chatTurn.tokens;
+  if (tokens < c.hintContext || now - lastActivity(s) < c.coldMinutes * MIN) return "";
+  return `这段对话已经 ${Math.round(tokens / 10_000)} 万 token，又停了一阵，接着聊会贵、也容易乱。想换就说「换个新对话」，进展和最近几轮会带过去。`;
+}
+
+/** He asked for a new chat (`affair renew`) after the current one began. */
+export function renewAsked(s) {
+  const asked = s.lines.findLast((l) => l.kind === "chat.renew");
+  const current = s.chats.at(-1);
+  return Boolean(asked && (!current || asked.seq > current.seq));
+}
+
 export function chatHandbooks(ctx, s) {
   const kind = primaryLink(s)?.split(":")[0];
   const dir = ctx.policy.handbooksDir;
@@ -100,6 +119,7 @@ export function chatCreateOptions(ctx, s) {
 export function noticeFor(why, title) {
   if (why === "first") return `开始盯「${title}」。我先去看一眼，有结果写在这里。`;
   if (why === "migrate") return "现在可以在这里直接跟我聊这件事了；右边的「进展」是最新的情况。";
+  if (why === "rotate:asked") return "新对话。我记下的要点在右边的「进展」里，上一段最后几轮也带过来了。";
   if (why.startsWith("rotate")) return "接着聊。我记下的要点在右边的「进展」里，你说过的话都还在。";
   return "";
 }

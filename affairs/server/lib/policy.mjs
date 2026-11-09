@@ -76,8 +76,9 @@ export const DEFAULT_POLICY = {
   // Flows the chat may start for an affair (`affair flow`): { perDay: 3, "<name>": { kinds, prepare, timeout, says } }; see lib/flows.mjs.
   flows: { perDay: 3 },
   role: "glance",
-  // The chat session of an affair. It is kept as long as it is cheap to keep: warm (spoken to within the cache's lifetime) it is
-  // never replaced; cold and long, or very long, or left over the night, it is replaced by a new one that reads the brief.
+  // The chat session of an affair. He says when it is replaced (`affair renew`); long and cold, a line suggests it. The rules
+  // below for replacing it on its own (cold and long, very long, left over the night) only run when maxPerDay is above 0:
+  // quiet time is not a sign he is done (2026-11-09: a chat waiting for a dispatched worker was replaced under him).
   chat: {
     // The name of a role in `roles` that every chat runs on (empty: the role of the affair's looks). A role may also have a
     // `chat` of its own: { provider, thinking, mode, env }.
@@ -94,7 +95,10 @@ export const DEFAULT_POLICY = {
     nightHour: 4,
     nightIdleHours: 6,
     nightContext: 50_000,
-    maxPerDay: 2,
+    // Replaced on its own at most this many times a day; 0: never (he says when, `affair renew`).
+    maxPerDay: 0,
+    // Long and cold (idle coldMinutes) from this length: one line in the chat suggests a new one.
+    hintContext: 100_000,
     // He has typed in this many minutes: not replaced.
     typingMinutes: 2,
     // How many of the latest lines and which open questions are drawn again after a restart (what the plugin drew into a conversation is lost with the daemon).

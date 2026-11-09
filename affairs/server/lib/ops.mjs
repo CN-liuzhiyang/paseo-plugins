@@ -1027,6 +1027,16 @@ async function resumableLines(ctx, s) {
   return [];
 }
 
+/** He asked for a new chat: the plugin makes it once the turn that ran this is over, and puts this one away. @returns {Result} */
+export function renew(ctx, ref) {
+  if (byLook(ctx)) return lookRefused("换对话");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  if (!isOpen(r.s)) return fail(`「${r.s.title}」已经不盯了，没有对话可换。`);
+  write(ctx, r.s.id, [{ kind: "chat.renew" }]);
+  return { ok: true, text: "好，这一轮说完就换新对话；进展和最近几轮会带过去。" };
+}
+
 /** @returns {Result} */
 export function undo(ctx, ref) {
   if (byLook(ctx)) return lookRefused("撤他说的话");
