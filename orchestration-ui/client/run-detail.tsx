@@ -1,13 +1,14 @@
 import { Icon, Modal, ScrollView } from "@getpaseo/plugin/client/react-native";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Pressable, Text, View } from "react-native";
-import { formatDuration, RUN_STATUS_LABEL } from "../shared/format";
-import { buildGraph, headline, hero, inputLabel, type Hero } from "../shared/graph";
+import { numbersLine, reusedLead } from "../shared/detail";
+import { RUN_STATUS_LABEL } from "../shared/format";
+import { buildGraph, hero, inputLabel, type Hero } from "../shared/graph";
 import { wakeLine } from "../shared/wake";
-import { caveatsOf, hasUncountedCodex, ms, runStatus, type RunState, type RunStatus } from "../shared/run";
+import { costSoFar, runStatus, type RunState, type RunStatus } from "../shared/run";
 import { useNow, useRun, type RunSnapshot } from "./data";
-import { AffairLine } from "./affair";
-import { Drawer, spendText } from "./drawer";
+import { AffairLink } from "./affair";
+import { Drawer } from "./drawer";
 import { EventsView } from "./events-view";
 import { GraphView } from "./graph-view";
 import { HERO_ICON, RUN_LOOK } from "./looks";
@@ -51,6 +52,8 @@ export function RunDetail({
   const [tab, setTab] = useState<Tab>("graph");
   const [picked, setPicked] = useState<string | null>(initialSelect);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // The key (the legend of the picture) is behind a "?" and off until asked for.
+  const [legend, setLegend] = useState(false);
   // The row the drawer sits in; the drawer never takes so much that the graph has no room.
   const [containerWidth, setContainerWidth] = useState(1200);
   const top = run.start ? hero(run, status, now, { proc: snap.process, staleMs: snap.staleMs }) : null;
@@ -58,6 +61,7 @@ export function RunDetail({
   const selected = picked ?? top?.select ?? "@start";
   // The run is folded in place; version is what says it changed.
   const graph = useMemo(() => buildGraph(run, status, now), [run, snap.version, status, now]);
+  const lead = useMemo(() => reusedLead(graph), [graph]);
   const select = useCallback(
     (key: string) => {
       setPicked(key);
@@ -88,12 +92,12 @@ export function RunDetail({
       <View style={[ui.styles.row, { justifyContent: "space-between" }]}>
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="返回流程列表"
+          accessibilityLabel="返回流程"
           onPress={onBack}
           style={{ flexDirection: "row", alignItems: "center", gap: 4, alignSelf: "flex-start" }}
         >
           <Icon name="ArrowLeft" size={16} color={ui.theme.colors.foregroundMuted} />
-          <Text style={ui.styles.muted}>全部流程</Text>
+          <Text style={ui.styles.muted}>流程</Text>
         </Pressable>
         {action}
       </View>
@@ -101,12 +105,11 @@ export function RunDetail({
       {!snap.loaded ? <Text style={ui.styles.muted}>正在读取……</Text> : null}
       {ready ? (
         <>
-          <Header run={run} runId={runId} status={status} />
-          {run.start?.affair ? <AffairLine affair={run.start.affair} /> : null}
+          <Header run={run} runId={runId} status={status} needsYou={top?.needsYou ?? false} />
           {top ? <HeroBar hero={top} status={status} remote={run.start?.host != null} /> : null}
-          <Numbers run={run} status={status} graphClock={graph.clock} onSelect={select} />
+          <Text style={ui.styles.muted}>{numbersLine(run, status, graph.clock, costSoFar(run).usd)}</Text>
           <View style={{ gap: 12 }}>
-            <View style={{ flexDirection: "row", borderBottomWidth: 1, borderBottomColor: ui.theme.colors.border }}>
+            <View style={{ flexDirection: "row", alignItems: "center", borderBottomWidth: 1, borderBottomColor: ui.theme.colors.border }}>
               {TABS.map(([key, label]) => (
                 <Pressable
                   key={key}
@@ -132,23 +135,31 @@ export function RunDetail({
                   </Text>
                 </Pressable>
               ))}
+              {tab !== "events" ? (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="图例"
+                  accessibilityState={{ expanded: legend }}
+                  onPress={() => setLegend(!legend)}
+                  style={{ marginLeft: "auto", paddingHorizontal: 8, paddingVertical: 4 }}
+                >
+                  <Icon name="CircleHelp" size={16} color={legend ? ui.theme.colors.foreground : ui.theme.colors.foregroundMuted} />
+                </Pressable>
+              ) : null}
             </View>
             {tab === "graph" ? (
-              <GraphView graph={graph} run={run} status={status} selected={selected} follow={picked !== null || selected !== "@end"} onSelect={select} />
+              <GraphView graph={graph} run={run} status={status} selected={selected} follow={picked !== null || selected !== "@end"} lead={lead} legend={legend} onSelect={select} />
             ) : tab === "timeline" ? (
-              <TimelineView graph={graph} run={run} status={status} selected={selected} onSelect={select} />
+              <TimelineView graph={graph} run={run} status={status} selected={selected} lead={lead} legend={legend} onSelect={select} />
             ) : (
               <EventsView events={snap.events} run={run} now={now} onSelect={select} />
             )}
           </View>
           {run.wake ? <Text style={ui.styles.small}>{wakeLine(run.wake)}</Text> : null}
-          <Text style={ui.styles.small}>
-            {!snap.polling ? "流程已结束，不再刷新。" : status === "lost" ? "每 5 秒看一次有没有新事件。" : "正在跟踪新事件，自动刷新。"}
-          </Text>
         </>
       ) : snap.loaded && snap.state === "ok" ? (
-        <Banner tone="neutral" icon="Hourglass" title="文件是空的">
-          <Text style={ui.styles.text}>流程刚创建了文件，第一条事件还没写完。这里会自动刷新。</Text>
+        <Banner tone="neutral" icon="Hourglass" title="刚开始">
+          <Text style={ui.styles.text}>第一条记录还没写完，这里会自动刷新。</Text>
         </Banner>
       ) : null}
     </ScrollView>
@@ -199,28 +210,24 @@ function Notices({ snap }: { snap: RunSnapshot }) {
   );
 }
 
-function Header({ run, runId, status }: { run: RunState; runId: string; status: RunStatus }) {
+function Header({ run, runId, status, needsYou }: { run: RunState; runId: string; status: RunStatus; needsYou: boolean }) {
   const ui = useUi();
   const look = RUN_LOOK[status];
   const label = inputLabel(run.start);
+  const waiting = needsYou && status === "running";
   return (
-    <View style={{ gap: 2 }}>
-      <View style={[ui.styles.row, { gap: 10 }]}>
-        <Text style={[ui.styles.title, { fontSize: ui.compact ? 19 : 22 }]} selectable>
-          {run.start?.flow.name ?? runId}
-        </Text>
-        {label ? (
-          <Text style={[ui.styles.muted, { fontSize: 15, flexShrink: 1 }]} numberOfLines={1}>
-            {label}
-          </Text>
-        ) : null}
-        <Badge tone={look.tone} icon={look.icon} label={RUN_STATUS_LABEL[status]} />
-      </View>
-      {run.start?.flow.description ? (
-        <Text style={ui.styles.small} numberOfLines={2}>
-          {run.start.flow.description}
+    <View style={[ui.styles.row, { gap: 10 }]}>
+      <Text style={[ui.styles.title, { fontSize: ui.compact ? 19 : 22 }]} selectable>
+        {run.start?.flow.name ?? runId}
+      </Text>
+      {run.start?.affair ? (
+        <AffairLink affair={run.start.affair} />
+      ) : label ? (
+        <Text style={[ui.styles.muted, { fontSize: 15, flexShrink: 1 }]} numberOfLines={1}>
+          {label}
         </Text>
       ) : null}
+      <Badge tone={waiting ? "warning" : look.tone} icon={look.icon} label={waiting ? "等你" : RUN_STATUS_LABEL[status]} />
     </View>
   );
 }
@@ -272,57 +279,6 @@ function HeroBar({ hero: top, status, remote }: { hero: Hero; status: RunStatus;
         </View>
       </View>
       {action}
-    </View>
-  );
-}
-
-function Stat({ label, children }: { label: string; children: ReactNode }) {
-  const ui = useUi();
-  return (
-    <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6 }}>
-      <Text style={ui.styles.small}>{label}</Text>
-      {typeof children === "string" ? <Text style={ui.styles.text}>{children}</Text> : children}
-    </View>
-  );
-}
-
-function Numbers({
-  run,
-  status,
-  graphClock,
-  onSelect,
-}: {
-  run: RunState;
-  status: RunStatus;
-  graphClock: number;
-  onSelect(key: string): void;
-}) {
-  const ui = useUi();
-  const started = ms(run.startedAt);
-  const took = run.end?.durationMs ?? (started === null ? null : graphClock - started);
-  // As run.end counts them: calls that had an agent (one agent may serve several rounds).
-  const agents = run.end?.cost?.agentCount ?? [...run.calls.values()].filter((call) => call.agentId !== null).length;
-  const gates = [...run.calls.values()].filter((call) => call.type === "gate");
-  const caveats = caveatsOf(run);
-  const codex = hasUncountedCodex(run) || [...run.calls.values()].some((call) => call.ask?.provider.startsWith("codex/") && !call.end);
-  return (
-    <View style={[ui.styles.row, { columnGap: 20, rowGap: 6 }]}>
-      <Stat label={status === "running" ? "已运行" : status === "lost" ? "失联前跑了" : "用时"}>{formatDuration(took)}</Stat>
-      <Stat label="花费">
-        <Text style={ui.styles.text}>
-          {spendText(run)}
-          {codex ? <Text style={ui.styles.small}>  不含 Codex</Text> : null}
-        </Text>
-      </Stat>
-      <Stat label="agent">{`${agents} 个`}</Stat>
-      {gates.length > 0 ? <Stat label="人闸">{gates.map((gate) => headline(gate, status) ?? "没有结束记录").join("、")}</Stat> : null}
-      {caveats.length > 0 ? (
-        <Pressable accessibilityRole="button" onPress={() => onSelect("@start")}>
-          <Text style={{ color: ui.tone("warning"), fontSize: 13, textDecorationLine: "underline", textDecorationStyle: "dotted" }}>
-            ⚠ {caveats.length} 条约束没被机械强制
-          </Text>
-        </Pressable>
-      ) : null}
     </View>
   );
 }

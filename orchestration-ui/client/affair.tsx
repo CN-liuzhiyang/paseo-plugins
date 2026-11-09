@@ -4,7 +4,7 @@ import { Linking, Platform, Pressable, Text, View } from "react-native";
 import { affairTarget, openPluginScreenOf, urlHost, type Affair, type AffairTarget } from "../shared/affair";
 import { useUi } from "./ui";
 
-// "属于：<label>": what a run is for, as whoever started it said. The words come from the run's
+// What a run is for, as whoever started it said. The words come from the run's
 // file and are drawn as plain text; where they lead is decided by shared/affair.ts (a screen of
 // another plugin, an outside address, or nowhere).
 
@@ -38,11 +38,13 @@ export function follow(target: AffairTarget, openScreen: ReturnType<typeof openP
   }
 }
 
-export function AffairLine({ affair }: { affair: Affair }) {
+/** What the run is for, as its caller said, next to the flow's name; where it goes is decided by shared/affair.ts. */
+export function AffairLink({ affair }: { affair: Affair }) {
   const ui = useUi();
   const c = ui.theme.colors;
   const openScreen = openPluginScreenOf(ui.navigation);
   const target = affairTarget(affair, { hostId: ui.hostId, routes: ui.routes, hostOpensScreens: openScreen !== null });
+  // The label is whatever the caller wrote; where it goes is not, so an outside address says its host.
   const where = target.kind === "url" ? urlHost(target.url) : null;
   const hint = target.kind === "route" ? "会重新载入页面" : target.kind === "url" ? "在浏览器里打开" : null;
   const label = (
@@ -50,27 +52,19 @@ export function AffairLine({ affair }: { affair: Affair }) {
       {affair.label}
     </Text>
   );
+  if (target.kind === "none") return label;
   return (
-    <View style={[ui.styles.row, { gap: 6, alignItems: "center" }]}>
-      <Text style={ui.styles.muted}>属于：</Text>
-      {target.kind === "none" ? (
-        label
-      ) : (
-        <Pressable
-          accessibilityRole="link"
-          accessibilityLabel={`属于：${affair.label}`}
-          accessibilityHint={hint ?? "打开"}
-          onPress={() => follow(target, openScreen)}
-          style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 }}
-        >
-          {label}
-          <Icon name={target.kind === "url" ? "ExternalLink" : "ArrowUpRight"} size={13} color={c.accent} />
-        </Pressable>
-      )}
-      {/* The label is whatever the caller wrote; where it goes is not. */}
+    <Pressable
+      accessibilityRole="link"
+      accessibilityLabel={affair.label}
+      accessibilityHint={hint ?? "打开"}
+      onPress={() => follow(target, openScreen)}
+      style={{ flexDirection: "row", alignItems: "center", gap: 4, flexShrink: 1 }}
+    >
+      {label}
+      <Icon name={target.kind === "url" ? "ExternalLink" : "ArrowUpRight"} size={13} color={c.accent} />
       {where ? <Text style={ui.styles.small}>{where}</Text> : null}
-      {target.kind === "route" ? <Text style={ui.styles.small}>（会重新载入页面）</Text> : null}
-    </View>
+    </Pressable>
   );
 }
 
