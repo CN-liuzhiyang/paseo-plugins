@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import * as ops from "../server/lib/ops.mjs";
 import { append, load, read } from "../server/lib/log.mjs";
-import { canResume, claimFile, eventsFile, flowFinishedMessage, readStatus } from "../server/lib/flows.mjs";
+import { canResume, claimFile, eventsFile, flowFinishedMessage, readStatus, resumeRefusal } from "../server/lib/flows.mjs";
 import { flowBlockOf } from "../server/lib/panel.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { createChats, type ChatPaseo } from "../server/chat";
@@ -18,6 +18,12 @@ import { checkReport, buildFacts } from "../server/lib/check.mjs";
 import { emptyDirectory, world } from "./kit";
 
 const POINT = { flow: "do-it", input: { version: 1 }, from: "从补丁接着做", spends: "maybe" };
+
+test("refusal kinds decide the message independently of wording; old claims still show their reason", () => {
+  assert.match(resumeRefusal("原因已换语言", "resume-claimed"), /已经接着跑过/);
+  assert.match(resumeRefusal("原因已换语言", "line-busy"), /还有步骤没结束/);
+  assert.equal(resumeRefusal("not the one that was shown", null), "没接上：not the one that was shown");
+});
 const statusModule = pathToFileURL(path.resolve(import.meta.dirname, "../../orchestration/runtime/status.mjs")).href;
 
 async function setup(limits = {}, trial = false) {
@@ -47,7 +53,7 @@ async function setup(limits = {}, trial = false) {
     const next = args[args.indexOf("--run-id") + 1];
     const child = Object.assign(new EventEmitter(), { pid: 111, unref() {} });
     if (args.includes("--expect") && args[args.indexOf("--expect") + 1] !== (w.ctx.flowNow.get(run)?.st?.resume?.print ?? "")) {
-      writeFileSync(claimFile(logs, next), JSON.stringify({ refused: "the resume point is not the one that was shown" }));
+      writeFileSync(claimFile(logs, next), JSON.stringify({ refused: "显示后输入已变化", refusedKind: "resume-point-changed" }));
       queueMicrotask(() => child.emit("exit", 2));
     } else writeFileSync(eventsFile(logs, next), JSON.stringify(event("run.start", { runId: next, flow: { name: "do-it", phases: [] } })) + "\n");
     return child;

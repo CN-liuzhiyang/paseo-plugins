@@ -72,9 +72,10 @@ const addCost = (a, b) => (a === null ? b : b === null ? a : { usd: sumOrNull(a.
 
 /** The input, the flow's source text, or its grants are wrong. Nothing ran and nothing was spent. */
 export class RunRefused extends Error {
-  constructor(message, problems = []) {
+  constructor(message, problems = [], kind = "run-refused") {
     super(problems.length > 0 ? `${message}:\n  - ${problems.join("\n  - ")}` : message);
     this.name = "RunRefused";
+    this.kind = kind;
     this.problems = problems;
   }
 }
@@ -272,7 +273,7 @@ export function takeRunId({ runId, logDir } = {}) {
  */
 export function settleRefusal({ runId, dir, claim, callerGiven }, error) {
   if (existsSync(eventsFile(dir, runId))) return;
-  if (callerGiven) claim.refuse(`${error?.name ?? "Error"}: ${error?.message ?? error}`);
+  if (callerGiven) claim.refuse(`${error?.name ?? "Error"}: ${error?.message ?? error}`, error?.kind ?? "run-refused");
   else claim.discard();
 }
 
@@ -309,7 +310,7 @@ async function runClaimed(target, options, taken) {
   try {
     taken.line = takeLine({ dir, lineage, runId });
   } catch (error) {
-    if (error instanceof LineBusy) throw new RunRefused(error.message);
+    if (error instanceof LineBusy) throw new RunRefused(error.message, [], "line-busy");
     throw error;
   }
   let journal;

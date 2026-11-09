@@ -166,6 +166,15 @@ workspace（每个目录一个）。第一次要起 agent 的调用要用某个�
   **没有这条**；后三种会有一条 `caveat`（`affair: ...`），调用照老办法起 agent，运行不因此失败。
 - 之前的文件没有这个事件，读者忽略不认识的 `kind`（见"演进规则"）。
 
+### 命令行拒绝（没有开始运行）
+
+`orch.mjs run|resume|settle|steps|status` 在开始前抛错，仍以退出码 **2** 退出、stderr 保留给人的错误说明；
+stdout 加 JSON `{ ok: false, kind, message }`。`kind` 稳定，不按 `message` 的措辞判断：
+`line-busy`（这条线仍被占用）、`resume-claimed`（这次停止已被接走或正在被接走）、
+`resume-point-changed`（与 `--expect` 显示的点不同）、`resume-refused`（其他续跑拒绝）、`run-refused`（其他启动前错误）。
+调用方指定 id 的占位文件同时加 `refusedKind`，`readRunState` / `status` 也返回它，后台调用方从这里读；
+旧占位缺字段返回 null，调用方显示原原因，不再猜英文。原 `refused` 字符串和退出码不变。
+
 ### `resume`
 
 flow 调 `$.resumeWith(...)` 一次写一行（后加的事件，2026-10-31）：这一刻起，如果这个运行没走到头，从哪里、用什么接着跑。

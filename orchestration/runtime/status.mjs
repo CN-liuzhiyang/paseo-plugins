@@ -21,6 +21,7 @@ export function runStatus({ dir, runId, now = Date.now, spawnedAt = null }) {
     state: live.state,
     reason: live.reason,
     refused: live.refused,
+    refusedKind: live.refusedKind,
     outcome: live.outcome,
     flow: null,
     resumeOf: null,

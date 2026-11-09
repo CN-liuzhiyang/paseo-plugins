@@ -154,6 +154,7 @@ export function readRunState({ dir, runId, now = Date.now, spawnedAt = null, gra
     ...verdict,
     reason: PROSE[verdict.state],
     refused: typeof body?.refused === "string" ? body.refused : null,
+    refusedKind: typeof body?.refusedKind === "string" ? body.refusedKind : null,
     outcome: events?.outcome ?? null,
     processAlive: pid === "unknown" ? null : pid === "alive",
     claim: claim

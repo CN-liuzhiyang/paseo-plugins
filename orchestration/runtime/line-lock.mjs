@@ -52,6 +52,7 @@ export class LineBusy extends Error {
         `Try again when it has ended; if its process is gone and this stays, remove ${file}`,
     );
     this.name = "LineBusy";
+    this.kind = "line-busy";
     this.lineage = lineage;
     this.holder = holder;
   }

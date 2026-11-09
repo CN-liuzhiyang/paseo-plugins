@@ -93,6 +93,7 @@ test("two runs of one line started together in one process: one works, the other
   assert.equal(done[0].value.outcome, "done");
   assert.equal(refused.length, 1);
   assert.ok(refused[0].reason instanceof RunRefused);
+  assert.equal(refused[0].reason.kind, "line-busy");
   assert.match(refused[0].reason.message, /being worked on by run par-/);
   assert.equal(acts, 1);
   assert.equal(existsSync(lineLockFile(logDir, "par-line")), false, "given back when the run is over");
