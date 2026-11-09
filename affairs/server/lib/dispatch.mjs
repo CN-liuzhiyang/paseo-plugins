@@ -7,6 +7,10 @@ import { callerInfo, resolve } from "./ops.mjs";
 import { directoryWorkspace, samePath } from "./workspace.mjs";
 import { roleOf } from "./schedule.mjs";
 
+// A dispatched session works unattended: a mode that stops to ask would wait on a person who is not watching it.
+// The policy can change these per provider (`drive.modes`).
+const MODES = { codex: "full-access", claude: "bypassPermissions" };
+
 export async function dispatch(ctx, ref, { contract, provider, thinking, mode, title, cwd } = {}) {
   const r = resolve(ctx, ref);
   if (!r.s) return { ok: false, text: r.text };
@@ -27,6 +31,7 @@ export async function dispatch(ctx, ref, { contract, provider, thinking, mode, t
     thinking ??= role.thinking;
     mode ??= role.mode;
   }
+  mode ??= { ...MODES, ...ctx.policy.drive?.modes }[String(provider || "").split("/")[0]];
   let workspaceId = s.workspaceId;
   title ||= path.basename(file, path.extname(file));
   try {

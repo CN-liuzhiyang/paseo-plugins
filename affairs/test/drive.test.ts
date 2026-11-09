@@ -177,7 +177,10 @@ test("session-open creation guard rejects no budget, spent budget, expiry and wa
   assert.throws(() => dispatchOpen(f.w.ctx, request), /先请他批额度/);
   f.put([{ kind: "budget", usd: 1 }]);assert.equal(dispatchOpen(f.w.ctx, request), request);
   const contract = path.join(f.w.dir, "contract.md");writeFileSync(contract, "契约");
-  assert.ok((await dispatch(f.main(), f.id, { contract, provider: "claude/example" })).ok);
+  const made = await dispatch(f.main(), f.id, { contract, provider: "claude/example" });assert.ok(made.ok);
+  assert.equal(made.createAgent?.settings.modeId, "bypassPermissions");
+  assert.equal((await dispatch(f.main(), f.id, { contract, provider: "codex/example" })).createAgent?.settings.modeId, "full-access");
+  assert.equal((await dispatch(f.main(), f.id, { contract, provider: "codex/example", mode: "auto" })).createAgent?.settings.modeId, "auto");
   f.put([{ kind: "chat.turn", agentId: "main-chat", usd: 1 }]);
   assert.throws(() => dispatchOpen(f.w.ctx, request), /额度已用完/);
   f.put([{ kind: "budget", usd: 2, until: "2000-01-01" }]);assert.throws(() => dispatchOpen(f.w.ctx, request), /过期/);
