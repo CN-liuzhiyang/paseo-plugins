@@ -11,6 +11,9 @@ import { localPathOf } from "./projects.mjs";
 export const PROJECT_NAME = "事项";
 const ARCHIVE_PREFIX = "✓ ";
 
+/** Only an absent command disables label alignment; connection and assignment errors must surface. */
+export const workspaceLabelMissing = (error) => /(?:unknown|unrecognized) command\s+['"`]?label\b/i.test(String(error?.message ?? error));
+
 export async function ensureProject(run, root) {
   mkdirSync(root, { recursive: true });
   const file = path.join(root, "project.json");

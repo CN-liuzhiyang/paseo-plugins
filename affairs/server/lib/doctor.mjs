@@ -3,7 +3,8 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listIds, load } from "./log.mjs";
-import { json } from "./paseo.mjs";
+import { json, whyOf } from "./paseo.mjs";
+import { workspaceLabelMissing } from "./workspace.mjs";
 import { policyProblems } from "./policy.mjs";
 import { listReaders } from "./readers.mjs";
 import { chatHandbooks } from "./chat.mjs";
@@ -68,6 +69,14 @@ export async function doctor(ctx) {
     add(true, "paseo 连得上", `${Array.isArray(projects) ? projects.length : "?"} 个项目`);
   } catch (error) {
     add(false, "paseo 连得上", `连不上：${String(error.message).slice(0, 120)}（daemon 起着吗？--paseo-home 对吗？）`);
+  }
+
+  try {
+    const result = await ctx.run(["workspace", "label", "--help"]);
+    if (result.exitCode !== 0) throw new Error(whyOf(result.stderr, result.stdout));
+    add(true, "工作区标签", "workspace label 可用");
+  } catch (error) {
+    add(false, "工作区标签", workspaceLabelMissing(error) ? "要新版 Paseo（workspace label）" : `检查失败：${String(error.message).slice(0, 120)}`);
   }
 
   if (!policy.push?.to) add(false, "推送", "push.to 没写：推送发给谁不知道，一条也发不出");

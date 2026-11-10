@@ -43,12 +43,13 @@ function setup(policyOver: Record<string, unknown> = {}) {
     },
   };
   const state = { deliverFails: false };
+  const logs: string[] = [];
   const deliver: Deliver = async (_channel, m) => {
     if (state.deliverFails) throw new Error("popo down");
     calls.pushed.push({ text: m.text, key: m.idempotencyKey });
   };
-  const engine = createEngine({ ctx: w.ctx, paseo, deliver, log: () => {}, lookDelaysMs: [0, 0, 0] });
-  return { w, calls, engine, state, status, tail };
+  const engine = createEngine({ ctx: w.ctx, paseo, deliver, log: (message) => void logs.push(message), lookDelaysMs: [0, 0, 0] });
+  return { w, calls, engine, state, status, tail, logs };
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
@@ -93,6 +94,103 @@ test("the sidebar title follows the log: a day when the next look is days away, 
   const n = s.calls.titles.length;
   await s.engine.scan(id);
   assert.equal(s.calls.titles.length, n, "the title is set when it changes, not on every scan");
+});
+
+const labelCalls = (s: ReturnType<typeof setup>) => s.w.calls().filter((c) => c[0] === "workspace" && c[1] === "label");
+const editPaseo = (s: ReturnType<typeof setup>, edit: (db: any) => void) => {
+  const db = s.w.paseo();
+  edit(db);
+  writeFileSync(path.join(s.w.dir, "paseo.json"), JSON.stringify(db));
+};
+
+test("workspace labels follow the log: new, done, reopened and stopped; personal labels stay", async () => {
+  const s = setup();
+  const id = await start(s);
+  const workspaceId = load(s.w.root, id).workspaceId;
+  const labels = () => s.w.paseo().workspaces[0].labels;
+  assert.deepEqual(labels(), ["事项"]);
+  assert.deepEqual(labelCalls(s), [
+    ["workspace", "label", workspaceId, "事项", "--color", "sky", "--json"],
+    ["workspace", "label", workspaceId, "事项·办完", "--remove", "--json"],
+  ]);
+  editPaseo(s, (db) => db.workspaces[0].labels.push("my-label"));
+  await ops.stop(s.w.ctx, id, { done: true, evidence: "办完了" });
+  await s.engine.scan(id);
+  assert.deepEqual(labels(), ["my-label", "事项·办完"]);
+  assert.deepEqual(labelCalls(s)[2], ["workspace", "label", workspaceId, "事项·办完", "--color", "emerald", "--json"]);
+  await ops.resume(s.w.ctx, id);
+  await s.engine.scan(id);
+  assert.deepEqual(labels(), ["my-label", "事项"]);
+  await ops.stop(s.w.ctx, id);
+  await s.engine.scan(id);
+  assert.deepEqual(labels(), ["my-label", "事项·办完"]);
+  const before = labelCalls(s).length;
+  await s.engine.scan(id);
+  assert.equal(labelCalls(s).length, before, "already aligned: no more CLI calls");
+  assert.equal(load(s.w.root, id).labelShown, "事项·办完");
+  assert.deepEqual(read(s.w.root, id).filter((l) => l.kind === "workspace" && l.label).map((l) => l.label), ["事项", "事项·办完", "事项", "事项·办完"]);
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
+  await restarted.scan(id);
+  assert.equal(labelCalls(s).length, before, "shown value survives an engine restart");
+});
+
+test("old affairs get their workspace label on the first scan, even if the title already agrees", async () => {
+  for (const done of [false, true]) {
+    const s = setup();
+    const made = await createWatch(s.w.ctx, { id: "old-affair", title: "旧事项", noWait: true });
+    if (done) {
+      await ops.stop(s.w.ctx, made.id, { done: true });
+      append(s.w.root, made.id, [{ kind: "workspace", title: "✓ 旧事项" }], { now: s.w.now() });
+    }
+    editPaseo(s, (db) => { db.workspaces[0].labels = ["my-label", done ? "事项" : "事项·办完"]; });
+    assert.equal(load(s.w.root, made.id).labelShown, "");
+    await s.engine.scan(made.id);
+    assert.deepEqual(s.w.paseo().workspaces[0].labels, ["my-label", done ? "事项·办完" : "事项"]);
+    assert.equal(s.calls.titles.length, 0);
+  }
+});
+
+test("an old CLI is tried only once across concurrent scans; titles and chats still follow the log", async () => {
+  const s = setup();
+  const made = await createWatch(s.w.ctx, { id: "old-cli", title: "旧版本", noWait: true });
+  await createWatch(s.w.ctx, { id: "other-affair", title: "另一件事", noWait: true });
+  editPaseo(s, (db) => { db.labelsUnsupported = true; });
+  await s.engine.scanAll();
+  await ops.stop(s.w.ctx, made.id);
+  await s.engine.scanAll();
+  assert.equal(labelCalls(s).length, 1);
+  assert.equal(s.logs.filter((l) => l === "工作区标签：要新版 Paseo（workspace label）").length, 1);
+  assert.equal(s.calls.titles.at(-1), "✓ 旧版本");
+  assert.equal(s.calls.created.length, 2, "both chats are created despite the old CLI");
+  assert.equal(load(s.w.root, made.id).labelShown, "");
+});
+
+test("other label errors surface and are retried without recording a successful alignment", async () => {
+  const s = setup();
+  const made = await createWatch(s.w.ctx, { id: "label-error", title: "出错", noWait: true });
+  editPaseo(s, (db) => { db.labelsError = "connection lost"; });
+  await s.engine.scan(made.id);
+  assert.ok(s.logs.some((l) => /connection lost/.test(l)));
+  assert.equal(load(s.w.root, made.id).labelShown, "");
+  editPaseo(s, (db) => { delete db.labelsError; });
+  await s.engine.scan(made.id);
+  assert.deepEqual(s.w.paseo().workspaces[0].labels, ["事项"]);
+  assert.equal(load(s.w.root, made.id).labelShown, "事项");
+  assert.equal(labelCalls(s).length, 3);
+});
+
+test("archived affairs and affairs without a workspace are skipped; a replacement workspace gets labeled", async () => {
+  const s = setup();
+  const id = await start(s);
+  const before = labelCalls(s).length;
+  append(s.w.root, id, [{ kind: "workspace", archived: true }], { now: s.w.now() });
+  await s.engine.scan(id);
+  assert.equal(labelCalls(s).length, before);
+  // Restoring a workspace must not reuse the shown value from the archived one.
+  await ops.resume(s.w.ctx, id);
+  await s.engine.scan(id);
+  assert.deepEqual(s.w.paseo().workspaces[1].labels, ["事项"]);
+  assert.equal(labelCalls(s).length, before + 2);
 });
 
 test("an ended affair keeps its workspace and panel, including after three days and when resumed", async () => {

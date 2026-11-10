@@ -333,6 +333,7 @@ test("F-02: policy problems are named, and doctor says ✓ or ✗ for each thing
   assert.ok(d.items.some((i) => !i.ok && i.label === "policy.json：binPath"));
   assert.ok(d.items.find((i) => i.label === "node 在 PATH 上")!.ok);
   assert.ok(d.items.find((i) => i.label === "paseo 连得上")!.ok);
+  assert.ok(d.items.find((i) => i.label === "工作区标签")!.ok);
   assert.match(d.text, /✗ policy\.json：push\.to/);
   // Everything in place: green, and the channel is found by the destination it was told.
   const dir = scratch("affairs-doctor-");
@@ -349,6 +350,9 @@ test("F-02: policy problems are named, and doctor says ✓ or ✗ for each thing
     assert.deepEqual(green.items.filter((i) => !i.ok).map((i) => `${i.label}：${i.detail}`).filter((t) => !/python|lark-cli/.test(t)), []);
     process.env.FAKE_PASEO_CHANNELS = "[]";
     assert.ok((await doctor(ok.ctx)).items.some((i) => !i.ok && i.label === "推送"));
+    const dbFile = path.join(ok.dir, "paseo.json");
+    writeFileSync(dbFile, JSON.stringify({ projects: [], workspaces: [], schedules: [], n: 0, labelsUnsupported: true }));
+    assert.match((await doctor(ok.ctx)).text, /✗ 工作区标签：要新版 Paseo（workspace label）/);
   } finally {
     delete process.env.FAKE_PASEO_CHANNELS;
   }

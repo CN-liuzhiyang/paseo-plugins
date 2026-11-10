@@ -48,6 +48,19 @@ else if (group === "project" && action === "create") {
   db.workspaces.find((w) => w.workspaceId === first).name = args[3];
   save();
   out({ workspaceId: first, name: args[3] });
+} else if (group === "workspace" && action === "label") {
+  if (db.labelsUnsupported) die("unknown command 'label'");
+  if (args.includes("--help")) out({ usage: "workspace label <workspaceId> <name>" });
+  else {
+    const w = db.workspaces.find((w) => w.workspaceId === first);
+    if (!w) die(`Workspace not found: ${first}`);
+    if (db.labelsError) die(db.labelsError);
+    const name = args[3];
+    w.labels = (w.labels ?? []).filter((label) => label !== name);
+    if (!args.includes("--remove")) w.labels.push(name);
+    save();
+    out({ workspaceId: first, labels: w.labels });
+  }
 } else if (group === "workspace" && action === "archive") {
   const w = db.workspaces.find((x) => x.workspaceId === first);
   w.archived = true;

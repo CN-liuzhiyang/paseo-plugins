@@ -166,7 +166,7 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
   const s = {
     id: "", title: "", goal: "", domain: "work", link: null, links: [], projects: [], attached: [], workdir: "", createdAt: null,
     status: "watching", statusAt: null, doneEvidence: "", mode: "", modeExplicit: false, budget: null, dispatched: [], envs: [],
-    workspaceId: null, projectId: null, archived: false, titleShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
+    workspaceId: null, projectId: null, archived: false, titleShown: "", labelShown: "", conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
     pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, flows: [], appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
@@ -212,10 +212,12 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         if (l.agentId && !s.attached.includes(l.agentId)) s.attached.push(l.agentId);
         break;
       case "workspace":
+        if (l.workspaceId && l.workspaceId !== s.workspaceId) s.labelShown = "";
         if (l.archived) Object.assign(s, { archived: true, workspaceId: null, conversationId: null, chatId: null, scheduleId: null });
         if (l.workspaceId) Object.assign(s, { workspaceId: l.workspaceId, archived: false });
         if (l.projectId) s.projectId = l.projectId;
         if (l.title !== undefined) s.titleShown = l.title;
+        if (l.label !== undefined) s.labelShown = l.label;
         break;
       case "conversation":
         s.conversationId = l.agentId ?? null;

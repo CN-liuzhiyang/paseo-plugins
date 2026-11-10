@@ -39,6 +39,7 @@ test("session titles, four states and activity survive archiving and sort by urg
 test("related sessions reuse the paged cost scan, include main, roles, status, project and cost, and sort by activity", async () => {
   for (const mode of ["drive", "watch"]) {
     const w = world();const id = "sessions";
+    w.file("paseo.json", JSON.stringify({ projects: [], workspaces: [{ workspaceId: "headquarters" }], schedules: [], n: 0 }));
     append(w.root, id, [{ kind: "created", id, title: "改进工具" }, { kind: "mode", mode }, { kind: "workspace", workspaceId: "headquarters" }, { kind: "chat", agentId: "main", why: "first" }], { now: w.now() });
     const snapshots = Array.from({ length: 10 }, (_, i) => ({ agent: {
       id: `worker-${i}`, title: `改进工具：任务 ${i}`, labels: { "affairs.affair": id, "affairs.role": i === 2 ? "flow" : "dispatched" },
@@ -82,6 +83,7 @@ test("related sessions reuse the paged cost scan, include main, roles, status, p
 test("done and stopped affairs archive only quiet related sessions, retry busy, permission and archive failures, and keep their workspace", async () => {
   for (const done of [true, false]) {
     const w = world();const id = "put-away";
+    w.file("paseo.json", JSON.stringify({ projects: [], workspaces: [{ workspaceId: "headquarters" }], schedules: [], n: 0 }));
     append(w.root, id, [{ kind: "created", id, title: "改进工具" }, { kind: "workspace", workspaceId: "headquarters" }, { kind: "chat", agentId: "main", why: "first" }], { now: w.now() });
     const agents: any[] = [
       { id: "main", status: "idle" }, { id: "closed", status: "closed" }, { id: "running", status: "running" },

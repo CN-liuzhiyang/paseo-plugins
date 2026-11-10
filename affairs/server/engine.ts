@@ -12,7 +12,8 @@ import { linkOf, rowsOf, say } from "./lib/view.mjs";
 import { materialFile, panelOf } from "./lib/panel.mjs";
 import { primaryLink, linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
-import { ensureProject, titleOf } from "./lib/workspace.mjs";
+import { ensureProject, titleOf, workspaceLabelMissing } from "./lib/workspace.mjs";
+import { json } from "./lib/paseo.mjs";
 import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 import { flushWork, refreshWork } from "./lib/workdir-git.mjs";
 import { modeOf } from "./lib/mode.mjs";
@@ -72,10 +73,33 @@ export function createEngine(deps: EngineDeps) {
   const lookDelays = deps.lookDelaysMs ?? [2000, 10_000, 30_000];
   const lookTimers = new Set<ReturnType<typeof setTimeout>>();
   const lookWork = new Set<Promise<void>>();
+  let labelsUnavailable = false;
+  // Scans of different affairs can overlap: an old CLI is tried only once, even at startup.
+  let labelQueue = Promise.resolve();
 
   const state = (id: string) => ({ ...load(ctx.root, id, ctx.policy), lines: read(ctx.root, id) });
   const write = (id: string, entries: Array<Record<string, unknown>>) => append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
   const chats = deps.paseo ? createChats({ ctx, paseo: deps.paseo, state, write: (id, entries) => void write(id, entries), view: (id) => view(id), log, changed: scanSoon }) : null;
+
+  function alignLabels(s: ReturnType<typeof state>) {
+    const work = labelQueue.then(async () => {
+      if (labelsUnavailable || s.archived || !s.workspaceId) return;
+      const watching = s.status === "watching";
+      const want = watching ? "事项" : "事项·办完";
+      if (want === s.labelShown) return;
+      try {
+        await json(ctx.run, ["workspace", "label", s.workspaceId, want, "--color", watching ? "sky" : "emerald"]);
+        await json(ctx.run, ["workspace", "label", s.workspaceId, watching ? "事项·办完" : "事项", "--remove"]);
+        write(s.id, [{ kind: "workspace", label: want }]);
+      } catch (error) {
+        if (!workspaceLabelMissing(error)) throw error;
+        labelsUnavailable = true;
+        log("工作区标签：要新版 Paseo（workspace label）");
+      }
+    });
+    labelQueue = work.catch(() => {});
+    return work;
+  }
 
   function scanSoon(id: string) {
     if (stopped || debounce.has(id)) return;
@@ -211,6 +235,7 @@ export function createEngine(deps: EngineDeps) {
         write(id, [{ kind: "workspace", title: want }]);
       }
     }
+    await alignLabels(s);
     // The chat: made, listened to, and shown what the log says.
     if (chats) await chats.sync(id, sessions.get(id)).catch((error: unknown) => log(`${id}: the chat: ${(error as Error).message}`));
     if (chats) await chats.tellFinished(id).catch((error: unknown) => log(`${id}: telling the chat: ${(error as Error).message}`));
