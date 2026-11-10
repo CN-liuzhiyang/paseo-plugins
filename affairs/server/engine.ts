@@ -95,6 +95,10 @@ export function createEngine(deps: EngineDeps) {
         if (workspaceLabelMissing(error)) {
           labelsUnavailable = true;
           log("工作区标签：要新版 Paseo（workspace label）");
+        } else if (/workspace not found/i.test((error as Error).message)) {
+          // The workspace was archived or deleted by hand; there is nothing to label, and asking again every scan would only repeat this line.
+          write(s.id, [{ kind: "workspace", label: want }]);
+          log(`${s.id}: workspace labels: workspace is gone, not labelled`);
         } else log(`${s.id}: workspace labels: ${(error as Error).message}`);
       }
     });

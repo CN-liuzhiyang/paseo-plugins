@@ -165,6 +165,16 @@ test("an old CLI is tried only once across concurrent scans; titles and chats st
   assert.equal(load(s.w.root, made.id).labelShown, "");
 });
 
+test("a workspace archived by hand is not labelled again on every scan", async () => {
+  const s = setup();
+  const made = await createWatch(s.w.ctx, { id: "gone", title: "没了", noWait: true });
+  editPaseo(s, (db) => { db.workspaces = db.workspaces.filter((w: { workspaceId: string }) => w.workspaceId !== load(s.w.root, made.id).workspaceId); });
+  await s.engine.scan(made.id);
+  await s.engine.scan(made.id);
+  assert.equal(labelCalls(s).length, 1, "asked once, then settled");
+  assert.equal(s.logs.filter((l) => /gone: workspace labels: workspace is gone/.test(l)).length, 1);
+});
+
 test("other label errors are logged and retried without blocking chat sync or finished flow delivery", async () => {
   const s = setup();
   const made = await createWatch(s.w.ctx, { id: "label-error", title: "出错", noWait: true });
