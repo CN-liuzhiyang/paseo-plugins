@@ -165,7 +165,7 @@ export async function restoreWork(ctx, s) {
 
 export function sizeWarnings(ctx, s, handbooks = "") {
   const { status, readme } = workTexts(ctx, s);
-  return [["README", readme, 4], ["status", status, 2], ["对话手册", handbooks, 4]].flatMap(([name, text, limit]) => {
+  return [["README", readme, 4], ["status", status, 2], ["对话手册", handbooks, 5]].flatMap(([name, text, limit]) => {
     const kb = Buffer.byteLength(text) / 1024;
     return kb > limit ? [`${name} 超了 ${(kb - limit).toFixed(1)} KB，把细节挪到同文件夹别的文件。`] : [];
   });
