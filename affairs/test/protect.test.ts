@@ -352,7 +352,12 @@ test("F-02: policy problems are named, and doctor says ✓ or ✗ for each thing
     assert.ok((await doctor(ok.ctx)).items.some((i) => !i.ok && i.label === "推送"));
     const dbFile = path.join(ok.dir, "paseo.json");
     writeFileSync(dbFile, JSON.stringify({ projects: [], workspaces: [], schedules: [], n: 0, labelsUnsupported: true }));
+    const oldHelp = await ok.ctx.run(["workspace", "label", "--help"]);
+    assert.equal(oldHelp.exitCode, 0, "old CLIs silently return the parent command's help");
+    assert.match(oldHelp.stdout, /Usage: paseo workspace \[options\] \[command\]/);
+    assert.doesNotMatch(oldHelp.stdout, /^[ \t]+label(?:[ \t]|$)/m);
     assert.match((await doctor(ok.ctx)).text, /✗ 工作区标签：要新版 Paseo（workspace label）/);
+    assert.ok(ok.calls().some((c) => c.join(" ") === "workspace --help"), "doctor checks the workspace command list");
   } finally {
     delete process.env.FAKE_PASEO_CHANNELS;
   }

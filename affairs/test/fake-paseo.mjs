@@ -21,7 +21,16 @@ const next = (prefix) => `${prefix}_${++db.n}`;
 
 if (process.env.FAKE_PASEO_FAIL && args.join(" ").includes(process.env.FAKE_PASEO_FAIL)) die("fake failure");
 
-if (group === "project" && action === "ls") out(db.projects);
+if (group === "workspace" && args.includes("--help")) {
+  if (action === "label" && !db.labelsUnsupported) console.log("Usage: paseo workspace label [options] <workspaceId> <name>");
+  else console.log([
+    "Usage: paseo workspace [options] [command]", "", "Commands:",
+    "  create [options]       Create a workspace",
+    "  rename <id> <title>    Rename a workspace",
+    ...(db.labelsUnsupported ? [] : ["  label [options] <workspaceId> <name>  Assign or remove a workspace label"]),
+    "  help [command]        Display help for command",
+  ].join("\n"));
+} else if (group === "project" && action === "ls") out(db.projects);
 else if (group === "project" && action === "create") {
   const p = { projectId: next("prj"), name: "root", kind: "non_git", path: first };
   db.projects.push(p);
@@ -50,17 +59,14 @@ else if (group === "project" && action === "create") {
   out({ workspaceId: first, name: args[3] });
 } else if (group === "workspace" && action === "label") {
   if (db.labelsUnsupported) die("unknown command 'label'");
-  if (args.includes("--help")) out({ usage: "workspace label <workspaceId> <name>" });
-  else {
-    const w = db.workspaces.find((w) => w.workspaceId === first);
-    if (!w) die(`Workspace not found: ${first}`);
-    if (db.labelsError) die(db.labelsError);
-    const name = args[3];
-    w.labels = (w.labels ?? []).filter((label) => label !== name);
-    if (!args.includes("--remove")) w.labels.push(name);
-    save();
-    out({ workspaceId: first, labels: w.labels });
-  }
+  const w = db.workspaces.find((w) => w.workspaceId === first);
+  if (!w) die(`Workspace not found: ${first}`);
+  if (db.labelsError) die(db.labelsError);
+  const name = args[3];
+  w.labels = (w.labels ?? []).filter((label) => label !== name);
+  if (!args.includes("--remove")) w.labels.push(name);
+  save();
+  out({ workspaceId: first, labels: w.labels });
 } else if (group === "workspace" && action === "archive") {
   const w = db.workspaces.find((x) => x.workspaceId === first);
   w.archived = true;

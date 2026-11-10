@@ -92,9 +92,10 @@ export function createEngine(deps: EngineDeps) {
         await json(ctx.run, ["workspace", "label", s.workspaceId, watching ? "事项·办完" : "事项", "--remove"]);
         write(s.id, [{ kind: "workspace", label: want }]);
       } catch (error) {
-        if (!workspaceLabelMissing(error)) throw error;
-        labelsUnavailable = true;
-        log("工作区标签：要新版 Paseo（workspace label）");
+        if (workspaceLabelMissing(error)) {
+          labelsUnavailable = true;
+          log("工作区标签：要新版 Paseo（workspace label）");
+        } else log(`${s.id}: workspace labels: ${(error as Error).message}`);
       }
     });
     labelQueue = work.catch(() => {});

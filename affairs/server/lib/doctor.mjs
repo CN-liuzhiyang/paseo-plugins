@@ -4,7 +4,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listIds, load } from "./log.mjs";
 import { json, whyOf } from "./paseo.mjs";
-import { workspaceLabelMissing } from "./workspace.mjs";
 import { policyProblems } from "./policy.mjs";
 import { listReaders } from "./readers.mjs";
 import { chatHandbooks } from "./chat.mjs";
@@ -72,11 +71,14 @@ export async function doctor(ctx) {
   }
 
   try {
-    const result = await ctx.run(["workspace", "label", "--help"]);
+    const result = await ctx.run(["workspace", "--help"]);
     if (result.exitCode !== 0) throw new Error(whyOf(result.stderr, result.stdout));
-    add(true, "工作区标签", "workspace label 可用");
+    // Older CLIs return success and the parent help even for `workspace label --help`.
+    const commands = result.stdout.split(/^Commands:[ \t]*\r?$/m)[1] ?? "";
+    const supported = /^[ \t]+label(?:[ \t]|$)/m.test(commands);
+    add(supported, "工作区标签", supported ? "workspace label 可用" : "要新版 Paseo（workspace label）");
   } catch (error) {
-    add(false, "工作区标签", workspaceLabelMissing(error) ? "要新版 Paseo（workspace label）" : `检查失败：${String(error.message).slice(0, 120)}`);
+    add(false, "工作区标签", `检查失败：${String(error.message).slice(0, 120)}`);
   }
 
   if (!policy.push?.to) add(false, "推送", "push.to 没写：推送发给谁不知道，一条也发不出");

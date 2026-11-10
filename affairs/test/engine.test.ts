@@ -165,18 +165,28 @@ test("an old CLI is tried only once across concurrent scans; titles and chats st
   assert.equal(load(s.w.root, made.id).labelShown, "");
 });
 
-test("other label errors surface and are retried without recording a successful alignment", async () => {
+test("other label errors are logged and retried without blocking chat sync or finished flow delivery", async () => {
   const s = setup();
   const made = await createWatch(s.w.ctx, { id: "label-error", title: "出错", noWait: true });
   editPaseo(s, (db) => { db.labelsError = "connection lost"; });
   await s.engine.scan(made.id);
-  assert.ok(s.logs.some((l) => /connection lost/.test(l)));
+  assert.ok(s.logs.some((l) => /label-error: workspace labels:.*connection lost/.test(l)));
   assert.equal(load(s.w.root, made.id).labelShown, "");
+  assert.equal(s.calls.created.length, 1, "the chat is created while label assignment fails");
+  assert.ok(s.calls.appended.length > 0, "the chat is drawn while label assignment fails");
+  append(s.w.root, made.id, [
+    { kind: "flow", flow: "do-it", runId: "label-result" },
+    { kind: "flow.mark", runId: "label-result", key: "end", outcome: "succeeded", summary: "办完了" },
+    { kind: "flow.look", runId: "label-result", ok: false },
+  ], { now: s.w.now() });
+  await s.engine.scan(made.id);
+  assert.equal(load(s.w.root, made.id).labelShown, "");
+  assert.ok(read(s.w.root, made.id).some((l) => l.kind === "flow.told" && l.runId === "label-result" && l.ok), "the flow result reaches the chat while label assignment still fails");
   editPaseo(s, (db) => { delete db.labelsError; });
   await s.engine.scan(made.id);
   assert.deepEqual(s.w.paseo().workspaces[0].labels, ["事项"]);
   assert.equal(load(s.w.root, made.id).labelShown, "事项");
-  assert.equal(labelCalls(s).length, 3);
+  assert.equal(labelCalls(s).length, 4);
 });
 
 test("archived affairs and affairs without a workspace are skipped; a replacement workspace gets labeled", async () => {
