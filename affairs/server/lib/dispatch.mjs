@@ -47,7 +47,8 @@ export async function dispatch(ctx, ref, { contract, provider, thinking, mode, t
 /** Only creation is gated: an existing worker must be able to resume and hand in after its budget runs out. */
 export function dispatchOpen(ctx, request) {
   const id = request.labels["affairs.affair"];
-  if (request.reason !== "create" || !id) return request;
+  // The talk with the affair carries both labels and is reopened as a "create" after a restart; only workers sent out are gated.
+  if (request.reason !== "create" || !id || request.labels["affairs.chat"]) return request;
   if (!ctx) throw new Error("事项还没准备好，请稍后再派活。");
   if (!ID.test(id)) throw new Error("派活的事项编号不对，请核对。");
   const s = { ...load(ctx.root, id, ctx.policy), lines: read(ctx.root, id) };

@@ -194,6 +194,8 @@ test("session-open leaves unlabelled creations and existing sessions unchanged, 
     const request = { reason, labels: { "affairs.affair": f.id }, env: { keep: "yes" }, mcpServers: { other: {} } };
     assert.equal(dispatchOpen(f.w.ctx, request), request);assert.equal(dispatchOpen(null, request), request);
   }
+  const chat = { reason: "create", labels: { "affairs.affair": f.id, "affairs.chat": f.id } };
+  f.put([{ kind: "mode", mode: "watch" }]);assert.equal(dispatchOpen(f.w.ctx, chat), chat);
   const ordinary = { reason: "create", labels: {}, env: { keep: "yes" } };
   assert.equal(dispatchOpen(null, ordinary), ordinary);
   assert.throws(() => dispatchOpen(null, { ...ordinary, labels: { "affairs.affair": f.id } }), /没准备好/);
