@@ -6,6 +6,7 @@ import os from "node:os";
 import { test, type TestContext } from "node:test";
 import { append, load } from "../server/lib/log.mjs";
 import { env } from "../server/lib/env.mjs";
+import { createEngine } from "../server/engine";
 import { world } from "./kit";
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -54,6 +55,24 @@ test("env remove must detach untracked dependency junctions before worktree remo
   assert.equal(existsSync(target), false);
   for (const rel of ["node_modules", "pkg/node_modules"]) assert.equal(readFileSync(path.join(f.main, rel, "keep"), "utf8"), "dependency");
   assert.equal(git(f.main, "branch", "--list", "affair/sample-env"), "");
+});
+
+test("env command workspaces get affair labels and env --remove stops further label alignment", async (t) => {
+  const f = setup(t);
+  assert.ok((await env(f.w.ctx, "sample-env")).ok);
+  const workspaceId = load(f.w.root, "sample-env").envs[0].workspaceId;
+  const engine = createEngine({ ctx: f.w.ctx, paseo: null, deliver: null, log: () => {} });
+  try {
+    await engine.scan("sample-env");
+    assert.deepEqual(f.w.paseo().workspaces[0].labels, ["事项"]);
+    const labels = () => f.w.calls().filter((c) => c[0] === "workspace" && c[1] === "label" && c[2] === workspaceId);
+    assert.equal(labels().length, 2);
+    assert.ok((await env(f.w.ctx, "sample-env", { remove: true })).ok);
+    append(f.w.root, "sample-env", [{ kind: "status", status: "done" }], { now: f.w.now() });
+    await engine.scan("sample-env");
+    assert.equal(labels().length, 2, "the removed environment is no longer an alignment target");
+    assert.equal(load(f.w.root, "sample-env").envs.length, 0);
+  } finally { await engine.stop(); }
 });
 
 test("env remove keeps an unmerged branch and refuses a dirty worktree without deleting its changes", async (t) => {

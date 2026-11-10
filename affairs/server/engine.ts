@@ -83,23 +83,30 @@ export function createEngine(deps: EngineDeps) {
 
   function alignLabels(s: ReturnType<typeof state>) {
     const work = labelQueue.then(async () => {
-      if (labelsUnavailable || s.archived || !s.workspaceId) return;
+      if (labelsUnavailable) return;
       const watching = s.status === "watching";
       const want = watching ? "事项" : "事项·办完";
-      if (want === s.labelShown) return;
-      try {
-        await json(ctx.run, ["workspace", "label", s.workspaceId, want, "--color", watching ? "sky" : "emerald"]);
-        await json(ctx.run, ["workspace", "label", s.workspaceId, watching ? "事项·办完" : "事项", "--remove"]);
-        write(s.id, [{ kind: "workspace", label: want }]);
-      } catch (error) {
-        if (workspaceLabelMissing(error)) {
-          labelsUnavailable = true;
-          log("工作区标签：要新版 Paseo（workspace label）");
-        } else if (/workspace not found/i.test((error as Error).message)) {
-          // The workspace was archived or deleted by hand; there is nothing to label, and asking again every scan would only repeat this line.
-          write(s.id, [{ kind: "workspace", label: want }]);
-          log(`${s.id}: workspace labels: workspace is gone, not labelled`);
-        } else log(`${s.id}: workspace labels: ${(error as Error).message}`);
+      const targets = new Map<string, string>();
+      if (!s.archived && s.workspaceId) targets.set(s.workspaceId, s.labelShown);
+      for (const e of s.envs) if (e.workspaceId && !e.removed && !targets.has(e.workspaceId)) targets.set(e.workspaceId, s.envLabelsShown[e.workspaceId] ?? "");
+      for (const [workspaceId, shown] of targets) {
+        if (want === shown) continue;
+        const entry = { kind: "workspace", label: want, ...(workspaceId === s.workspaceId ? {} : { labelFor: workspaceId }) };
+        try {
+          await json(ctx.run, ["workspace", "label", workspaceId, want, "--color", watching ? "sky" : "emerald"]);
+          await json(ctx.run, ["workspace", "label", workspaceId, watching ? "事项·办完" : "事项", "--remove"]);
+          write(s.id, [entry]);
+        } catch (error) {
+          if (workspaceLabelMissing(error)) {
+            labelsUnavailable = true;
+            log("工作区标签：要新版 Paseo（workspace label）");
+            return;
+          } else if (/workspace not found/i.test((error as Error).message)) {
+            // Gone by hand: record the target too, so only this workspace stops being retried.
+            write(s.id, [entry]);
+            log(`${s.id}: workspace labels: workspace is gone, not labelled (${workspaceId})`);
+          } else log(`${s.id}: workspace labels: ${(error as Error).message} (${workspaceId})`);
+        }
       }
     });
     labelQueue = work.catch(() => {});

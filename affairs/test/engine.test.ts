@@ -374,6 +374,100 @@ test("workspace labels follow the log: new, done, reopened and stopped; personal
   assert.equal(labelCalls(s).length, before, "shown value survives an engine restart");
 });
 
+const addEnv = (s: ReturnType<typeof setup>, id: string, workspaceId: string, project = workspaceId) => {
+  editPaseo(s, (db) => { db.workspaces.push({ workspaceId, labels: ["personal"] }); });
+  append(s.w.root, id, [{ kind: "env", project, workspaceId }], { now: s.w.now() });
+};
+
+test("affair and environment workspaces share status labels; generic dispatched workspaces stay untouched", async () => {
+  const s = setup();
+  const made = await createWatch(s.w.ctx, { id: "env-labels", title: "环境标签", noWait: true });
+  const id = made.id;
+  const own = load(s.w.root, id).workspaceId;
+  addEnv(s, id, "env-a");
+  addEnv(s, id, "env-b");
+  editPaseo(s, (db) => { db.workspaces.push({ workspaceId: "general", labels: ["general"] }); });
+  append(s.w.root, id, [
+    { kind: "dispatched", agentId: "entry-worker", workspaceId: "general" },
+    { kind: "env", project: "legacy-env-without-workspace" },
+  ], { now: s.w.now() });
+  const labels = (workspaceId: string) => s.w.paseo().workspaces.find((w: any) => w.workspaceId === workspaceId).labels;
+  await s.engine.scan(id);
+  assert.deepEqual(labels(own), ["事项"]);
+  for (const env of ["env-a", "env-b"]) assert.deepEqual(labels(env), ["personal", "事项"]);
+  assert.equal(labelCalls(s).length, 6);
+  assert.deepEqual(load(s.w.root, id).envLabelsShown, { "env-a": "事项", "env-b": "事项" });
+  assert.equal(load(s.w.root, id).labelShown, "事项");
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
+  await restarted.scan(id);
+  assert.equal(labelCalls(s).length, 6, "per-workspace labels survive restart");
+  await ops.stop(s.w.ctx, id, { done: true });
+  await s.engine.scan(id);
+  assert.deepEqual(labels(own), ["事项·办完"]);
+  for (const env of ["env-a", "env-b"]) assert.deepEqual(labels(env), ["personal", "事项·办完"]);
+  for (const call of labelCalls(s).filter((c) => c[3] === "事项·办完" && !c.includes("--remove"))) assert.ok(call.includes("emerald"));
+  await ops.resume(s.w.ctx, id);
+  await s.engine.scan(id);
+  for (const workspaceId of [own, "env-a", "env-b"]) assert.ok(labels(workspaceId).includes("事项"));
+  for (const call of labelCalls(s).filter((c) => c[3] === "事项" && !c.includes("--remove"))) assert.ok(call.includes("sky"));
+  await ops.stop(s.w.ctx, id);
+  await s.engine.scan(id);
+  for (const workspaceId of [own, "env-a", "env-b"]) assert.ok(labels(workspaceId).includes("事项·办完"));
+  assert.deepEqual(labels("general"), ["general"]);
+  assert.ok(labelCalls(s).every((c) => c[2] !== "general"));
+  assert.equal(read(s.w.root, id).filter((l) => l.kind === "workspace" && l.labelFor).length, 8);
+  await restarted.stop();
+});
+
+test("a missing environment workspace is settled once without blocking other workspace labels", async () => {
+  const s = setup();
+  const made = await createWatch(s.w.ctx, { id: "gone-env", title: "丢失环境", noWait: true });
+  const id = made.id;
+  addEnv(s, id, "missing-env");
+  addEnv(s, id, "remaining-env");
+  editPaseo(s, (db) => { db.workspaces = db.workspaces.filter((w: any) => w.workspaceId !== "missing-env"); });
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
+  await restarted.scan(id);
+  await restarted.stop();
+  assert.equal(labelCalls(s).filter((c) => c[2] === "missing-env").length, 1);
+  assert.equal(s.logs.filter((l) => /workspace is gone.*missing-env/.test(l)).length, 1);
+  assert.deepEqual(s.w.paseo().workspaces.map((w: any) => w.labels), [["事项"], ["personal", "事项"]]);
+  assert.equal(load(s.w.root, id).labelShown, "事项");
+  assert.equal(load(s.w.root, id).envLabelsShown["missing-env"], "事项");
+});
+
+test("a removed environment is ignored and a replacement workspace gets its own first label", async () => {
+  const s = setup();
+  const id = await start(s);
+  addEnv(s, id, "old-env", "code-project");
+  await s.engine.scan(id);
+  const before = labelCalls(s).length;
+  append(s.w.root, id, [{ kind: "env", project: "code-project", workspaceId: "old-env", removed: true }], { now: s.w.now() });
+  await ops.stop(s.w.ctx, id, { done: true });
+  await s.engine.scan(id);
+  assert.equal(labelCalls(s).filter((c) => c[2] === "old-env").length, 2);
+  assert.equal(labelCalls(s).length, before + 2, "only the affair's workspace changes after removal");
+  addEnv(s, id, "new-env", "code-project");
+  await s.engine.scan(id);
+  assert.deepEqual(s.w.paseo().workspaces.find((w: any) => w.workspaceId === "new-env").labels, ["personal", "事项·办完"]);
+  assert.equal(load(s.w.root, id).envLabelsShown["new-env"], "事项·办完");
+});
+
+test("environment labels align even after the affair workspace was archived", async () => {
+  const s = setup();
+  const id = await start(s);
+  addEnv(s, id, "surviving-env");
+  await ops.stop(s.w.ctx, id, { done: true });
+  append(s.w.root, id, [{ kind: "workspace", archived: true }], { now: s.w.now() });
+  const before = labelCalls(s).length;
+  await s.engine.scan(id);
+  assert.equal(labelCalls(s).length, before + 2);
+  assert.ok(labelCalls(s).slice(before).every((c) => c[2] === "surviving-env"));
+  assert.deepEqual(s.w.paseo().workspaces.find((w: any) => w.workspaceId === "surviving-env").labels, ["personal", "事项·办完"]);
+});
+
 test("old affairs get their workspace label on the first scan, even if the title already agrees", async () => {
   for (const done of [false, true]) {
     const s = setup();

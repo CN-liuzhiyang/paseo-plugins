@@ -74,6 +74,25 @@ test("fold: the state is only what the lines say", () => {
   assert.deepEqual(listIds(root), ["D1"]);
 });
 
+test("workspace labels keep legacy affair state separate from each environment workspace", () => {
+  const legacy = [
+    { kind: "workspace", workspaceId: "main", label: "事项" },
+    { kind: "env", project: "code", workspaceId: "old-env" },
+  ];
+  assert.equal(fold(legacy).labelShown, "事项");
+  assert.deepEqual(fold(legacy).envLabelsShown, {});
+  const s = fold([
+    ...legacy,
+    { kind: "workspace", labelFor: "old-env", label: "事项·办完" },
+    { kind: "env", project: "code", workspaceId: "new-env" },
+    { kind: "workspace", labelFor: "new-env", label: "事项" },
+    { kind: "workspace", workspaceId: "new-main" },
+  ]);
+  assert.equal(s.labelShown, "", "a new affair workspace still resets its own shown value");
+  assert.deepEqual(s.envLabelsShown, { "old-env": "事项·办完", "new-env": "事项" });
+  assert.deepEqual(s.envs.map((e: any) => e.workspaceId), ["new-env"]);
+});
+
 test("time: local text, ISO with offset and cron agree in Asia/Shanghai", () => {
   const ms = parseLocal("2026-11-03 09:30", "Asia/Shanghai")!;
   assert.equal(isoLocal(ms, "Asia/Shanghai"), "2026-11-03T09:30:00+08:00");
