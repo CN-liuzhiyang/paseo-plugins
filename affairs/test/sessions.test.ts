@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createEngine } from "../server/engine";
-import { append } from "../server/lib/log.mjs";
+import { append, load } from "../server/lib/log.mjs";
 import { panelSchema } from "../shared/panel";
 import { sessionsOf } from "../server/lib/panel.mjs";
 import * as ops from "../server/lib/ops.mjs";
@@ -80,7 +80,7 @@ test("related sessions reuse the paged cost scan, include main, roles, status, p
   }
 });
 
-test("done and stopped affairs archive only quiet related sessions, retry busy, permission and archive failures, and keep their workspace", async () => {
+test("done and stopped affairs archive quiet related sessions immediately and their workspace after retention", async () => {
   for (const done of [true, false]) {
     const w = world();const id = "put-away";
     w.file("paseo.json", JSON.stringify({ projects: [], workspaces: [{ workspaceId: "headquarters" }], schedules: [], n: 0 }));
@@ -114,7 +114,9 @@ test("done and stopped affairs archive only quiet related sessions, retry busy, 
       const restarted = createEngine({ ctx: w.ctx, paseo, deliver: null, log: () => {} });
       w.advance(10 * 86_400_000);await restarted.scan(id);await restarted.stop();
       assert.equal(archives.length, 6, "already archived sessions are not archived again after restart");
-      assert.equal(creates, 0);assert.equal(workspaceArchives, 0);assert.equal(engine.panel("headquarters")!.mood, done ? "done" : "stopped");
+      assert.equal(creates, 0);assert.equal(workspaceArchives, 0, "workspace archiving uses the CLI");
+      assert.equal(load(w.root, id).archived, true);assert.equal(w.paseo().workspaces[0].archived, true);
+      assert.equal(engine.panel("headquarters"), null);
     } finally { await engine.stop(); }
   }
 });

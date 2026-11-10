@@ -6,7 +6,7 @@ import path from "node:path";
 import { append, load, logFile, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
-import { createEngine, idOfWatch, type Deliver } from "../server/engine";
+import { createEngine, idOfWatch, type Deliver, type PaseoLike } from "../server/engine";
 import { titleOf } from "../server/lib/workspace.mjs";
 import { emptyDirectory, iso, world } from "./kit";
 
@@ -17,12 +17,12 @@ function setup(policyOver: Record<string, unknown> = {}) {
   const w = world({ policy: { push: { ...DEFAULT_POLICY.push, to: "p2p:me" }, ...policyOver } });
   const calls = { woken: [] as string[], created: [] as Array<Record<string, unknown>>, titles: [] as string[], archived: 0, appended: [] as Array<{ chat: string; item: any }>, subscribed: [] as Array<{ chat: string; handler: (e: any) => void }>, pushed: [] as Array<{ text: string; key: string }> };
   const tail: { entries: Array<{ item: any }> } = { entries: [] };
-  const status = { value: "idle" };
-  const paseo = {
+  const status = { value: "idle", pendingPermissions: [] as unknown[] };
+  const paseo: PaseoLike = {
     agents: {
       list: emptyDirectory,
       ref: (id: string) => ({
-        send: async () => {}, refresh: async () => ({ agent: { status: status.value } }),
+        send: async () => {}, refresh: async () => ({ agent: { status: status.value, pendingPermissions: status.pendingPermissions } }),
         archive: async () => void calls.woken.push(id),
         timeline: {
           append: async (item: any) => void calls.appended.push({ chat: id, item }),
@@ -49,7 +49,7 @@ function setup(policyOver: Record<string, unknown> = {}) {
     calls.pushed.push({ text: m.text, key: m.idempotencyKey });
   };
   const engine = createEngine({ ctx: w.ctx, paseo, deliver, log: (message) => void logs.push(message), lookDelaysMs: [0, 0, 0] });
-  return { w, calls, engine, state, status, tail, logs };
+  return { w, calls, engine, state, status, tail, logs, paseo };
 }
 
 const start = async (s: ReturnType<typeof setup>, extra: Record<string, unknown> = {}) => {
@@ -102,6 +102,246 @@ const editPaseo = (s: ReturnType<typeof setup>, edit: (db: any) => void) => {
   edit(db);
   writeFileSync(path.join(s.w.dir, "paseo.json"), JSON.stringify(db));
 };
+
+const archiveCalls = (s: ReturnType<typeof setup>) => s.w.calls().filter((c) => c[0] === "workspace" && c[1] === "archive");
+
+test("ended workspaces stay for three full days, then archive once and stop aligning titles and labels", async () => {
+  for (const done of [true, false]) {
+    const s = setup();
+    const id = await start(s);
+    const old = load(s.w.root, id);
+    await ops.stop(s.w.ctx, id, { done, evidence: "办好了" });
+    assert.equal(s.w.paseo().schedules[0].status, "paused", "stop pauses the plan; it does not remove it");
+    s.w.advance(3 * DAY - 1);
+    await s.engine.scan(id);
+    assert.equal(archiveCalls(s).length, 0);
+    assert.equal(s.calls.titles.at(-1), "✓ 洗牙");
+    assert.deepEqual(s.w.paseo().workspaces[0].labels, ["事项·办完"]);
+    const aligned = [s.calls.titles.length, labelCalls(s).length];
+    s.w.advance(1);
+    await s.engine.scan(id);
+    const ended = load(s.w.root, id);
+    assert.equal(ended.archived, true);
+    assert.deepEqual([ended.workspaceId, ended.conversationId, ended.chatId, ended.scheduleId], [null, null, null, null]);
+    assert.equal(s.w.paseo().workspaces[0].archived, true);
+    assert.deepEqual(s.w.paseo().schedules, []);
+    const cli = s.w.calls();
+    assert.ok(cli.findIndex((c) => c[0] === "schedule" && c[1] === "delete" && c[2] === old.scheduleId) < cli.findIndex((c) => c[0] === "workspace" && c[1] === "archive"));
+    await s.engine.scan(id);
+    const restarted = createEngine({ ctx: s.w.ctx, paseo: s.paseo, deliver: null, log: () => {} });
+    await restarted.scan(id);
+    await restarted.stop();
+    assert.equal(archiveCalls(s).length, 1);
+    assert.equal(read(s.w.root, id).filter((l) => l.kind === "workspace" && l.archived).length, 1);
+    assert.deepEqual([s.calls.titles.length, labelCalls(s).length], aligned);
+  }
+});
+
+test("an ended affair uses the current archive policy and never archives while watching", async () => {
+  const s = setup();
+  const id = await start(s);
+  s.w.advance(30 * DAY);
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0);
+  await ops.stop(s.w.ctx, id, { done: true });
+  s.w.advance(2 * DAY);
+  s.w.ctx.policy.archiveAfterDays = 5;
+  s.w.advance(DAY);
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0, "the new five-day retention applies to an already ended affair");
+  s.w.ctx.policy.archiveAfterDays = 3;
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 1, "shortening retention takes effect on the next scan");
+});
+
+test("workspace archiving waits for the main chat's running turn, initialization and pending permissions", async () => {
+  for (const blocked of ["running", "initializing", "permission"]) {
+    const s = setup();
+    const id = await start(s);
+    await ops.stop(s.w.ctx, id, { done: true });
+    s.w.advance(3 * DAY);
+    s.status.value = blocked === "permission" ? "idle" : blocked;
+    s.status.pendingPermissions = blocked === "permission" ? [{}] : [];
+    await s.engine.scan(id);
+    assert.equal(archiveCalls(s).length, 0);
+    assert.equal(s.w.paseo().schedules.length, 1, "cleanup waits too");
+    s.status.value = "idle";
+    s.status.pendingPermissions = [];
+    await s.engine.scan(id);
+    assert.equal(archiveCalls(s).length, 1);
+  }
+});
+
+test("archiving checks paged workspace tabs and related workers, including unlabelled and old chats after restart", async () => {
+  for (const kind of ["unlabelled", "related", "old-chat"]) {
+    const s = setup();
+    const id = await start(s);
+    const ws = load(s.w.root, id).workspaceId;
+    const labels: Record<string, string> = kind === "related" ? { "affairs.affair": id } : {};
+    const agent = { id: "busy-tab", workspaceId: kind === "related" ? "another-workspace" : ws, status: "idle", pendingPermissions: [{}], labels };
+    if (kind === "old-chat") append(s.w.root, id, [{ kind: "chat", agentId: agent.id }, { kind: "chat", agentId: "agent-1" }], { now: s.w.now() });
+    const originalRef = s.paseo.agents.ref;
+    s.paseo.agents.ref = (agentId) => agentId === agent.id ? { ...originalRef(agentId), refresh: async () => ({ agent }) } : originalRef(agentId);
+    const cursors: Array<string | undefined> = [];
+    s.paseo.agents.list = async (q) => {
+      if (q.subscribe) return emptyDirectory();
+      if (q.filter?.labels) return { entries: kind === "related" ? [{ agent }] : [] };
+      cursors.push(q.page?.cursor);
+      return { entries: q.page?.cursor && kind !== "old-chat" ? [{ agent }] : [], pageInfo: { nextCursor: q.page?.cursor ? null : "second-page" } };
+    };
+    await ops.stop(s.w.ctx, id);
+    s.w.advance(3 * DAY);
+    const restarted = createEngine({ ctx: s.w.ctx, paseo: s.paseo, deliver: null, log: () => {} });
+    await restarted.scan(id);
+    assert.deepEqual(cursors, [undefined, "second-page"]);
+    assert.equal(archiveCalls(s).length, 0, kind);
+    agent.pendingPermissions = [];
+    await restarted.scan(id);
+    assert.equal(archiveCalls(s).length, 1, kind);
+    await restarted.stop();
+  }
+});
+
+test("archive errors are logged, chat sync continues and the next scan retries", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  editPaseo(s, (db) => { db.archiveError = "connection lost"; });
+  append(s.w.root, id, [
+    { kind: "flow", flow: "do-it", runId: "archive-result" },
+    { kind: "flow.mark", runId: "archive-result", key: "end", outcome: "succeeded", summary: "办完了" },
+    { kind: "flow.look", runId: "archive-result", ok: false },
+  ], { now: s.w.now() });
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).archived, false);
+  assert.ok(s.logs.some((l) => /dental: archiving workspace:.*connection lost/.test(l)));
+  assert.ok(read(s.w.root, id).some((l) => l.kind === "flow.told" && l.runId === "archive-result" && l.ok), "finished flow delivery continues after the archive failure");
+  assert.ok(s.calls.woken.length > 0, "chat cleanup continues too");
+  editPaseo(s, (db) => { delete db.archiveError; });
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 2);
+  assert.equal(load(s.w.root, id).archived, true);
+});
+
+test("a missing workspace is recorded as archived and is never retried", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  editPaseo(s, (db) => { db.workspaces = []; });
+  await s.engine.scan(id);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).archived, true);
+  assert.equal(archiveCalls(s).length, 1);
+  assert.deepEqual(s.w.paseo().schedules, []);
+});
+
+test("an automatically archived affair reopens through '还没完' with a new workspace, chat, label and plan", async () => {
+  const s = setup();
+  const id = await start(s);
+  const old = load(s.w.root, id);
+  await ops.stop(s.w.ctx, id, { done: true });
+  await s.engine.scan(id);
+  s.w.advance(3 * DAY);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).archived, true);
+  const reply = await ops.note(s.w.ctx, id, { said: "还没完", by: "user" });
+  assert.equal(reply.ok, true, reply.text);
+  await s.engine.scan(id);
+  const reopened = load(s.w.root, id);
+  assert.equal(reopened.status, "watching");
+  assert.equal(reopened.archived, false);
+  assert.notEqual(reopened.workspaceId, old.workspaceId);
+  assert.notEqual(reopened.chatId, old.chatId);
+  assert.notEqual(reopened.scheduleId, old.scheduleId);
+  assert.equal(s.w.paseo().workspaces[0].archived, true);
+  assert.deepEqual(s.w.paseo().workspaces[1].labels, ["事项"]);
+  assert.equal(s.w.paseo().schedules[0].workspace, reopened.workspaceId);
+  assert.equal(s.w.paseo().schedules[0].status, "active");
+});
+
+test("archive cleanup removes orphan named plans and tolerates an already missing logged plan", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  editPaseo(s, (db) => { db.schedules = [{ id: "orphan", name: `affair:${id}`, status: "paused" }, { id: "unrelated", name: "another-plan", status: "active" }]; });
+  s.w.advance(3 * DAY);
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).archived, true);
+  assert.deepEqual(s.w.paseo().schedules.map((p: any) => p.id), ["unrelated"]);
+});
+
+test("a schedule cleanup failure leaves the workspace unarchived and retries next scan", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  const run = s.w.ctx.run;
+  s.w.ctx.run = async (args: string[]) => args[0] === "schedule" && args[1] === "delete" ? { stdout: "", stderr: "connection lost", exitCode: 1 } : run(args);
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0);
+  assert.equal(load(s.w.root, id).archived, false);
+  assert.ok(s.logs.some((l) => /dental: archiving workspace:.*connection lost/.test(l)));
+  s.w.ctx.run = run;
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 1);
+});
+
+test("a session lookup failure defers workspace archiving without interrupting chat cleanup", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  const list = s.paseo.agents.list;
+  s.paseo.agents.list = async (q) => {
+    if (!q.filter?.labels) throw new Error("directory unavailable");
+    return list(q);
+  };
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0);
+  assert.ok(s.logs.some((l) => /dental: archiving workspace: directory unavailable/.test(l)));
+  assert.ok(s.calls.woken.length > 0);
+  s.paseo.agents.list = list;
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 1);
+});
+
+test("an unreadable workspace tab blocks archiving until its state can be confirmed", async () => {
+  const s = setup();
+  const id = await start(s);
+  const tab = { id: "unreadable-tab", workspaceId: load(s.w.root, id).workspaceId, status: "idle" };
+  let unavailable = true;
+  const originalRef = s.paseo.agents.ref;
+  s.paseo.agents.ref = (agentId) => agentId === tab.id ? { ...originalRef(agentId), refresh: async () => {
+    if (unavailable) throw new Error("connection lost");
+    return { agent: tab };
+  } } : originalRef(agentId);
+  s.paseo.agents.list = async (q) => q.filter?.labels ? { entries: [] } : { entries: [{ agent: tab }] };
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0);
+  assert.ok(s.logs.some((l) => /dental: archiving workspace: connection lost/.test(l)));
+  unavailable = false;
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 1);
+});
+
+test("resuming while a scan is checking chats cancels archiving from that scan's stale state", async () => {
+  const s = setup();
+  const id = await start(s);
+  await ops.stop(s.w.ctx, id);
+  s.w.advance(3 * DAY);
+  s.paseo.agents.list = async (q) => {
+    if (!q.filter?.labels && !q.subscribe) assert.equal((await ops.resume(s.w.ctx, id)).ok, true);
+    return emptyDirectory();
+  };
+  await s.engine.scan(id);
+  assert.equal(archiveCalls(s).length, 0);
+  assert.equal(load(s.w.root, id).status, "watching");
+  assert.equal(s.w.paseo().schedules[0].status, "active");
+});
 
 test("workspace labels follow the log: new, done, reopened and stopped; personal labels stay", async () => {
   const s = setup();
@@ -213,32 +453,38 @@ test("archived affairs and affairs without a workspace are skipped; a replacemen
   assert.equal(labelCalls(s).length, before + 2);
 });
 
-test("an ended affair keeps its workspace and panel, including after three days and when resumed", async () => {
+test("resuming inside retention keeps the workspace; ending it again starts a fresh three-day window", async () => {
   const s = setup();
   const quiet = await start(s);
+  const workspaceId = load(s.w.root, quiet).workspaceId;
   await createWatch(s.w.ctx, { id: "other-2", title: "牙冠", noWait: true });
   await s.engine.scanAll();
   s.w.advance(40 * DAY);
   await s.engine.scanAll();
-  assert.equal(s.calls.archived, 0, "watching is never archived, however long it has been");
+  assert.equal(archiveCalls(s).length, 0, "watching is never archived, however long it has been");
   await ops.stop(s.w.ctx, quiet);
   s.w.advance(2 * DAY);
   await s.engine.scan(quiet);
-  assert.equal(s.calls.archived, 0, "not yet three days");
+  assert.equal(archiveCalls(s).length, 0, "not yet three days");
+  assert.equal(s.engine.panel(workspaceId)!.mood, "stopped");
   await ops.resume(s.w.ctx, quiet);
   s.w.advance(2 * DAY);
   await s.engine.scan(quiet);
-  assert.equal(s.calls.archived, 0, "taken up again inside the three days");
+  assert.equal(archiveCalls(s).length, 0, "taken up again inside the three days");
+  assert.equal(load(s.w.root, quiet).workspaceId, workspaceId);
   await ops.stop(s.w.ctx, quiet);
-  s.w.advance(3 * DAY + HOUR);
+  s.w.advance(3 * DAY - 1);
   await s.engine.scan(quiet);
-  assert.equal(s.calls.archived, 0);
-  assert.equal(load(s.w.root, quiet).archived, false);
-  assert.equal(s.engine.panel(load(s.w.root, quiet).workspaceId)!.mood, "stopped");
+  assert.equal(archiveCalls(s).length, 0, "the second stop gets its own retention period");
+  s.w.advance(1);
+  await s.engine.scan(quiet);
+  assert.equal(archiveCalls(s).length, 1);
+  assert.equal(load(s.w.root, quiet).archived, true);
+  assert.equal(s.engine.panel(workspaceId), null);
   const again = await ops.resume(s.w.ctx, quiet);
   assert.equal(again.ok, true, again.text);
   assert.equal(load(s.w.root, quiet).status, "watching");
-  assert.equal(s.w.paseo().workspaces.length, 2, "the original workspace stays available");
+  assert.equal(s.w.paseo().workspaces.length, 3, "the archived affair gets a new workspace");
 });
 
 test("a question is pushed once, with its number; answered before the push it is not pushed at all", async () => {
@@ -453,7 +699,7 @@ test("M06: an affair taken up again is not archived, however long ago it was las
   await ops.resume(s.w.ctx, id);
   s.w.advance(5 * DAY);
   await s.engine.scan(id);
-  assert.equal(s.calls.archived, 0, "it is watching: what it was last stopped at five days ago is not a reason");
+  assert.equal(archiveCalls(s).length, 0, "it is watching: what it was last stopped at five days ago is not a reason");
   assert.equal(load(s.w.root, id).archived, false);
 });
 

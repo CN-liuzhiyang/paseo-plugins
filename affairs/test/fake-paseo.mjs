@@ -69,6 +69,8 @@ else if (group === "project" && action === "create") {
   out({ workspaceId: first, labels: w.labels });
 } else if (group === "workspace" && action === "archive") {
   const w = db.workspaces.find((x) => x.workspaceId === first);
+  if (!w) die(`Workspace not found: ${first}`);
+  if (db.archiveError) die(db.archiveError);
   w.archived = true;
   if (w.isolation === "worktree") execFileSync("git", ["worktree", "remove", "--force", w.cwd], { cwd: w.source, stdio: "pipe" });
   for (const s of db.schedules) if (s.workspace === first) s.status = "completed";

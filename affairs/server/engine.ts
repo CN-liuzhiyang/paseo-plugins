@@ -12,7 +12,7 @@ import { linkOf, rowsOf, say } from "./lib/view.mjs";
 import { materialFile, panelOf } from "./lib/panel.mjs";
 import { primaryLink, linkContext, partsOf, withUrls } from "./lib/links.mjs";
 import * as schedule from "./lib/schedule.mjs";
-import { ensureProject, titleOf, workspaceLabelMissing } from "./lib/workspace.mjs";
+import { archiveWorkspace, ensureProject, titleOf, workspaceLabelMissing } from "./lib/workspace.mjs";
 import { json } from "./lib/paseo.mjs";
 import { createChats, type ChatPaseo, type Row, type View } from "./chat";
 import { flushWork, refreshWork } from "./lib/workdir-git.mjs";
@@ -104,6 +104,32 @@ export function createEngine(deps: EngineDeps) {
     });
     labelQueue = work.catch(() => {});
     return work;
+  }
+
+  async function archiveEnded(s: ReturnType<typeof state>) {
+    if (s.status === "watching" || s.archived || !s.workspaceId || !s.statusAt ||
+      !(ctx.now() - Date.parse(s.statusAt) >= ctx.policy.archiveAfterDays * 86_400_000) || !chats) return;
+    const unchanged = () => {
+      const latest = state(s.id);
+      return latest.status === s.status && latest.statusAt === s.statusAt && latest.workspaceId === s.workspaceId;
+    };
+    try {
+      if (!(await chats.canArchive(s.id, sessions.get(s.id))) || !unchanged()) return;
+      // Ending an affair pauses its plan. Delete it before archiving, including a named plan whose id was never logged.
+      const plans = await json(ctx.run, ["schedule", "ls"]);
+      const ids = new Set<string>(plans.filter((p: any) => p.name === schedule.nameOf(s.id)).map((p: any) => p.id ?? p.scheduleId));
+      if (s.scheduleId) ids.add(s.scheduleId);
+      for (const scheduleId of ids) {
+        try { await schedule.remove(ctx.run, scheduleId); }
+        catch (error) { if (!/schedule not found/i.test((error as Error).message)) throw error; }
+      }
+      if (!unchanged()) return;
+      try { await archiveWorkspace(ctx.run, s.workspaceId); }
+      catch (error) { if (!/workspace not found/i.test((error as Error).message)) throw error; }
+      write(s.id, [{ kind: "workspace", archived: true }]);
+    } catch (error) {
+      log(`${s.id}: archiving workspace: ${(error as Error).message}`);
+    }
   }
 
   function scanSoon(id: string) {
@@ -231,6 +257,8 @@ export function createEngine(deps: EngineDeps) {
       log(`${id}: the log does not follow from line ${s.chainBroken}`);
       s = state(id);
     }
+    await archiveEnded(s);
+    s = state(id);
     const ws = s.workspaceId && deps.paseo ? deps.paseo.workspaces.ref(s.workspaceId) : null;
     if (ws) {
       const want = titleOf(s, ctx.now(), ctx.policy);

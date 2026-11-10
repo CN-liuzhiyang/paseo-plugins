@@ -1,4 +1,5 @@
 import { writeFileSync } from "node:fs";
+import type { PaseoAgentListOptions } from "@getpaseo/client";
 import path from "node:path";
 import { chatCreateOptions, chatPrompt, noticeFor, renewAsked, renewHint, rotationReason } from "./lib/chat.mjs";
 import { affairDir, isOpen } from "./lib/log.mjs";
@@ -54,6 +55,7 @@ export interface ChatAgent {
 }
 interface ChatDirectory {
   entries: Array<{ agent: ChatAgent }>;
+  pageInfo?: { nextCursor?: string | null };
   subscription?: {
     subscribe(observer: { snapshot(value: ChatDirectory): void; update(message: any): void; error(error: unknown): void }): () => void;
     release(): Promise<void>;
@@ -72,7 +74,7 @@ export interface ChatHandle {
 export interface ChatPaseo {
   agents: {
     ref(id: string): ChatHandle;
-    list(options: { subscribe: {}; sort: Array<{ key: "created_at"; direction: "desc" }>; page: { limit: number } }): Promise<ChatDirectory>;
+    list(options: PaseoAgentListOptions): Promise<ChatDirectory>;
   };
   workspaces: { ref(id: string): { agents: { create(options: Record<string, unknown>): Promise<{ id: string }> } } };
 }
@@ -96,6 +98,8 @@ interface Drawn {
 }
 
 const askId = (qid: string) => `ask-${qid}`;
+const sessionBusy = (seen: { status: string; pendingPermissions?: unknown[] } | undefined) =>
+  ["running", "initializing"].includes(seen?.status ?? "") || Boolean(seen?.pendingPermissions?.length);
 
 /** An older chat is looked at for coming back to life this often (per affair), and only while it is this recent. */
 const REVIVED_EVERY_MS = 5 * 60_000;
@@ -213,7 +217,7 @@ export function createChats(deps: ChatDeps) {
   const busy = async (chatId: string): Promise<boolean> => {
     try {
       const seen = (await paseo.agents.ref(chatId).refresh())?.agent;
-      return ["running", "initializing"].includes(seen?.status ?? "") || Boolean(seen?.pendingPermissions?.length);
+      return sessionBusy(seen);
     } catch {
       return false; // not there to ask: nothing is running in it
     }
@@ -224,7 +228,7 @@ export function createChats(deps: ChatDeps) {
     try {
       const seen = (await paseo.agents.ref(old).refresh())?.agent;
       if (seen?.archivedAt) { toPutAway.delete(old);return; }
-      if (["running", "initializing"].includes(seen?.status ?? "") || seen?.pendingPermissions?.length) {
+      if (sessionBusy(seen)) {
         toPutAway.set(old, id);
         return;
       }
@@ -507,6 +511,33 @@ export function createChats(deps: ChatDeps) {
     await draw(id);
   }
 
+  /** Workspace archive also archives its unlabelled tabs: check every page, then refresh the known chats and workers. */
+  async function canArchive(id: string, sessions: Array<{ agent: ChatAgent }> = []): Promise<boolean> {
+    const s = deps.state(id);
+    if (isOpen(s) || !s.workspaceId) return false;
+    const ids = new Set<string>([
+      s.chatId, s.conversationId, ...s.chats.map((c: any) => c.agentId), ...s.dispatched.map((d: any) => d.agentId),
+      ...sessions.filter(({ agent }) => agent.labels?.["affairs.affair"] === id).map(({ agent }) => agent.id),
+      ...[...toPutAway].filter(([, owner]) => owner === id).map(([agentId]) => agentId),
+    ].filter(Boolean));
+    let cursor: string | undefined;
+    do {
+      const page = await paseo.agents.list({ filter: { includeArchived: true, includeInternal: true, includeBackground: true }, page: { limit: 200, ...(cursor ? { cursor } : {}) } });
+      for (const { agent } of page.entries) if (agent.workspaceId === s.workspaceId) ids.add(agent.id);
+      cursor = page.pageInfo?.nextCursor ?? undefined;
+    } while (cursor);
+    for (const agentId of ids) {
+      try {
+        const seen = (await paseo.agents.ref(agentId).refresh())?.agent;
+        if (!seen?.archivedAt && sessionBusy(seen)) return false;
+      } catch (error) {
+        // Missing chats cannot be interrupted; a connection failure does not prove that a chat is quiet.
+        if (!/not found|does not exist/i.test((error as Error).message)) throw error;
+      }
+    }
+    return true;
+  }
+
   /** Wait for the result's look first. A blocked or failed look must not hide the run's end from the person. */
   async function tellFinished(id: string): Promise<void> {
     const s = deps.state(id);
@@ -578,5 +609,5 @@ export function createChats(deps: ChatDeps) {
     if (listing) await (await listing).subscription?.release();
   }
 
-  return { sync, ensure, draw, listen, tellFinished, tellDrive, stop };
+  return { sync, ensure, draw, listen, tellFinished, tellDrive, canArchive, stop };
 }
