@@ -13,6 +13,7 @@ Host settings are stored at `plugin-settings/automation-flow/automation-flow.jso
   "version": 1,
   "values": {
     "allowedFlows": ["example-sync"],
+    "orchestrationDir": "/path/to/orchestration",
     "defaultTimeout": "30m"
   }
 }
@@ -20,8 +21,10 @@ Host settings are stored at `plugin-settings/automation-flow/automation-flow.jso
 
 `allowedFlows` defaults to `[]`: no flow can run until explicitly allowed. Names must match
 `^[a-z][a-z0-9-]*$`; paths are not accepted. Allowing a flow trusts its code and effects.
-`orchestrationDir` optionally selects the orchestration checkout; the default is the sibling
-`../orchestration` of this plugin. `defaultTimeout` accepts integer seconds, minutes or hours
+Set `orchestrationDir` to the absolute path of the orchestration checkout. The current host does
+not expose the plugin directory to its compiled bundle, so the plugin cannot safely locate the
+sibling checkout automatically. If omitted, a run fails with a configuration error.
+`defaultTimeout` accepts integer seconds, minutes or hours
 (e.g. `90s`, `30m`, `1h`), from 1 second to 1 hour. It is published as the action's default.
 The runner's timeout subtracts the time already spent checking and a 60-second reserve, rounded
 down to seconds, with a minimum of 1 second. For short timeouts that reserve cannot be guaranteed.

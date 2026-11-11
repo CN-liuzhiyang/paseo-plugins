@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { timeoutMs, type Settings } from "./settings";
 
@@ -25,7 +24,6 @@ export type ActionRegistration = {
   run(input: ActionInput, context: ActionContext): Promise<{ text: string; agentId?: string | null }>;
 };
 
-const defaultDir = fileURLToPath(new URL("../../orchestration/", import.meta.url));
 const tail = (value: string) => Buffer.from(value).subarray(-2048).toString("utf8");
 const head = (value: string) => Buffer.from(value).subarray(0, 2048).toString("utf8");
 
@@ -78,7 +76,8 @@ export async function runFlow(input: ActionInput, context: ActionContext, settin
   const { flow, input: supplied } = paramsSchema.parse(input.params);
   if (!settings.allowedFlows.includes(flow)) throw new Error(`流程 ${flow} 不在允许清单里`);
   const id = `auto-${createHash("sha256").update(input.run.runId).digest("hex")}`;
-  const orch = path.join(settings.orchestrationDir ?? defaultDir, "runtime", "orch.mjs");
+  if (!settings.orchestrationDir) throw new Error(`runId ${id}: 无法获取插件目录，请在 automation-flow 设置中指定 orchestrationDir`);
+  const orch = path.join(settings.orchestrationDir, "runtime", "orch.mjs");
   let stderr = "";
   try {
     const checked = await execute([orch, "check", flow], context.signal);

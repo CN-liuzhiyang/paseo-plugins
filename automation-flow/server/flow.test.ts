@@ -4,6 +4,8 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { createRequire } from "node:module";
+import { build } from "esbuild";
 import contribute from "../index.server";
 import { paramsSchema, runFlow, type ActionInput, type ActionRegistration } from "./flow";
 import { settingsDefinition } from "./settings";
@@ -169,4 +171,26 @@ for (const failed of ["invalid", "throws"]) test(`registers with default timeout
   await assert.rejects(action.run(input(), { signal: signal() }), /bad settings|unavailable/);
   fixed = true;
   await assert.rejects(action.run(input(), { signal: signal() }), /不在允许清单/);
+});
+
+test("host-style CJS bundle loads and uses only the configured orchestration directory", async () => {
+  const result = await build({
+    entryPoints: [path.resolve("index.server.ts")], bundle: true, format: "cjs", platform: "node",
+    target: "node20", external: ["@getpaseo/plugin", "@getpaseo/plugin/server", "zod"], write: false,
+  });
+  const source = `(function(require) { const module = { exports: {} }; const exports = module.exports;\n${result.outputFiles[0].text}\nreturn module.exports; })`;
+  const factory = (0, eval)(source);
+  const entry = factory(createRequire(path.resolve("package.json"))).default;
+  const f = await fixture();
+  try {
+    let action: ActionRegistration | undefined;
+    let values = settingsDefinition.schema.parse({ allowedFlows: ["example-sync"] });
+    const server = { registerSettings: () => ({ read: async () => ({ status: "ready", values }) }), registerAction: (a: ActionRegistration) => { action = a; } };
+    const cleanup = entry(server); await delay(10);
+    assert.ok(action);
+    await assert.rejects(action.run(input(), { signal: signal() }), /无法获取插件目录.*orchestrationDir/);
+    values = settingsDefinition.schema.parse(f.settings);
+    assert.match((await action.run(input(), { signal: signal() })).text, /outcome: done/);
+    cleanup();
+  } finally { await f.cleanup(); }
 });
