@@ -21,7 +21,7 @@ if (command === 'check') {
   if (config.checkDelay) await new Promise(resolve => setTimeout(resolve, config.checkDelay));
   if (config.problems) { console.log(JSON.stringify({ok:false,problems:config.problems})); process.exit(2); }
   if (config.checkOverflow) { process.stdout.write('x'.repeat(1100000)); }
-  else console.log(JSON.stringify({ok:true,flow:{inputs:{properties:config.prompt ? {automationPrompt:{type:'string'}} : {}}}}));
+  else console.log(JSON.stringify({ok:true,flow:{inputs:{properties:{...(config.prompt ? {automationPrompt:{type:'string'}} : {}), ...(config.trigger ? {automationTrigger:{type:'object'}} : {})}}}}));
 } else {
   const get = (flag) => args[args.indexOf(flag)+1];
   const values = JSON.parse(readFileSync(get('--input').slice(1), 'utf8'));
@@ -33,7 +33,8 @@ if (command === 'check') {
   } else if (config.invalid) console.log('not json');
   else if (config.overflow) process.stdout.write('x'.repeat(1100000));
   else {
-    console.log(JSON.stringify({ok:config.outcome !== 'failed',outcome:config.outcome || 'done',value:{hello:'world'},runId:config.wrongId ? 'wrong' : get('--run-id'),events:config.events || 'events.jsonl',cost:config.cost ?? null,caveats:config.caveats || [],durationMs:123}));
+    console.log(JSON.stringify({ok:config.outcome !== 'failed',outcome:config.outcome || 'done',error:config.error,value:{hello:'world'},runId:config.wrongId ? 'wrong' : get('--run-id'),events:config.events || 'events.jsonl',cost:config.cost ?? null,caveats:config.caveats || [],durationMs:123}));
+    if (config.stderr) console.error(config.stderr);
     if (config.exit) process.exitCode = config.exit;
   }
 }`;
@@ -54,6 +55,53 @@ test("rejects names and injections before executing anything", async () => {
     await assert.rejects(runFlow(input("other"), { signal: signal() }, f.settings), /流程 other 不在允许清单里/);
     await assert.rejects(readFile(f.log));
   } finally { await f.cleanup(); }
+});
+
+for (const declared of [true, false]) for (const kind of ["event", "clock", "manual"]) test(`trigger ${kind}, declared ${declared}`, async () => {
+  const f = await fixture({ trigger: declared });
+  try {
+    const original = { event: "ping", id: "event-1", subject: "subject", data: { sender: "alice" } };
+    const trigger = kind === "event" ? { type: "event", source: "demo", event: "ping", eventId: "event-1", subject: "subject", data: original.data } : kind === "manual" ? { type: "manual", event: original } : { type: "clock" };
+    await runFlow({ ...input(), trigger, params: { flow: "example-sync", input: { automationTrigger: "spoof" } } }, { signal: signal() }, f.settings);
+    const values = JSON.parse(await readFile(f.log, "utf8")).values;
+    const expected = { type: kind, ...(kind === "event" ? { source: "demo" } : {}), event: "ping", eventId: "event-1", subject: "subject", data: original.data };
+    if (declared && kind !== "clock") assert.deepEqual(values.automationTrigger, expected);
+    else assert.equal(Object.hasOwn(values, "automationTrigger"), false);
+  } finally { await f.cleanup(); }
+});
+test("large trigger data is bounded and marked", async () => {
+  const f = await fixture({ trigger: true });
+  try {
+    await runFlow({ ...input(), trigger: { type: "event", source: "demo", event: "ping", eventId: "id", data: { text: "内容".repeat(10000) } } }, { signal: signal() }, f.settings);
+    const value = JSON.parse(await readFile(f.log, "utf8")).values.automationTrigger.data;
+    assert.equal(value.truncated, true); assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 16384);
+  } finally { await f.cleanup(); }
+});
+test("trigger data whose escapes expand stays within 16KB", async () => {
+  const f = await fixture({ trigger: true });
+  try {
+    await runFlow({ ...input(), trigger: { type: "event", source: "demo", event: "ping", eventId: "id", data: { text: '"'.repeat(20000) } } }, { signal: signal() }, f.settings);
+    const value = JSON.parse(await readFile(f.log, "utf8")).values.automationTrigger.data;
+    assert.equal(value.truncated, true); assert.ok(Buffer.byteLength(JSON.stringify(value)) <= 16384);
+  } finally { await f.cleanup(); }
+});
+test("trigger data at the limit passes through unchanged", async () => {
+  const f = await fixture({ trigger: true });
+  try {
+    const data = { text: "a".repeat(16384 - '{"text":""}'.length) };
+    await runFlow({ ...input(), trigger: { type: "event", source: "demo", event: "ping", eventId: "id", data } }, { signal: signal() }, f.settings);
+    assert.deepEqual(JSON.parse(await readFile(f.log, "utf8")).values.automationTrigger.data, data);
+  } finally { await f.cleanup(); }
+});
+test("nonzero exit without JSON uses the generic error", async () => {
+  const f = await fixture({ invalid: true });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), (e: Error) => e.message.includes("输出不是预期的 JSON") && !e.message.includes("outcome:")); }
+  finally { await f.cleanup(); }
+});
+for (const outcome of ["failed", "timeout"]) test(`reports ${outcome} and error message from nonzero JSON`, async () => {
+  const f = await fixture({ exit: 1, outcome, error: { message: "deliberate failure" }, stderr: "stderr-tail" });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), (e: Error) => e.message.includes(`outcome: ${outcome}`) && e.message.includes("deliberate failure") && e.message.includes("stderr-tail")); }
+  finally { await f.cleanup(); }
 });
 for (const prompt of [true, false]) test(`passes automationPrompt only when declared: ${prompt}`, async () => {
   const f = await fixture({ prompt });

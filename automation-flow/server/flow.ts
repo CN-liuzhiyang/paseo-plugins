@@ -27,6 +27,48 @@ export type ActionRegistration = {
 const tail = (value: string) => Buffer.from(value).subarray(-2048).toString("utf8");
 const head = (value: string) => Buffer.from(value).subarray(0, 2048).toString("utf8");
 
+const TRIGGER_DATA_LIMIT = 16 * 1024;
+
+// Event payloads are untrusted. Ordinary JSON objects pass through; data whose serialized form
+// exceeds 16KB becomes a marked preview, so a flow cannot mistake it for the full object.
+function boundedData(data: Record<string, unknown>): unknown {
+  const encoded = JSON.stringify(data);
+  const bytes = Buffer.byteLength(encoded);
+  if (bytes <= TRIGGER_DATA_LIMIT) return data;
+  for (let size = 8 * 1024; ; size = Math.floor(size / 2)) {
+    const preview = { truncated: true, bytes, preview: Buffer.from(encoded).subarray(0, size).toString("utf8") };
+    if (Buffer.byteLength(JSON.stringify(preview)) <= TRIGGER_DATA_LIMIT) return preview;
+  }
+}
+
+const record = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+const text = (value: unknown) => typeof value === "string" ? value : undefined;
+
+// Mirrors the host's RunTrigger: event carries the event inline, manual may carry one under `event`
+// (with `id` rather than `eventId`), clock carries none and is not passed.
+export function automationTrigger(raw: unknown): Record<string, unknown> | undefined {
+  const t = record(raw);
+  if (!t || (t.type !== "event" && t.type !== "manual")) return undefined;
+  const event = t.type === "manual" ? record(t.event) ?? {} : t;
+  const data = record(event.data);
+  const fields = {
+    type: t.type, source: t.type === "event" ? text(t.source) : undefined, event: text(event.event),
+    eventId: text(t.type === "manual" ? event.id : event.eventId), subject: text(event.subject),
+    data: data && boundedData(data),
+  };
+  return Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined));
+}
+
+// orch prints its result JSON even when it exits 1; its outcome and error say why.
+function failureDetails(raw: unknown): string {
+  const value = record(raw);
+  if (!value) return "";
+  const message = text(record(value.error)?.message);
+  const parts = [text(value.outcome) && `outcome: ${value.outcome}`, message && `error: ${message}`].filter(Boolean);
+  return parts.length ? `: ${head(parts.join("; "))}` : "";
+}
+
 // No shell: on Windows invoke the real node executable, never node.cmd.
 type ChildResult = { code: number | null; stdout: string; stderr: string; aborted: boolean; overflow: boolean };
 async function child(args: string[], signal: AbortSignal): Promise<ChildResult> {
@@ -92,6 +134,9 @@ export async function runFlow(input: ActionInput, context: ActionContext, settin
     const values = { ...supplied };
     if (Object.hasOwn(info.data.flow.inputs.properties, "automationPrompt")) values.automationPrompt = input.prompt;
     else delete values.automationPrompt;
+    delete values.automationTrigger;
+    const trigger = automationTrigger(input.trigger);
+    if (trigger && Object.hasOwn(info.data.flow.inputs.properties, "automationTrigger")) values.automationTrigger = trigger;
     const dir = await mkdtemp(path.join(tmpdir(), "automation-flow-"));
     try {
       const file = path.join(dir, "input.json");
@@ -101,10 +146,14 @@ export async function runFlow(input: ActionInput, context: ActionContext, settin
       stderr = result.stderr;
       if (result.overflow) throw new Error("流程运行 stdout 超过 1MB");
       const raw = json(result.stdout);
+      if (result.aborted) throw new Error("流程运行失败：已取消");
       const parsed = resultSchema.safeParse(raw);
-      if (result.aborted || result.code !== 0 || !parsed.success || !raw || typeof raw !== "object" || !Object.hasOwn(raw, "cost")) throw new Error("流程运行失败、已取消或输出无效");
+      if (result.code !== 0 || !parsed.success || !record(raw) || !Object.hasOwn(raw as object, "cost")) {
+        const details = failureDetails(raw);
+        throw new Error(details ? `流程运行失败（退出码 ${result.code}）${details}` : `流程运行失败：退出码 ${result.code}，输出不是预期的 JSON`);
+      }
       const data = parsed.data;
-      if (!data.ok || data.runId !== id || !["done", "stopped"].includes(data.outcome)) throw new Error(`流程结果 ${data.outcome}`);
+      if (!data.ok || data.runId !== id || !["done", "stopped"].includes(data.outcome)) throw new Error(`流程结果 ${data.outcome}${failureDetails(raw)}`);
       const events = path.win32.basename(path.posix.basename(data.events));
       return { text: `流程: ${flow}\nrunId: ${data.runId}\noutcome: ${data.outcome}\n耗时: ${data.durationMs}ms\ncost: ${head(JSON.stringify(data.cost) ?? "null")}\ncaveats: ${head(JSON.stringify(data.caveats))}\nvalue: ${head(JSON.stringify(data.value) ?? "null")}\n事件文件: ${events}` };
     } finally { await rm(dir, { recursive: true, force: true }); }
