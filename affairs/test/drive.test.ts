@@ -172,6 +172,20 @@ test("dispatch approves MCP parameters with labels, finish subscription and file
   assert.equal(f.state().dispatched.length, 0);assert.equal(f.state().lines.at(-1).kind, "dispatch.approved");
 });
 
+test("a dispatch that names no model starts on drive.workerRole, falling back to drive.role", async () => {
+  const f = fixture();f.put([{ kind: "budget", usd: 20 }]);
+  const ctx = f.main();ctx.run = async () => ({ stdout: JSON.stringify({ workspaceId: "workspace" }), stderr: "", exitCode: 0 });
+  const contract = path.join(f.w.dir, "contract.md");writeFileSync(contract, "契约");
+  const roles = { ...ctx.policy.roles, driver: { provider: "claude/driver", thinking: "high", mode: "bypassPermissions" }, worker: { provider: "codex/worker", thinking: "high", mode: "full-access" } };
+  ctx.policy = { ...ctx.policy, roles, drive: { idleHours: 12, role: "driver" } };
+  const before = (await dispatch(ctx, f.id, { contract })).createAgent!;
+  assert.equal(before.provider, "claude/driver");assert.deepEqual(before.settings, { thinkingOptionId: "high", modeId: "bypassPermissions" });
+  ctx.policy = { ...ctx.policy, drive: { idleHours: 12, role: "driver", workerRole: "worker" } };
+  const worker = (await dispatch(ctx, f.id, { contract })).createAgent!;
+  assert.equal(worker.provider, "codex/worker");assert.deepEqual(worker.settings, { thinkingOptionId: "high", modeId: "full-access" });
+  assert.equal((await dispatch(ctx, f.id, { contract, provider: "claude/named", thinking: "low" })).createAgent!.provider, "claude/named", "a model named in the dispatch wins");
+});
+
 test("session-open creation guard rejects no budget, spent budget, expiry and watch mode; approval is checked again at creation", async () => {
   const f = fixture();const request = { reason: "create", labels: { "affairs.affair": f.id } };
   assert.throws(() => dispatchOpen(f.w.ctx, request), /先请他批额度/);

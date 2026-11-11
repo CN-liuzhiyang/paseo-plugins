@@ -26,7 +26,8 @@ export async function dispatch(ctx, ref, { contract, provider, thinking, mode, t
   const readme = ctx.policy.workDir && path.join(ctx.policy.workDir, s.id, "README.md");
   if (!readme || !existsSync(readme)) return { ok: false, text: "先配置事项文档目录并写好这件事的 README。" };
   if (!provider) {
-    const role = roleOf(ctx.policy, ctx.policy.drive?.role || s.roleName || undefined);
+    // A worker is not the main chat: policy.drive.workerRole names the role it starts on when the chat does not say; unset, it follows drive.role as before.
+    const role = roleOf(ctx.policy, ctx.policy.drive?.workerRole || ctx.policy.drive?.role || s.roleName || undefined);
     provider = role.provider;
     thinking ??= role.thinking;
     mode ??= role.mode;

@@ -43,6 +43,7 @@ export const DEFAULT_POLICY = {
   linkHash: "",
   projectsByKind: {},
   watchKinds: ["gcp"],
+  // role: the role the main chat of an affair he drives runs on. workerRole: the role a dispatched worker starts on when the dispatch names no model (empty: the same as role).
   drive: { idleHours: 12 },
   driveHandbook: "",
   projects: { searchDirs: [] },
