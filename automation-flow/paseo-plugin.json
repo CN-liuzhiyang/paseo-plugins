@@ -1,0 +1,6 @@
+{
+  "id": "automation-flow",
+  "description": "Runs allowed orchestration flows as automation actions",
+  "requirements": { "paseo": ">=0.11.0" },
+  "build": [["npm", "ci", "--no-audit", "--no-fund"]]
+}
