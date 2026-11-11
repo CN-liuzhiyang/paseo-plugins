@@ -16,7 +16,10 @@ const [command, flow, ...args] = process.argv.slice(2);
 const config = JSON.parse(readFileSync(new URL('../config.json', import.meta.url)));
 if (command === 'check') {
   writeFileSync(config.log, 'check:' + flow);
-  console.log(JSON.stringify({ok:true,flow:{inputs:{properties:config.prompt ? {automationPrompt:{type:'string'}} : {}}}}));
+  if (config.checkDelay) await new Promise(resolve => setTimeout(resolve, config.checkDelay));
+  if (config.problems) { console.log(JSON.stringify({ok:false,problems:config.problems})); process.exit(2); }
+  if (config.checkOverflow) { process.stdout.write('x'.repeat(1100000)); }
+  else console.log(JSON.stringify({ok:true,flow:{inputs:{properties:config.prompt ? {automationPrompt:{type:'string'}} : {}}}}));
 } else {
   const get = (flag) => args[args.indexOf(flag)+1];
   const values = JSON.parse(readFileSync(get('--input').slice(1), 'utf8'));
@@ -26,8 +29,11 @@ if (command === 'check') {
     writeFileSync(config.pid, String(sub.pid));
     setInterval(()=>{}, 1000);
   } else if (config.invalid) console.log('not json');
-  else if (config.exit) { console.error('refused'); process.exit(config.exit); }
-  else console.log(JSON.stringify({ok:config.outcome !== 'failed',outcome:config.outcome || 'done',value:{hello:'world'},runId:get('--run-id'),events:'events.jsonl',cost:null,caveats:[],durationMs:123}));
+  else if (config.overflow) process.stdout.write('x'.repeat(1100000));
+  else {
+    console.log(JSON.stringify({ok:config.outcome !== 'failed',outcome:config.outcome || 'done',value:{hello:'world'},runId:config.wrongId ? 'wrong' : get('--run-id'),events:config.events || 'events.jsonl',cost:config.cost ?? null,caveats:config.caveats || [],durationMs:123}));
+    if (config.exit) process.exitCode = config.exit;
+  }
 }`;
 async function fixture(config: Record<string, unknown> = {}) {
   const dir = await mkdtemp(path.join(tmpdir(), "flow-test-"));
@@ -53,7 +59,7 @@ for (const prompt of [true, false]) test(`passes automationPrompt only when decl
     const result = await runFlow(input(), { signal: signal() }, f.settings);
     const log = JSON.parse(await readFile(f.log, "utf8"));
     assert.deepEqual(log.values, prompt ? { test: 42, automationPrompt: "异常原文" } : { test: 42 });
-    assert.match(log.runId, /^auto-[a-f0-9]{64}$/); assert.equal(log.timeout, "30m");
+    assert.match(log.runId, /^auto-[a-f0-9]{64}$/); assert.ok(Number.parseInt(log.timeout) <= 1740 && Number.parseInt(log.timeout) >= 1738);
     assert.match(result.text, /events.jsonl/); assert.match(result.text, /outcome: done/);
     await assert.rejects(readFile(log.file));
   } finally { await f.cleanup(); }
@@ -90,4 +96,77 @@ test("registers configured timeout and reads current allowlist", async () => {
   values = settingsDefinition.schema.parse({ allowedFlows: [] });
   await assert.rejects(action.run(input(), { signal: signal() }), /不在允许清单/);
   assert.equal(settingsDefinition.schema.safeParse({ defaultTimeout: "61m" }).success, false);
+});
+
+for (const code of [1, 2]) test(`rejects exit ${code} even with valid success JSON`, async () => {
+  const f = await fixture({ exit: code });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), /流程运行失败/); }
+  finally { await f.cleanup(); }
+});
+test("rejects mismatched runId", async () => {
+  const f = await fixture({ wrongId: true });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), /流程结果/); }
+  finally { await f.cleanup(); }
+});
+test("rejects valid JSON delivered after abort", async () => {
+  const f = await fixture(); const controller = new AbortController();
+  try {
+    const execute = async (args: string[], abort: AbortSignal) => {
+      if (args[1] === "check") return { code: 0, stdout: JSON.stringify({ ok: true, flow: { inputs: { properties: {} } } }), stderr: "", aborted: false, overflow: false };
+      await new Promise<void>((resolve) => abort.addEventListener("abort", () => resolve(), { once: true }));
+      return { code: 0, stdout: JSON.stringify({ ok: true, outcome: "done", value: null, runId: args[args.indexOf("--run-id") + 1], events: "e", cost: null, caveats: [], durationMs: 1 }), stderr: "", aborted: true, overflow: false };
+    };
+    const promise = runFlow(input(), { signal: controller.signal }, f.settings, execute);
+    await delay(100); controller.abort();
+    await assert.rejects(promise, /流程运行失败/);
+  } finally { controller.abort(); await f.cleanup(); }
+});
+test("stopped is successful", async () => {
+  const f = await fixture({ outcome: "stopped" });
+  try { assert.match((await runFlow(input(), { signal: signal() }, f.settings)).text, /outcome: stopped/); }
+  finally { await f.cleanup(); }
+});
+test("reports check problems within 2KB", async () => {
+  const f = await fixture({ problems: ["missing input", "x".repeat(5000)] });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), (e: Error) => e.message.includes("missing input") && Buffer.byteLength(e.message) < 2300); }
+  finally { await f.cleanup(); }
+});
+for (const key of ["checkOverflow", "overflow"]) test(`rejects oversized stdout: ${key}`, async () => {
+  const f = await fixture({ [key]: true });
+  try { await assert.rejects(runFlow(input(), { signal: signal() }, f.settings), /stdout 超过 1MB/); }
+  finally { await f.cleanup(); }
+});
+test("bounds result fields and removes event path", async () => {
+  const f = await fixture({ events: "C:\\private\\events.jsonl", cost: { detail: "a".repeat(4000) }, caveats: ["b".repeat(4000)] });
+  try {
+    const { text } = await runFlow(input(), { signal: signal() }, f.settings);
+    assert.ok(Buffer.byteLength(text) < 4500); assert.doesNotMatch(text, /private/); assert.match(text, /事件文件: events.jsonl/);
+  } finally { await f.cleanup(); }
+});
+test("check time counts against timeout and minimum is one second", async () => {
+  const f = await fixture({ checkDelay: 1100 });
+  try {
+    await runFlow(input(), { signal: signal() }, { ...f.settings, defaultTimeout: "120s" });
+    const log = JSON.parse(await readFile(f.log, "utf8"));
+    assert.ok(Number.parseInt(log.timeout) <= 58 && Number.parseInt(log.timeout) >= 55);
+    await runFlow(input(), { signal: signal() }, { ...f.settings, defaultTimeout: "1s" });
+    assert.equal(JSON.parse(await readFile(f.log, "utf8")).timeout, "1s");
+  } finally { await f.cleanup(); }
+});
+for (const failed of ["invalid", "throws"]) test(`registers with default timeout when settings ${failed}`, async () => {
+  let action: ActionRegistration | undefined;
+  let fixed = false;
+  const server = {
+    registerSettings: () => ({ read: async () => {
+      if (fixed) return { status: "ready", values: settingsDefinition.schema.parse({ allowedFlows: [] }) };
+      if (failed === "throws") throw new Error("unavailable");
+      return { status: "invalid", error: "bad settings" };
+    } }),
+    registerAction: (a: ActionRegistration) => { action = a; },
+  };
+  contribute(server as never); await delay(10);
+  assert.ok(action); assert.equal(action.defaultTimeoutMs, 1800000);
+  await assert.rejects(action.run(input(), { signal: signal() }), /bad settings|unavailable/);
+  fixed = true;
+  await assert.rejects(action.run(input(), { signal: signal() }), /不在允许清单/);
 });

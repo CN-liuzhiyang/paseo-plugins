@@ -13,11 +13,17 @@ export default function contribute(server: PluginServerContext) {
   }
   const settings = server.registerSettings(settingsDefinition);
   let closed = false;
-  void settings.read().then((state) => {
+  void (async () => {
+    let timeout = "30m";
+    try {
+      const state = await settings.read();
+      if (state.status === "ready") timeout = state.values.defaultTimeout;
+      else console.info(`automation-flow: invalid settings: ${state.error}`);
+    } catch (error) {
+      console.info(`automation-flow: cannot read settings: ${String(error)}`);
+    }
     if (closed) return;
-    if (state.status !== "ready") throw new Error(state.error);
     // The host publishes action metadata once. Timeout changes take effect after plugin reload.
-    const timeout = state.values.defaultTimeout;
     registerAction.call(server, {
       id: "flow.run", label: "Run flow", params: paramsSchema, defaultTimeoutMs: timeoutMs(timeout),
       async run(input, context) {
@@ -26,6 +32,6 @@ export default function contribute(server: PluginServerContext) {
         return runFlow(input, context, { ...current.values, defaultTimeout: timeout });
       },
     });
-  }).catch((error) => console.error(`automation-flow: cannot register action: ${String(error)}`));
+  })().catch((error) => console.error(`automation-flow: cannot register action: ${String(error)}`));
   return () => { closed = true; };
 }

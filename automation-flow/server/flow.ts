@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import type { Settings } from "./settings";
+import { timeoutMs, type Settings } from "./settings";
 
 export const paramsSchema = z.object({
   flow: z.string().regex(/^[a-z][a-z0-9-]*$/),
@@ -30,14 +30,17 @@ const tail = (value: string) => Buffer.from(value).subarray(-2048).toString("utf
 const head = (value: string) => Buffer.from(value).subarray(0, 2048).toString("utf8");
 
 // No shell: on Windows invoke the real node executable, never node.cmd.
-async function child(args: string[], signal: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string; aborted: boolean }> {
+type ChildResult = { code: number | null; stdout: string; stderr: string; aborted: boolean; overflow: boolean };
+async function child(args: string[], signal: AbortSignal): Promise<ChildResult> {
   signal.throwIfAborted();
   return new Promise((resolve, reject) => {
     const proc = spawn(process.execPath, args, { windowsHide: true, detached: process.platform !== "win32", stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "", stderr = "", aborted = false;
+    const chunks: Buffer[] = [];
+    let size = 0, stderr = "", aborted = false, overflow = false, stopping = false;
     let killing: Promise<void> = Promise.resolve();
-    const abort = () => {
-      aborted = true;
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
       if (!proc.pid) return;
       if (process.platform === "win32") {
         killing = new Promise<void>((done) => {
@@ -49,12 +52,17 @@ async function child(args: string[], signal: AbortSignal): Promise<{ code: numbe
         try { process.kill(-proc.pid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
       }
     };
+    const abort = () => { aborted = true; stop(); };
     signal.addEventListener("abort", abort, { once: true });
     if (signal.aborted) abort();
-    proc.stdout.setEncoding("utf8"); proc.stdout.on("data", (s: string) => { stdout += s; });
+    proc.stdout.on("data", (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 1024 * 1024) { overflow = true; stop(); }
+      else chunks.push(chunk);
+    });
     proc.stderr.setEncoding("utf8"); proc.stderr.on("data", (s: string) => { stderr = tail(stderr + s); });
     proc.once("error", (error) => { signal.removeEventListener("abort", abort); reject(error); });
-    proc.once("close", (code) => { signal.removeEventListener("abort", abort); void killing.then(() => resolve({ code, stdout, stderr, aborted })); });
+    proc.once("close", (code) => { signal.removeEventListener("abort", abort); void killing.then(() => resolve({ code, stdout: Buffer.concat(chunks).toString("utf8"), stderr, aborted, overflow })); });
   });
 }
 
@@ -65,17 +73,23 @@ const resultSchema = z.object({
   events: z.string(), durationMs: z.number().nonnegative(), cost: z.unknown(), caveats: z.array(z.string()), value: z.unknown(),
 });
 
-export async function runFlow(input: ActionInput, context: ActionContext, settings: Settings): Promise<{ text: string }> {
+export async function runFlow(input: ActionInput, context: ActionContext, settings: Settings, execute = child): Promise<{ text: string }> {
+  const started = Date.now();
   const { flow, input: supplied } = paramsSchema.parse(input.params);
   if (!settings.allowedFlows.includes(flow)) throw new Error(`流程 ${flow} 不在允许清单里`);
   const id = `auto-${createHash("sha256").update(input.run.runId).digest("hex")}`;
   const orch = path.join(settings.orchestrationDir ?? defaultDir, "runtime", "orch.mjs");
   let stderr = "";
   try {
-    const checked = await child([orch, "check", flow], context.signal);
+    const checked = await execute([orch, "check", flow], context.signal);
     stderr = checked.stderr;
-    const info = checkSchema.safeParse(json(checked.stdout));
-    if (checked.aborted || checked.code !== 0 || !info.success) throw new Error("流程检查失败或已取消");
+    if (checked.overflow) throw new Error("流程检查 stdout 超过 1MB");
+    const checkOutput = json(checked.stdout);
+    const info = checkSchema.safeParse(checkOutput);
+    if (checked.aborted || checked.code !== 0 || !info.success) {
+      const problems = z.object({ problems: z.array(z.unknown()) }).safeParse(checkOutput);
+      throw new Error(`流程检查失败或已取消${problems.success ? `: ${head(JSON.stringify(problems.data.problems))}` : ""}`);
+    }
     const values = { ...supplied };
     if (Object.hasOwn(info.data.flow.inputs.properties, "automationPrompt")) values.automationPrompt = input.prompt;
     else delete values.automationPrompt;
@@ -83,14 +97,17 @@ export async function runFlow(input: ActionInput, context: ActionContext, settin
     try {
       const file = path.join(dir, "input.json");
       await writeFile(file, JSON.stringify(values), { encoding: "utf8", mode: 0o600 });
-      const result = await child([orch, "run", flow, "--input", `@${file}`, "--timeout", settings.defaultTimeout, "--run-id", id], context.signal);
+      const remainingSeconds = Math.max(1, Math.floor((timeoutMs(settings.defaultTimeout) - (Date.now() - started) - 60000) / 1000));
+      const result = await execute([orch, "run", flow, "--input", `@${file}`, "--timeout", `${remainingSeconds}s`, "--run-id", id], context.signal);
       stderr = result.stderr;
+      if (result.overflow) throw new Error("流程运行 stdout 超过 1MB");
       const raw = json(result.stdout);
       const parsed = resultSchema.safeParse(raw);
       if (result.aborted || result.code !== 0 || !parsed.success || !raw || typeof raw !== "object" || !Object.hasOwn(raw, "cost")) throw new Error("流程运行失败、已取消或输出无效");
       const data = parsed.data;
       if (!data.ok || data.runId !== id || !["done", "stopped"].includes(data.outcome)) throw new Error(`流程结果 ${data.outcome}`);
-      return { text: `流程: ${flow}\nrunId: ${data.runId}\noutcome: ${data.outcome}\n耗时: ${data.durationMs}ms\ncost: ${JSON.stringify(data.cost)}\ncaveats: ${JSON.stringify(data.caveats)}\nvalue: ${head(JSON.stringify(data.value) ?? "null")}\n事件文件: ${data.events}` };
+      const events = path.win32.basename(path.posix.basename(data.events));
+      return { text: `流程: ${flow}\nrunId: ${data.runId}\noutcome: ${data.outcome}\n耗时: ${data.durationMs}ms\ncost: ${head(JSON.stringify(data.cost) ?? "null")}\ncaveats: ${head(JSON.stringify(data.caveats))}\nvalue: ${head(JSON.stringify(data.value) ?? "null")}\n事件文件: ${events}` };
     } finally { await rm(dir, { recursive: true, force: true }); }
   } catch (error) {
     throw new Error(`runId ${id}: ${String(error)}; stderr: ${tail(stderr)}`);

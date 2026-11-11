@@ -22,8 +22,11 @@ Host settings are stored at `plugin-settings/automation-flow/automation-flow.jso
 `^[a-z][a-z0-9-]*$`; paths are not accepted. Allowing a flow trusts its code and effects.
 `orchestrationDir` optionally selects the orchestration checkout; the default is the sibling
 `../orchestration` of this plugin. `defaultTimeout` accepts integer seconds, minutes or hours
-(e.g. `90s`, `30m`, `1h`), from 1 second to 1 hour. It is published as the action's default
-and passed to the runner. Reload the plugin after changing this timeout: action metadata is
+(e.g. `90s`, `30m`, `1h`), from 1 second to 1 hour. It is published as the action's default.
+The runner's timeout subtracts the time already spent checking and a 60-second reserve, rounded
+down to seconds, with a minimum of 1 second. For short timeouts that reserve cannot be guaranteed.
+An individual automation can override the host timeout; this is not passed to the action, so the
+runner still uses the plugin default. Reload the plugin after changing the default: action metadata is
 registered at startup. The allowlist and directory are read for each run.
 
 Example, once `example-sync` is installed and allowed:
@@ -38,6 +41,7 @@ To pass flow inputs, use `--params-json` with an object such as
 runs `orch.mjs check <flow>` for that flow only, then invokes `run` with a temporary input file.
 Results and failures are recorded by the automation host; a stopped flow is reported as stopped.
 A host cancellation kills the process tree. The flow's event file is the detailed record.
+Results may be delivered to external channels: do not put sensitive content in flow values or caveats.
 
 ## Development
 
