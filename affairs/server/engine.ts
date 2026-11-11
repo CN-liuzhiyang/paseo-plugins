@@ -338,6 +338,7 @@ export function createEngine(deps: EngineDeps) {
     const s = state(id);
     const now = ctx.now();
     if (!isOpen(s) || s.system || modeOf(s, ctx.policy) === "drive" || s.pending.length === 0 || s.pending.every((p: string) => p.startsWith("watch"))) return;
+    if (s.lookRetryAt && now < Date.parse(s.lookRetryAt)) return;
     if (s.running && now - Date.parse(s.runningSince) < 45 * 60_000) return;
     const ended = s.lastEnd ? Date.parse(s.lastEnd.at) : 0;
     if (now - ended < 2 * 60_000 || now - (triedAt.get(id) ?? 0) < 2 * 60_000) return;
@@ -351,6 +352,7 @@ export function createEngine(deps: EngineDeps) {
     if (!isOpen(s) || modeOf(s, ctx.policy) === "drive" || s.running || !s.pending.some((p: string) => p.startsWith("watch"))) return;
     const gap = ctx.policy.readers.minLookGapMinutes * 60_000;
     const now = ctx.now();
+    if (s.lookRetryAt && now < Date.parse(s.lookRetryAt)) return;
     const last = s.wakes[s.wakes.length - 1];
     if ((last && now - Date.parse(last.at) < gap) || now - (triedAt.get(id) ?? 0) < gap) return;
     triedAt.set(id, now);
@@ -377,6 +379,8 @@ export function createEngine(deps: EngineDeps) {
           readAt.set(key, now);
           await readWatch(id, w).catch((error: unknown) => log(`${key}: ${(error as Error).message}`));
         }
+        const retry = state(id);
+        if (retry.lookRetryAt && ctx.now() >= Date.parse(retry.lookRetryAt) && !retry.breaker) await ops.syncPlan(ctx, id);
         await lookAtChanges(id).catch((error: unknown) => log(`${id}: ${(error as Error).message}`));
         await lookAtPending(id).catch((error: unknown) => log(`${id}: ${(error as Error).message}`));
       }
@@ -398,16 +402,24 @@ export function createEngine(deps: EngineDeps) {
   async function runEnded(delivery: { to: string; status: string; text: string; agentId: string | null }) {
     const id = delivery.to;
     if (!ID.test(id) || !existsSync(path.join(ctx.root, id))) return;
-    const ok = delivery.status === "succeeded";
-    write(id, [{ kind: "wake.end", state: ok ? "ok" : "failed", usd: null, agentId: delivery.agentId, ...(ok ? {} : { error: delivery.text.slice(0, 200) }) }]);
     let s = state(id);
-    const tail = s.wakes.slice(-3);
-    if (isOpen(s) && tail.length === 3 && tail.every((w: { reported: boolean }) => !w.reported) && !s.asks.some((a: { state: string; title: string }) => a.state === "open" && a.title.endsWith("没看成"))) {
-      write(id, [{ kind: "asked", id: `${id}-${s.asks.length + 1}`, title: `${s.title}没看成`, line: "连着 3 次没看成。处理好了点一下，我马上看。", options: ["好了", "不用盯了"] }]);
-    }
+    if (delivery.agentId && s.lines.some((l: any) => l.kind === "look.result" && l.agentId === delivery.agentId)) return;
+    const wake = s.wakes.at(-1);
+    const reported = wake && wake.seq > (s.lastEnd?.seq ?? 0) && wake.reported;
+    const ok = delivery.status === "succeeded" && Boolean(reported);
+    const failures = ok ? 0 : s.lookFailures + 1;
+    const retryAt = !ok && failures < 3 ? new Date(ctx.now() + (failures === 1 ? 5 : 15) * 60_000).toISOString() : null;
+    const error = delivery.status !== "succeeded" ? delivery.text.slice(0, 200) : /API Error/i.test(delivery.text) ? "模型接口报错，未交回有效报告" : "没有交回有效报告";
+    const entries: Array<Record<string, unknown>> = [
+      { kind: "wake.end", state: ok ? "ok" : "failed", usd: null, agentId: delivery.agentId, ...(ok ? {} : { error }) },
+      { kind: "look.result", ok, failures, retryAt, agentId: delivery.agentId },
+    ];
+    if (isOpen(s) && !ok && !s.pending.some((p: string) => !p.startsWith("watch"))) entries.push({ kind: "ring", why: "retry" });
+    if (isOpen(s) && failures >= 3 && !s.breaker) entries.push({ kind: "asked", id: `${id}-${s.asks.length + 1}`, for: "breaker", title: `${s.title}：连续 3 次没看成`, line: `${/API Error/i.test(delivery.text) ? "模型接口报错。" : "没有交回有效报告。"}已暂停自动跟进，这段时间不会提醒变化。处理好了再点接着看。`, options: ["接着看", "不用盯了"] });
+    write(id, entries);
     await ops.syncPlan(ctx, id);
     s = state(id);
-    if (isOpen(s) && s.pending.length > 0) lookSoon(id);
+    if (ok && isOpen(s) && s.pending.length > 0) lookSoon(id);
     await scan(id);
   }
 

@@ -317,6 +317,7 @@ async function ringNow(ctx, s, why, { force = false } = {}) {
   if (modeOf(s, ctx.policy) === "drive") return { ok: false, text: "这件事由主对话接着推，不排看一眼。" };
   if (s.breaker) return { ok: false, text: say.stoppedByBreaker(s.title) };
   const now = ctx.now();
+  if (s.lookRetryAt && now < Date.parse(s.lookRetryAt)) return { ok: false, text: "" };
   const gate = mayLook(ctx.root, s.id, now, ctx.policy, { force });
   if (!gate.ok) {
     write(ctx, s.id, [{ kind: "budget", blocked: gate.text, until: isoLocal(gate.until, ctx.policy.tz) }]);
@@ -622,7 +623,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
   if (q.runs?.[text.trim()]) return flow(ctx, s.id, q.runs[text.trim()], { saidSeq: byChat(ctx) ? saidSeq : "" });
   if (/^不用盯了$/.test(text.trim())) return stop(ctx, s.id, { evidence: text });
   if (q.for === "breaker" && text.trim() === "接着看") {
-    write(ctx, s.id, [{ kind: "breaker.reset" }]);
+    write(ctx, s.id, [{ kind: "breaker.reset" }, { kind: "look.reset" }]);
     await syncPlan(ctx, s.id);
     const go = await ringNow(ctx, state(ctx, s.id), "breaker");
     return { ok: true, text: go.text || "好，接着看。" };

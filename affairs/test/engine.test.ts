@@ -6,6 +6,7 @@ import path from "node:path";
 import { append, load, logFile, read } from "../server/lib/log.mjs";
 import * as ops from "../server/lib/ops.mjs";
 import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
+import { counts } from "../server/lib/limits.mjs";
 import { createEngine, idOfWatch, type Deliver, type PaseoLike } from "../server/engine";
 import { titleOf } from "../server/lib/workspace.mjs";
 import { emptyDirectory, iso, world } from "./kit";
@@ -651,23 +652,58 @@ test("finished by the look: one push that says what shows it and how to take it 
   assert.equal(s.calls.pushed.length, 1);
 });
 
-test("a run that ends: noted; what came in meanwhile is looked at again; three that never reported ask for help", async () => {
+test("provider failures before brief back off, stop after three and recover only on confirmation", async () => {
   const s = setup();
   const id = await start(s);
-  await ops.brief(s.w.ctx, id);
-  await ops.note(s.w.ctx, id, { said: "改成下周一看", by: "user" });
-  const before = s.w.calls().filter((c) => c[1] === "run-once").length;
-  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
-  await s.engine.settle();
-  assert.equal(s.w.calls().filter((c) => c[1] === "run-once").length, before + 1, "said while it ran: one more look");
-  for (let i = 0; i < 2; i++) {
-    s.w.advance(HOUR);
-    await ops.brief(s.w.ctx, id);
-    await s.engine.runEnded({ to: id, status: "failed", text: "崩溃库连不上", agentId: "a" });
-  }
-  const ask = load(s.w.root, id).asks.find((a: { title: string }) => a.title.endsWith("没看成"));
-  assert.ok(ask, "three looks without a report");
-  assert.deepEqual(ask.options, ["好了", "不用盯了"]);
+  const runsBefore = runs(s);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "API Error: 500", agentId: "failed-1" });
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "API Error: 500", agentId: "failed-1" });
+  assert.equal(load(s.w.root, id).lookFailures, 1, "duplicate delivery is counted once");
+  assert.equal(counts(s.w.root, s.w.now(), s.w.ctx.policy).per[id].looks, 1, "failure before brief counts against limits");
+  assert.equal(s.w.paseo().schedules[0].status, "paused");
+  const restarted = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {} });
+  s.w.advance(4 * 60_000);
+  await restarted.readPass();
+  assert.equal(runs(s), runsBefore, "restart retains the five-minute delay");
+  s.w.advance(60_000);
+  await restarted.readPass();
+  assert.equal(runs(s), runsBefore + 1);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "API Error: 500", agentId: "failed-2" });
+  s.w.advance(14 * 60_000);
+  await s.engine.readPass();
+  assert.equal(runs(s), runsBefore + 1, "no retry before fifteen minutes");
+  s.w.advance(60_000);
+  await s.engine.readPass();
+  assert.equal(runs(s), runsBefore + 2);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "API Error: 500", agentId: "failed-3" });
+  const stopped = load(s.w.root, id);
+  assert.equal(stopped.lookFailures, 3);
+  assert.equal(stopped.breaker, true);
+  const ask = stopped.asks.find((a: { for: string }) => a.for === "breaker");
+  assert.ok(ask);
+  assert.deepEqual(ask.options, ["接着看", "不用盯了"]);
+  await s.engine.scan(id);
+  assert.ok(s.calls.pushed.some((p) => p.text.includes("连续 3 次没看成")), "the alert reaches the configured channel");
+  s.w.advance(HOUR);
+  await s.engine.readPass();
+  assert.equal(runs(s), runsBefore + 2, "breaker prevents further attempts");
+  await ops.answer(s.w.ctx, id, ask.id, "接着看");
+  assert.equal(load(s.w.root, id).lookFailures, 0);
+  assert.equal(load(s.w.root, id).breaker, false);
+  assert.equal(runs(s), runsBefore + 3, "confirmation starts only one look");
+});
+
+test("a valid report clears the failure streak, and a later missing report starts a new one", async () => {
+  const s = setup();
+  const id = await start(s);
+  await s.engine.runEnded({ to: id, status: "failed", text: "unavailable", agentId: "failed-1" });
+  s.w.advance(5 * 60_000);
+  await s.engine.readPass();
+  await report(s, id, {}, false);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "good" });
+  assert.equal(load(s.w.root, id).lookFailures, 0);
+  await s.engine.runEnded({ to: id, status: "succeeded", text: "API Error: 500", agentId: "failed-2" });
+  assert.equal(load(s.w.root, id).lookFailures, 1, "the previous report cannot complete a later run");
 });
 
 test("at start, a look that came due while nothing ran is made once; a plan that disagrees is put right", async () => {
@@ -706,8 +742,10 @@ test("the panel is drawn from the log, and says when the day's looks are used up
   for (let i = 0; i < 8; i++) {
     s.w.advance(10 * 60_000);
     const b = await ops.brief(s.w.ctx, id);
-    if (b.ok) await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
-    append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
+    if (b.ok) {
+      await ops.report(s.w.ctx, id, { status: `x${i}`, entry: "还没变", facts: [], next: { at: "2026-11-03 09:30", waitingFor: "等你去约", why: "他说今天搞定", earlyIf: [] } });
+      append(s.w.root, id, [{ kind: "wake.end", state: "ok", usd: 0 }], { now: s.w.now() });
+    }
   }
   assert.match(s.engine.panel(ws)!.next.text, /今天看了 8 次，明早 8 点接着看/);
 });
@@ -863,6 +901,7 @@ test("a look for what came in meanwhile is not asked for inside the run's delive
   const slow = createEngine({ ctx: s.w.ctx, paseo: null, deliver: null, log: () => {}, lookDelaysMs: [30, 30, 30] });
   const id = await start(s);
   await ops.brief(s.w.ctx, id);
+  append(s.w.root, id, [{ kind: "report", verdict: "pass", entry: "已看" }], { now: s.w.now() });
   await ops.note(s.w.ctx, id, { said: "改成下周一看" });
   const before = runs(s);
   await slow.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });
@@ -877,6 +916,7 @@ test("Paseo still counting the last look as running: asked again after 10 and 30
   s.w.ctx.runRetries = 0;
   const id = await start(s);
   await ops.brief(s.w.ctx, id);
+  append(s.w.root, id, [{ kind: "report", verdict: "pass", entry: "已看" }], { now: s.w.now() });
   await ops.note(s.w.ctx, id, { said: "改成下周一看" });
   setBusy(s, 2);
   const before = runs(s);
@@ -891,6 +931,7 @@ test("if every try is refused, the loop's next pass asks again once two minutes 
   s.w.ctx.runRetries = 0;
   const id = await start(s);
   await ops.brief(s.w.ctx, id);
+  append(s.w.root, id, [{ kind: "report", verdict: "pass", entry: "已看" }], { now: s.w.now() });
   await ops.note(s.w.ctx, id, { said: "改成下周一看" });
   setBusy(s, 99);
   await s.engine.runEnded({ to: id, status: "succeeded", text: "ok", agentId: "a" });

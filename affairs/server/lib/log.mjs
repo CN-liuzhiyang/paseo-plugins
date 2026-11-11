@@ -169,7 +169,7 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
     workspaceId: null, projectId: null, archived: false, titleShown: "", labelShown: "", envLabelsShown: {}, conversationId: null, scheduleId: null, paseoHome: "", roleName: "",
     next: null, nowText: "", nowAt: null, nowSeq: 0, facts: [], watches: {}, reads: [], asks: [], said: [], deadlines: [], answers: {},
     reports: [], wakes: [], running: false, runningSince: null, lastWake: null, lastEnd: null,
-    pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, flows: [], appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
+    lookFailures: 0, lookRetryAt: null, pending: [], flags: [], rejected: null, attempt: 0, chatRejected: null, chatAttempt: 0, chats: [], chatId: null, chatTurn: null, notes: [], briefs: { look: 0, chat: 0 }, flows: [], appeals: [], crossed: [], lastSeq: 0, chainBroken: 0, held: false, breaker: false, system: false, cleared: null,
   };
   const undone = new Set(lines.filter((l) => l.kind === "undo").map((l) => l.target));
   for (const l of lines) {
@@ -272,6 +272,14 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         break;
       case "breaker.reset":
         s.breaker = false;
+        break;
+      case "look.result":
+        s.lookFailures = l.ok ? 0 : Number(l.failures) || 0;
+        s.lookRetryAt = l.ok ? null : l.retryAt ?? null;
+        break;
+      case "look.reset":
+        s.lookFailures = 0;
+        s.lookRetryAt = null;
         break;
       case "wake":
         s.wakes.push({ seq: l.seq, at: l.at, why: l.why ?? ["time"], gapMinutes: l.gapMinutes ?? null, changed: null, reported: false });

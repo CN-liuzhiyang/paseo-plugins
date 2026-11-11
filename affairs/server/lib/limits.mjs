@@ -22,9 +22,16 @@ export function dayStart(now, tz, hour) {
 function tally(lines, since) {
   const out = { looks: 0, usd: 0, bursts: 0, hour: 0, resetAt: 0 };
   let estimated = 0;
+  let wakeSinceEnd = false;
   for (const l of lines) {
     const t = Date.parse(l.at);
     if (l.kind === "breaker.reset") out.resetAt = t;
+    if (l.kind === "wake") wakeSinceEnd = true;
+    if (l.kind === "wake.end" && !wakeSinceEnd && t >= since.day) {
+      out.looks += 1;
+      if (t >= since.hour) { out.hour += 1; out.bursts += 1; }
+    }
+    if (l.kind === "wake.end") wakeSinceEnd = false;
     if (l.kind === "wake" && t >= since.day) {
       out.looks += 1;
       estimated = typeof l.estUsd === "number" ? l.estUsd : 0;

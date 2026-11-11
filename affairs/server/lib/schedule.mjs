@@ -61,7 +61,7 @@ export async function sync(run, state, policy, now = Date.now) {
   if (plan.status === "completed" || plan.status === "ended") return { changed: [], problem: "计划已经结束了" };
   const changed = [];
   // Over, held (all plans paused by hand) or stopped by the breaker: the plan stays paused whatever the log says about the next time.
-  const wantPaused = state.status !== "watching" || state.held || state.breaker || modeOf(state, policy) === "drive";
+  const wantPaused = state.status !== "watching" || state.held || state.breaker || (state.lookRetryAt && Date.parse(state.lookRetryAt) > now()) || modeOf(state, policy) === "drive";
   if (wantPaused && plan.status === "active") {
     await pause(run, state.scheduleId);
     changed.push("paused");
