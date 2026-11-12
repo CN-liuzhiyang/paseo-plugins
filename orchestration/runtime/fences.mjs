@@ -65,6 +65,14 @@ export const FENCES = {
         "Codex auto: sandbox workspace-write, on-request approval (source). Whether the sandbox holds on Windows " +
         "has not been measured, and inside a Paseo agent the workspace is the caller's, not the requested cwd",
     },
+    "none-unattended": {
+      mode: "full-access",
+      enforced: false,
+      note:
+        "Codex full-access: approvalPolicy never + sandbox danger-full-access " +
+        "(codex-app-server-agent.ts MODE_PRESETS and CODEX_MODES). No writes are blocked; " +
+        "not editing files or running commands that change state is a request in the prompt. Explicit opt-in for unattended calls",
+    },
     // No ask-human: on-request only asks when a command leaves the sandbox,
     // so writes inside the workspace would land without a person.
   },
@@ -97,13 +105,13 @@ export const FENCES = {
   },
 };
 
-export const LEVELS = ["none", "workspace", "ask-human"];
+export const LEVELS = ["none", "workspace", "ask-human", "none-unattended"];
 
 /**
  * The fence one call runs behind.
  *
  * @param {string} provider `<family>/<model>`
- * @param {"none" | "workspace" | "ask-human"} level
+ * @param {"none" | "workspace" | "ask-human" | "none-unattended"} level
  * @returns {{ mode: string | null, enforced: boolean, note: string }}
  */
 export function fenceFor(provider, level) {

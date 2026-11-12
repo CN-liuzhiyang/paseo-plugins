@@ -128,7 +128,11 @@ export function assertBuilderSchema(schema, at) {
 // tree -- is the script's job, done with `$.do` after `$.gate`. Which provider
 // mode each value maps to, and whether that is enforced, is fences.mjs.
 
-export const EFFECTS = ["none", "workspace"];
+// none-unattended is an explicit opt-in to a provider mode that never asks
+// for tool approval. It still requests no side effects, but does not enforce
+// that boundary. Other steps keep their existing modes. Like workspace, its
+// answers require an explicit reuse probe before journal replay.
+export const EFFECTS = ["none", "workspace", "none-unattended"];
 
 // "Do not write code" used to be here too. It contradicts any step whose
 // answer is code (hotfix `draft` returns a Lua file through its schema); the
@@ -140,7 +144,11 @@ export const WORKSPACE_SUFFIX =
   "You may create and edit files in your working directory, and only there. Do not commit, push, deploy, " +
   "or send anything to another system: that happens after a person approves, and not by you.";
 
-const SUFFIX = { none: NO_EDITS_SUFFIX, workspace: WORKSPACE_SUFFIX };
+const SUFFIX = {
+  none: NO_EDITS_SUFFIX,
+  workspace: WORKSPACE_SUFFIX,
+  "none-unattended": NO_EDITS_SUFFIX + " Do NOT run commands that modify files or external state.",
+};
 
 /**
  * The input as a prompt function sees it. Reading a field the caller did not
@@ -173,7 +181,7 @@ export const isStep = (value) => Boolean(value?.[STEP]);
 /**
  * @param {{
  *   name: string,
- *   effects: "none" | "workspace",
+ *   effects: "none" | "workspace" | "none-unattended",
  *   returns: Record<string, object> | object,
  *   prompt: (input: unknown) => string,
  *   timeout?: string,

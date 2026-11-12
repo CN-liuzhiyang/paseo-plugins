@@ -15,6 +15,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { affairProblems } from "./affair.mjs";
 import { PRINT_SHAPE, pointProblems } from "./resume-point.mjs";
+import { EFFECTS } from "./step.mjs";
 
 export const EVENTS_VERSION = 1;
 
@@ -276,7 +277,7 @@ export function checkEvents(events, { strict = false, complete = false } = {}) {
           need(event, isNullableString(event.role), "role is not string | null");
           need(event, isString(event.provider), "provider is not a string");
           need(event, isNullableString(event.thinking), "thinking is not string | null");
-          need(event, ["none", "workspace"].includes(event.effects), "effects is not none | workspace");
+          need(event, EFFECTS.includes(event.effects), `effects is not ${EFFECTS.join(" | ")}`);
           need(
             event,
             isObject(event.fence) && isNullableString(event.fence.mode) && typeof event.fence.enforced === "boolean" && isString(event.fence.note),

@@ -1120,6 +1120,10 @@ test("define: effects is required, readOnly is gone, names are verbs in lowercas
   assert.throws(() => define({ ...base, effects: "none", timeout: "5 minutes" }), /timeout must look like/);
   assert.throws(() => define({ ...base, name: "Analyze", effects: "none" }), /lowercase name/);
   assert.equal(define({ ...base, effects: "none" }).effects, "none");
+  const unattended = define({ ...base, effects: "none-unattended" });
+  assert.equal(unattended.effects, "none-unattended");
+  assert.match(unattended.for({}), /Do NOT edit, create, or delete any files/);
+  assert.match(unattended.for({}), /Do NOT run commands that modify files or external state/);
 });
 
 test("flow: metadata is data, every key required, grants guarded", () => {
@@ -1202,6 +1206,27 @@ test("fences: every level has a mode source, unknown families fail closed", () =
   assert.throws(() => fenceFor("codex/gpt-6-astra", "ask-human"), /codex has no "ask-human" fence/);
   assert.throws(() => fenceFor("gemini/pro", "none"), /No fence for provider family "gemini"/);
   assert.throws(() => fenceFor("claude/x", "readonly"), /unknown fence level/);
+});
+
+test("none-unattended: explicit Codex opt-in reaches the executor and reports its unenforced boundary", async () => {
+  const step = define({ name: "inspect-unattended", effects: "none-unattended", returns: { said: text() }, prompt: () => "Inspect only." });
+  const target = flow({ name: "inspect-unattended", description: "Inspect unattended", phases: [], inputs: {}, grants: [],
+    run: (_, $) => $.ask(step, {}, { provider: "codex/gpt-6.1-sol", thinking: "high" }),
+  });
+  const executor = fakeExecutor({ answer: () => ({ said: "Inspected" }) });
+  const result = await run(target, { executor });
+  assert.equal(result.outcome, "done", result.error?.message);
+  assert.equal(executor.requests[0].mode, "full-access");
+  const start = eventsOf(result).find((e) => e.kind === "call.start");
+  assert.equal(start.effects, "none-unattended");
+  assert.equal(start.fence.enforced, false);
+  assert.match(start.fence.note, /MODE_PRESETS and CODEX_MODES/);
+  assert.match(start.prompt, /Do NOT run commands that modify files or external state/);
+  assert.ok(result.caveats.some((c) => /none-unattended.*not enforced/.test(c)));
+  assert.equal(fenceFor("codex/x", "none").mode, "auto");
+  assert.equal(fenceFor("codex/x", "workspace").mode, "auto");
+  assert.throws(() => fenceFor("claude/x", "none-unattended"), /not declared/);
+  assert.throws(() => fenceFor("pi/x", "none-unattended"), /not declared/);
 });
 
 test("CLI arguments are parsed by the flow's input types", async () => {

@@ -24,8 +24,8 @@ export function choice<const V extends readonly string[]>(values: V, description
 export function list<T>(of: Field<T>, description?: string): Field<T[]>;
 export function group<F extends Fields>(fields: F, description?: string): Field<Shape<F>>;
 
-/** How far a step's effects may reach. Agents never get more than the workspace. */
-export type Effects = "none" | "workspace";
+/** Requested effects; none-unattended explicitly opts into an unenforced mode without tool approval prompts. */
+export type Effects = "none" | "workspace" | "none-unattended";
 
 /** A duration: 90s, 12m, 2h. */
 export type Duration = `${number}${"s" | "m" | "h"}`;
