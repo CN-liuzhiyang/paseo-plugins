@@ -22,20 +22,20 @@ export const workTexts = (ctx, s) => {
 };
 
 export function statusText(s, policy = { watchKinds: ["gcp"] }) {
-  const head = { id: s.id, title: s.title, state: s.status === "watching" ? "open" : s.status, mode: modeOf(s, policy), links: s.links, projects: s.projects };
+  const head = { id: s.id, title: s.title, state: s.status === "watching" ? "open" : s.status, mode: modeOf(s, policy), links: s.links, projects: s.projects, ...(s.origin ? { origin: s.origin } : {}) };
   return ["---", ...Object.entries(head).map(([key, value]) => `${key}: ${JSON.stringify(value)}`), "---",
-    `方式：${modeText(s, policy)}`, `现在：${s.nowText || "还没看过"}${s.nowAt ? `（${s.nowAt.slice(5, 16).replace("T", " ")}）` : ""}`,
+    `方式：${modeText(s, policy)}`, ...(s.origin ? [`来源：事项 ${s.origin.affairId}（对话 ${s.origin.agentId}）`] : []), `现在：${s.nowText || "还没看过"}${s.nowAt ? `（${s.nowAt.slice(5, 16).replace("T", " ")}）` : ""}`,
     `在等：${s.next?.waitingFor || "还没定"}`, "记住的：", ...s.facts.map((f) => `- ${f}`), ...s.notes.slice(-5).map((n) => `- ${n.text}（${n.at.slice(5, 16).replace("T", " ")}）`),
     "没答的问题：", ...s.asks.filter((q) => q.state === "open").map((q) => `- ${q.id} ${q.title}：${q.line}（${q.options.join("、")}）`), ""].join("\n");
 }
 
-export function refreshWork(ctx, s) {
+export function refreshWork(ctx, s, { initialReadme = undefined } = {}) {
   if (!ctx.policy.workDir || s.status !== "watching" || s.system) return;
   const dir = workFolder(ctx, s.id);
   const changed = writeChanged(path.join(dir, "status.md"), statusText(s, ctx.policy));
   const readme = path.join(dir, "README.md");
   const made = !existsSync(readme);
-  if (made) writeChanged(readme, `# ${s.title}\n\n## 是什么\n\n${modeOf(s, ctx.policy) === "drive" ? "## 步骤\n\n- [ ] 写步骤和估算 → 他批（谁：他；验收：步骤和额度已批准）\n\n" : ""}## 决定\n\n## 入口\n`);
+  if (made) writeChanged(readme, initialReadme ?? `# ${s.title}\n\n## 是什么\n\n${modeOf(s, ctx.policy) === "drive" ? "## 步骤\n\n- [ ] 写步骤和估算 → 他批（谁：他；验收：步骤和额度已批准）\n\n" : ""}## 决定\n\n## 入口\n`);
   const index = refreshIndex(ctx);
   if (changed || made || index) markPending(ctx, s.id);
 }

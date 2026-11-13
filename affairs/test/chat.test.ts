@@ -83,14 +83,13 @@ test("the chat session is told by its label, which says which affair it is the c
   }
 });
 
-test("the chat of one affair touches no other, and cannot start, stop-all, or run a look's brief", async () => {
+test("the chat of one affair touches no other, and cannot stop-all or run a look's brief", async () => {
   const w = world();
   const id = await started(w);
   const other = (await createWatch(w.ctx, { id: "other-2", title: "体检", noWait: true })).id as string;
   const c = chatOf(w, id);
   assert.match((await ops.note(c, other, { said: "x", mine: true })).text, /只管 dental/);
   assert.match((await ops.show(c, other)).text, /只管 dental/);
-  assert.equal((await createWatch(c, { id: "other-3", title: "新的", noWait: true })).ok, false);
   assert.equal((await ops.pauseAll(c)).ok, false);
   assert.equal((await ops.resumeAll(c)).ok, false);
   const b = await ops.brief(c, id);
