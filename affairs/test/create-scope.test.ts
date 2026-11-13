@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
 import { append, listIds, load, logFile, read } from "../server/lib/log.mjs";
@@ -190,5 +190,118 @@ test("CLI initial README commit and push failures report partial success with re
     assert.equal(readFileSync(path.join(w.workDir, "partial-job/README.md"), "utf8"), "# Recoverable\n");
     assert.equal(git(w.docs, "rev-parse", "HEAD") === head, failure === "commit");
     assert.equal(git(w.bare, "rev-parse", "HEAD"), head);
+  }
+});
+
+test("CLI: the originating main retries failed setup, preserves one creation and source, but cannot reopen a later human stop", () => {
+  const w = stored(); seed(w); refreshWork(w.ctx, load(w.root, "source-job"));
+  const source = readFileSync(logFile(w.root, "source-job"), "utf8");
+  const sourceReadme = readFileSync(path.join(w.workDir, "source-job/README.md"), "utf8");
+  const file = path.join(w.dir, "initial.md"); writeFileSync(file, "# Retry setup\n");
+  const args = ["new", "--id", "child-job", "--title", "Child", "--link", "gcp:child-job", "--readme-file", file, "--said", "original words", "--no-wait"];
+  const main = { PASEO_AGENT_ID: "main-source-job" };
+  const failed = cli(w, args, { ...main, FAKE_PASEO_FAIL: "schedule create" });
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /失败记录已保留.*原调用者重复相同 new 请求/);
+  assert.doesNotMatch(failed.stdout, /什么都没留下/);
+  const origin = load(w.root, "child-job").origin;
+  seed(w, "other-source");
+  const before = readFileSync(logFile(w.root, "child-job"), "utf8");
+  for (const [request, env] of [
+    [args, { PASEO_AGENT_ID: "main-other-source" }],
+    [[...args, "--goal", "different request"], main],
+  ] as const) {
+    const denied = cli(w, [...request], env);
+    assert.equal(denied.status, 1, denied.stdout + denied.stderr);
+    assert.equal(readFileSync(logFile(w.root, "child-job"), "utf8"), before);
+  }
+  const failedAgain = cli(w, args, { ...main, FAKE_PASEO_FAIL: "schedule create" });
+  assert.equal(failedAgain.status, 1, failedAgain.stdout + failedAgain.stderr);
+  const restored = cli(w, args, main);
+  assert.equal(restored.status, 0, restored.stdout + restored.stderr);
+  assert.equal(JSON.parse(restored.stdout).saved, true);
+  assert.equal(load(w.root, "child-job").status, "watching");
+  assert.deepEqual(load(w.root, "child-job").origin, origin);
+  assert.equal(read(w.root, "child-job").filter((l) => l.kind === "created").length, 1);
+  assert.equal(load(w.root, "child-job").said.length, 1);
+  assert.equal(w.paseo().workspaces.filter((ws: any) => !ws.archived).length, 1);
+  assert.equal(w.paseo().schedules.length, 1);
+  assert.equal(readFileSync(path.join(w.workDir, "child-job/README.md"), "utf8"), "# Retry setup\n");
+  assert.equal(git(w.bare, "show", "HEAD:work/child-job/README.md"), "# Retry setup");
+  const calls = w.calls().length;
+  assert.equal(cli(w, args, main).status, 0, "completed requests are harmless repeats");
+  assert.equal(w.calls().slice(calls).some((c) => c[0] === "workspace" || c[0] === "schedule"), false);
+  const stopped = cli(w, ["stop", "child-job", "--said", "stop now"]);
+  assert.equal(stopped.status, 0, stopped.stdout + stopped.stderr);
+  const stoppedLog = readFileSync(logFile(w.root, "child-job"), "utf8");
+  const denied = cli(w, args, main);
+  assert.equal(denied.status, 1); assert.match(denied.stdout, /不能重新打开 child-job/);
+  assert.equal(readFileSync(logFile(w.root, "child-job"), "utf8"), stoppedLog);
+  assert.equal(readFileSync(logFile(w.root, "source-job"), "utf8"), source);
+  assert.equal(readFileSync(path.join(w.workDir, "source-job/README.md"), "utf8"), sourceReadme);
+});
+
+test("CLI: the same source repeats new to finish a failed initial commit or push without duplicating resources", () => {
+  for (const failure of ["commit", "push"]) {
+    const w = stored(); seed(w); refreshWork(w.ctx, load(w.root, "source-job"));
+    const source = readFileSync(logFile(w.root, "source-job"), "utf8");
+    const file = path.join(w.dir, "initial.md"); writeFileSync(file, "# Retry save\n");
+    const hook = path.join(w.docs, ".git/hooks/pre-commit");
+    if (failure === "commit") writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    else git(w.docs, "remote", "set-url", "origin", path.join(w.dir, "unavailable.git"));
+    const args = ["new", "--id", "partial-job", "--title", "Partial", "--link", "gcp:partial-job", "--readme-file", file, "--no-wait"];
+    const main = { PASEO_AGENT_ID: "main-source-job" };
+    const failed = cli(w, args, main);
+    assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+    assert.equal(JSON.parse(failed.stdout).partial, true);
+    const id = load(w.root, "partial-job").workspaceId;
+    const origin = load(w.root, "partial-job").origin;
+    assert.equal(cli(w, ["save", "partial-job"], main).status, 1, "general child writes remain scoped out");
+    seed(w, "other-source");
+    const before = readFileSync(logFile(w.root, "partial-job"), "utf8");
+    assert.equal(cli(w, args, { PASEO_AGENT_ID: "main-other-source" }).status, 1);
+    assert.equal(cli(w, [...args, "--goal", "changed"], main).status, 1);
+    assert.equal(readFileSync(logFile(w.root, "partial-job"), "utf8"), before);
+    if (failure === "commit") unlinkSync(hook);
+    else git(w.docs, "remote", "set-url", "origin", w.bare);
+    const restored = cli(w, args, main);
+    assert.equal(restored.status, 0, restored.stdout + restored.stderr);
+    assert.equal(JSON.parse(restored.stdout).saved, true);
+    assert.equal(load(w.root, "partial-job").creation.phase, "saved");
+    assert.equal(git(w.bare, "show", "HEAD:work/partial-job/README.md"), "# Retry save");
+    assert.equal(load(w.root, "partial-job").workspaceId, id);
+    assert.deepEqual(load(w.root, "partial-job").origin, origin);
+    assert.equal(read(w.root, "partial-job").filter((l) => l.kind === "created").length, 1);
+    assert.equal(w.paseo().workspaces.length, 1); assert.equal(w.paseo().schedules.length, 1);
+    const after = readFileSync(logFile(w.root, "partial-job"), "utf8");
+    assert.equal(cli(w, args, main).status, 0);
+    assert.equal(readFileSync(logFile(w.root, "partial-job"), "utf8"), after);
+    assert.equal(readFileSync(logFile(w.root, "source-job"), "utf8"), source);
+  }
+});
+
+test("CLI: initial-save recovery refuses documents edited by the child's main chat, preserves them and keeps general writes scoped out", () => {
+  for (const changed of ["README.md", "status.md", "notes.md"]) {
+    const w = stored(); seed(w);
+    const file = path.join(w.dir, "initial.md"); writeFileSync(file, "# Initial\n");
+    git(w.docs, "remote", "set-url", "origin", path.join(w.dir, "unavailable.git"));
+    const args = ["new", "--id", "partial-job", "--title", "Partial", "--readme-file", file, "--no-wait"];
+    const main = { PASEO_AGENT_ID: "main-source-job" };
+    assert.equal(cli(w, args, main).status, 1);
+    git(w.docs, "remote", "set-url", "origin", w.bare);
+    append(w.root, "partial-job", [{ kind: "chat", agentId: "child-main" }]);
+    const target = path.join(w.workDir, "partial-job", changed);
+    writeFileSync(target, "child's latest work\n");
+    const log = readFileSync(logFile(w.root, "partial-job"), "utf8");
+    const head = git(w.docs, "rev-parse", "HEAD");
+    const refused = cli(w, args, main);
+    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
+    assert.match(refused.stdout, /文档已变化.*没有覆盖或保存/);
+    assert.equal(readFileSync(target, "utf8"), "child's latest work\n");
+    assert.equal(readFileSync(logFile(w.root, "partial-job"), "utf8"), log);
+    assert.equal(git(w.docs, "rev-parse", "HEAD"), head);
+    assert.equal(w.paseo().workspaces.length, 1);
+    const saved = cli(w, ["save", "partial-job"], { PASEO_AGENT_ID: "child-main" });
+    assert.equal(saved.status, 0, saved.stdout + saved.stderr);
   }
 });

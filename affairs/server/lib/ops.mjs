@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { askFields, buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
@@ -373,6 +373,28 @@ async function stopForBreaker(ctx, id, trip) {
 
 export const requestLook = (ctx, id, why, options) => ringNow(ctx, state(ctx, id), why, options);
 
+const digest = (value) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+// Recovery may save only the unchanged initial documents, never work the child's own chat has added or edited.
+function creationDocuments(ctx, id) {
+  if (!ctx.policy.workDir) return null;
+  try {
+    const dir = path.join(ctx.policy.workDir, id);
+    const files = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    if (files.some((f) => !f.isFile())) return null;
+    return digest(files.map((f) => [f.name, readFileSync(path.join(dir, f.name), "utf8")]));
+  } catch { return null; }
+}
+
+async function saveCreation(ctx, s, recovering = false) {
+  if (recovering && (!s.creation.documents || creationDocuments(ctx, s.id) !== s.creation.documents)) return fail(`事项 ${s.id} 的 README 或其他文档已变化；没有覆盖或保存，请该事项的主对话核对后 save。`);
+  let saved;
+  try { saved = await saveWork(ctx, s.id); }
+  catch (error) { saved = fail(`保存失败：${error.message}`); }
+  if (!saved.ok) return { ok: false, partial: true, created: true, saved: false, id: s.id, text: `事项 ${s.id} 已创建，初始 README 已写入，但保存或推送未完成：${saved.text}\n撤除故障后，由原调用者重复相同 new 请求补保存；不会覆盖已有文档。` };
+  write(ctx, s.id, [{ kind: "create.saved" }]);
+  return { ok: true, created: true, saved: true, id: s.id, text: `事项 ${s.id} 已创建，初始 README 已保存并推送。${linkTextOf(ctx, s)}` };
+}
+
 /** @returns {Promise<Result>} */
 export async function create(ctx, input) {
   if (byLook(ctx)) return lookRefused("新建事项");
@@ -408,15 +430,23 @@ export async function create(ctx, input) {
   if (input.id !== undefined && !/^[a-z][a-z0-9-]{1,39}$/.test(input.id)) return fail("--id 要用 2–40 个小写字母、数字或连字符，字母开头。");
   let id = ref || input.id;
   if (!id) return fail("没有单号，请用 --id 给这件事起一个短名（小写字母、数字、连字符）。");
+  const projects = input.projects ?? policy.projectsByKind?.[kind] ?? [];
+  const request = digest({ id, title: title?.trim(), goal, said, domain, deadline, deadlineQuote, links, projects, role: role ?? "", roleExplicit: input.role != null, initialReadme, workDir: policy.workDir ?? "" });
+  const sameCreation = (s) => s.creation?.request === request && s.creation.agentId === (process.env.PASEO_AGENT_ID || "") && (s.origin?.affairId ?? "") === (origin?.affairId ?? "");
   const duplicate = open.find((s) => s.id !== id && links.some((l) => s.links.includes(l)));
   if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」，请用这件事。`);
   const existing = open.find((s) => s.id === id);
+  if (existing && initialReadme !== undefined && sameCreation(existing)) {
+    if (existing.creation.phase === "ready") return saveCreation(ctx, existing, true);
+    if (existing.creation.phase === "saved") return { ok: true, created: true, saved: true, id, text: `事项 ${id} 的首次创建和保存已完成，本次没有覆盖文档或重复创建。` };
+  }
   if (existing && initialReadme !== undefined) return fail(`事项 ${id} 已存在；初始 README 没有覆盖它，请在该事项里修改后 save。`);
   if (existing) return { ok: true, text: modeOf(existing, policy) === "drive" ? `「${existing.title}」已经由我来推。${linkTextOf(ctx, existing)}` : say.already(existing.title, existing.next ? speak(Date.parse(existing.next.at), now, policy.tz) : "稍后", linkTextOf(ctx, existing)), id };
   if (!title?.trim()) return fail("要有一个名字：--title");
   // A ticket that was watched before and is over (or never got made): the person asked again, so it is watched again.
   const before = listIds(ctx.root).map((key) => loadState(ctx.root, key)).find((s) => !isOpen(s) && links.some((link) => s.links.includes(link))) ?? (existsSync(path.join(ctx.root, id)) ? loadState(ctx.root, id) : null);
-  if (before?.id && !isOpen(before)) {
+  const retry = before?.id === id && sameCreation(before) && before.creation.phase === "failed" && before.status === "stopped" && before.doneEvidence === "没建成";
+  if (before?.id && !isOpen(before) && !retry) {
     if (byChat(ctx) && before.id !== ctx.chatFor) return fail(`这个对话只管 ${ctx.chatFor} 这一件事，不能重新打开 ${before.id}。`);
     if (initialReadme !== undefined) return fail(`事项 ${before.id} 已存在；先 resume，再修改 README 并 save。`);
     id = before.id;
@@ -426,19 +456,20 @@ export async function create(ctx, input) {
     return { ...again, id, text: again.ok ? say.restarted(before.title, before.status) : again.text };
   }
   if (open.length >= policy.limits.maxActive) return fail(say.tooMany(open.length));
-  if (initialReadme !== undefined && existsSync(path.join(policy.workDir, id))) return fail(`事项文档目录 ${id} 已存在，初始 README 没有写入。`);
-  const projects = input.projects ?? policy.projectsByKind?.[kind] ?? [];
+  if (!retry && initialReadme !== undefined && existsSync(path.join(policy.workDir, id))) return fail(`事项文档目录 ${id} 已存在，初始 README 没有写入。`);
   let workdir;
   try { workdir = await workspace.workdirOf(ctx.root, id, projects, policy); }
   catch (error) { return fail(error.message); }
   const dir = path.join(ctx.root, id);
   mkdirSync(path.join(dir, "files"), { recursive: true });
-  append(ctx.root, id, [{ kind: "created", id, title: title.trim(), goal, domain, links, projects, workdir, paseoHome: ctx.paseoHome, role: role ?? "", roleExplicit: input.role != null, ...(origin ? { origin } : {}) }], { now, tz: policy.tz });
+  if (retry) append(ctx.root, id, [{ kind: "create.retry" }, { kind: "status", status: "watching", evidence: "" }], { now, tz: policy.tz });
+  else append(ctx.root, id, [{ kind: "created", id, title: title.trim(), goal, domain, links, projects, workdir, paseoHome: ctx.paseoHome, role: role ?? "", roleExplicit: input.role != null, creation: { request, agentId: process.env.PASEO_AGENT_ID || "" }, ...(origin ? { origin } : {}) }], { now, tz: policy.tz });
   let s = state(ctx, id);
   try {
+    if (retry && policy.workDir && !existsSync(path.join(policy.workDir, id))) await restoreWork(ctx, s);
     refreshWork(ctx, s, { initialReadme });
     writeProgress(ctx, s);
-    if (said) {
+    if (said && !retry) {
       const [line] = write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
       if (deadlineAt !== null) write(ctx, id, [{ kind: "deadline", deadline: isoLocal(deadlineAt, policy.tz), from: `said:${line.seq}`, quote: deadlineQuote || said }]);
     }
@@ -456,19 +487,14 @@ export async function create(ctx, input) {
       const look = await ringNow(ctx, s, "created");
       if (!look.ok && look.text) write(ctx, id, [{ kind: "flag", what: "first-look", detail: look.text }]);
     } else write(ctx, id, [{ kind: "drive.ready", reason: "created" }]);
+    write(ctx, id, [{ kind: "create.ready", documents: initialReadme !== undefined ? creationDocuments(ctx, id) : null }]);
   } catch (error) {
     await rollbackCreate(ctx, id, error);
-    return fail(`没建成「${title}」：${error.message}。什么都没留下，再说一次就行。`);
+    return { ok: false, id, text: `没建成「${title}」：${error.message}。失败记录已保留，事项已停止；撤除故障后由原调用者重复相同 new 请求重试。` };
   }
   if (!noWait) await waitForConversation(ctx, id);
   s = state(ctx, id);
-  if (initialReadme !== undefined) {
-    let saved;
-    try { saved = await saveWork(ctx, id); }
-    catch (error) { saved = fail(`保存失败：${error.message}`); }
-    if (!saved.ok) return { ok: false, partial: true, created: true, saved: false, id, text: `事项 ${id} 已创建，初始 README 已写入，但保存或推送未完成：${saved.text}` };
-    return { ok: true, created: true, saved: true, id, text: `事项 ${id} 已创建，初始 README 已保存并推送。${linkTextOf(ctx, s)}` };
-  }
+  if (initialReadme !== undefined) return saveCreation(ctx, s);
   return { ok: true, id, text: modeOf(s, policy) === "drive" ? `好，我来推「${s.title}」。先写步骤和估算，请他批额度。${linkTextOf(ctx, s)}` : say.started(s.title, linkTextOf(ctx, s)) };
 }
 
@@ -480,7 +506,7 @@ async function rollbackCreate(ctx, id, error) {
     await workspace.archiveWorkspace(ctx.run, s.workspaceId).catch(() => undefined);
     write(ctx, id, [{ kind: "workspace", archived: true }]);
   }
-  write(ctx, id, [{ kind: "flag", what: "setup", detail: error.message }, { kind: "status", status: "stopped", evidence: "没建成", by: "system" }]);
+  write(ctx, id, [{ kind: "flag", what: "setup", detail: error.message }, { kind: "status", status: "stopped", evidence: "没建成", by: "system" }, { kind: "create.failed" }]);
   await finishWork(ctx, state(ctx, id));
 }
 

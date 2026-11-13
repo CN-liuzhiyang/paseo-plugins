@@ -283,7 +283,7 @@ test("F-09: a half-made affair is taken apart, blocks nothing and can be asked f
   const first = await createWatch(w.ctx, { id: "other-2", title: "洗牙", said: "帮我盯一下洗牙", noWait: true });
   delete process.env.FAKE_PASEO_FAIL;
   assert.equal(first.ok, false);
-  assert.match(first.text, /什么都没留下/);
+  assert.match(first.text, /失败记录已保留/);
   assert.equal(load(w.root, "other-2").status, "stopped");
   assert.ok(w.calls().some((c) => c[0] === "workspace" && c[1] === "archive"), "the workspace that was made is put away");
   assert.equal(ops.ls(w.ctx).text.split("\n").filter((l) => l.includes("watching")).length, 0, "nothing is left watching");

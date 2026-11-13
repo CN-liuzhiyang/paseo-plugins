@@ -198,9 +198,16 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
       case "created":
         Object.assign(s, { id: l.id, title: l.title, goal: l.goal ?? "", domain: l.domain ?? "work", link: l.link ?? null, workdir: l.workdir ?? "", createdAt: l.at, paseoHome: l.paseoHome ?? "", roleName: l.role ?? "", system: l.system === true });
         if (l.origin) s.origin = l.origin;
+        if (l.creation) s.creation = { ...l.creation, phase: "setup" };
         s.links = [...new Set((l.links ?? (l.link ? [l.link] : [])).map(normalizedLink).filter(Boolean))];
         s.projects = l.projects ?? [];
         s.roleExplicit = l.roleExplicit;
+        break;
+      case "create.retry":
+      case "create.failed":
+      case "create.ready":
+      case "create.saved":
+        if (s.creation) Object.assign(s.creation, { phase: l.kind === "create.retry" ? "setup" : l.kind.slice(7), ...(l.documents ? { documents: l.documents } : {}) });
         break;
       case "link":
         s.links = l.action === "rm" ? s.links.filter((v) => v !== l.link) : [...new Set([...s.links, l.link])];
