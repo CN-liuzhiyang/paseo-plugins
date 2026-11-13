@@ -54,6 +54,10 @@
 
 `affair link <编号> add|rm kind:ref`，`affair project <编号> add|rm key`。项目用 `remote:host/path`、`svn:host/path` 或 `path:主机名:绝对路径`；`new --project key` 可重复，第一个项目决定工作目录，没检出就拒绝。
 
+当前主对话可以修改自己的关联和项目，也能 `new` 创建派生事项；来源事项、对话和当前原话编号由系统自动记录，在 `show --log` 和 status 中可查，不会改来源事项。看一眼、attach 和派出的会话不能创建或改关联。
+
+新建时可加 `--readme-file FILE` 一次带初始 README（先配置 workDir），`--file` / `--said -` 仍是原话。初始说明先检查凭据，再创建和保存；只提交新事项与 INDEX 并推送。返回部分成功时，事项和 README 已在本地，按回执的编号处理保存失败，别重复创建。已有事项的 README 不会被覆盖。
+
 `status.md` 是插件生成的，README 和同文件夹文档由对话写。改后 `affair save <编号> [--msg-file F]`，不用自己跑 git；README 建议 ≤4 KB，status ≤2 KB，对话手册合计 ≤4 KB，超了把细节放同目录别的文件。
 
 在项目里开对话，`affair here [--cwd D]` 看本项目上的事，`affair attach <编号>` 接手并读印象。接手后可 `note --mine --file F` 记结论，其他写命令不开放。

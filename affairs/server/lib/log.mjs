@@ -197,6 +197,7 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         break;
       case "created":
         Object.assign(s, { id: l.id, title: l.title, goal: l.goal ?? "", domain: l.domain ?? "work", link: l.link ?? null, workdir: l.workdir ?? "", createdAt: l.at, paseoHome: l.paseoHome ?? "", roleName: l.role ?? "", system: l.system === true });
+        if (l.origin) s.origin = l.origin;
         s.links = [...new Set((l.links ?? (l.link ? [l.link] : [])).map(normalizedLink).filter(Boolean))];
         s.projects = l.projects ?? [];
         s.roleExplicit = l.roleExplicit;

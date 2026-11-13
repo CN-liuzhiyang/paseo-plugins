@@ -138,9 +138,12 @@ export async function callerInfo(ctx) {
     const plans = [...new Set(ids.map((id) => loadState(ctx.root, id).scheduleId).filter(Boolean))];
     const looks = await Promise.all(plans.map((p) => has(`paseo.schedule-id=${p}`)));
     if (looks.some(Boolean)) return { by: "look", chatFor: "" };
+    if (ids.some((id) => loadState(ctx.root, id).dispatched.some((worker) => worker.agentId === agentId))) return { by: "attached", chatFor: "", agentId };
     // Adopted chats were created without our labels; their binding is in the same log as the chats we made.
     const bound = ids.find((id) => loadState(ctx.root, id).chats.some((chat) => chat.agentId === agentId));
     if (bound) return { by: "chat", chatFor: bound };
+    // Workers can arrive before the cost scan has recorded them. Their launch label already identifies them.
+    if (await has("affairs.role=dispatched")) return { by: "attached", chatFor: "", agentId };
     // The chat session of an affair is labelled by the plugin that made it; the label also says which affair it is the chat of.
     const first = process.env.AFFAIR_ID && ids.includes(process.env.AFFAIR_ID) ? [process.env.AFFAIR_ID] : [];
     const rest = ids.filter((id) => !first.includes(id)).slice(-60);
@@ -159,6 +162,7 @@ export const callerOf = async (ctx) => (await callerInfo(ctx)).by;
 
 const byLook = (ctx) => ctx.by === "look" || ctx.by === "attached";
 const byChat = (ctx) => ctx.by === "chat";
+const currentMain = (ctx) => ctx.chatFor && process.env.PASEO_AGENT_ID && loadState(ctx.root, ctx.chatFor).chatId === process.env.PASEO_AGENT_ID;
 export function hisSaid(s, saidSeq) {
   return s.said.find((m) => m.seq === Number(saidSeq) && !m.undone && m.by === "user" && m.via !== "chat-agent");
 }
@@ -222,9 +226,9 @@ export function currentSaid(s) {
 
 export async function link(ctx, ref, action, value) {
   if (byLook(ctx)) return lookRefused("改关联");
-  if (byChat(ctx)) return chatRefused("改关联");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
+  if (byChat(ctx) && !currentMain(ctx)) return fail("只有这件事当前的主对话能改关联。");
   const link = normalizedLink(value);
   if (!link || link.startsWith("svn:") || !["add", "rm"].includes(action)) return fail("用法：affair link <编号> add|rm <kind:ref>，关联只挂管事的系统。");
   const duplicate = action === "add" && listIds(ctx.root).map((id) => loadState(ctx.root, id)).find((s) => s.id !== r.s.id && isOpen(s) && s.links.includes(link));
@@ -238,9 +242,9 @@ export async function link(ctx, ref, action, value) {
 
 export async function project(ctx, ref, action, key) {
   if (byLook(ctx)) return lookRefused("改项目");
-  if (byChat(ctx)) return chatRefused("改项目");
   const r = resolve(ctx, ref);
   if (!r.s) return fail(r.text);
+  if (byChat(ctx) && !currentMain(ctx)) return fail("只有这件事当前的主对话能改项目。");
   if (!["add", "rm"].includes(action) || !/^(remote|svn|path):.+/.test(key ?? "")) return fail("用法：affair project <编号> add|rm <key>");
   write(ctx, r.s.id, [{ kind: "project", action, project: key }]);
   return { ok: true, text: "项目已更新。" };
@@ -372,7 +376,20 @@ export const requestLook = (ctx, id, why, options) => ringNow(ctx, state(ctx, id
 /** @returns {Promise<Result>} */
 export async function create(ctx, input) {
   if (byLook(ctx)) return lookRefused("新建事项");
-  if (byChat(ctx)) return chatRefused("新建事项");
+  if (byChat(ctx) && !currentMain(ctx)) return fail("只有事项当前的主对话能创建派生事项。");
+  const source = byChat(ctx) ? state(ctx, ctx.chatFor) : null;
+  const fromSaid = source && currentSaid(source);
+  const origin = source ? { affairId: source.id, agentId: process.env.PASEO_AGENT_ID, ...(fromSaid ? { saidSeq: fromSaid.seq } : {}) } : null;
+  // Read once, before logs, folders or Paseo resources are created. --file still carries only the original words.
+  let initialReadme;
+  if (input.readmeFile !== undefined) {
+    try { initialReadme = readFileSync(input.readmeFile, "utf8"); }
+    catch (error) { return fail(`初始 README 没读到：${error.message}`); }
+    if (!initialReadme.trim()) return fail("初始 README 不能为空。");
+    const secret = refuseSecret(initialReadme);
+    if (secret) return secret;
+    if (!ctx.policy.workDir) return fail("要带初始 README，先配置事项文档目录 workDir。");
+  }
   const { title, goal = "", said = "", domain = "work", deadline = null, deadlineQuote = "", noWait = false } = input;
   const links = [...new Set((Array.isArray(input.link) ? input.link : input.link ? [input.link] : []).map(normalizedLink))];
   if (links.some((l) => !l || l.startsWith("svn:"))) return fail("关联要写成管事的系统的 kind:ref。");
@@ -380,6 +397,8 @@ export async function create(ctx, input) {
   const secret = refuseSecret(`${title} ${goal} ${said}`);
   if (secret) return secret;
   const policy = ctx.policy;
+  const deadlineAt = said && deadline ? parseLocal(deadline, policy.tz) : null;
+  if (said && deadline && deadlineAt === null) return fail("--deadline 要写成 YYYY-MM-DD HH:mm");
   const now = ctx.now();
   const kind = link?.split(":")[0];
   // Only a plain number after the kind names a ticket ("gcp:#700", "gcp:700/字段"); other digits in a link are not its number.
@@ -392,11 +411,14 @@ export async function create(ctx, input) {
   const duplicate = open.find((s) => s.id !== id && links.some((l) => s.links.includes(l)));
   if (duplicate) return fail(`关联已经挂在 ${duplicate.id}「${duplicate.title}」，请用这件事。`);
   const existing = open.find((s) => s.id === id);
+  if (existing && initialReadme !== undefined) return fail(`事项 ${id} 已存在；初始 README 没有覆盖它，请在该事项里修改后 save。`);
   if (existing) return { ok: true, text: modeOf(existing, policy) === "drive" ? `「${existing.title}」已经由我来推。${linkTextOf(ctx, existing)}` : say.already(existing.title, existing.next ? speak(Date.parse(existing.next.at), now, policy.tz) : "稍后", linkTextOf(ctx, existing)), id };
   if (!title?.trim()) return fail("要有一个名字：--title");
   // A ticket that was watched before and is over (or never got made): the person asked again, so it is watched again.
   const before = listIds(ctx.root).map((key) => loadState(ctx.root, key)).find((s) => !isOpen(s) && links.some((link) => s.links.includes(link))) ?? (existsSync(path.join(ctx.root, id)) ? loadState(ctx.root, id) : null);
   if (before?.id && !isOpen(before)) {
+    if (byChat(ctx) && before.id !== ctx.chatFor) return fail(`这个对话只管 ${ctx.chatFor} 这一件事，不能重新打开 ${before.id}。`);
+    if (initialReadme !== undefined) return fail(`事项 ${before.id} 已存在；先 resume，再修改 README 并 save。`);
     id = before.id;
     if (open.length >= policy.limits.maxActive) return fail(say.tooMany(open.length));
     if (said) write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
@@ -404,24 +426,22 @@ export async function create(ctx, input) {
     return { ...again, id, text: again.ok ? say.restarted(before.title, before.status) : again.text };
   }
   if (open.length >= policy.limits.maxActive) return fail(say.tooMany(open.length));
+  if (initialReadme !== undefined && existsSync(path.join(policy.workDir, id))) return fail(`事项文档目录 ${id} 已存在，初始 README 没有写入。`);
   const projects = input.projects ?? policy.projectsByKind?.[kind] ?? [];
   let workdir;
   try { workdir = await workspace.workdirOf(ctx.root, id, projects, policy); }
   catch (error) { return fail(error.message); }
   const dir = path.join(ctx.root, id);
   mkdirSync(path.join(dir, "files"), { recursive: true });
-  write(ctx, id, [{ kind: "created", id, title: title.trim(), goal, domain, links, projects, workdir, paseoHome: ctx.paseoHome, role: role ?? "", roleExplicit: input.role != null }]);
+  append(ctx.root, id, [{ kind: "created", id, title: title.trim(), goal, domain, links, projects, workdir, paseoHome: ctx.paseoHome, role: role ?? "", roleExplicit: input.role != null, ...(origin ? { origin } : {}) }], { now, tz: policy.tz });
   let s = state(ctx, id);
-  writeProgress(ctx, s);
-  if (said) {
-    const [line] = write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
-    if (deadline) {
-      const at = parseLocal(deadline, policy.tz);
-      if (at === null) return fail("--deadline 要写成 YYYY-MM-DD HH:mm");
-      write(ctx, id, [{ kind: "deadline", deadline: isoLocal(at, policy.tz), from: `said:${line.seq}`, quote: deadlineQuote || said }]);
-    }
-  }
   try {
+    refreshWork(ctx, s, { initialReadme });
+    writeProgress(ctx, s);
+    if (said) {
+      const [line] = write(ctx, id, [{ kind: "said", text: said, via: input.via ?? "chat", by: "user" }]);
+      if (deadlineAt !== null) write(ctx, id, [{ kind: "deadline", deadline: isoLocal(deadlineAt, policy.tz), from: `said:${line.seq}`, quote: deadlineQuote || said }]);
+    }
     write(ctx, id, [{ kind: "mode", mode: modeOf(s, policy), source: "default" }]);
     const projectId = await workspace.ensureProject(ctx.run, ctx.root);
     const workspaceId = await workspace.createWorkspace(ctx.run, { projectId, workdir, title: title.trim() });
@@ -442,6 +462,13 @@ export async function create(ctx, input) {
   }
   if (!noWait) await waitForConversation(ctx, id);
   s = state(ctx, id);
+  if (initialReadme !== undefined) {
+    let saved;
+    try { saved = await saveWork(ctx, id); }
+    catch (error) { saved = fail(`保存失败：${error.message}`); }
+    if (!saved.ok) return { ok: false, partial: true, created: true, saved: false, id, text: `事项 ${id} 已创建，初始 README 已写入，但保存或推送未完成：${saved.text}` };
+    return { ok: true, created: true, saved: true, id, text: `事项 ${id} 已创建，初始 README 已保存并推送。${linkTextOf(ctx, s)}` };
+  }
   return { ok: true, id, text: modeOf(s, policy) === "drive" ? `好，我来推「${s.title}」。先写步骤和估算，请他批额度。${linkTextOf(ctx, s)}` : say.started(s.title, linkTextOf(ctx, s)) };
 }
 

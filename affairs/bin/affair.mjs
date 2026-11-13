@@ -69,7 +69,7 @@ async function main() {
       result = await dispatch(ctx, need(arg, "编号"), { contract: flags.contract, provider: flags.provider, thinking: flags.thinking, mode: flags.mode, title: flags.title, cwd: flags.cwd });
       break;
     case "new":
-      result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"] });
+      result = await ops.create(ctx, { id: flags.id, title: need(flags.title, "--title"), goal: flags.goal, said: saidIfAny(), link: flags.link, projects: flags.project, domain: flags.domain, deadline: flags.deadline, role: flags.role, noWait: flags["no-wait"], readmeFile: Object.hasOwn(flags, "readme-file") ? need(flags["readme-file"], "--readme-file FILE") : undefined });
       break;
     case "link":
       result = await ops.link(ctx, need(arg, "编号"), rest[2], rest[3]);
