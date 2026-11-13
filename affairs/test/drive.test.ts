@@ -251,32 +251,67 @@ function chatsFixture() {
   return { ...f, chats: restart(), restart, sent, worker, busy: (value: boolean) => { busy = value; } };
 }
 
-test("idle drive reminders wait 12 hours, wait for a busy main and survive restart", async () => {
+test("idle drive reminders wait 72 hours, wait for a busy main and survive restart", async () => {
   const f = chatsFixture();
   await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
-  f.w.advance(12 * 3_600_000);f.busy(true);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(71 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(1 * 3_600_000);f.busy(true);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
   f.busy(false);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
   assert.match(f.sent[0].text, /接着推/);await f.restart().tellDrive(f.id);assert.equal(f.sent.length, 1);
 });
 
-test("dispatch idle fallback waits for twelve quiet hours and blocks running workers and pending permissions", async () => {
+test("dispatch idle fallback waits for 72 quiet hours and blocks running workers and pending permissions", async () => {
   const f = chatsFixture();f.put([{ kind: "dispatched", agentId: "worker" }]);
-  f.w.advance(11 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(71 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
   f.w.advance(2 * 3_600_000);f.worker.status = "running";await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
   f.worker.status = "initializing";await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
   f.worker.status = "idle";f.worker.pendingPermissions = [{ id: "permission" }];await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
   f.worker.pendingPermissions = [];f.put([{ kind: "note", text: "有了新动静" }]);
   await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
-  f.w.advance(12 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  f.w.advance(72 * 3_600_000);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
   await f.restart().tellDrive(f.id);assert.equal(f.sent.length, 1);
 });
 
 test("an active flow blocks idle progress using runtime status; its proven end permits a later reminder", async () => {
   const f = chatsFixture();const runtime = path.join(f.w.dir, "runtime.mjs");writeFileSync(runtime, 'console.log(JSON.stringify({state:"running"}));');f.w.ctx.policy.flows = { ...f.w.ctx.policy.flows, orch: runtime };
-  f.put([{ kind: "flow", flow: "build", runId: "running-flow" }]);f.w.advance(13 * 3_600_000);
+  f.put([{ kind: "flow", flow: "build", runId: "running-flow" }]);f.w.advance(73 * 3_600_000);
   await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
-  f.put([{ kind: "flow.mark", runId: "running-flow", key: "end", outcome: "done", costUsd: 0 }]);f.w.advance(13 * 3_600_000);
+  f.put([{ kind: "flow.mark", runId: "running-flow", key: "end", outcome: "done", costUsd: 0 }]);f.w.advance(73 * 3_600_000);
   await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+});
+
+const HOUR = 3_600_000;
+const nextAt = (f: any, hours: number) => new Date(f.w.now() + hours * HOUR).toISOString();
+
+test("a registered next time that has not come stops every nudge, however long the chat has been quiet", async () => {
+  const f = chatsFixture();f.put([{ kind: "next", next: nextAt(f, 24 * 7), waitingFor: "周一查上游", why: "每周一", earlyIf: [], verdict: "pass", source: "chat" }]);
+  f.w.advance(5 * 24 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+});
+
+test("when the next time comes the chat is nudged once, with the reason, and a restart does not repeat it", async () => {
+  const f = chatsFixture();f.put([{ kind: "next", next: nextAt(f, 2), waitingFor: "周一查上游", why: "每周一", earlyIf: [], verdict: "pass", source: "chat" }]);
+  f.w.advance(1 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.w.advance(1 * HOUR);f.busy(true);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 0);
+  f.busy(false);await f.chats.tellDrive(f.id);await f.chats.tellDrive(f.id);await f.restart().tellDrive(f.id);
+  assert.equal(f.sent.length, 1);assert.match(f.sent[0].text, /到点了：周一查上游/);assert.match(f.sent[0].text, /report/);
+  f.w.advance(24 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1, "the same next is never nudged twice, and no idle nudge follows at once");
+  f.put([{ kind: "next", next: nextAt(f, 2), waitingFor: "下周一", why: "每周一", earlyIf: [], verdict: "pass", source: "chat" }]);
+  f.w.advance(3 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 2);assert.match(f.sent[1].text, /下周一/);
+});
+
+test("the nudge and the chat's own turns do not restart the idle clock, so one quiet stretch is nudged once", async () => {
+  const f = chatsFixture();
+  f.w.advance(72 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  f.put([{ kind: "brief", for: "chat", seen: 1 }, { kind: "chat.turn", agentId: "main-chat", tokens: 1, usd: 0.1 }]);
+  f.w.advance(72 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  f.put([{ kind: "note", text: "有进展" }]);f.w.advance(72 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 2);
+});
+
+test("a past next that was nudged and not replaced falls back to the idle rule only after the quiet days pass", async () => {
+  const f = chatsFixture();f.put([{ kind: "next", next: nextAt(f, 1), waitingFor: "周一查上游", why: "每周一", earlyIf: [], verdict: "pass", source: "chat" }]);
+  f.w.advance(2 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  f.w.advance(60 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 1);
+  f.w.advance(12 * HOUR);await f.chats.tellDrive(f.id);assert.equal(f.sent.length, 2);assert.match(f.sent[1].text, /接着推/);
 });
 
 test("a newly created drive affair starts its plan immediately and does not claim an answer arrived", async () => {

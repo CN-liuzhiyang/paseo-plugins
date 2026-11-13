@@ -564,6 +564,9 @@ export function createChats(deps: ChatDeps) {
     }
   }
 
+  /** Log lines the nudges and the chat's own turns leave behind; they say nothing about whether the affair moved. */
+  const QUIET_KINDS = new Set(["drive.told", "brief", "chat.turn", "dispatch.cost", "workspace"]);
+
   async function tellDrive(id: string): Promise<void> {
     const s = deps.state(id);
     if (!isOpen(s) || s.held || s.system || modeOf(s, ctx.policy) !== "drive" || !s.chatId) return;
@@ -573,10 +576,17 @@ export function createChats(deps: ChatDeps) {
     const day = localParts(ctx.now(), ctx.policy.tz).date;
     if (waiting && !ready && ctx.now() - Date.parse(s.asks.findLast((q: any) => q.state === "open").at) < 24 * 3_600_000) return;
     let key = ready ? `ready:${ready.seq}` : waiting ? `remind:${day}` : "";
+    // A registered next time is the schedule: before it nothing nudges; at it, one nudge says why. Once that nudge has been sent, a chat that registered nothing new falls back to the idle rule below.
+    const next = s.next && Number.isFinite(Date.parse(s.next.at)) ? s.next : null;
+    const dueKey = next ? `due:${next.seq}` : "";
+    const dueNow = !!next && ctx.now() >= Date.parse(next.at) && !s.lines.some((l: any) => l.kind === "drive.told" && l.key === dueKey);
+    if (!key && next && ctx.now() < Date.parse(next.at)) return;
+    if (!key && dueNow) key = dueKey;
     if (!key) {
-      const last = s.lines.at(-1);
-      if (!last || ctx.now() - Date.parse(last.at) < (ctx.policy.drive?.idleHours ?? 12) * 3_600_000) return;
-      // This is an idle fallback after twelve quiet hours; daemon finish subscriptions own prompt hand-in notifications.
+      // Only what the person or the chat's own work wrote counts as activity; the nudges and their bookkeeping must not restart the clock.
+      const last = s.lines.findLast((l: any) => !QUIET_KINDS.has(l.kind));
+      if (!last || ctx.now() - Math.max(Date.parse(last.at), next ? Date.parse(next.at) : 0) < (ctx.policy.drive?.idleHours ?? 72) * 3_600_000) return;
+      // This is an idle fallback after three quiet days; daemon finish subscriptions own prompt hand-in notifications.
       for (const d of s.dispatched) {
         const worker = (await paseo.agents.ref(d.agentId).refresh())?.agent;
         if (!worker || ["running", "initializing"].includes(worker.status) || worker.pendingPermissions?.length) return;
@@ -588,7 +598,7 @@ export function createChats(deps: ChatDeps) {
     const handle = paseo.agents.ref(s.chatId);
     const seen = (await handle.refresh())?.agent;
     if (!seen || seen.archivedAt || ["running", "initializing"].includes(seen.status)) return;
-    const text = waiting && !ready ? `提醒他：${s.title}还有问题待答。用一两句话提醒，不重复整张卡；先做不依赖答案的步骤。` : `接着推「${s.title}」：先看 README 的步骤，做下一步；做不了就用 affair ask 请他拍板。${ready?.reason === "answered" ? answeredText(s, ready.question) : ready?.reason === "created" ? "先写步骤和估算，请他批额度。" : ""}`;
+    const text = key === dueKey && !ready ? `到点了：${next?.waitingFor || "登记的下次时间"}。先 brief --chat，按进展里写的做，做完 report 登记下一次。` : waiting && !ready ? `提醒他：${s.title}还有问题待答。用一两句话提醒，不重复整张卡；先做不依赖答案的步骤。` : `接着推「${s.title}」：先看 README 的步骤，做下一步；做不了就用 affair ask 请他拍板。${ready?.reason === "answered" ? answeredText(s, ready.question) : ready?.reason === "created" ? "先写步骤和估算，请他批额度。" : ""}`;
     await handle.send(text, { messageId: `affair-chat:${id}:${key}`, activeTurnBehavior: "steer" });
     deps.write(id, [{ kind: "drive.told", key, agentId: s.chatId }]);
   }
