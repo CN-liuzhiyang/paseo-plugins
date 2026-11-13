@@ -114,6 +114,26 @@ export function OtherAnswer({ c, onSend, disabled, testID }: { c: Colors; onSend
   );
 }
 
+/** Closing a question without answering it: a quiet link, and the press only asks "sure?"; the second press closes it. It is not an answer and the AI is not told now. */
+export function DismissAsk({ c, onClose, disabled, testID }: { c: Colors; onClose: () => void; disabled?: boolean; testID: string }) {
+  const [sure, setSure] = useState(false);
+  if (!sure)
+    return (
+      <Pressable testID={testID} accessibilityRole="button" accessibilityLabel="关闭这个问题" disabled={disabled} onPress={() => setSure(true)} style={{ alignSelf: "flex-start", paddingVertical: 2 }}>
+        <Words style={{ color: c.foregroundMuted, fontSize: 12 }}>不答了，关闭这个问题</Words>
+      </Pressable>
+    );
+  return (
+    <View style={{ gap: 8 }}>
+      <Words style={{ color: c.foreground, fontSize: 13, lineHeight: 19 }}>确定关闭？不会通知 AI，它之后会知道你关了。</Words>
+      <View style={{ flexDirection: "row", gap: 8 }}>
+        <ChoiceButton testID={`${testID}-yes`} text="确定关闭" primary={false} c={c} disabled={disabled} onPress={() => { setSure(false); onClose(); }} />
+        <ChoiceButton testID={`${testID}-no`} text="再想想" primary={false} c={c} onPress={() => setSure(false)} />
+      </View>
+    </View>
+  );
+}
+
 /** A question for him as a card: a warm wash, rounded, the question first and large, the choices under it. */
 export function QuestionCard({ c, title, line, children, size = 15, footer }: { c: Colors; title: string; line?: string; children: ReactNode; size?: number; footer?: ReactNode }) {
   return (

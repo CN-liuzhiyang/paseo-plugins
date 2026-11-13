@@ -6,7 +6,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { loadPolicy, defaultRoot } from "./server/lib/policy.mjs";
 import { makeCtx } from "./server/lib/ops.mjs";
 import { settingsDefinition } from "./shared/settings";
-import { answerRpc, fileRpc, listRpc, panelRpc, resumeFlowRpc } from "./shared/rpc";
+import { answerRpc, dismissRpc, fileRpc, listRpc, panelRpc, resumeFlowRpc } from "./shared/rpc";
 import type { PanelData } from "./shared/panel";
 import { createEngine, type Deliver, type PaseoLike } from "./server/engine";
 import { orchCommand, orchLogDir, wakeLostRuns } from "./server/lib/flows.mjs";
@@ -46,6 +46,10 @@ export default function contribute(server: PluginServerContext) {
   server.handle(answerRpc, async ({ affairId, askId, text }) => {
     if (!engine) return { ok: false, text: "事项还没准备好" };
     return engine.answered(affairId, askId, text);
+  });
+  server.handle(dismissRpc, async ({ affairId, askId }) => {
+    if (!engine) return { ok: false, text: "事项还没准备好" };
+    return engine.dismissed(affairId, askId);
   });
   server.handle(resumeFlowRpc, async (input) => engine ? engine.resumeFlow(input) : { ok: false, text: "事项还没准备好" });
 

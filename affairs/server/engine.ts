@@ -504,5 +504,11 @@ export function createEngine(deps: EngineDeps) {
       while (lookWork.size) await Promise.all([...lookWork]);
     },
     answered: async (id: string, qid: string, text: string) => ops.answer(ctx, id, qid, text, "panel"),
+    /** His 关闭 on a card: recorded for the chat's next brief, the chat itself is not woken. */
+    dismissed: async (id: string, qid: string) => {
+      const result = await ops.dismiss(ctx, id, qid, "panel");
+      await scan(id);
+      return result;
+    },
   };
 }

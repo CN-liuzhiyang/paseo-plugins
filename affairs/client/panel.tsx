@@ -4,11 +4,11 @@ import { useEffect, useState } from "react";
 import { ScrollView, View } from "react-native";
 import type { PanelData } from "../shared/panel";
 import { tint } from "../shared/look";
-import { answerRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
+import { answerRpc, dismissRpc, panelRpc, resumeFlowRpc } from "../shared/rpc";
 import { Pieces, openExternal } from "./card";
 import { FlowBox } from "./flow";
 import { Materials, What, useFiles } from "./files";
-import { ChoiceButton, Dot, Heading, OtherAnswer, QuestionCard, Rule, Section, StateBadge } from "./look";
+import { ChoiceButton, DismissAsk, Dot, Heading, OtherAnswer, QuestionCard, Rule, Section, StateBadge } from "./look";
 import { Sessions, SessionSummary } from "./sessions";
 import { Timeline } from "./timeline";
 import { Clip, Words } from "./text";
@@ -21,6 +21,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
   const c = theme.colors;
   const load = useRpc(panelRpc);
   const answer = useRpc(answerRpc);
+  const dismiss = useRpc(dismissRpc);
   const resumeFlow = useRpc(resumeFlowRpc);
   const [resuming, setResuming] = useState(false);
   const [flowReply, setFlowReply] = useState("");
@@ -73,7 +74,7 @@ export function Panel({ theme, workspaceId, navigation }: PluginWorkspacePanelPr
         {flowReply ? <Words style={muted}>{flowReply}</Words> : null}
         {panel.asks.map((a) => {
           const send = (text: string) => void answer({ affairId: panel.id, askId: a.id, text }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); });
-          return <QuestionCard key={a.id} c={c} title={a.title} line={a.line} footer={<OtherAnswer c={c} testID={`panel-ask-other-${a.id}`} onSend={send} />}>
+          return <QuestionCard key={a.id} c={c} title={a.title} line={a.line} footer={<><OtherAnswer c={c} testID={`panel-ask-other-${a.id}`} onSend={send} /><DismissAsk c={c} testID={`panel-ask-dismiss-${a.id}`} onClose={() => void dismiss({ affairId: panel.id, askId: a.id }).then((r) => { if (!r.ok) setFlowReply(r.text); return load({ workspaceId }).then((r) => setPanel(r.panel)); })} /></>}>
             {a.options.map((o, i) => <ChoiceButton key={o} testID={`panel-ask-${o}`} text={o} primary={i === 0} c={c} onPress={() => send(o)} />)}
           </QuestionCard>;
         })}

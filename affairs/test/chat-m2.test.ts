@@ -557,6 +557,39 @@ test("a question taken back is turned into a line that says it need not be answe
   assert.match(textOf(last), /不用答/);
 });
 
+test("he closes a question's card: not an answer, no look and no nudge; the card becomes a line; the chat's next brief says so", async () => {
+  const s = setup();
+  const id = await start(s);
+  await askOne(s, id);
+  await s.engine.scan(id);
+  const card = lines(s).filter((d) => d.item.kind === "affair-ask")[0]!;
+  const before = read(s.w.root, id).length;
+  const refused = await ops.dismiss({ ...s.w.ctx, by: "chat", chatFor: id }, id, `${id}-1`);
+  assert.equal(refused.ok, false, "the chat cannot close it for him");
+  const closed = await s.engine.dismissed(id, `${id}-1`);
+  assert.equal(closed.ok, true, closed.text);
+  assert.match(closed.text, /没有通知/);
+  assert.doesNotMatch(closed.text, MECHANISM);
+  const added = read(s.w.root, id).slice(before).filter((l: any) => l.kind !== "workspace");
+  assert.deepEqual(added.map((l: any) => l.kind), ["ask.dismiss"], "only that one line: no answer, no nudge, no look called for");
+  const state = load(s.w.root, id);
+  assert.equal(state.asks[0].state, "dismissed");
+  assert.equal(state.answers[`${id}-1`], undefined);
+  assert.equal(state.pending.some((p: string) => p.startsWith("answered:")), false);
+  assert.doesNotMatch(titleOf(state, s.w.now(), s.w.ctx.policy), /要你定/);
+  const after = lines(s).filter((d) => d.item.id === card.item.id);
+  assert.equal(after.length, 2);
+  assert.equal(after[1]!.item.kind, "affair-line");
+  assert.match(textOf(after[1]!), /关了这个问题/);
+  const brief = await ops.brief({ ...s.w.ctx, by: "chat", chatFor: id }, id, { chat: true });
+  assert.match(brief.text, /强制关闭了问题.*洗牙约上了吗/);
+  assert.match(brief.text, /没通知你/);
+  assert.doesNotMatch(brief.text, /没答的问题/);
+  const again = await ops.answer(s.w.ctx, id, `${id}-1`, "约好了", "panel");
+  assert.match(again.text, /强制关闭/);
+  assert.equal(load(s.w.root, id).answers[`${id}-1`], undefined, "a late answer does not count");
+});
+
 // ---- the panel -----------------------------------------------------------------------------------------------------
 
 test("the panel's sources: the affair's own link first, what is watched, references in what is remembered, once each; at most six and how many more", async () => {

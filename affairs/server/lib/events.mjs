@@ -259,6 +259,11 @@ export function eventsOf(state, now, policy, lc, helpers) {
         add(l, { kind: "answered", label: "你", sub: `答了「${clip(String(l.answer ?? ""), 14)}」`, text: "", meta: q ? `问的是：${clip(q.title, 60)}` : "", yours: true });
         break;
       }
+      case "ask.dismiss": {
+        const q = askBy.get(String(l.id));
+        add(l, { kind: "answered", label: "你", sub: "关了这个问题", text: "", meta: q ? `没回答：${clip(q.title, 60)}` : "", yours: true });
+        break;
+      }
       case "asked": {
         const q = askBy.get(String(l.id));
         if (!q || q.state !== "open") break;

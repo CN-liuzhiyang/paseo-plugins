@@ -89,7 +89,7 @@ function loadStateWithLines(root, id, policy) {
 
 const write = (ctx, id, entries) => {
   const lines = append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
-  if (entries.some((e) => ["created", "mode", "budget", "asked", "report", "answered", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id, ctx.policy));
+  if (entries.some((e) => ["created", "mode", "budget", "asked", "report", "answered", "ask.dismiss", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id, ctx.policy));
   return lines;
 };
 /** @returns {Result} */
@@ -604,6 +604,7 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
     if (secret) return secret;
   }
   if (!q) return fail(`没有这个问题：${qid}`);
+  if (q.state === "dismissed") return { ok: true, text: say.dismissedAlready() };
   if (q.state !== "open") return { ok: true, text: say.answeredAlready(q.answer || "收起了") };
   if (byChat(ctx)) {
     // His own line, said after the question came and not taken back: that line is the answer, word for word.
@@ -638,6 +639,23 @@ export async function answer(ctx, ref, qid, text, via = "chat", { saidSeq = /** 
   if (modeOf(s, ctx.policy) === "drive") return { ok: true, text: "收到，接着推。" };
   const look = await ringNow(ctx, s, `answered:${qid}`);
   return { ok: true, text: look.text || `收到。` };
+}
+
+/**
+ * He closes a question's card without answering it (the 关闭 on the card, asked twice). It is his own press only: no look,
+ * no nudge to the chat, nothing that reads it as an answer. The chat finds it in its next brief.
+ * @returns {Promise<Result>}
+ */
+export async function dismiss(ctx, ref, qid, via = "panel") {
+  if (byLook(ctx) || byChat(ctx)) return fail("关闭问题只能他自己在卡片上点，你不能替他关。");
+  const r = resolve(ctx, ref);
+  if (!r.s) return fail(r.text);
+  const q = r.s.asks.find((a) => a.id === qid);
+  if (!q) return fail(`没有这个问题：${qid}`);
+  if (q.state === "dismissed") return { ok: true, text: say.dismissedAlready() };
+  if (q.state !== "open") return { ok: true, text: say.answeredAlready(q.answer || "收起了") };
+  write(ctx, r.s.id, [{ kind: "ask.dismiss", id: qid, via }]);
+  return { ok: true, text: say.dismissed() };
 }
 
 /** @returns {Promise<Result>} */
@@ -1248,6 +1266,11 @@ async function briefChat(ctx, s) {
     if (l.kind === "report" && l.from === "chat") continue;
     if (l.kind === "answered" && l.via === "chat") continue;
     if (l.kind === "note") continue;
+    if (l.kind === "ask.dismiss") {
+      const q = s.asks.find((a) => a.id === l.id);
+      news.push(`- #${l.seq} ${stamp(l.at, now, tz)} 他强制关闭了问题 ${l.id}${q ? `「${q.title}」` : ""}：没有回答，也没通知你。别当成答过或同意，要不要再问由你定。`);
+      continue;
+    }
     const text = lineForChat(l, now, tz);
     if (text) news.push(text);
     else if (l.kind === "wake.end" && l.state === "failed") news.push(`- #${l.seq} ${stamp(l.at, now, tz)} 这次没看成：${String(l.error ?? "没有说明").slice(0, 80)}`);

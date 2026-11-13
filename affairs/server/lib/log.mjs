@@ -378,6 +378,12 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         s.pending.push(`answered:${l.id}`);
         break;
       }
+      case "ask.dismiss": {
+        // He closed the card himself: not an answer (nothing reads it as one, no look is called for), and the chat is told in its next brief.
+        const q = s.asks.find((a) => a.id === l.id);
+        if (q && q.state === "open") Object.assign(q, { state: "dismissed", answeredAt: l.at, via: l.via ?? "" });
+        break;
+      }
       case "ask.drop": {
         const q = s.asks.find((a) => a.id === l.id);
         if (q && q.state === "open") q.state = "dropped";

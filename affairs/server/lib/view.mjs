@@ -83,6 +83,8 @@ export function rowsOf(state, now, policy, { withChat = false, flowNow = new Map
       add(`m${l.seq}`, l.at, `${time}  我记下：${l.text}`);
     } else if (l.kind === "answered") {
       add(`a${l.seq}`, l.at, `${time}  你：${l.answer}`, "normal", "", { ask: String(l.id) });
+    } else if (l.kind === "ask.dismiss") {
+      add(`a${l.seq}`, l.at, `${time}  你关了这个问题，没有回答。`, "normal", "", { ask: String(l.id) });
     } else if (l.kind === "status" && l.status === "done") {
       add(`d${l.seq}`, l.at, `${time}  办完了 ✓ ${l.evidence ?? ""}`.trim());
     } else if (l.kind === "status" && l.status === "stopped") {
@@ -127,6 +129,8 @@ export const say = {
   notFound: (word, names) => `没找到「${word}」。${names.length ? `在盯的有：${names.join("、")}。是哪件？` : "现在没有在盯的事。"}`,
   which: (names) => `是${names.map((n) => `「${n}」`).join("还是")}？`,
   budget: (title, text) => `「${title}」${text}。`,
+  dismissed: () => "已关闭，没有通知 AI。它后面聊到这件事时会知道你关了。",
+  dismissedAlready: () => "这个问题他已经强制关闭了，不用答。",
   answeredAlready: (answer) => `这个问题你在 Paseo 里答过了（${answer}）。`,
   done: (title, evidence) => `${title}办完了 ✓ ${String(evidence).replace(/[。.！!？?]+$/, "")}。不对就回「还没完」。`,
   troubleRead: (title, what, ask) => `${title} 这两天没看成：${what}。${ask}`,
