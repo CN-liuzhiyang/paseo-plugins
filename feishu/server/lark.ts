@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -142,7 +142,9 @@ export async function fetchMessages(
 ): Promise<LarkMessage[]> {
   const args = ["im", "+messages-mget", "--message-ids", messageIds.join(","), "--no-reactions", "--format", "json"];
   if (downloadTo === null) return messagesOf(await run(cli, args));
-  const staging = await mkdtemp(path.join(os.tmpdir(), "paseo-feishu-"));
+  // os.tmpdir() can be a Windows 8.3 short path (C:\Users\LIUZHI~1\...) while lark-cli reports the
+  // long one; resolve it so the "stays inside staging" check below compares like with like.
+  const staging = await realpath(await mkdtemp(path.join(os.tmpdir(), "paseo-feishu-")));
   try {
     const messages = messagesOf(
       await run(cli, [...args, "--download-resources"], { cwd: staging, timeoutMs: FETCH_TIMEOUT_MS, stderr: onStderr }),
