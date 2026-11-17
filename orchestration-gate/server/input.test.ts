@@ -44,7 +44,7 @@ async function gateFiles(input: Partial<GateInput> = {}, overrides: Partial<Gate
   const requestPath = path.join(dir, "c3.request.json");
   const text = JSON.stringify(request, null, 2);
   await writeFile(requestPath, text, "utf8");
-  const prompt = `人闸 c3 · 运行 run-1：${request.title}\nrequest: ${requestPath}\nsha256: ${sha256(text)}`;
+  const prompt = `人工审批 c3 · 运行 run-1：${request.title}\nrequest: ${requestPath}\nsha256: ${sha256(text)}`;
   return { dir, request, requestPath, prompt };
 }
 

@@ -28,13 +28,15 @@ interface Through {
   /** What the host reports instead of the provider's own turn state. */
   hostStatus?: () => string | null;
   timeout?: string;
+  /** Simulate the first line sent by an older runtime. */
+  legacyPrompt?: boolean;
   /** Makes it an input gate (the runtime's `$.gate({ input })`, already normalized). */
   input?: { label: string; secret: boolean; pattern: string | null; hint: string } | null;
 }
 
 /** One gate through the runtime and the provider; `answer` is what the person does with the card. */
 async function gateThrough(answer: Answer | Through) {
-  const { answer: act, before, hostStatus, timeout = "1m", input = null }: Through = typeof answer === "function" ? { answer } : answer;
+  const { answer: act, before, hostStatus, timeout = "1m", input = null, legacyPrompt = false }: Through = typeof answer === "function" ? { answer } : answer;
   const gate = await import(runtimeGate);
   const dir = await mkdtemp(path.join(os.tmpdir(), "orch-gate-contract-"));
   const prepared = gate.prepareGate({
@@ -74,7 +76,8 @@ async function gateThrough(answer: Answer | Through) {
   const io = {
     spawn: async (prompt: string) => {
       if (before) await before(prepared);
-      await send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "m", delivery: "auto", input: { type: "message", content: [{ type: "text", text: prompt }] } } });
+      const carrierPrompt = legacyPrompt ? prompt.replace(/^人工审批 /, "人闸 ") : prompt;
+      await send({ type: "session.prompt", sessionId: "s", prompt: { clientMessageId: "m", delivery: "auto", input: { type: "message", content: [{ type: "text", text: carrierPrompt }] } } });
       // The person answers once the card is up.
       const wait = setInterval(() => {
         if (permissionId === null) return;
@@ -105,6 +108,17 @@ test("an approval on the card is the runtime's allowed, for exactly the bytes it
   const permission = decision.events.find((event: ProviderEvent) => event.type === "session.permission") as Extract<ProviderEvent, { type: "session.permission" }>;
   assert.equal(permission.request.description, "校验：✅\n批准 = 同意写下下面这 1 行；批准后会留一份回执。\n" + JSON.parse(decision.prepared.requestText).help);
   assert.equal(permission.request.name, "人工审批");
+});
+
+test("the runtime accepts an approval from a legacy prompt and its original receipt", async () => {
+  const decision = await gateThrough({
+    legacyPrompt: true,
+    answer: (send, id) => send({ type: "session.permission", sessionId: "s", permissionId: id, response: { behavior: "allow", selectedActionId: "approve" } }),
+  });
+  assert.equal(decision.outcome, "allowed");
+  assert.equal(decision.answeredVia, "button");
+  assert.match(decision.prepared.receipt, /^批准 a\.lua 放进 x\/\n人闸 c1 · 运行 run-1\n内容 sha256 [0-9a-f]{64}$/);
+  assert.equal(await readFile(decision.prepared.holdPath, "utf8"), decision.prepared.receipt);
 });
 
 test("a typed reply is the runtime's denied, with the words as the reason", async () => {
@@ -194,6 +208,7 @@ test("the runtime's prompt is the three lines the provider takes, even with a li
     callId: "c1",
   });
   assert.equal(prepared.prompt.split("\n").length, 3);
+  assert.equal(prepared.prompt.split("\n")[0], "人工审批 c1 · 运行 r：批准 a request: C:/evil/c1.request.json");
   assert.equal(parsePointer(prepared.prompt)?.path, prepared.requestPath);
 });
 

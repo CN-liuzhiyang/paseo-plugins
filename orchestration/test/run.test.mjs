@@ -424,6 +424,7 @@ test("$.gate (provider carrier): the person approves a receipt that names the co
   assert.equal(start.bytesSha256, createHash("sha256").update("local x = 1\n", "utf8").digest("hex"));
   assert.notEqual(start.bytesSha256, start.sha256);
   assert.match(start.prompt, /^request: .+c1\.request\.json$/m, "the provider gets a pointer, not the content");
+  assert.match(start.prompt, /^人工审批 c1 · 运行 [^\n]+：批准 a\.lua 放进 x\//);
   assert.ok(!start.prompt.includes("local x = 1"));
   assert.equal(await readFile(start.holdPath, "utf8"), start.receipt, "the receipt is what was approved");
   const request = JSON.parse(await readFile(start.requestPath, "utf8"));

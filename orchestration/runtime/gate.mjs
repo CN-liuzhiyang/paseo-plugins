@@ -218,7 +218,7 @@ export function prepareGate(gate) {
     null,
     2,
   );
-  const prompt = [`人闸 ${callId} · 运行 ${runId}：${title}`, `request: ${requestPath}`, `sha256: ${sha256(requestText)}`].join("\n");
+  const prompt = [`人工审批 ${callId} · 运行 ${runId}：${title}`, `request: ${requestPath}`, `sha256: ${sha256(requestText)}`].join("\n");
   return { ...base, requestPath, requestText, prompt, fits: true };
 }
 
