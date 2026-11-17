@@ -88,6 +88,7 @@ test("the card is a question with one text field; the decision and what each ans
   await h.prompt(prompt);
   const [card] = h.cards();
   assert.equal(card.kind, "question");
+  assert.equal(card.name, "人工审批");
   assert.equal(card.actions, undefined, "the app draws a question form, not buttons");
   const q = (card.input as { questions: Array<Record<string, unknown>> }).questions;
   assert.equal(q.length, 1);
@@ -101,6 +102,9 @@ test("the card is a question with one text field; the decision and what each ans
   assert.ok(text.includes("点「提交」= 批准") && text.includes("点「不批」= 不批"), text);
   assert.ok(text.includes("这个输入框只填值，不当理由"), "the field and the conversation are not mixed up");
   assert.ok(text.includes("8h 内没人处理按不批"));
+  const row = h.events.find((e) => e.type === "timeline.item" && e.item.type === "tool_call" && e.item.name === "回执信息");
+  assert.ok(row && row.type === "timeline.item" && row.item.type === "tool_call");
+  assert.deepEqual(row.item.detail, { type: "read", filePath: "回执信息", content: `原文：${request.name}\n内容 sha256 ${request.sha256.slice(0, 12)}…\n回执：${request.receiptPath}` });
   assert.deepEqual(h.turns(), ["started"]);
   assert.equal(await read(request.answerPath), null);
 });

@@ -83,19 +83,20 @@ test("the card: the decision as the title, the summary and what approving does, 
   await h.prompt(prompt);
   const card = h.card() as ProviderPermissionRequest;
   assert.equal(card.title, request.title);
-  assert.ok(card.description?.startsWith("校验：✅ 2 项通过\n批准 = 同意脚本随后原样写下这 1 行（1.lua，sha256 "), card.description);
-  assert.ok(card.description?.endsWith("不批的话可以点「不批」。"));
+  assert.equal(card.description, "校验：✅ 2 项通过\n批准 = 同意写下下面这 1 行；批准后会留一份回执。\n不批的话可以点「不批」。");
+  assert.equal(card.name, "人工审批");
   assert.deepEqual(card.detail, { type: "write", filePath: "1.lua", content: request.content });
   assert.deepEqual(
     card.actions?.map((a) => [a.id, a.label, a.behavior]),
     [["deny", "不批", "deny"], ["approve", "批准", "allow"]],
   );
-  // Above the card: the brief, the evidence and the content, in that order, the last two folded rows.
+  // Above the card: the brief, then the evidence, content, and receipt information as folded rows.
   const items = h.events.filter((e) => e.type === "timeline.item").map((e) => (e as { item: { type: string; text?: string; detail?: unknown } }).item);
-  assert.deepEqual(items.map((i) => i.type), ["user_message", "assistant_message", "tool_call", "tool_call"]);
+  assert.deepEqual(items.map((i) => i.type), ["user_message", "assistant_message", "tool_call", "tool_call", "tool_call"]);
   assert.equal(items[1].text, `**要你决定**：${request.title}\n\n## 审阅\n- 一条`);
   assert.deepEqual(items[2].detail, { type: "edit", filePath: "证据：要实现的修复 r9 · a.lua", unifiedDiff: "-a\n+b" });
   assert.deepEqual(items[3].detail, { type: "read", filePath: "待批全文（1 行） · 1.lua", content: request.content });
+  assert.deepEqual(items[4].detail, { type: "read", filePath: "回执信息", content: `原文：${request.name}\n内容 sha256 ${request.sha256.slice(0, 12)}…\n回执：${request.receiptPath}` });
   assert.deepEqual(h.turns(), ["started"], "the turn stays open while the card is up");
   assert.equal(await receiptOf(request), null, "nothing is written before an answer");
 });
@@ -157,7 +158,7 @@ test("deny: no receipt; button, command line, typed reply and interrupt each say
     assert.ok(said?.startsWith(name === "interrupt" ? "**卡片被中断关闭了**" : "**已记为不批**"), `${name}: ${said}`);
     assert.ok(said?.includes("什么都不会写入"), name);
     if (name === "typed") {
-      assert.ok(said?.includes("被当作这个人闸的裁决，不是普通聊天"), said);
+      assert.ok(said?.includes("被当作这次人工审批的裁决，不是普通聊天"), said);
       assert.ok(said?.endsWith("> 这个类的源文件不对"), said);
     }
   }
@@ -210,13 +211,16 @@ test("closed with the card up: nothing is recorded, so the runtime reads no answ
 });
 
 test("the catalog has the one model and no modes", async () => {
-  const connection = await createGateProvider().connect({ versions: [1], capabilities: ["prompt.message", "prompt.steer", "permission"] });
+  const provider = createGateProvider();
+  assert.equal(provider.label, "人工审批");
+  const connection = await provider.connect({ versions: [1], capabilities: ["prompt.message", "prompt.steer", "permission"] });
   const events: ProviderEvent[] = [];
   connection.onEvent((event) => events.push(event));
   await connection.send({ type: "catalog", requestId: "r1" });
   await settle();
   const catalog = events.find((e) => e.type === "catalog") as Extract<ProviderEvent, { type: "catalog" }>;
   assert.deepEqual(catalog.catalog.models.map((m) => m.id), ["card"]);
+  assert.equal(catalog.catalog.models[0].label, "人工审批卡片");
   assert.deepEqual(catalog.catalog.modes, []);
   assert.deepEqual([...connection.capabilities].sort(), ["permission", "prompt.message", "prompt.steer"]);
 });
@@ -258,11 +262,16 @@ test("a receipt is created, never written over a file that is already there", as
   assert.deepEqual(h.turns(), ["started", "failed"], "the turn fails: the receipt could not be written");
 });
 
-test("the card says where the receipt goes", async () => {
+test("the receipt information is folded separately from the card description", async () => {
   const { request, prompt } = await gateFiles();
   const h = await host();
   await h.prompt(prompt);
-  assert.ok(h.card()!.description!.includes(`批准后这里只写一份三行回执：${request.receiptPath}`), h.card()!.description);
+  const description = h.card()!.description!;
+  assert.ok(!description.includes("sha256"), description);
+  assert.ok(!description.includes(request.receiptPath), description);
+  const row = h.events.find((e) => e.type === "timeline.item" && e.item.type === "tool_call" && e.item.name === "回执信息");
+  assert.ok(row && row.type === "timeline.item" && row.item.type === "tool_call");
+  assert.deepEqual(row.item.detail, { type: "read", filePath: "回执信息", content: `原文：${request.name}\n内容 sha256 ${request.sha256.slice(0, 12)}…\n回执：${request.receiptPath}` });
 });
 
 test("the pointer is exactly three lines: nothing slipped in through the title; Paseo's agent-message wrapper is taken off", async () => {

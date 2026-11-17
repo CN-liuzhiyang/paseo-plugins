@@ -88,7 +88,7 @@ const diskFiles: GateFiles = {
 export function createGateProvider(files: GateFiles = diskFiles): ProviderRegistration {
   return {
     id: PROVIDER_ID,
-    label: "人闸",
+    label: "人工审批",
     description: "The orchestration runtime's human gate: a permission card, no model",
     async connect(request) {
       if (!request.versions.includes(1)) throw new Error("Provider protocol version 1 is required");
@@ -102,7 +102,7 @@ const lines = (text: string) => (text === "" ? 0 : text.replace(/\r\n/g, "\n").r
 /** A row's label, ending in the file name when there is one so the app can highlight it. */
 const rowPath = (label: string, name?: string) => (name ? `${label} · ${name}` : label);
 
-/** What goes above the card: the brief as Markdown, then each piece of evidence folded, then the content folded. */
+/** What goes above the card: the brief, then folded evidence, content, and receipt information. */
 export function gateTimeline(request: GateRequest, turn: number): ProviderTimelineItem[] {
   const items: ProviderTimelineItem[] = [
     {
@@ -134,6 +134,15 @@ export function gateTimeline(request: GateRequest, turn: number): ProviderTimeli
     error: null,
     detail: { type: "read", filePath: rowPath(`待批全文（${lines(request.content)} 行）`, request.name), content: request.content },
   });
+  items.push({
+    type: "tool_call",
+    id: `receipt-info-${turn}`,
+    callId: `receipt-info-${turn}`,
+    name: "回执信息",
+    status: "completed",
+    error: null,
+    detail: { type: "read", filePath: "回执信息", content: `原文：${request.name}\n内容 sha256 ${request.sha256.slice(0, 12)}…\n回执：${request.receiptPath}` },
+  });
   return items;
 }
 
@@ -141,12 +150,12 @@ export function gateTimeline(request: GateRequest, turn: number): ProviderTimeli
 export function gatePermission(request: GateRequest, permissionId: string): ProviderPermissionRequest {
   const description = [
     ...(request.summary.trim() === "" ? [] : [request.summary.trim()]),
-    `批准 = 同意脚本随后原样写下这 ${lines(request.content)} 行（${request.name}，sha256 ${request.sha256.slice(0, 12)}…）。批准后这里只写一份三行回执：${request.receiptPath}`,
+    `批准 = 同意写下下面这 ${lines(request.content)} 行；批准后会留一份回执。`,
     request.help,
   ].join("\n");
   return {
     id: permissionId,
-    name: "人闸",
+    name: "人工审批",
     kind: "tool",
     title: request.title,
     description,
@@ -179,7 +188,7 @@ export function gateQuestion(request: GateRequest, permissionId: string, notice:
   ].join("\n");
   return {
     id: permissionId,
-    name: "人闸",
+    name: "人工审批",
     kind: "question",
     title: request.title,
     description: input.hint,
@@ -240,7 +249,7 @@ export function verdictText(answer: Omit<Answer, "v" | "at" | "permissionId">, r
   const quote = (text: string) => `\n\n> ${text.replace(/\n/g, "\n> ")}`;
   if (answer.via === "typed") {
     return (
-      "**已记为不批**：你在对话里发的这句话被当作这个人闸的裁决，不是普通聊天。卡片已关闭，脚本按不批处理，什么都不会写入。" +
+      "**已记为不批**：你在对话里发的这句话被当作这次人工审批的裁决，不是普通聊天。卡片已关闭，脚本按不批处理，什么都不会写入。" +
       (answer.typed ? `\n\n理由：${quote(answer.typed)}` : "")
     );
   }
@@ -325,7 +334,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
     emit({ type: "session.turn", sessionId, turnId, state: "started" });
 
     if (session.state !== "fresh") {
-      say(sessionId, `closed-${turnId}`, `这个人闸已经结束（${session.outcome ?? "已应答"}），这里不再接受回复。`);
+      say(sessionId, `closed-${turnId}`, `这次人工审批已经结束（${session.outcome ?? "已应答"}），这里不再接受回复。`);
       emit({ type: "session.turn", sessionId, turnId, state: "completed" });
       return;
     }
@@ -341,7 +350,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
       if (error instanceof RequestError && error.answerPath) {
         await files.create(error.answerPath, JSON.stringify({ v: 1, at: new Date().toISOString(), error: message })).catch(() => {});
       }
-      emit({ type: "timeline.item", sessionId, item: { type: "error", id: `request-error-${turnId}`, message: `人闸没有起卡片：${message}` } });
+      emit({ type: "timeline.item", sessionId, item: { type: "error", id: `request-error-${turnId}`, message: `人工审批没有起卡片：${message}` } });
       emit({ type: "session.turn", sessionId, turnId, state: "failed", error: { message } });
       return;
     }
@@ -375,7 +384,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
         emit({
           type: "catalog",
           requestId: input.requestId,
-          catalog: { models: [{ id: MODEL_ID, label: "人闸卡片", isDefault: true }], modes: [], defaultModel: MODEL_ID },
+          catalog: { models: [{ id: MODEL_ID, label: "人工审批卡片", isDefault: true }], modes: [], defaultModel: MODEL_ID },
         });
         return;
       case "sessions":
@@ -395,7 +404,7 @@ function createConnection(capabilities: readonly string[], files: GateFiles): Pr
         emit({
           type: "session.config",
           sessionId: input.sessionId,
-          config: { model: MODEL_ID, models: [{ id: MODEL_ID, label: "人闸卡片" }], modes: [], thinkingOptions: [], settings: [] },
+          config: { model: MODEL_ID, models: [{ id: MODEL_ID, label: "人工审批卡片" }], modes: [], thinkingOptions: [], settings: [] },
         });
         emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
         return;

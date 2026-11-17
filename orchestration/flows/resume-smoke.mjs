@@ -22,7 +22,7 @@ const CONTENT = ["-- 接着跑冒烟用的假内容，不会被写到任何地�
 export default flow({
   name: "resume-smoke",
   description: "接着跑冒烟：两段，各起一张人闸卡片；第一段停下，接着跑时第一段做过的不再做、第一张卡不再问，不调模型、不花钱，看停下的流程能不能接着跑、一次停下是不是只能接一次",
-  phases: [{ id: "review", title: "人闸" }],
+  phases: [{ id: "review", title: "人工审批" }],
   inputs: {
     gateTimeout: text("人闸最多等多久，如 30m"),
   },

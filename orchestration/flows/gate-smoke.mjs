@@ -31,7 +31,7 @@ const OUTCOME_WORD = { allowed: "批准", denied: "不批", expired: "过期", m
 export default flow({
   name: "gate-smoke",
   description: "人闸冒烟：对一份假内容起一张人闸卡片，不调模型、不花钱，看卡片长相和每种应答怎么判",
-  phases: [{ id: "review", title: "人闸" }],
+  phases: [{ id: "review", title: "人工审批" }],
   inputs: {
     round: text("第几张，写进卡片标题，如 1、补测 A"),
     task: text("这张卡要人做什么，写进卡片标题，如：请点「不批」"),

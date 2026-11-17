@@ -1,15 +1,15 @@
-# orchestration-gate：编排人闸的载体
+# orchestration-gate：编排人工审批的载体
 
-编排运行时（[`../orchestration/`](../orchestration/)）的人闸 `$.gate` 要人拍板时，起的就是这个插件提供的
+编排运行时（[`../orchestration/`](../orchestration/)）的人工审批 `$.gate` 要人拍板时，起的就是这个插件提供的
 provider `orch-gate/card`。它不带模型，只做一件事：把待批的东西做成一张 Paseo 原生权限卡片，
 人答了以后照实记下来。
 
 ## 人看到什么
 
-在承载人闸的 agent 对话里：
+在承载人工审批的 agent 对话里：
 
 1. 一条说明（markdown）：要你决定的事，加上 flow 给的 brief；
-2. 收起的证据行：flow 给的每条证据（diff 用 diff 视图），最后一行是待批全文；
+2. 收起的行：flow 给的每条证据（diff 用 diff 视图）、待批全文，以及含原文名、内容 sha256 前 12 位和回执路径的「回执信息」；
 3. 权限卡片：
    - 标题是决定本身，例如"批准 补丁 #1 放进 …"；
    - 说明是 flow 给的 summary，加上两行：批准意味着什么、不批怎么写理由；
@@ -18,7 +18,7 @@ provider `orch-gate/card`。它不带模型，只做一件事：把待批的东�
 
 推送和通知的正文就是标题和说明。
 
-## 带值的人闸（`$.gate({ input })`）
+## 带值的人工审批（`$.gate({ input })`）
 
 运行时的请求文件带 `input` 时，卡片是 Paseo 的 `question` 卡而不是两个按钮：
 
@@ -42,7 +42,7 @@ provider `orch-gate/card`。它不带模型，只做一件事：把待批的东�
 - **写什么、写到哪，不听请求文件的**：请求文件谁都能写，prompt 里的 sha256 也是发 prompt 的一方算的。
   - 应答记在请求文件旁边、按它命名的 `<callId>.answer.json`；
   - 回执只能是同一目录里的 `*.receipt.txt`，内容是 provider 按决定、run、call、原文 sha256 自己生成的三行；
-  - 两个文件都只新建，不覆盖已有的文件，也不建目录。卡片说明里写着回执路径。
+  - 两个文件都只新建，不覆盖已有的文件，也不建目录。卡片上方「回执信息」里写着回执路径。
 - **任何应答**都先记进 `<callId>.answer.json`，批准时再写回执。记的是批没批，以及是怎么答的（`via`）：
   - `button`：带着这张卡片按钮的 id。Paseo App 和 IM 卡片会带；
   - `no-button`：没带，例如 `paseo permit allow/deny`、到期时运行时替人拒绝；
@@ -60,9 +60,9 @@ paseo plugin install /absolute/path/to/orchestration-gate
 paseo provider ls        # 应该能看到 orch-gate，状态 available
 ```
 
-运行时开跑前会检查 `orch-gate` 是否可用；不可用时，会动用人闸的 flow 在花第一笔钱之前就被拒。没装插件的机器，
+运行时开跑前会检查 `orch-gate` 是否可用；不可用时，会动用人工审批的 flow 在花第一笔钱之前就被拒。没装插件的机器，
 可以在私有 `roles/gate.md` 里把角色 `gate` 指向一个便宜模型（例如 `claude/claude-haiku-5-5`，`thinking: off`），
-人闸就改用模型载体。模型载体没有应答记录，回执就是它的批准；它也可能拒绝当载体（从另一个 agent 的会话里起时
+人工审批就改用模型载体。模型载体没有应答记录，回执就是它的批准；它也可能拒绝当载体（从另一个 agent 的会话里起时
 基本都会拒绝），所以只适合插件确实不可用的时候用。
 
 冒烟（不花钱，内容是假的）：

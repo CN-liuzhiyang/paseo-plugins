@@ -102,6 +102,9 @@ test("an approval on the card is the runtime's allowed, for exactly the bytes it
   const decision = await gateThrough((send, id) => send({ type: "session.permission", sessionId: "s", permissionId: id, response: { behavior: "allow", selectedActionId: "approve" } }));
   assert.equal(decision.outcome, "allowed");
   assert.equal(decision.answeredVia, "button");
+  const permission = decision.events.find((event: ProviderEvent) => event.type === "session.permission") as Extract<ProviderEvent, { type: "session.permission" }>;
+  assert.equal(permission.request.description, "校验：✅\n批准 = 同意写下下面这 1 行；批准后会留一份回执。\n" + JSON.parse(decision.prepared.requestText).help);
+  assert.equal(permission.request.name, "人工审批");
 });
 
 test("a typed reply is the runtime's denied, with the words as the reason", async () => {
