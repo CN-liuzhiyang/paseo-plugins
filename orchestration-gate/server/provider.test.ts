@@ -74,8 +74,26 @@ async function host() {
   return { connection, events, send, prompt, card, turns };
 }
 
-const answerOf = async (request: GateRequest) => JSON.parse(await readFile(request.answerPath, "utf8"));
+/** Wait for an expected file to be written; it may exist before its contents are complete. */
+async function readWhenReady(file: string, ready: (text: string) => boolean): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      const text = await readFile(file, "utf8");
+      if (ready(text)) return text;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${file}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+const answerOf = async (request: GateRequest) => JSON.parse(await readWhenReady(request.answerPath, (text) => {
+  try { JSON.parse(text); return true; } catch (error) { if (error instanceof SyntaxError) return false; throw error; }
+}));
 const receiptOf = (request: GateRequest) => readFile(request.receiptPath, "utf8").catch(() => null);
+const writtenReceiptOf = (request: GateRequest) => readWhenReady(request.receiptPath, (text) => text.length >= request.receipt.length);
 
 test("the card: the decision as the title, the summary and what approving does, the content, two buttons", async () => {
   const { request, prompt } = await gateFiles();
@@ -107,7 +125,7 @@ test("approve with the card's button: the receipt, then the record, then the tur
   await h.prompt(prompt);
   const card = h.card() as ProviderPermissionRequest;
   await h.send({ type: "session.permission", sessionId: "s1", permissionId: card.id, response: { behavior: "allow", selectedActionId: "approve" } });
-  assert.equal(await receiptOf(request), request.receipt);
+  assert.equal(await writtenReceiptOf(request), request.receipt);
   const answer = await answerOf(request);
   assert.equal(answer.behavior, "allow");
   assert.equal(answer.via, "button");
@@ -128,7 +146,7 @@ test("an allow without the card's button id is recorded as no-button; the receip
   const h = await host();
   await h.prompt(prompt);
   await h.send({ type: "session.permission", sessionId: "s1", permissionId: h.card()!.id, response: { behavior: "allow" } });
-  assert.equal(await receiptOf(request), request.receipt);
+  assert.equal(await writtenReceiptOf(request), request.receipt);
   assert.equal((await answerOf(request)).via, "no-button");
 });
 
@@ -285,7 +303,7 @@ test("the legacy prompt still raises a card and writes the original receipt", as
   await h.send({ type: "session.permission", sessionId: "s1", permissionId: card.id, response: { behavior: "allow", selectedActionId: "approve" } });
   const expected = `${request.title}\n人闸 c3 · 运行 run-1\n内容 sha256 ${request.sha256}`;
   assert.equal(request.receipt, expected);
-  assert.equal(await receiptOf(request), expected);
+  assert.equal(await writtenReceiptOf(request), expected);
   assert.equal((await answerOf(request)).behavior, "allow");
 });
 
