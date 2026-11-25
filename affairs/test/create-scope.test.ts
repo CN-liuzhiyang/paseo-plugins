@@ -64,6 +64,87 @@ test("CLI: the current main chat changes its own links/projects; scope, uniquene
   assert.equal(cli(w, ["link", "source-job", "add", "task:entry"]).status, 0, "entry sessions retain access");
 });
 
+test("CLI: retitle reads a UTF-8 file, updates generated documents, and preserves the title history", () => {
+  const w = world(); seed(w);
+  const id = "source-job";
+  const workDir = path.join(w.dir, "work");
+  const policyFile = path.join(w.dir, "retitle-policy.json");
+  w.file("retitle-policy.json", JSON.stringify({ workDir }));
+  w.ctx.policy.workDir = workDir;
+  refreshWork(w.ctx, load(w.root, id));
+  const readme = path.join(workDir, id, "README.md");
+  writeFileSync(readme, "# 原来的决定\n");
+  const created = read(w.root, id)[0];
+  const args = ["--policy", policyFile, "retitle", id, "--title-file", path.join(w.dir, "title.txt")];
+  const title = "维护知识库";
+  w.file("title.txt", `\uFEFF  ${title}\r\n`);
+  const result = cli(w, args);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(JSON.parse(result.stdout).text, `标题改成了：${title}`);
+  assert.equal(load(w.root, id).title, title);
+  const lines = read(w.root, id);
+  assert.deepEqual(lines[0], created);
+  assert.deepEqual(lines.filter((l) => l.kind === "retitle").map(({ oldTitle, title }) => ({ oldTitle, title })), [{ oldTitle: id, title }]);
+  assert.match(cli(w, ["show", id, "--log"]).stdout, /retitle.*oldTitle.*维护知识库/);
+  assert.match(readFileSync(path.join(workDir, id, "status.md"), "utf8"), /^title: "维护知识库"$/m);
+  assert.match(readFileSync(path.join(workDir, "INDEX.md"), "utf8"), /\| source-job \| 维护知识库 \|/);
+  assert.equal(readFileSync(readme, "utf8"), "# 原来的决定\n");
+
+  const before = readFileSync(logFile(w.root, id), "utf8");
+  const same = cli(w, args);
+  assert.equal(same.status, 0, same.stdout + same.stderr);
+  assert.equal(JSON.parse(same.stdout).text, "标题没变化。");
+  assert.equal(readFileSync(logFile(w.root, id), "utf8"), before);
+});
+
+test("CLI: retitle rejects blank titles, internal words, and credential-like text", () => {
+  const w = world(); seed(w);
+  const id = "source-job";
+  const before = readFileSync(logFile(w.root, id), "utf8");
+  const missing = cli(w, ["retitle", id, "--title", "Wrong flag"]);
+  assert.equal(missing.status, 2, missing.stdout + missing.stderr);
+  assert.match(missing.stderr, /--title-file/);
+  for (const [title, reason] of [["   \n", /标题不能为空/], ["检查会话进度", /内部用词/], ["token=example123456", /密码、令牌或配对链接/]] as const) {
+    w.file("title.txt", title);
+    const result = cli(w, ["retitle", id, "--title-file", path.join(w.dir, "title.txt")]);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+    assert.match(result.stdout, reason);
+  }
+  assert.equal(readFileSync(logFile(w.root, id), "utf8"), before);
+});
+
+test("CLI: retitle has the same caller scope as link and project", () => {
+  const w = world(); seed(w); seed(w, "other-job");
+  const id = "source-job";
+  append(w.root, id, [{ kind: "schedule", scheduleId: "source-plan" }, { kind: "attached", agentId: "attached" }, { kind: "dispatched", agentId: "recorded-worker" }]);
+  w.file("title.txt", "新的事项名称");
+  const flags = ["--title-file", path.join(w.dir, "title.txt")];
+  const main = { PASEO_AGENT_ID: "main-source-job" };
+  const cross = cli(w, ["retitle", "other-job", ...flags], main);
+  assert.equal(cross.status, 1, cross.stdout + cross.stderr);
+  assert.match(cross.stdout, /只管 source-job/);
+  assert.equal(load(w.root, "other-job").title, "other-job");
+  const args = ["retitle", id, ...flags];
+  const own = cli(w, args, main);
+  assert.equal(own.status, 0, own.stdout + own.stderr);
+  assert.equal(load(w.root, id).title, "新的事项名称");
+
+  append(w.root, id, [{ kind: "chat", agentId: "replacement" }]);
+  w.file("title.txt", "另一个标题");
+  const before = readFileSync(logFile(w.root, id), "utf8");
+  for (const env of [
+    { PASEO_AGENT_ID: "look", FAKE_PASEO_LABELS: JSON.stringify({ "paseo.schedule-id": "source-plan" }) },
+    { PASEO_AGENT_ID: "attached" },
+    { PASEO_AGENT_ID: "recorded-worker" },
+    { PASEO_AGENT_ID: "labelled-worker", FAKE_PASEO_LABELS: JSON.stringify({ "affairs.role": "dispatched" }) },
+    main,
+  ]) {
+    const result = cli(w, args, env);
+    assert.equal(result.status, 1, result.stdout + result.stderr);
+  }
+  assert.equal(readFileSync(logFile(w.root, id), "utf8"), before);
+});
+
 test("CLI: a main chat creates a child with verified origin and said seq, leaves its source unchanged; entry cannot forge origin", async () => {
   const w = stored(); seed(w);
   append(w.root, "source-job", [{ kind: "said", text: "请跟进后续", via: "chat-session", by: "user" }], { now: w.now() });

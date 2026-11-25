@@ -2,10 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { askFields, buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, verifyEvidence } from "./check.mjs";
+import { askFields, buildFacts, checkReport, earliestOf, mentionsDay, plainText, secretIn, skeletonOf, textProblem, verifyEvidence } from "./check.mjs";
 import { dayStart, flowLook, mayLook, tripped } from "./limits.mjs";
 import { canResume, resumeRefusal, eventsFile, flowsOf, labelOf, endedAfterNow, liveOf, logDirOf, lostLike, marksOf, readGateCarrier, sentenceOf, orchCommand, orchLogDir, outcomeText, parseDuration, perDayOf, prepareInput, readStatus, runEnv, startRun } from "./flows.mjs";
-import { append, ID, isOpen, listIds, load as loadState, read } from "./log.mjs";
+import { append, fold, ID, isOpen, listIds, load as loadState, read } from "./log.mjs";
 import { policyProblems } from "./policy.mjs";
 import { json, makeRun, whyOf } from "./paseo.mjs";
 import * as readers from "./readers.mjs";
@@ -89,7 +89,7 @@ function loadStateWithLines(root, id, policy) {
 
 const write = (ctx, id, entries) => {
   const lines = append(ctx.root, id, entries, { now: ctx.now(), tz: ctx.policy.tz });
-  if (entries.some((e) => ["created", "mode", "budget", "asked", "report", "answered", "ask.dismiss", "link", "project", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id, ctx.policy));
+  if (lines.some((e) => ["created", "mode", "budget", "asked", "report", "answered", "ask.dismiss", "link", "project", "retitle", "next", "note"].includes(e.kind))) refreshWork(ctx, loadState(ctx.root, id, ctx.policy));
   return lines;
 };
 /** @returns {Result} */
@@ -224,11 +224,17 @@ export function currentSaid(s) {
     (turn ? m.seq > turn.seq : !s.chatTurn || Date.parse(m.at) > Date.parse(s.chatTurn.at))).at(-1);
 }
 
-export async function link(ctx, ref, action, value) {
-  if (byLook(ctx)) return lookRefused("改关联");
+function resolveForEdit(ctx, ref, field) {
+  if (byLook(ctx)) return { refusal: lookRefused(`改${field}`) };
   const r = resolve(ctx, ref);
-  if (!r.s) return fail(r.text);
-  if (byChat(ctx) && !currentMain(ctx)) return fail("只有这件事当前的主对话能改关联。");
+  if (!r.s) return { refusal: fail(r.text) };
+  if (byChat(ctx) && !currentMain(ctx)) return { refusal: fail(`只有这件事当前的主对话能改${field}。`) };
+  return { s: r.s };
+}
+
+export async function link(ctx, ref, action, value) {
+  const r = resolveForEdit(ctx, ref, "关联");
+  if (r.refusal) return r.refusal;
   const link = normalizedLink(value);
   if (!link || link.startsWith("svn:") || !["add", "rm"].includes(action)) return fail("用法：affair link <编号> add|rm <kind:ref>，关联只挂管事的系统。");
   const duplicate = action === "add" && listIds(ctx.root).map((id) => loadState(ctx.root, id)).find((s) => s.id !== r.s.id && isOpen(s) && s.links.includes(link));
@@ -241,13 +247,29 @@ export async function link(ctx, ref, action, value) {
 }
 
 export async function project(ctx, ref, action, key) {
-  if (byLook(ctx)) return lookRefused("改项目");
-  const r = resolve(ctx, ref);
-  if (!r.s) return fail(r.text);
-  if (byChat(ctx) && !currentMain(ctx)) return fail("只有这件事当前的主对话能改项目。");
+  const r = resolveForEdit(ctx, ref, "项目");
+  if (r.refusal) return r.refusal;
   if (!["add", "rm"].includes(action) || !/^(remote|svn|path):.+/.test(key ?? "")) return fail("用法：affair project <编号> add|rm <key>");
   write(ctx, r.s.id, [{ kind: "project", action, project: key }]);
   return { ok: true, text: "项目已更新。" };
+}
+
+export function retitle(ctx, ref, titleFile) {
+  const r = resolveForEdit(ctx, ref, "标题");
+  if (r.refusal) return r.refusal;
+  if (!r.s.id) return fail(say.notFound(ref, []));
+  const title = readFileSync(titleFile, "utf8").trim();
+  if (title === r.s.title) return { ok: true, text: "标题没变化。" };
+  if (!title) return fail("标题不能为空。");
+  const secret = refuseSecret(title);
+  if (secret) return secret;
+  const problem = textProblem("标题", title);
+  if (problem) return fail(`${problem}。`);
+  const lines = write(ctx, r.s.id, (entries) => {
+    const oldTitle = fold(entries, ctx.policy).title;
+    return title === oldTitle ? [] : [{ kind: "retitle", oldTitle, title }];
+  });
+  return { ok: true, text: lines.length ? `标题改成了：${title}` : "标题没变化。" };
 }
 
 export async function save(ctx, ref, message = "") {

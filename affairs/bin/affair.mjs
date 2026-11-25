@@ -77,6 +77,9 @@ async function main() {
     case "project":
       result = await ops.project(ctx, need(arg, "编号"), rest[2], rest[3]);
       break;
+    case "retitle":
+      result = ops.retitle(ctx, need(arg, "编号"), need(flags["title-file"], "--title-file F"));
+      break;
     case "save":
       result = await ops.save(ctx, need(arg, "编号"), flags["msg-file"] ? readFileSync(flags["msg-file"], "utf8").trim() : "");
       break;

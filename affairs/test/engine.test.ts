@@ -9,6 +9,7 @@ import { DEFAULT_POLICY } from "../server/lib/policy.mjs";
 import { counts } from "../server/lib/limits.mjs";
 import { createEngine, idOfWatch, type Deliver, type PaseoLike } from "../server/engine";
 import { titleOf } from "../server/lib/workspace.mjs";
+import { cardOf } from "../server/lib/view.mjs";
 import { emptyDirectory, iso, world } from "./kit";
 
 const HOUR = 3_600_000;
@@ -95,6 +96,25 @@ test("the sidebar title follows the log: a day when the next look is days away, 
   const n = s.calls.titles.length;
   await s.engine.scan(id);
   assert.equal(s.calls.titles.length, n, "the title is set when it changes, not on every scan");
+});
+
+test("retitle is picked up by workspace title reconciliation, the panel and the card", async () => {
+  const s = setup();
+  const id = await start(s);
+  await report(s, id, { next: { at: "2026-11-12 09:00", waitingFor: "2月2日再看", why: "他说三个月后", earlyIf: [] } });
+  await s.engine.scan(id);
+  assert.equal(load(s.w.root, id).titleShown, "洗牙 · 11月12日");
+  s.w.file("title.txt", "安排牙科检查");
+  const result = ops.retitle(s.w.ctx, id, path.join(s.w.dir, "title.txt"));
+  assert.equal(result.ok, true, result.text);
+  await s.engine.scan(id);
+
+  const state = load(s.w.root, id);
+  assert.equal(s.calls.titles.at(-1), "安排牙科检查 · 11月12日");
+  assert.equal(state.titleShown, "安排牙科检查 · 11月12日");
+  assert.equal(s.engine.panel(state.workspaceId)?.title, "安排牙科检查");
+  assert.equal(cardOf(state, s.w.now(), s.w.ctx.policy).title, "安排牙科检查");
+  assert.equal(s.w.paseo().schedules[0].name, `affair:${id}`);
 });
 
 const labelCalls = (s: ReturnType<typeof setup>) => s.w.calls().filter((c) => c[0] === "workspace" && c[1] === "label");

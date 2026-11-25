@@ -117,7 +117,7 @@ export function verifyEvidence(evidence, facts, extraSources = {}) {
   return source.includes(q) ? null : `在「${from}」里找不到原文「${String(quote).slice(0, 40)}」`;
 }
 
-const textProblem = (field, text) => (INNER_WORDS.test(text ?? "") ? `${field} 里有内部用词（叫醒、校验、读数、会话、agent），换成人话` : null);
+export const textProblem = (field, text) => (INNER_WORDS.test(text ?? "") ? `${field} 里有内部用词（叫醒、校验、读数、会话、agent），换成人话` : null);
 
 /** A workday after now, at the same clock time: Saturday and Sunday are skipped. */
 export function nextWorkday(now, tz) {

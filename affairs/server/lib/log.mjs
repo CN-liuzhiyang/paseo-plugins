@@ -114,7 +114,9 @@ export function read(root, id) {
   return c.lines.concat(tail.lines);
 }
 
-/** Appends entries ({ kind, ...fields }) and returns them with seq, at and prev. */
+/** Appends entries ({ kind, ...fields }) and returns them with seq, at and prev.
+ * A function can choose entries from the current log under the same lock.
+ */
 export function append(root, id, entries, { now = Date.now(), tz = "Asia/Shanghai" } = {}) {
   const dir = affairDir(root, id);
   mkdirSync(dir, { recursive: true });
@@ -122,11 +124,13 @@ export function append(root, id, entries, { now = Date.now(), tz = "Asia/Shangha
     const file = logFile(root, id);
     const text = existsSync(file) ? readFileSync(file, "utf8") : "";
     const parsed = parseLines(text, null, false);
+    const batch = typeof entries === "function" ? entries(parsed.lines) : entries;
+    if (!batch.length) return [];
     let seq = parsed.lines.reduce((max, l) => Math.max(max, l.seq), 0);
     let prevRaw = parsed.lastRaw;
     const lines = [];
     const raws = [];
-    for (const entry of entries) {
+    for (const entry of batch) {
       const line = { ...entry, seq: ++seq, at: isoLocal(now, tz), ...(prevRaw === null ? {} : { prev: hashOf(prevRaw) }) };
       const raw = JSON.stringify(line);
       lines.push(line);
@@ -215,6 +219,9 @@ export function fold(lines, policy = { watchKinds: ["gcp"] }) {
         break;
       case "project":
         s.projects = l.action === "rm" ? s.projects.filter((v) => v !== l.project) : [...new Set([...s.projects, l.project])];
+        break;
+      case "retitle":
+        s.title = l.title;
         break;
       case "attached":
         if (l.agentId && !s.attached.includes(l.agentId)) s.attached.push(l.agentId);

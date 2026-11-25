@@ -14,6 +14,7 @@
 | 「不用盯了」「办完了」 | `affair stop 洗牙 --said -` |
 | 「先放一放，下个月再说」 | `affair pause 洗牙 --until "2026-12-02 09:00" --said -` |
 | 「接着盯洗牙」 | `affair resume 洗牙` |
+| 「这件事改个名字」 | `affair retitle <编号> --title-file F`，在 UTF-8 文件里写新标题，权限与 `link` 相同 |
 | 「换个新对话」（在那件事自己的对话里） | `affair renew 洗牙`；这一轮说完插件开新的，带上最近几轮，旧的收起。插件不会自己换，对话又长又停了一阵时只会提示他一行 |
 | 「你在盯什么」 | `affair ls`；一件的详情 `affair show 洗牙` |
 | 他回答了一个问题（编号 D3-1） | `affair answer D3-1 --said -` |
